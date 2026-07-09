@@ -16,7 +16,7 @@ from backend.agent_parser import parse_widget_from_text
 from backend.llm_service import generate_agent_response, SYSTEM_PROMPT
 from backend.app_manager import AppManager
 from backend.context_manager import ContextManager
-from backend.opencode_service import run_opencode_agent
+from backend.opencode_service import run_opencode_agent, run_opencode_agent_acp
 
 DATABASE_URL = "sqlite:///./db.sqlite3"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -244,22 +244,80 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 instruction = app_match.group(2) or "Refactor or inspect the app."
                 instruction = instruction.strip()
             else:
-                # 2. Check for keywords indicating app creation/modification
-                creation_patterns = [
-                    r"\b(?:create|build|make|generate|write|develop)\s+(?:a\s+)?(?:new\s+)?(?:widget|app|gui|dashboard)\b",
-                    r"\b(?:modify|update|add|change|fix)\s+(?:the\s+)?(?:widget|app|gui)\b"
-                ]
-                if any(re.search(pat, content, re.IGNORECASE) for pat in creation_patterns):
+                # 2. Check if user mentioned an existing app to modify
+                existing_apps = app_manager.list_apps()
+                mentioned_app_id = None
+                for app_meta in existing_apps:
+                    app_id_clean = app_meta["id"]
+                    base_name = app_id_clean.split("-")[0]
+                    zh_mappings = {
+                        "clock": ["时钟", "秒表", "计时器"],
+                        "weather": ["天气"],
+                        "todo": ["待办", "任务"],
+                        "calculator": ["计算器"],
+                        "notes": ["笔记", "便签"],
+                        "calendar": ["日历"],
+                        "chart": ["图表"],
+                    }
+                    if (app_id_clean in content.lower() or 
+                        base_name in content.lower() or 
+                        any(term in content for term in zh_mappings.get(base_name, []))):
+                        mentioned_app_id = app_id_clean
+                        break
+                
+                if mentioned_app_id:
                     is_coding = True
-                    guessed_name = "new-app"
-                    for word in ["calculator", "stopwatch", "todo", "calendar", "notes", "chart", "clock", "weather"]:
-                        if word in content.lower():
-                            guessed_name = f"{word}-app"
-                            break
-                    import uuid
-                    suffix = uuid.uuid4().hex[:4]
-                    app_id = f"{guessed_name}-{suffix}"
+                    app_id = mentioned_app_id
                     instruction = content.strip()
+                else:
+                    # 3. Check for keywords indicating a new app creation
+                    creation_patterns_en = [
+                        r"\b(?:create|build|make|generate|write|develop)\s+(?:a\s+)?(?:new\s+)?(?:widget|app|gui|dashboard)\b",
+                        r"\b(?:modify|update|add|change|fix)\s+(?:the\s+)?(?:widget|app|gui)\b"
+                    ]
+                    
+                    verbs = ["创建", "制作", "生成", "开发", "写", "设计", "做", "修改", "更新", "增加", "改变", "修复", "优化", "调整", "改下", "完善", "加上", "添加", "重构"]
+                    app_types = ["计算器", "天气", "时钟", "秒表", "计时器", "待办", "任务", "日历", "日程", "笔记", "便签", "图表", "widget", "app", "gui", "应用", "小程序"]
+                    
+                    has_en_pattern = any(re.search(pat, content, re.IGNORECASE) for pat in creation_patterns_en)
+                    has_zh_pattern = any(v in content for v in verbs) and any(a in content for a in app_types)
+                    
+                    if has_en_pattern or has_zh_pattern:
+                        is_coding = True
+                        guessed_name = "new-app"
+                        for word in ["calculator", "计算器"]:
+                            if word in content.lower():
+                                guessed_name = "calculator-app"
+                                break
+                        for word in ["stopwatch", "clock", "timer", "秒表", "时钟", "计时器"]:
+                            if word in content.lower():
+                                guessed_name = "clock-app"
+                                break
+                        for word in ["todo", "task", "待办", "任务"]:
+                            if word in content.lower():
+                                guessed_name = "todo-app"
+                                break
+                        for word in ["notes", "笔记", "便签"]:
+                            if word in content.lower():
+                                guessed_name = "notes-app"
+                                break
+                        for word in ["calendar", "日历"]:
+                            if word in content.lower():
+                                guessed_name = "calendar-app"
+                                break
+                        for word in ["chart", "图表"]:
+                            if word in content.lower():
+                                guessed_name = "chart-app"
+                                break
+                        for word in ["weather", "天气"]:
+                            if word in content.lower():
+                                guessed_name = "weather-app"
+                                break
+                                
+                        import uuid
+                        suffix = uuid.uuid4().hex[:4]
+                        app_id = f"{guessed_name}-{suffix}"
+                        instruction = content.strip()
 
             if is_coding:
                 # Send ack/status to client that OpenCode is starting
@@ -275,10 +333,22 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                     }
                 })
                 
-                # Run OpenCode CLI agent as a subprocess in a thread executor to avoid blocking the event loop
-                import asyncio
-                loop = asyncio.get_running_loop()
-                cli_output = await loop.run_in_executor(None, run_opencode_agent, app_id, instruction)
+                async def send_ws_update(text: str):
+                    try:
+                        await websocket.send_json({
+                            "type": "reply",
+                            "message": {
+                                "id": -1,
+                                "sender": "agent",
+                                "role": "agent",
+                                "content": text,
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            }
+                        })
+                    except Exception:
+                        pass
+
+                cli_output = await run_opencode_agent_acp(app_id, instruction, on_update=send_ws_update)
                 
                 # Check if the widget was successfully created/modified on disk
                 widget_to_send = app_manager.get_app_files(app_id)
@@ -348,6 +418,17 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                     })
             else:
                 # Conversational path (standard LLM response)
+                await websocket.send_json({
+                    "type": "reply",
+                    "message": {
+                        "id": -1,
+                        "sender": "agent",
+                        "role": "agent",
+                        "content": "🤔 Thinking...",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                })
+
                 llm_prompt_messages = context_manager.build_llm_prompt(session_id)
                 llm_prompt_messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
                 

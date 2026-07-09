@@ -25,8 +25,10 @@ def test_session_fixture():
         shutil.rmtree(test_app_dir)
 
 def test_websocket_opencode_routing(test_session, monkeypatch):
-    # Mock run_opencode_agent to avoid running a real command line process
-    def mock_run_opencode_agent(app_id, instruction):
+    # Mock run_opencode_agent_acp to avoid running a real command line process
+    async def mock_run_opencode_agent_acp(app_id, instruction, on_update):
+        # Stream a mocked update
+        await on_update("Mocked OpenCode progress update")
         # Simulate creating/modifying the app files on disk
         app_manager.create_or_update_app(
             app_id=app_id,
@@ -37,7 +39,7 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         )
         return "Mocked OpenCode success: stopwatch files updated on disk."
         
-    monkeypatch.setattr("backend.main.run_opencode_agent", mock_run_opencode_agent)
+    monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode_agent_acp)
 
     # Override get_db dependency
     def override_get_db():
@@ -63,12 +65,18 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         assert "🛠️ Starting OpenCode agent" in status["message"]["content"]
         assert status["message"]["id"] == -1
         
-        # 3. Expect the final execution log reply
+        # 3. Expect the mocked progress update
+        progress = websocket.receive_json()
+        assert progress["type"] == "reply"
+        assert "Mocked OpenCode progress update" in progress["message"]["content"]
+        assert progress["message"]["id"] == -1
+
+        # 4. Expect the final execution log reply
         reply = websocket.receive_json()
         assert reply["type"] == "reply"
         assert "Mocked OpenCode success" in reply["message"]["content"]
         
-        # 4. Expect the updated widget to be sent
+        # 5. Expect the updated widget to be sent
         widget_msg = websocket.receive_json()
         assert widget_msg["type"] == "widget"
         assert widget_msg["widget"]["id"] == "test-timer"

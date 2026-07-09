@@ -48,7 +48,13 @@ def test_websocket_chat_flow(test_session, monkeypatch):
         assert ack["message"]["content"] == "Hello Agent"
         assert ack["message"]["id"] is not None
         
-        # 2. Expect a reply from the agent
+        # 2. Expect thinking indicator
+        thinking = websocket.receive_json()
+        assert thinking["type"] == "reply"
+        assert thinking["message"]["id"] == -1
+        assert "Thinking" in thinking["message"]["content"]
+        
+        # 3. Expect a reply from the agent
         reply = websocket.receive_json()
         assert reply["type"] == "reply"
         assert reply["message"]["sender"] == "agent"
@@ -84,7 +90,13 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         ack = websocket.receive_json()
         assert ack["type"] == "ack"
         
-        # 2. Reply
+        # 2. Expect thinking indicator
+        thinking = websocket.receive_json()
+        assert thinking["type"] == "reply"
+        assert thinking["message"]["id"] == -1
+        assert "Thinking" in thinking["message"]["content"]
+        
+        # 3. Reply
         reply = websocket.receive_json()
         assert reply["type"] == "reply"
         assert "weather widget" in reply["message"]["content"]
