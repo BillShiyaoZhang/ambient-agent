@@ -22,7 +22,7 @@ const scopeCss = (css: string, scopeId: string): string => {
     const trimmed = selector.trim();
     if (!trimmed) return match;
     
-    const scopedSelectors = trimmed.split(",").map(sel => {
+    const scopedSelectors = trimmed.split(",").map((sel: string) => {
       const s = sel.trim();
       if (!s) return "";
       if (s === "from" || s === "to" || s.endsWith("%") || s.includes(prefix)) {

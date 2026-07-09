@@ -73,8 +73,9 @@ async def test_client_terminal_operations(tmp_path):
     client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
     
     # Run a simple echo command in subprocess shell
-    # Use cmd.exe /c echo hello on Windows
-    create_resp = await client.create_terminal(session_id="sess", command="cmd.exe /c echo hello_terminal")
+    import sys
+    cmd = "cmd.exe /c echo hello_terminal" if sys.platform == "win32" else "echo hello_terminal"
+    create_resp = await client.create_terminal(session_id="sess", command=cmd)
     assert isinstance(create_resp, CreateTerminalResponse)
     terminal_id = create_resp.terminal_id
     assert terminal_id is not None

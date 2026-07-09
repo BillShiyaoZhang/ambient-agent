@@ -27,7 +27,7 @@ interface WidgetSpans {
 }
 
 export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
-  activeSessionId = null,
+  activeSessionId: _activeSessionId = null,
   widgets,
   onRemoveWidget,
   renderWidgetContent,
