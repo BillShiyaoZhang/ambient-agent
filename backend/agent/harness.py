@@ -48,7 +48,20 @@ class AgentOrchestrator:
 
         # 2. Classify intent via IntentRouter
         existing_apps = self.app_manager.list_apps()
-        is_coding, app_id, instruction = IntentRouter.route(content, existing_apps)
+        try:
+            is_coding, app_id, instruction = await IntentRouter.route(content, existing_apps, db_session=self.db)
+        except Exception as e:
+            # Save error message to DB and return to client
+            error_msg = ChatMessage(
+                session_id=session_id,
+                role="agent",
+                sender="agent",
+                content=f"⚠️ 意图路由分类失败：无法连接大模型服务或解析返回结果。错误信息：{str(e)}"
+            )
+            self.db.add(error_msg)
+            self.db.commit()
+            self.db.refresh(error_msg)
+            return error_msg, None
 
         if is_coding:
             # Spawns OpenCode agent via ACP mode

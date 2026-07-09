@@ -1,5 +1,6 @@
 import os
 import pytest
+from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, create_engine, Session
 from backend.main import app, get_db
@@ -20,6 +21,11 @@ def test_session_fixture():
         os.remove("./test_websocket.db")
 
 def test_websocket_chat_flow(test_session, monkeypatch):
+    # Mock IntentRouter.route to bypass LLM classification in websocket test
+    async def mock_route(content, existing_apps, db_session=None):
+        return False, None, content
+    monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
+
     # Mock LLM API call
     async def mock_call_llm_api(provider, model, prompt):
         return "I am your Ambient Agent. You said: 'Hello Agent'"
@@ -64,6 +70,11 @@ def test_websocket_chat_flow(test_session, monkeypatch):
     app.dependency_overrides.clear()
 
 def test_websocket_widget_trigger_flow(test_session, monkeypatch):
+    # Mock IntentRouter.route to bypass LLM classification in websocket test
+    async def mock_route(content, existing_apps, db_session=None):
+        return False, None, content
+    monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
+
     # Mock LLM API call containing widget block
     async def mock_call_llm_api(provider, model, prompt):
         return """

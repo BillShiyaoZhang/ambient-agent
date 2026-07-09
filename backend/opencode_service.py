@@ -3,6 +3,7 @@ import shutil
 import uuid
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import Callable, Any, Dict, List
 
@@ -27,6 +28,28 @@ from acp.schema import (
 )
 
 logger = logging.getLogger("opencode_service")
+
+UI_ELEMENTS_GUIDE = """
+Here are the pre-configured custom UI web components and utility CSS classes available in our glassmorphism design system.
+You are strongly encouraged to reuse these pre-existing components and styles instead of writing custom complex HTML/CSS structure where possible.
+
+Custom Web Components:
+1. <a-card title="Optional Title"> - A container card with glassmorphism style, subtle hover border, and glow effects.
+2. <a-button variant="primary|secondary|danger" [loading] [disabled]> - Styled button.
+3. <a-input placeholder="..." type="text|number|..." [value] [disabled]> - Styled input box. Exposes a `.value` property. Dispatches 'input' and 'change' events.
+4. <a-select [value] [disabled]> - Styled dropdown select. Wrap standard <option> tags inside it. Exposes a `.value` property and dispatches 'change' events.
+5. <a-badge variant="info|success|warning|danger"> - Status tag badge.
+6. <a-table> - Table wrapper. Put standard table structure <thead>, <th>, <tbody>, <tr>, <td> inside it.
+7. <a-chart type="line|bar" labels="comma,separated,labels" data="comma,separated,numeric,data"> - Light canvas-based chart. For example: <a-chart type="line" labels="Mon,Tue,Wed" data="12,19,3"></a-chart>
+
+Utility CSS Classes available (along with full Tailwind CSS):
+- .glass: Backdrop blur and thin semi-transparent border styling.
+- .glass-card: Translucent background, box shadow, and purple glow on hover.
+- .glass-input: Translucent styling for input fields.
+- .glow-accent: Text shadow glow effect.
+
+Please integrate these components and styles elegantly into the widget layout to maintain visual cohesion with the user workspace.
+"""
 
 class FastAPIACPClient(Client):
     def __init__(self, workspace_root: Path, on_update_callback: Callable[[str], None]):
@@ -234,7 +257,8 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
         f"User request instruction: '{clean_instruction}'. "
         f"Please inspect the directory, check any existing source files there, apply the modifications directly to the files, "
         f"and save them back to '{target_dir}'. Ensure the code is functional, visually premium, and directly modifies those files. "
-        f"Do not put any XML <ambient-widget> tags inside index.html, style.css, or controller.js themselves. Write only raw HTML, CSS, and JS."
+        f"Do not put any XML <ambient-widget> tags inside index.html, style.css, or controller.js themselves. Write only raw HTML, CSS, and JS.\n\n"
+        f"{UI_ELEMENTS_GUIDE}"
     )
 
     full_command = f'{opencode_cmd} run "{prompt}" --auto'
@@ -309,7 +333,8 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
                 f"User request instruction: '{instruction}'. "
                 f"Please inspect the directory, check any existing source files there, apply the modifications directly to the files, "
                 f"and save them back. Ensure the code is functional, visually premium, and directly modifies those files. "
-                f"Do not put any XML <ambient-widget> tags inside index.html, style.css, or controller.js themselves. Write only raw HTML, CSS, and JS."
+                f"Do not put any XML <ambient-widget> tags inside index.html, style.css, or controller.js themselves. Write only raw HTML, CSS, and JS.\n\n"
+                f"{UI_ELEMENTS_GUIDE}"
             )
             
             await conn.prompt(

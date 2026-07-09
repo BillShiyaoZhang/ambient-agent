@@ -1,6 +1,9 @@
 import re
+import os
+import json
 import uuid
 from typing import List, Dict, Any, Tuple, Optional
+from sqlmodel import Session
 
 class IntentRouter:
     """
@@ -38,60 +41,88 @@ class IntentRouter:
     ]
 
     @classmethod
-    def route(cls, content: str, existing_apps: List[Dict[str, Any]]) -> Tuple[bool, Optional[str], str]:
+    async def route(cls, content: str, existing_apps: List[Dict[str, Any]], db_session: Optional[Session] = None) -> Tuple[bool, Optional[str], str]:
         """
-        Analyzes message content.
+        Analyzes message content using an LLM.
         Returns:
             (is_coding, app_id, instruction)
         """
         content_stripped = content.strip()
 
-        # 1. Check for explicit /app command
+        # 1. Check for explicit /app command (Fast Fallback - Always overrides)
         app_match = re.match(r"^/app\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?$", content_stripped, re.IGNORECASE)
         if app_match:
             app_id = app_match.group(1).strip()
             instruction = app_match.group(2) or "Refactor or inspect the app."
             return True, app_id, instruction.strip()
 
-        # 2. Check if user mentions an existing app to modify
-        for app_meta in existing_apps:
-            app_id_clean = app_meta.get("id", "")
-            base_name = app_id_clean.split("-")[0]
+        # 2. Call LLM for Intent Routing
+        provider_name = os.getenv("LLM_PROVIDER", "ollama")
+        model_name = os.getenv("LLM_MODEL", "llama3")
+        
+        # Import dynamically to avoid circular dependencies
+        from backend.agent.providers import get_llm_provider
+        provider = get_llm_provider(provider_name, model_name)
+
+        # Format list of existing apps
+        if existing_apps:
+            apps_list_str = "\n".join([f"- ID: {app['id']}, Title: {app.get('title', '')}" for app in existing_apps])
+        else:
+            apps_list_str = "(None)"
+
+        system_prompt = f"""You are an intent routing assistant for Ambient Agent.
+Your task is to classify whether a user's request is a widget coding task (creating a new app/widget, or modifying/updating/fixing/optimizing an existing app/widget) OR a general conversational question/message.
+
+We have these existing widgets in the workspace:
+{apps_list_str}
+
+Please respond in JSON format with three fields:
+1. "is_coding": boolean (true if the user is asking to build, update, change, fix, style, create, or modify a widget/app; false if it's general conversation/question/greeting).
+2. "app_id": string or null (if is_coding is true, this is the ID of the widget. If it refers to an existing widget, use that widget's exact ID from the list. If it is a new widget, suggest a URL-friendly name in kebab-case like "todo-app", "clock-app", "weather-app", etc., appending a random 4-character hex suffix like "-8f3a").
+3. "instruction": string (if is_coding is true, extract the specific modification or creation task instruction; if is_coding is false, return the original message).
+
+Examples of is_coding=true:
+- "Make clock-app-1234 look glassmorphic" -> {{"is_coding": true, "app_id": "clock-app-1234", "instruction": "Make clock-app-1234 look glassmorphic"}}
+- "帮我改一下待办清单，加上删除按钮" (where existing apps has "todo-app-abcd") -> {{"is_coding": true, "app_id": "todo-app-abcd", "instruction": "加上删除按钮"}}
+- "创建天气小程序" -> {{"is_coding": true, "app_id": "weather-app-8f3a", "instruction": "创建天气小程序"}}
+
+Examples of is_coding=false:
+- "Hello, who are you?" -> {{"is_coding": false, "app_id": null, "instruction": "Hello, who are you?"}}
+- "Tell me a joke" -> {{"is_coding": false, "app_id": null, "instruction": "Tell me a joke"}}
+
+Response MUST be a valid JSON object ONLY.
+"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content_stripped}
+        ]
+
+        try:
+            raw_response = await provider.generate(messages, db_session=db_session)
             
-            # Match directly or by common Chinese terms mapped to standard widget base names
-            zh_terms = cls.ZH_MAPPINGS.get(base_name, [])
-            if (app_id_clean in content_stripped.lower() or 
-                base_name in content_stripped.lower() or 
-                any(term in content_stripped for term in zh_terms)):
-                return True, app_id_clean, content_stripped
-
-        # 3. Check for keywords indicating a new app creation
-        has_en_pattern = any(re.search(pat, content_stripped, re.IGNORECASE) for pat in cls.CREATION_PATTERNS_EN)
-        has_zh_pattern = any(v in content_stripped for v in cls.CREATION_VERBS) and any(a in content_stripped for a in cls.APP_TYPES)
-
-        if has_en_pattern or has_zh_pattern:
-            guessed_name = "new-app"
-            lower_content = content_stripped.lower()
+            # Extract JSON block using regex
+            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            if not json_match:
+                raise ValueError("LLM response did not contain a valid JSON object.")
             
-            # Map keyword cues to specific templates
-            if "calculator" in lower_content or "计算器" in content_stripped:
-                guessed_name = "calculator-app"
-            elif any(w in lower_content for w in ["stopwatch", "clock", "timer"]) or any(w in content_stripped for w in ["秒表", "时钟", "计时器"]):
-                guessed_name = "clock-app"
-            elif "todo" in lower_content or "task" in lower_content or any(w in content_stripped for w in ["待办", "任务"]):
-                guessed_name = "todo-app"
-            elif "notes" in lower_content or any(w in content_stripped for w in ["笔记", "便签"]):
-                guessed_name = "notes-app"
-            elif "calendar" in lower_content or "日历" in content_stripped:
-                guessed_name = "calendar-app"
-            elif "chart" in lower_content or "图表" in content_stripped:
-                guessed_name = "chart-app"
-            elif "weather" in lower_content or "天气" in content_stripped:
-                guessed_name = "weather-app"
+            parsed = json.loads(json_match.group(0))
+            is_coding = bool(parsed.get("is_coding", False))
+            app_id = parsed.get("app_id")
+            instruction = parsed.get("instruction", content_stripped)
+            
+            # Resolve ambiguity
+            if is_coding and app_id:
+                base_name = app_id.split("-")[0]
+                matching_apps = [app for app in existing_apps if app["id"] == app_id or app["id"].split("-")[0] == base_name]
+                
+                # If there are multiple matching apps in the workspace, return ambiguity prompt conversational message
+                if len(matching_apps) > 1:
+                    ids_str = ", ".join([f"`{app['id']}`" for app in matching_apps])
+                    msg = f"我发现您有多个同类型应用（{ids_str}），请使用 `/app <Widget ID> <指令>` 明确指定您想修改哪一个。"
+                    return False, None, msg
 
-            suffix = uuid.uuid4().hex[:4]
-            app_id = f"{guessed_name}-{suffix}"
-            return True, app_id, content_stripped
+            return is_coding, app_id, instruction
 
-        # 4. Standard conversational query
-        return False, None, content_stripped
+        except Exception as e:
+            raise ValueError(f"意图路由大模型解析失败或网络异常。详情: {str(e)}")
