@@ -32,10 +32,11 @@ classDiagram
     }
 
     class AppManager {
-        +apps_dir: Path
+        +apps_dir: str
+        +create_or_update_app(app_id: str, title: str, html: str, css: str, js: str) void
+        +get_app_files(app_id: str) dict
         +list_apps() List~dict~
-        +get_app(app_id: str) dict
-        +save_app_file(app_id: str, filename: str, content: str) void
+        +delete_app(app_id: str) bool
         +get_app_data(app_id: str) dict
         +save_app_data(app_id: str, data: dict) void
     }
@@ -56,12 +57,21 @@ classDiagram
         +call_llm_api(provider: str, model: str, messages: List~dict~) str
     }
 
+    class AgentOrchestrator {
+        +db: Session
+        +app_manager: AppManager
+        +context_manager: ContextManager
+        +run_opencode_agent_acp_fn: function
+        +handle_message(session_id: str, content: str, on_update: Callable) tuple
+        -_run_callback(callback: Callable, data: Any) void
+    }
+
     ChatSession "1" --* "0..*" ChatMessage : contains
     ContextManager --> AppManager : references
     ContextManager --> ChatMessage : queries database
-    WebSocketHandler --> ContextManager : constructs message history
-    WebSocketHandler --> LLMService : requests completion
-    WebSocketHandler --> AgentParser : extracts XML widgets
+    AgentOrchestrator --> ContextManager : constructs message history
+    AgentOrchestrator --> AppManager : references
+    AgentOrchestrator --> AgentParser : extracts XML widgets
     LLMService --> LLMAuditLog : writes prompt audit logs
 ```
 

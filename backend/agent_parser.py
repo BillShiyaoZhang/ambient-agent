@@ -1,6 +1,7 @@
 import re
+from typing import List, Dict, Optional
 
-def parse_widget_from_text(text: str):
+def parse_widget_from_text(text: str) -> Optional[Dict[str, str]]:
     """
     Parses a widget structured as:
     <ambient-widget id="widget-id" title="Widget Title">
@@ -29,3 +30,14 @@ def parse_widget_from_text(text: str):
         "css": css_match.group(1).strip() if css_match else "",
         "js": js_match.group(1).strip() if js_match else ""
     }
+
+class AgentParser:
+    @staticmethod
+    def parse_widgets(text: str) -> List[Dict[str, str]]:
+        """
+        Parses all widgets from text. Currently parses a single widget
+        and returns it inside a list, matching UML specification.
+        """
+        widget = parse_widget_from_text(text)
+        return [widget] if widget else []
+

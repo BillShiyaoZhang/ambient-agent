@@ -143,3 +143,31 @@ async def generate_agent_response(
     session.refresh(audit_log)
     
     return response_text
+
+class LLMService:
+    @staticmethod
+    async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]) -> str:
+        """
+        Wrapper matching UML definition for call_llm_api.
+        """
+        return await call_llm_api(provider, model, messages)
+
+    @staticmethod
+    async def generate_agent_response(
+        messages: Optional[List[Dict[str, str]]] = None,
+        provider: str = "ollama",
+        model: str = "llama3",
+        session: Session = None,
+        user_message: Optional[str] = None
+    ) -> str:
+        """
+        Wrapper matching UML definition for generate_agent_response.
+        """
+        return await generate_agent_response(
+            messages=messages,
+            provider=provider,
+            model=model,
+            session=session,
+            user_message=user_message
+        )
+
