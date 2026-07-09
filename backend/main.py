@@ -16,6 +16,7 @@ from backend.agent_parser import parse_widget_from_text
 from backend.llm_service import generate_agent_response, SYSTEM_PROMPT
 from backend.app_manager import AppManager
 from backend.context_manager import ContextManager
+from backend.opencode_service import run_opencode_agent
 
 DATABASE_URL = "sqlite:///./db.sqlite3"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
     # 1. Create database tables if they don't exist
     SQLModel.metadata.create_all(engine)
     
-    # 2. Simple SQLite migration check & default session migration
+    # 2. Simple SQLite database checks & schema syncs
     import sqlite3
     db_path = "./db.sqlite3"
     if os.path.exists(db_path):
@@ -54,17 +55,6 @@ async def lifespan(app: FastAPI):
                 cursor.execute("ALTER TABLE chatmessage ADD COLUMN role VARCHAR DEFAULT 'user';")
                 conn.commit()
                 
-            # Ensure we have a default session in chatsession table
-            cursor.execute("SELECT id FROM chatsession WHERE id = 'default-session'")
-            if not cursor.fetchone():
-                cursor.execute(
-                    "INSERT INTO chatsession (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    ("default-session", "Migrated Chat", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat())
-                )
-                conn.commit()
-                
-            # Migrate any messages that have NULL session_id to default-session
-            cursor.execute("UPDATE chatmessage SET session_id = 'default-session' WHERE session_id IS NULL")
             # Migrate role for existing agent messages
             cursor.execute("UPDATE chatmessage SET role = 'agent' WHERE sender = 'agent' AND (role = 'user' OR role IS NULL)")
             
@@ -241,77 +231,184 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 }
             })
             
-            # Construct LLM prompt using ContextManager (pruning old codes and injecting disk app codes)
-            llm_prompt_messages = context_manager.build_llm_prompt(session_id)
-            # Prepend standard system prompt
-            llm_prompt_messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+            # Determine if this is a coding/app modification task
+            is_coding = False
+            app_id = None
+            instruction = ""
             
-            # Call the LLM service to generate raw reply containing potential widgets
-            raw_response = await generate_agent_response(
-                messages=llm_prompt_messages,
-                provider=provider,
-                model=model,
-                session=session
-            )
-            
-            # Parse widget from response text if present
-            widget_to_send = parse_widget_from_text(raw_response)
-            
-            # Clean response text by removing XML block
-            if widget_to_send:
-                reply_content = re.sub(r"<ambient-widget.*?>.*?</ambient-widget>", "", raw_response, flags=re.DOTALL).strip()
+            # 1. Check for /app command
+            app_match = re.match(r"^/app\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?$", content.strip(), re.IGNORECASE)
+            if app_match:
+                is_coding = True
+                app_id = app_match.group(1).strip()
+                instruction = app_match.group(2) or "Refactor or inspect the app."
+                instruction = instruction.strip()
             else:
-                reply_content = raw_response
+                # 2. Check for keywords indicating app creation/modification
+                creation_patterns = [
+                    r"\b(?:create|build|make|generate|write|develop)\s+(?:a\s+)?(?:new\s+)?(?:widget|app|gui|dashboard)\b",
+                    r"\b(?:modify|update|add|change|fix)\s+(?:the\s+)?(?:widget|app|gui)\b"
+                ]
+                if any(re.search(pat, content, re.IGNORECASE) for pat in creation_patterns):
+                    is_coding = True
+                    guessed_name = "new-app"
+                    for word in ["calculator", "stopwatch", "todo", "calendar", "notes", "chart", "clock", "weather"]:
+                        if word in content.lower():
+                            guessed_name = f"{word}-app"
+                            break
+                    import uuid
+                    suffix = uuid.uuid4().hex[:4]
+                    app_id = f"{guessed_name}-{suffix}"
+                    instruction = content.strip()
 
-            # Save agent conversational reply to database
-            agent_msg = ChatMessage(
-                session_id=session_id,
-                role="agent",
-                sender="agent",
-                content=reply_content
-            )
-            session.add(agent_msg)
-            
-            # Save widget code block separately if triggered, and update physical files on disk
-            if widget_to_send:
-                code_msg = ChatMessage(
-                    session_id=session_id,
-                    role="code",
-                    sender="agent",
-                    content=raw_response
-                )
-                session.add(code_msg)
-                
-                # Write app files to disk
-                app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    html=widget_to_send["html"],
-                    css=widget_to_send["css"],
-                    js=widget_to_send["js"]
-                )
-                
-            session.commit()
-            session.refresh(agent_msg)
-            
-            # Send agent reply back to client
-            await websocket.send_json({
-                "type": "reply",
-                "message": {
-                    "id": agent_msg.id,
-                    "sender": agent_msg.sender,
-                    "role": agent_msg.role,
-                    "content": agent_msg.content,
-                    "timestamp": agent_msg.timestamp.isoformat() if agent_msg.timestamp else None
-                }
-            })
-            
-            # Send widget message to frontend if triggered
-            if widget_to_send:
+            if is_coding:
+                # Send ack/status to client that OpenCode is starting
+                status_msg_content = f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
                 await websocket.send_json({
-                    "type": "widget",
-                    "widget": widget_to_send
+                    "type": "reply",
+                    "message": {
+                        "id": -1,  # Special ID for temporary status updates
+                        "sender": "agent",
+                        "role": "agent",
+                        "content": status_msg_content,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
                 })
+                
+                # Run OpenCode CLI agent as a subprocess in a thread executor to avoid blocking the event loop
+                import asyncio
+                loop = asyncio.get_running_loop()
+                cli_output = await loop.run_in_executor(None, run_opencode_agent, app_id, instruction)
+                
+                # Check if the widget was successfully created/modified on disk
+                widget_to_send = app_manager.get_app_files(app_id)
+                
+                # Save agent execution log to DB
+                agent_msg = ChatMessage(
+                    session_id=session_id,
+                    role="agent",
+                    sender="agent",
+                    content=f"OpenCode Execution Log:\n\n```\n{cli_output}\n```"
+                )
+                session.add(agent_msg)
+                
+                # Save widget metadata/code to database messages for context recovery in future turns
+                if widget_to_send:
+                    code_msg = ChatMessage(
+                        session_id=session_id,
+                        role="code",
+                        sender="agent",
+                        content=(
+                            f'<ambient-widget id="{widget_to_send["id"]}" title="{widget_to_send["title"]}">\n'
+                            f'<html-content>\n{widget_to_send["html"]}\n</html-content>\n'
+                            f'<css-styles>\n{widget_to_send["css"]}\n</css-styles>\n'
+                            f'<js-script>\n{widget_to_send["js"]}\n</js-script>\n'
+                            f'</ambient-widget>'
+                        )
+                    )
+                    session.add(code_msg)
+                    
+                    # Ensure metadata.json is updated/synchronized with a nice title
+                    title = app_id.replace("-", " ").title()
+                    title_match = re.search(r"<title>(.*?)</title>", widget_to_send["html"], re.IGNORECASE)
+                    if title_match:
+                        title = title_match.group(1).strip()
+                    
+                    app_manager.create_or_update_app(
+                        app_id=widget_to_send["id"],
+                        title=title,
+                        html=widget_to_send["html"],
+                        css=widget_to_send["css"],
+                        js=widget_to_send["js"]
+                    )
+                    
+                    # Re-get the updated widget files (with title updated)
+                    widget_to_send = app_manager.get_app_files(app_id)
+                    
+                session.commit()
+                session.refresh(agent_msg)
+                
+                # Send the final agent explanation/execution log back to client
+                await websocket.send_json({
+                    "type": "reply",
+                    "message": {
+                        "id": agent_msg.id,
+                        "sender": agent_msg.sender,
+                        "role": agent_msg.role,
+                        "content": agent_msg.content,
+                        "timestamp": agent_msg.timestamp.isoformat() if agent_msg.timestamp else None
+                    }
+                })
+                
+                # Send widget creation/update to frontend
+                if widget_to_send:
+                    await websocket.send_json({
+                        "type": "widget",
+                        "widget": widget_to_send
+                    })
+            else:
+                # Conversational path (standard LLM response)
+                llm_prompt_messages = context_manager.build_llm_prompt(session_id)
+                llm_prompt_messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+                
+                raw_response = await generate_agent_response(
+                    messages=llm_prompt_messages,
+                    provider=provider,
+                    model=model,
+                    session=session
+                )
+                
+                widget_to_send = parse_widget_from_text(raw_response)
+                
+                if widget_to_send:
+                    reply_content = re.sub(r"<ambient-widget.*?>.*?</ambient-widget>", "", raw_response, flags=re.DOTALL).strip()
+                else:
+                    reply_content = raw_response
+
+                agent_msg = ChatMessage(
+                    session_id=session_id,
+                    role="agent",
+                    sender="agent",
+                    content=reply_content
+                )
+                session.add(agent_msg)
+                
+                if widget_to_send:
+                    code_msg = ChatMessage(
+                        session_id=session_id,
+                        role="code",
+                        sender="agent",
+                        content=raw_response
+                    )
+                    session.add(code_msg)
+                    
+                    app_manager.create_or_update_app(
+                        app_id=widget_to_send["id"],
+                        title=widget_to_send["title"],
+                        html=widget_to_send["html"],
+                        css=widget_to_send["css"],
+                        js=widget_to_send["js"]
+                    )
+                    
+                session.commit()
+                session.refresh(agent_msg)
+                
+                await websocket.send_json({
+                    "type": "reply",
+                    "message": {
+                        "id": agent_msg.id,
+                        "sender": agent_msg.sender,
+                        "role": agent_msg.role,
+                        "content": agent_msg.content,
+                        "timestamp": agent_msg.timestamp.isoformat() if agent_msg.timestamp else None
+                    }
+                })
+                
+                if widget_to_send:
+                    await websocket.send_json({
+                        "type": "widget",
+                        "widget": widget_to_send
+                    })
             
     except WebSocketDisconnect:
         pass

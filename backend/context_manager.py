@@ -11,16 +11,27 @@ class ContextManager:
 
     def _extract_app_ids(self, messages: List[ChatMessage]) -> Set[str]:
         """
-        Scans messages for <ambient-widget id="some-id" ...> tags to identify
-        which apps have been created or modified in this session.
+        Scans messages for <ambient-widget id="some-id" ...> tags and
+        /app <app_id> references to identify which apps have been created
+        or modified in this session.
         """
         app_ids = set()
-        # Find ID patterns in both role="code" and standard content, matching single or double quotes
-        pattern = r"<ambient-widget\s+[^>]*?id=[\"']([^\"']+)[\"']"
+        # Find ID patterns matching single or double quotes
+        xml_pattern = r"<ambient-widget\s+[^>]*?id=[\"']([^\"']+)[\"']"
+        # Match slash command: /app <app_id> (with optional spaces/word boundaries)
+        slash_pattern = r"(?:^|\s)/app\s+([a-zA-Z0-9_-]+)"
+        
         for msg in messages:
-            matches = re.findall(pattern, msg.content)
-            for m in matches:
+            # Extract from XML tags
+            xml_matches = re.findall(xml_pattern, msg.content)
+            for m in xml_matches:
                 app_ids.add(m.strip())
+            
+            # Extract from /app slash commands
+            slash_matches = re.findall(slash_pattern, msg.content)
+            for m in slash_matches:
+                app_ids.add(m.strip())
+                
         return app_ids
 
     def _prune_message_content(self, content: str) -> str:
