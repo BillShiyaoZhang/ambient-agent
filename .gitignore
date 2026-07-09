@@ -157,3 +157,6 @@ Thumbs.db
 # Test databases
 *.db
 test_*.db
+
+# Generated Apps
+backend/apps/
