@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { DashboardCanvas, Widget } from "../../frontend/src/components/DashboardCanvas";
 import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
@@ -103,7 +103,60 @@ describe("SandboxWidget Rendering & Containment", () => {
     // explicit window writing will bleed (which is normal), but let's confirm var does not.
     expect((window as any).mySecretVariablePublic).toBe("public-value");
     
+    
     // Clean up
     delete (window as any).mySecretVariablePublic;
+  });
+
+  it("should intercept and cache GET requests to external APIs using injected fetch", async () => {
+    const fetchSpy = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ weather: "sunny" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      )
+    );
+    const originalFetch = window.fetch;
+    window.fetch = fetchSpy;
+
+    const mockWidget: Widget = {
+      id: "test-fetch-cache",
+      title: "Fetch Cache Test",
+      html: '<div id="output" data-testid="fetch-out">Init</div>',
+      css: "",
+      js: `
+        (async () => {
+          const res1 = await fetch("https://api.external.com/weather");
+          const data1 = await res1.json();
+          
+          const res2 = await fetch("https://api.external.com/weather");
+          const data2 = await res2.json();
+          
+          root.querySelector("#output").textContent = data1.weather + "-" + data2.weather;
+        })();
+      `,
+    };
+
+    render(
+      <DashboardCanvas
+        widgets={[mockWidget]}
+        onRemoveWidget={() => {}}
+        renderWidgetContent={(w) => <SandboxWidget widget={w} />}
+        fullscreenAppId={null}
+      />
+    );
+
+    // Wait for the async JS execution to complete and update DOM
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const out = screen.getByTestId("fetch-out");
+    expect(out.textContent).toBe("sunny-sunny");
+
+    // The fetch function should only have been called ONCE due to caching!
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Restore fetch
+    window.fetch = originalFetch;
   });
 });

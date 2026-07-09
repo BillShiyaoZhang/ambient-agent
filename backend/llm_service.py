@@ -1,5 +1,6 @@
 import os
 import httpx
+from typing import Optional
 from sqlmodel import Session
 from backend.models import LLMAuditLog
 
@@ -17,33 +18,49 @@ To spawn a widget, output a block in this exact XML-like format anywhere in your
   /* Scoped CSS rules targeting classes inside the widget */
 </css-styles>
 <js-script>
-  // Scoped JavaScript. You are passed 'root' which points to the widget's HTML content div.
+  // Scoped JavaScript. You are passed 'root' (the widget's HTML content div) and 'ambient' (the client SDK).
   // Use root.querySelector to select elements. Do NOT write global variables.
-  // Attach event listeners or draw elements using root.
+  // To persist and sync data/state:
+  //   const data = await ambient.model.get(); // returns dict, initially {}
+  //   await ambient.model.set(newData);       // saves to backend data.json and syncs
+  //   ambient.model.onChange(data => { ... }); // triggers on data updates (e.g. from other devices)
+  // To interact with chat:
+  //   ambient.sendMessage("message text"); // sends user message in chat
+  // To control window:
+  //   ambient.fullscreen(); // requests fullscreen view
+  //   ambient.minimize();   // minimizes/restores grid view
 </js-script>
 </ambient-widget>
 
 Always make widgets look visually stunning, glassmorphic, responsive, and functional! Keep user data private and run locally when possible.
 """
 
-async def call_llm_api(provider: str, model: str, prompt: str) -> str:
+import json
+from typing import List, Dict
+
+async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]) -> str:
     """
-    Directly contacts Ollama or cloud providers using HTTP clients.
+    Directly contacts Ollama (chat endpoint) or cloud providers using HTTP clients.
     """
     if provider == "ollama":
-        # Ollama local endpoint
-        url = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
+        # Ollama local chat endpoint
+        raw_url = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
+        # Ensure we use the /api/chat endpoint for messages list
+        if "generate" in raw_url:
+            url = raw_url.replace("generate", "chat")
+        else:
+            url = raw_url
+            
         payload = {
             "model": model,
-            "prompt": prompt,
-            "system": SYSTEM_PROMPT,
+            "messages": messages,
             "stream": False
         }
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, timeout=60.0)
+                response = await client.post(url, json=payload, timeout=300.0)
                 if response.status_code == 200:
-                    return response.json().get("response", "")
+                    return response.json().get("message", {}).get("content", "")
                 else:
                     return f"Error from Ollama server (status code {response.status_code}): {response.text}"
         except Exception as e:
@@ -55,24 +72,23 @@ async def call_llm_api(provider: str, model: str, prompt: str) -> str:
         api_url = os.getenv("LLM_API_URL", "https://api.openai.com/v1/chat/completions")
         
         if not api_key:
-            return f"Mock response: You requested '{prompt}' using provider '{provider}' and model '{model}', but no API key was configured."
+            prompt_summary = messages[-1]["content"] if messages else ""
+            return f"Mock response: You requested using provider '{provider}' and model '{model}', but no API key was configured."
             
         # Standard OpenAI compatible completions payload
         payload = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "temperature": 0.7
         }
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
+        trust_env = os.getenv("LLM_TRUST_ENV", "true").lower() != "false"
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(api_url, json=payload, headers=headers, timeout=60.0)
+            async with httpx.AsyncClient(trust_env=trust_env) as client:
+                response = await client.post(api_url, json=payload, headers=headers, timeout=300.0)
                 if response.status_code == 200:
                     choices = response.json().get("choices", [])
                     if choices:
@@ -81,20 +97,45 @@ async def call_llm_api(provider: str, model: str, prompt: str) -> str:
                 else:
                     return f"API Error (status code {response.status_code}): {response.text}"
         except Exception as e:
-            return f"Failed to connect to cloud API provider. Error: {str(e)}"
+            import traceback
+            traceback.print_exc()
+            return f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {str(e)}"
 
-async def generate_agent_response(user_message: str, provider: str, model: str, session: Session) -> str:
+async def generate_agent_response(
+    messages: Optional[List[Dict[str, str]]] = None,
+    provider: str = "ollama",
+    model: str = "llama3",
+    session: Session = None,
+    user_message: Optional[str] = None
+) -> str:
     """
     Coordinates LLM execution, registers prompts and responses in the audit database.
     """
+    if messages is None:
+        if user_message is not None:
+            # Wrap legacy string prompt into structured messages list, including SYSTEM_PROMPT
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message}
+            ]
+        else:
+            messages = []
+
     # 1. Trigger LLM call
-    response_text = await call_llm_api(provider, model, user_message)
+    response_text = await call_llm_api(provider, model, messages)
     
+    # Extract last user message or serialize full messages for audit log
+    prompt_str = ""
+    try:
+        prompt_str = json.dumps(messages, ensure_ascii=False)
+    except Exception:
+        prompt_str = str(messages)
+
     # 2. Write to Audit Log database table
     audit_log = LLMAuditLog(
         provider=provider,
         model=model,
-        prompt=user_message,
+        prompt=prompt_str,
         response=response_text
     )
     session.add(audit_log)

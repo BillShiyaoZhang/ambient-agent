@@ -1,0 +1,189 @@
+<div class="weather-app">
+  <!-- Search Bar -->
+  <div class="search-bar">
+    <div class="search-input-wrap">
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+      <input type="text" id="citySearch" placeholder="搜索城市,例如:北京 / Shanghai / Tokyo" />
+      <button id="geoBtn" class="geo-btn" title="定位">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Animated Background -->
+  <div class="bg-animation" id="bgAnim">
+    <div class="sun" id="sunOrMoon"></div>
+    <div class="cloud cloud-1"></div>
+    <div class="cloud cloud-2"></div>
+    <div class="cloud cloud-3"></div>
+    <div class="rain-container" id="rainContainer"></div>
+    <div class="snow-container" id="snowContainer"></div>
+  </div>
+
+  <!-- Loading -->
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>正在加载天气数据...</p>
+  </div>
+
+  <!-- Main Content -->
+  <div class="content" id="content" style="display:none;">
+    <!-- Current Weather -->
+    <div class="current-weather">
+      <div class="location">
+        <h1 id="cityName">--</h1>
+        <p id="countryName">--</p>
+        <p id="currentDate">--</p>
+      </div>
+      <div class="current-main">
+        <div class="current-icon" id="currentIcon">☀️</div>
+        <div class="current-temp">
+          <span id="currentTemp">--</span><span class="degree">°</span>
+        </div>
+        <div class="current-desc" id="currentDesc">--</div>
+        <div class="current-range">
+          <span>↑ <span id="tempHigh">--</span>°</span>
+          <span>↓ <span id="tempLow">--</span>°</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hourly Forecast -->
+    <div class="card hourly-card">
+      <h2 class="card-title">逐小时预报</h2>
+      <div class="hourly-scroll" id="hourlyScroll">
+        <!-- Filled dynamically -->
+      </div>
+    </div>
+
+    <!-- 7-Day Forecast -->
+    <div class="card daily-card">
+      <h2 class="card-title">7 天预报</h2>
+      <div class="daily-list" id="dailyList">
+        <!-- Filled dynamically -->
+      </div>
+    </div>
+
+    <!-- Details Grid -->
+    <div class="details-grid">
+      <div class="detail-card">
+        <div class="detail-icon">🌡️</div>
+        <div class="detail-label">体感温度</div>
+        <div class="detail-value" id="feelsLike">--°</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">💧</div>
+        <div class="detail-label">湿度</div>
+        <div class="detail-value" id="humidity">--%</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">💨</div>
+        <div class="detail-label">风速</div>
+        <div class="detail-value" id="windSpeed">-- km/h</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">🧭</div>
+        <div class="detail-label">风向</div>
+        <div class="detail-value" id="windDir">--</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">🌡️</div>
+        <div class="detail-label">气压</div>
+        <div class="detail-value" id="pressure">-- hPa</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">👁️</div>
+        <div class="detail-label">能见度</div>
+        <div class="detail-value" id="visibility">-- km</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">☀️</div>
+        <div class="detail-label">紫外线</div>
+        <div class="detail-value" id="uvIndex">--</div>
+        <div class="detail-sub" id="uvLevel">--</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">☁️</div>
+        <div class="detail-label">云量</div>
+        <div class="detail-value" id="cloudCover">--%</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">💦</div>
+        <div class="detail-label">露点</div>
+        <div class="detail-value" id="dewPoint">--°</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">🌅</div>
+        <div class="detail-label">日出</div>
+        <div class="detail-value" id="sunrise">--:--</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">🌇</div>
+        <div class="detail-label">日落</div>
+        <div class="detail-value" id="sunset">--:--</div>
+      </div>
+      <div class="detail-card">
+        <div class="detail-icon">🌧️</div>
+        <div class="detail-label">降水概率</div>
+        <div class="detail-value" id="precipProb">--%</div>
+      </div>
+    </div>
+
+    <!-- Air Quality -->
+    <div class="card air-card">
+      <h2 class="card-title">空气质量</h2>
+      <div class="air-content">
+        <div class="air-main">
+          <div class="air-aqi-circle">
+            <div class="aqi-value" id="aqiValue">--</div>
+            <div class="aqi-label">AQI</div>
+          </div>
+          <div class="air-status">
+            <div class="air-level" id="airLevel">--</div>
+            <div class="air-desc" id="airDesc">加载中...</div>
+          </div>
+        </div>
+        <div class="air-details">
+          <div class="air-item">
+            <span>PM2.5</span>
+            <span id="pm25">--</span>
+          </div>
+          <div class="air-item">
+            <span>PM10</span>
+            <span id="pm10">--</span>
+          </div>
+          <div class="air-item">
+            <span>O₃</span>
+            <span id="o3">--</span>
+          </div>
+          <div class="air-item">
+            <span>NO₂</span>
+            <span id="no2">--</span>
+          </div>
+          <div class="air-item">
+            <span>SO₂</span>
+            <span id="so2">--</span>
+          </div>
+          <div class="air-item">
+            <span>CO</span>
+            <span id="co">--</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">数据来源: Open-Meteo · 最后更新: <span id="updateTime">--</span></div>
+  </div>
+
+  <!-- Error -->
+  <div class="error" id="error" style="display:none;">
+    <p id="errorMsg">出错了</p>
+    <button onclick="document.getElementById('error').style.display='none'; document.getElementById('citySearch').focus();">重试</button>
+  </div>
+</div>
