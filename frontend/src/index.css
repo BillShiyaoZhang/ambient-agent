@@ -85,3 +85,19 @@ body {
 .glow-accent {
   text-shadow: 0 0 10px rgba(170, 59, 255, 0.5);
 }
+
+/* Ambient Custom Elements Light DOM Defaults */
+a-card, a-table, a-chart {
+  display: block;
+  margin-bottom: 12px;
+}
+a-button, a-badge {
+  display: inline-block;
+  margin-right: 8px;
+  margin-bottom: 8px;
+}
+a-input, a-select {
+  display: block;
+  width: 100%;
+  margin-bottom: 12px;
+}
