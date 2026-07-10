@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from sqlmodel import Session
 
 from backend.models import LLMAuditLog

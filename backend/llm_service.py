@@ -1,6 +1,6 @@
 import os
 import httpx
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from sqlmodel import Session
 from backend.models import LLMAuditLog
 
@@ -36,7 +36,6 @@ Always make widgets look visually stunning, glassmorphic, responsive, and functi
 """
 
 import json
-from typing import List, Dict
 
 async def call_llm_api(
     provider: str,
