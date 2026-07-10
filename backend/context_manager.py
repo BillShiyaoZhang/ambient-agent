@@ -1,11 +1,11 @@
 import re
 from typing import List, Dict, Set
-from sqlmodel import Session, select
+from backend.workspace_storage import WorkspaceStorage
 from backend.models import ChatMessage
 from backend.app_manager import AppManager
 
 class ContextManager:
-    def __init__(self, db_session: Session, app_manager: AppManager):
+    def __init__(self, db_session: WorkspaceStorage, app_manager: AppManager):
         self.db = db_session
         self.app_manager = app_manager
 
@@ -64,8 +64,7 @@ class ContextManager:
         token explosion, identifies active apps, and injects their latest files from disk.
         """
         # 1. Fetch messages for the session sorted by timestamp
-        statement = select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.timestamp)
-        messages = self.db.exec(statement).all()
+        messages = self.db.get_messages(session_id)
 
         # 2. Extract all apps referenced/created in this session
         app_ids = self._extract_app_ids(messages)

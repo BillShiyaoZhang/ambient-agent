@@ -1,11 +1,10 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from sqlmodel import Session
-
 from backend.agent.router import IntentRouter
 from backend.agent.tools import ToolRegistry, registry as global_registry
 from backend.agent.harness import AgentOrchestrator
 from backend.models import ChatMessage, ChatSession
+from backend.workspace_storage import WorkspaceStorage
 
 @pytest.mark.asyncio
 async def test_intent_router(monkeypatch):
@@ -114,7 +113,7 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
     
     # Mock database session
-    db_session = MagicMock(spec=Session)
+    db_session = MagicMock(spec=WorkspaceStorage)
     db_session.get.return_value = ChatSession(id="sess-1", title="Test")
     
     # Mock app manager

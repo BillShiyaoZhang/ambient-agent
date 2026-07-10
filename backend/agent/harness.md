@@ -8,8 +8,22 @@ Agent Harness 实现了执行流、意图路由、上下文组装以及大模型
 
 ```mermaid
 classDiagram
+    class WorkspaceStorage {
+        +workspace_dir: str
+        +get(model_class, obj_id) BaseModel
+        +add(obj) void
+        +commit() void
+        +refresh(obj) void
+        +get_sessions() List
+        +get_messages(session_id) List
+        +get_audit_logs() List
+        +delete_session(session_id) bool
+        +get_canvas_config() dict
+        +save_canvas_config(config) void
+    }
+
     class AgentOrchestrator {
-        +db: Session
+        +db: WorkspaceStorage
         +app_manager: AppManager
         +context_manager: ContextManager
         +run_opencode_agent_acp_fn: Callable

@@ -2,7 +2,7 @@ import re
 import os
 import asyncio
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
@@ -10,66 +10,28 @@ load_dotenv()
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlmodel import SQLModel, create_engine, Session, select
 
 from backend.models import ChatSession, ChatMessage, LLMAuditLog
 from backend.app_manager import AppManager
 from backend.agent.harness import AgentOrchestrator
 from backend.opencode_service import run_opencode_agent_acp
-
-DATABASE_URL = "sqlite:///./db.sqlite3"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 
 # Global registry of active WebSockets for broadcasting app data updates
 active_websockets = set()
 app_manager = AppManager()
 
+# Initialize workspace storage
+WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
+db_storage = WorkspaceStorage(WORKSPACE_DIR)
+
 def get_db():
-    with Session(engine) as session:
-        yield session
+    yield db_storage
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Create database tables if they don't exist
-    SQLModel.metadata.create_all(engine)
-    
-    # 2. Simple SQLite database checks & schema syncs
-    import sqlite3
-    db_path = "./db.sqlite3"
-    if os.path.exists(db_path):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        try:
-            # Check columns in chatmessage
-            cursor.execute("PRAGMA table_info(chatmessage)")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            # Add session_id column if not exists
-            if "session_id" not in columns:
-                cursor.execute("ALTER TABLE chatmessage ADD COLUMN session_id VARCHAR;")
-                conn.commit()
-                
-            # Add role column if not exists
-            if "role" not in columns:
-                cursor.execute("ALTER TABLE chatmessage ADD COLUMN role VARCHAR DEFAULT 'user';")
-                conn.commit()
-                
-            # Migrate role for existing agent messages
-            cursor.execute("UPDATE chatmessage SET role = 'agent' WHERE sender = 'agent' AND (role = 'user' OR role IS NULL)")
-            
-            # Purge any corrupted sessions (e.g. callback strings from previous frontend bugs)
-            cursor.execute("SELECT id FROM chatsession")
-            sessions_in_db = cursor.fetchall()
-            for (s_id,) in sessions_in_db:
-                if any(x in s_id for x in ("=>", "function", "{", "(")):
-                    cursor.execute("DELETE FROM chatmessage WHERE session_id = ?", (s_id,))
-                    cursor.execute("DELETE FROM chatsession WHERE id = ?", (s_id,))
-            conn.commit()
-        except Exception as e:
-            print("Migration error:", e)
-        finally:
-            conn.close()
-            
+    # Perform automated migration from db.sqlite3 and backend/apps to workspace
+    migrate_old_data(WORKSPACE_DIR)
     yield
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
@@ -88,10 +50,8 @@ async def health_check():
     return {"status": "ok", "message": "Ambient Agent is running"}
 
 @app.get("/api/audit-logs")
-async def get_audit_logs(session: Session = Depends(get_db)):
-    statement = select(LLMAuditLog).order_by(LLMAuditLog.timestamp.desc())
-    results = session.exec(statement).all()
-    return results
+async def get_audit_logs(session: WorkspaceStorage = Depends(get_db)):
+    return session.get_audit_logs()
 
 # --- Multi-Session REST endpoints ---
 
@@ -100,38 +60,43 @@ class SessionCreate(BaseModel):
     title: str
 
 @app.get("/api/sessions")
-async def get_sessions(session: Session = Depends(get_db)):
-    statement = select(ChatSession).order_by(ChatSession.updated_at.desc())
-    return session.exec(statement).all()
+async def get_sessions(session: WorkspaceStorage = Depends(get_db)):
+    return session.get_sessions()
 
 @app.post("/api/sessions")
-async def create_session(data: SessionCreate, session: Session = Depends(get_db)):
+async def create_session(data: SessionCreate, session: WorkspaceStorage = Depends(get_db)):
     db_sess = session.get(ChatSession, data.id)
     if not db_sess:
         db_sess = ChatSession(id=data.id, title=data.title)
         session.add(db_sess)
         session.commit()
-        session.refresh(db_sess)
     return db_sess
 
 @app.get("/api/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str, session: Session = Depends(get_db)):
-    statement = select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.timestamp.asc())
-    return session.exec(statement).all()
+async def get_session_messages(session_id: str, session: WorkspaceStorage = Depends(get_db)):
+    return session.get_messages(session_id)
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str, session: Session = Depends(get_db)):
-    db_sess = session.get(ChatSession, session_id)
-    if db_sess:
-        # Delete associated messages
-        msgs_statement = select(ChatMessage).where(ChatMessage.session_id == session_id)
-        msgs = session.exec(msgs_statement).all()
-        for m in msgs:
-            session.delete(m)
-        session.delete(db_sess)
-        session.commit()
+async def delete_session(session_id: str, session: WorkspaceStorage = Depends(get_db)):
+    success = session.delete_session(session_id)
+    if success:
         return {"status": "ok"}
     return {"status": "error", "message": "Session not found"}
+
+# --- Canvas Config REST endpoints ---
+
+class CanvasConfig(BaseModel):
+    pinned_ids: List[str]
+    widget_spans: Dict[str, Any]
+
+@app.get("/api/canvas")
+async def get_canvas(session: WorkspaceStorage = Depends(get_db)):
+    return session.get_canvas_config()
+
+@app.post("/api/canvas")
+async def save_canvas(data: CanvasConfig, session: WorkspaceStorage = Depends(get_db)):
+    session.save_canvas_config(data.model_dump())
+    return {"status": "ok"}
 
 # --- AppStore REST endpoints ---
 
@@ -175,7 +140,7 @@ async def save_app_data(app_id: str, data: Dict[str, Any]):
 # --- WebSocket Chat Handler ---
 
 @app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None, session: Session = Depends(get_db)):
+async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None, session: WorkspaceStorage = Depends(get_db)):
     await websocket.accept()
     active_websockets.add(websocket)
     
@@ -188,7 +153,6 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
         db_session_obj = ChatSession(id=session_id, title="Active Chat")
         session.add(db_session_obj)
         session.commit()
-        session.refresh(db_session_obj)
         
     orchestrator = AgentOrchestrator(db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp)
     

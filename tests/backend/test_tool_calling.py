@@ -1,25 +1,16 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-from sqlmodel import SQLModel, create_engine, Session
-import os
-
+from unittest.mock import AsyncMock
 from backend.agent.providers import OllamaProvider
-from backend.agent.tools import ToolRegistry, registry as global_registry
+from backend.agent.tools import registry as global_registry
 from backend.models import LLMAuditLog
 import backend.llm_service
-
-TEST_DATABASE_URL = "sqlite:///./test_tool_calling.db"
+from backend.workspace_storage import WorkspaceStorage
 
 @pytest.fixture(name="test_session")
-def test_session_fixture():
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    if os.path.exists("./test_tool_calling.db"):
-        os.remove("./test_tool_calling.db")
+def test_session_fixture(tmp_path):
+    workspace_dir = str(tmp_path / "workspace")
+    storage = WorkspaceStorage(workspace_dir)
+    yield storage
 
 @pytest.mark.asyncio
 async def test_tool_calling_loop(test_session, monkeypatch):
@@ -39,8 +30,6 @@ async def test_tool_calling_loop(test_session, monkeypatch):
         return "success_delete"
 
     # 2. Mock call_llm_api to simulate a 2-step tool loop:
-    # First call: return a request to execute "test_delete_app"
-    # Second call: return final text response
     mock_calls = []
 
     async def mock_call_llm_api(provider, model, messages, tools=None):
@@ -86,14 +75,9 @@ async def test_tool_calling_loop(test_session, monkeypatch):
     assert response == "Successfully deleted the app."
 
     # 5. Verify the messages history was correctly built in the loop:
-    # First API call got 1 user message.
     assert len(mock_calls[0]) == 1
     assert mock_calls[0][0]["content"] == "Delete test-widget"
 
-    # Second API call got:
-    # - User message
-    # - Assistant message requesting tool execution
-    # - Tool response message
     assert len(mock_calls[1]) == 3
     assert mock_calls[1][0]["role"] == "user"
     assert mock_calls[1][1]["role"] == "assistant"
@@ -102,14 +86,13 @@ async def test_tool_calling_loop(test_session, monkeypatch):
     assert mock_calls[1][2]["name"] == "test_delete_app"
     assert mock_calls[1][2]["content"] == "success_delete"
 
-    # 6. Verify audit logging: both LLM calls should have been logged in LLMAuditLog
-    from sqlmodel import select
-    logs = test_session.exec(select(LLMAuditLog)).all()
+    # 6. Verify audit logging
+    logs = test_session.get_audit_logs()
     assert len(logs) == 2
-    # Verify first log has tool request
-    assert "test_delete_app" in logs[0].response or "call_1" in logs[0].response or "I need to delete the app." in logs[0].response
-    # Verify second log has final response
-    assert logs[1].response == "Successfully deleted the app."
+    tool_req_log = next((l for l in logs if "test_delete_app" in l.response or "call_1" in l.response or "I need to delete the app." in l.response), None)
+    final_resp_log = next((l for l in logs if l.response == "Successfully deleted the app."), None)
+    assert tool_req_log is not None
+    assert final_resp_log is not None
 
     # Clean up registry to avoid polluting other tests
     global_registry.tools.pop("test_delete_app", None)

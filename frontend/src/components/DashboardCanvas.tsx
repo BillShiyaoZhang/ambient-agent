@@ -17,6 +17,8 @@ interface DashboardCanvasProps {
   onOpenAppStore?: () => void;
   onFullscreenWidget?: (id: string) => void;
   fullscreenAppId?: string | null;
+  widgetSpans: WidgetSpans;
+  onWidgetSpansChange: (spans: WidgetSpans) => void;
 }
 
 interface WidgetSpans {
@@ -35,23 +37,9 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
   onOpenAppStore,
   onFullscreenWidget,
   fullscreenAppId = null,
+  widgetSpans,
+  onWidgetSpansChange,
 }) => {
-  const [widgetSpans, setWidgetSpans] = useState<WidgetSpans>({});
-
-  // Load layout from localStorage when widgets list changes
-  useEffect(() => {
-    const saved = localStorage.getItem("widget_spans_global");
-    if (saved) {
-      try {
-        setWidgetSpans(JSON.parse(saved));
-      } catch (e) {
-        console.error("Error parsing widget spans:", e);
-      }
-    } else {
-      setWidgetSpans({});
-    }
-  }, [widgets]);
-
   const handleResizeMouseDown = (
     e: React.MouseEvent,
     widgetId: string,
@@ -78,14 +66,11 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
       const newCols = Math.max(1, Math.min(3, startCols + addedCols));
       const newRows = Math.max(1, Math.min(4, startRows + addedRows));
 
-      setWidgetSpans((prev) => {
-        const updated = {
-          ...prev,
-          [widgetId]: { cols: newCols, rows: newRows },
-        };
-        localStorage.setItem("widget_spans_global", JSON.stringify(updated));
-        return updated;
-      });
+      const updated = {
+        ...widgetSpans,
+        [widgetId]: { cols: newCols, rows: newRows },
+      };
+      onWidgetSpansChange(updated);
     };
 
     const handleMouseUp = () => {

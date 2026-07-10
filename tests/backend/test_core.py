@@ -1,22 +1,16 @@
 import os
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlmodel import SQLModel, create_engine, Session
 
-# Import models early so SQLModel registers them on metadata
 from backend.models import ChatMessage
 from backend.main import app
-
-TEST_DATABASE_URL = "sqlite://"
+from backend.workspace_storage import WorkspaceStorage
 
 @pytest.fixture(name="session")
-def session_fixture():
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def session_fixture(tmp_path):
+    workspace_dir = str(tmp_path / "workspace")
+    storage = WorkspaceStorage(workspace_dir)
+    yield storage
 
 @pytest.mark.asyncio
 async def test_health_check():
@@ -28,7 +22,7 @@ async def test_health_check():
 @pytest.mark.asyncio
 async def test_database_initialization(session):
     # Create a message
-    msg = ChatMessage(sender="user", content="Hello Agent")
+    msg = ChatMessage(session_id="test-session", sender="user", content="Hello Agent")
     session.add(msg)
     session.commit()
     session.refresh(msg)

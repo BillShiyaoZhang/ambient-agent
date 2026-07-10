@@ -1,29 +1,23 @@
 import os
 import pytest
-from sqlmodel import SQLModel, create_engine, Session
 from datetime import datetime, timezone
 
 from backend.models import ChatSession, ChatMessage
 from backend.app_manager import AppManager
 from backend.context_manager import ContextManager
-
-TEST_DATABASE_URL = "sqlite://"
+from backend.workspace_storage import WorkspaceStorage
 
 @pytest.fixture(name="db_session")
-def db_session_fixture():
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def db_session_fixture(tmp_path):
+    workspace_dir = str(tmp_path / "workspace")
+    storage = WorkspaceStorage(workspace_dir)
+    yield storage
 
 @pytest.fixture
-def temp_apps_dir(tmp_path, monkeypatch):
-    apps_path = tmp_path / "apps"
-    apps_path.mkdir()
-    monkeypatch.setenv("APPS_DIR", str(apps_path))
-    return apps_path
+def temp_apps_dir(tmp_path, monkeypatch, db_session):
+    # AppManager resolves self.apps_dir using WORKSPACE_DIR by default
+    monkeypatch.setenv("WORKSPACE_DIR", db_session.workspace_dir)
+    return db_session.apps_dir
 
 def test_session_message_relations(db_session):
     # Create session
@@ -46,9 +40,7 @@ def test_session_message_relations(db_session):
     db_session.commit()
     
     # Read back messages
-    from sqlmodel import select
-    statement = select(ChatMessage).where(ChatMessage.session_id == "session-1").order_by(ChatMessage.timestamp)
-    messages = db_session.exec(statement).all()
+    messages = db_session.get_messages("session-1")
     
     assert len(messages) == 3
     assert messages[0].role == "user"
@@ -104,9 +96,6 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     assert len(prompt_messages) > 0
     
     # Find the message corresponding to role "code"
-    # It should not contain the original full string, or it should be formatted minimally.
-    # Actually, let's look for the code role. In prompt_messages (which has openai format: role is 'user'/'assistant'/'system'),
-    # our role "code" might be mapped to 'assistant' with a pruned placeholder.
     assistant_msgs = [m for m in prompt_messages if m["role"] == "assistant"]
     assert len(assistant_msgs) >= 1
     

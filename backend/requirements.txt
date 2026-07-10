@@ -1,7 +1,7 @@
 agent-client-protocol>=0.0.0
 fastapi>=0.110.0
 uvicorn>=0.28.0
-sqlmodel>=0.0.16
+# sqlmodel>=0.0.16 (removed in favor of WorkspaceStorage)
 websockets>=12.0
 pydantic==2.13.4
 pytest>=8.0.0

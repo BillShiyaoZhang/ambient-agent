@@ -15,7 +15,20 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [widgets, setWidgets] = useState<Widget[]>([]);
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  const [widgetSpans, setWidgetSpans] = useState<Record<string, {cols: number, rows: number}>>({});
   const [isConnected, setIsConnected] = useState(false);
+
+  const saveCanvasConfig = async (ids: string[], spans: Record<string, {cols: number, rows: number}>) => {
+    try {
+      await fetch(`${API_BASE}/api/canvas`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned_ids: ids, widget_spans: spans }),
+      });
+    } catch (err) {
+      console.error("Error saving canvas configuration:", err);
+    }
+  };
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
   const [fullscreenAppId, setFullscreenAppId] = useState<string | null>(null);
@@ -130,29 +143,38 @@ function App() {
       }
     };
 
-    // Load pinned app IDs and fetch their source files
-    const loadPinnedApps = async () => {
-      const savedPinned = localStorage.getItem("pinned_widgets_global");
-      const ids: string[] = savedPinned ? JSON.parse(savedPinned) : [];
-      setPinnedIds(ids);
+    // Load pinned app IDs and fetch their source files from canvas configuration
+    const loadCanvasConfig = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/canvas`);
+        if (res.ok) {
+          const config = await res.json();
+          const ids = config.pinned_ids || [];
+          const spans = config.widget_spans || {};
+          setPinnedIds(ids);
+          setWidgetSpans(spans);
 
-      const loadedWidgets: Widget[] = [];
-      for (const id of ids) {
-        try {
-          const res = await fetch(`${API_BASE}/api/apps/${id}`);
-          if (res.ok) {
-            const data = await res.json();
-            loadedWidgets.push(data);
+          const loadedWidgets: Widget[] = [];
+          for (const id of ids) {
+            try {
+              const appRes = await fetch(`${API_BASE}/api/apps/${id}`);
+              if (appRes.ok) {
+                const appData = await appRes.json();
+                loadedWidgets.push(appData);
+              }
+            } catch (err) {
+              console.error(`Error loading pinned widget ${id}:`, err);
+            }
           }
-        } catch (err) {
-          console.error(`Error loading pinned widget ${id}:`, err);
+          setWidgets(loadedWidgets);
         }
+      } catch (err) {
+        console.error("Error loading canvas configuration:", err);
       }
-      setWidgets(loadedWidgets);
     };
 
     loadSessionHistory();
-    loadPinnedApps();
+    loadCanvasConfig();
 
     // Connect WebSocket
     const wsUrl = `ws://${window.location.hostname}:8000/ws/chat`;
@@ -180,10 +202,10 @@ function App() {
             : [...prev, data.widget];
         });
         
-        // Auto-pin newly created widget
+        // Auto-pin newly created widget and sync to backend
         setPinnedIds((prev) => {
           const updated = prev.includes(data.widget.id) ? prev : [...prev, data.widget.id];
-          localStorage.setItem("pinned_widgets_global", JSON.stringify(updated));
+          saveCanvasConfig(updated, widgetSpans);
           return updated;
         });
       } else if (data.type === "app_data_update") {
@@ -246,11 +268,13 @@ function App() {
   };
 
   const handleRemoveWidget = (id: string) => {
-    // Unpin from current session
     if (!activeSessionId) return;
     setPinnedIds((prev) => {
       const updated = prev.filter((wId) => wId !== id);
-      localStorage.setItem("pinned_widgets_global", JSON.stringify(updated));
+      const updatedSpans = { ...widgetSpans };
+      delete updatedSpans[id];
+      setWidgetSpans(updatedSpans);
+      saveCanvasConfig(updated, updatedSpans);
       return updated;
     });
     setWidgets((prev) => prev.filter((w) => w.id !== id));
@@ -270,7 +294,7 @@ function App() {
         });
         setPinnedIds((prev) => {
           const updated = prev.includes(id) ? prev : [...prev, id];
-          localStorage.setItem("pinned_widgets_global", JSON.stringify(updated));
+          saveCanvasConfig(updated, widgetSpans);
           return updated;
         });
       }
@@ -332,6 +356,11 @@ function App() {
         onOpenAppStore={() => setIsAppStoreOpen(true)}
         onFullscreenWidget={(id) => setFullscreenAppId(id)}
         fullscreenAppId={fullscreenAppId}
+        widgetSpans={widgetSpans}
+        onWidgetSpansChange={(updatedSpans) => {
+          setWidgetSpans(updatedSpans);
+          saveCanvasConfig(pinnedIds, updatedSpans);
+        }}
       />
 
       {/* Audit Log Panel Overlay */}

@@ -41,8 +41,24 @@ classDiagram
         +save_app_data(app_id: str, data: dict) void
     }
 
+    class WorkspaceStorage {
+        +workspace_dir: str
+        +sessions_dir: str
+        +apps_dir: str
+        +get(model_class, obj_id) BaseModel
+        +add(obj) void
+        +commit() void
+        +refresh(obj) void
+        +get_sessions() List
+        +get_messages(session_id) List
+        +get_audit_logs() List
+        +delete_session(session_id) bool
+        +get_canvas_config() dict
+        +save_canvas_config(config) void
+    }
+
     class ContextManager {
-        -db: Session
+        -db: WorkspaceStorage
         -app_manager: AppManager
         +build_llm_prompt(session_id: str) List~dict~
         -_prune_message_content(content: str) str
@@ -58,7 +74,7 @@ classDiagram
     }
 
     class AgentOrchestrator {
-        +db: Session
+        +db: WorkspaceStorage
         +app_manager: AppManager
         +context_manager: ContextManager
         +run_opencode_agent_acp_fn: function

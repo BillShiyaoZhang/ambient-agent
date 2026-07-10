@@ -2,27 +2,22 @@ import os
 import pytest
 import shutil
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, create_engine, Session
 from backend.main import app, get_db, app_manager
-from backend.models import ChatMessage
-
-TEST_DATABASE_URL = "sqlite:///./test_opencode.db"
+from backend.workspace_storage import WorkspaceStorage
 
 @pytest.fixture(name="test_session")
-def test_session_fixture():
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    if os.path.exists("./test_opencode.db"):
-        os.remove("./test_opencode.db")
-        
-    # Clean up test apps created during test
-    test_app_dir = os.path.join("backend", "apps", "test-timer")
-    if os.path.exists(test_app_dir):
-        shutil.rmtree(test_app_dir)
+def test_session_fixture(tmp_path):
+    workspace_dir = str(tmp_path / "workspace")
+    storage = WorkspaceStorage(workspace_dir)
+    
+    # Isolate apps directory for app_manager inside this test
+    old_apps_dir = app_manager.apps_dir
+    app_manager.apps_dir = storage.apps_dir
+    
+    yield storage
+    
+    # Restore original apps directory
+    app_manager.apps_dir = old_apps_dir
 
 def test_websocket_opencode_routing(test_session, monkeypatch):
     # Mock run_opencode_agent_acp to avoid running a real command line process

@@ -6,7 +6,8 @@ from typing import Optional, Dict, Any, List
 
 class AppManager:
     def __init__(self):
-        self.apps_dir = os.getenv("APPS_DIR", os.path.join("backend", "apps"))
+        workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
+        self.apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
 
     def _get_app_path(self, app_id: str) -> str:
         return os.path.join(self.apps_dir, app_id)

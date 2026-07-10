@@ -1,28 +1,19 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlmodel import SQLModel, create_engine, Session
 from backend.main import app, get_db
 from backend.models import LLMAuditLog
 from backend.llm_service import generate_agent_response
-
-TEST_DATABASE_URL = "sqlite:///./test_llm_audit.db"
+from backend.workspace_storage import WorkspaceStorage
 
 @pytest.fixture(name="test_session")
-def test_session_fixture():
-    import os
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    if os.path.exists("./test_llm_audit.db"):
-        os.remove("./test_llm_audit.db")
+def test_session_fixture(tmp_path):
+    workspace_dir = str(tmp_path / "workspace")
+    storage = WorkspaceStorage(workspace_dir)
+    yield storage
 
 @pytest.mark.asyncio
 async def test_llm_audit_logging(test_session, monkeypatch):
     # Mock the actual LLM call to return a fixed string
-    # We will patch backend.llm_service.call_llm_api
     mock_response = "Mocked LLM reply containing no widget."
     
     async def mock_call_llm_api(provider, model, prompt):
@@ -40,9 +31,8 @@ async def test_llm_audit_logging(test_session, monkeypatch):
     
     assert response == mock_response
     
-    # Verify that an audit log was written to the DB
-    from sqlmodel import select
-    logs = test_session.exec(select(LLMAuditLog)).all()
+    # Verify that an audit log was written to storage
+    logs = test_session.get_audit_logs()
     assert len(logs) == 1
     assert logs[0].provider == "ollama"
     assert logs[0].model == "llama3"

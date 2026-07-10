@@ -2,23 +2,22 @@ import os
 import pytest
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, create_engine, Session
-from backend.main import app, get_db
-from backend.models import ChatMessage
+from backend.main import app, get_db, app_manager
+from backend.workspace_storage import WorkspaceStorage
 
-TEST_DATABASE_URL = "sqlite:///./test_websocket.db"
-
-# Set up test database fixture for testing HTTP/WS requests
 @pytest.fixture(name="test_session")
-def test_session_fixture():
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-    if os.path.exists("./test_websocket.db"):
-        os.remove("./test_websocket.db")
+def test_session_fixture(tmp_path):
+    workspace_dir = str(tmp_path / "workspace")
+    storage = WorkspaceStorage(workspace_dir)
+    
+    # Isolate apps directory for app_manager inside tests
+    old_apps_dir = app_manager.apps_dir
+    app_manager.apps_dir = storage.apps_dir
+    
+    yield storage
+    
+    # Restore original apps dir
+    app_manager.apps_dir = old_apps_dir
 
 def test_websocket_chat_flow(test_session, monkeypatch):
     # Mock IntentRouter.route to bypass LLM classification in websocket test
@@ -113,7 +112,7 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         assert "weather widget" in reply["message"]["content"]
         assert "<ambient-widget" not in reply["message"]["content"] # XML block must be stripped!
         
-        # 3. Widget
+        # 4. Widget
         widget_msg = websocket.receive_json()
         assert widget_msg["type"] == "widget"
         assert widget_msg["widget"]["id"] == "weather-card"

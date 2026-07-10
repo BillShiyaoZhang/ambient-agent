@@ -159,3 +159,7 @@ test_*.db
 
 # Generated Apps
 backend/apps/
+
+# Local Workspace and Backups
+workspace/
+*.backup
