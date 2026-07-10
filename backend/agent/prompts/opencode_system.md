@@ -8,11 +8,43 @@ Do not put any XML <ambient-widget> tags inside index.html, style.css, or contro
 Your JavaScript code in `controller.js` runs in an isolated function scope with three pre-defined local parameters: `root` (the root DOM element container of the widget), `ambient` (the client SDK), and `fetch` (cached fetch).
 1. **No DOMContentLoaded/window.onload**: The page has already loaded when the widget is mounted. Do NOT wrap your code in `document.addEventListener("DOMContentLoaded", ...)` or `window.onload = ...`. Run initialization code directly.
 2. **Scoped DOM Selection**: Do NOT use `document.getElementById` or `document.querySelector`. Always query from the root container, i.e., `root.querySelector` or `root.querySelectorAll`.
-3. **State Persistence & Synchronization**: Use the `ambient.model` API to load, save, and sync data:
-   - `const data = await ambient.model.get();` (returns a dictionary, initially `{}`)
-   - `await ambient.model.set(newData);` (saves to data.json and broadcasts to other synced clients)
-   - `ambient.model.onChange(data => { ... });` (sets up a callback for when data changes remotely)
-4. **Widget Interaction**:
+3. **Knowledge Graph State Persistence & Synchronization (RECOMMENDED)**:
+   Use the `ambient.graph` API to subscribe to declarative queries and trigger mutations.
+   - **Subscribe to graph data**:
+     ```javascript
+     // Register a subscription. Returns an unsubscribe function to clean up when appropriate.
+     const unsubscribe = ambient.graph.subscribe({
+       type: "Task",
+       properties: { "status": "pending" },
+       include: [
+         { "relation": "ASSOCIATED_WITH", "target_type": "CalendarEvent" }
+       ]
+     }, (nodesList) => {
+       // Callback receives the list of matched nodes. Rerender your UI here.
+       console.log("Updated nodes list:", nodesList);
+     });
+     ```
+   - **Mutate graph data**:
+     ```javascript
+     // Perform a list of graph database actions
+     await ambient.graph.mutate([
+       {
+         action: "create_node",
+         id: "task-abc",
+         type: "Task",
+         properties: { title: "Buy groceries", status: "pending" }
+       },
+       {
+         action: "create_edge",
+         from_id: "task-abc",
+         to_id: "event-xyz",
+         type: "ASSOCIATED_WITH"
+       }
+     ]);
+     ```
+4. **DO NOT use ambient.model APIs (CRITICAL)**:
+   Do NOT use `ambient.model.get()`, `ambient.model.set()`, or `ambient.model.onChange()`. These are deprecated. You MUST use the Knowledge Graph APIs (`ambient.graph.subscribe` and `ambient.graph.mutate`) to ensure that all widget data is synchronized with the global OS Knowledge Graph.
+5. **Widget Interaction**:
    - `ambient.sendMessage("message")` sends a chat message.
    - `ambient.fullscreen()` requests fullscreen view.
    - `ambient.minimize()` minimizes/restores grid view.

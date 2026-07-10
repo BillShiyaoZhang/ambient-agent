@@ -37,8 +37,6 @@ classDiagram
         +get_app_files(app_id: str) dict
         +list_apps() List~dict~
         +delete_app(app_id: str) bool
-        +get_app_data(app_id: str) dict
-        +save_app_data(app_id: str, data: dict) void
     }
 
     class WorkspaceStorage {

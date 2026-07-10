@@ -225,10 +225,10 @@ function App() {
           saveCanvasConfig(updated, widgetSpans);
           return updated;
         });
-      } else if (data.type === "app_data_update") {
-        // Dispatch data change event to SandboxWidget listeners
+
+      } else if (data.type === "graph_query_update") {
         window.dispatchEvent(
-          new CustomEvent(`app_data_update:${data.app_id}`, {
+          new CustomEvent(`graph_query_update:${data.subscription_id}`, {
             detail: data.data,
           })
         );

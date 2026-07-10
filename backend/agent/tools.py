@@ -125,3 +125,70 @@ def delete_widget_app(app_id: str) -> bool:
     from backend.app_manager import AppManager
     mgr = AppManager()
     return mgr.delete_app(app_id)
+
+@registry.register
+def query_graph(query_json: str) -> str:
+    """
+    Query the global Knowledge Graph database using a declarative query.
+    :param query_json: The declarative graph query in JSON string format.
+    """
+    import json
+    from backend.graph_query_engine import execute_graph_query
+    from backend.main import graph_db
+    try:
+        query = json.loads(query_json)
+        res = execute_graph_query(query, graph_db)
+        return json.dumps(res, ensure_ascii=False)
+    except Exception as e:
+        return f"Error executing query: {str(e)}"
+
+@registry.register
+async def mutate_graph(actions_json: str) -> str:
+    """
+    Perform a batch of mutation actions on the global Knowledge Graph.
+    :param actions_json: The list of actions in JSON string format. Actions can be create_node, update_node_property, delete_node, create_edge, delete_edge.
+    """
+    import json
+    from backend.main import graph_db
+    from backend.graph_subscription import subscription_manager
+    try:
+        actions = json.loads(actions_json)
+        for action in actions:
+            act_type = action.get("action")
+            if act_type == "create_node":
+                graph_db.create_node(
+                    node_id=action.get("id"),
+                    node_type=action.get("type", "Generic"),
+                    properties=action.get("properties")
+                )
+            elif act_type == "update_node_property":
+                graph_db.update_node_property(
+                    node_id=action.get("id"),
+                    properties=action.get("properties")
+                )
+            elif act_type == "delete_node":
+                graph_db.delete_node(node_id=action.get("id"))
+            elif act_type == "create_edge":
+                graph_db.create_edge(
+                    from_id=action.get("from_id"),
+                    to_id=action.get("to_id"),
+                    edge_type=action.get("type"),
+                    properties=action.get("properties")
+                )
+            elif act_type == "delete_edge":
+                graph_db.delete_edge(
+                    from_id=action.get("from_id"),
+                    to_id=action.get("to_id"),
+                    edge_type=action.get("type")
+                )
+        # Broadcast updates
+        async def send_ws(ws, payload):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                pass
+        await subscription_manager.broadcast_updates(graph_db, send_ws)
+        return "success"
+    except Exception as e:
+        return f"Error: {str(e)}"
+

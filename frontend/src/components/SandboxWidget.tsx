@@ -84,30 +84,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
 
     // 4. Construct ambient SDK (excluding deprecated standard UI components)
     const ambient = {
-      model: {
-        get: async () => {
-          const res = await fetch(`${API_BASE}/api/apps/${widget.id}/data`);
-          if (!res.ok) throw new Error("Failed to load app data");
-          return res.json();
-        },
-        set: async (data: any) => {
-          const res = await fetch(`${API_BASE}/api/apps/${widget.id}/data`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(data),
-          });
-          if (!res.ok) throw new Error("Failed to save app data");
-          return res.json();
-        },
-        onChange: (callback: (data: any) => void) => {
-          const handler = (e: Event) => {
-            callback((e as CustomEvent).detail);
-          };
-          const eventName = `app_data_update:${widget.id}`;
-          window.addEventListener(eventName, handler);
-          customListeners.push({ event: eventName, handler });
-        },
-      },
+
       sendMessage: (text: string) => {
         wsService.sendMessage({
           sender: "user",
@@ -122,6 +99,43 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
       minimize: () => {
         if (onMinimizeRef.current) {
           onMinimizeRef.current(widget.id);
+        }
+      },
+      graph: {
+        subscribe: (query: any, callback: (data: any) => void) => {
+          const subId = `sub-${Math.random().toString(36).substring(2, 11)}`;
+          const handler = (e: Event) => {
+            callback((e as CustomEvent).detail);
+          };
+          const eventName = `graph_query_update:${subId}`;
+          window.addEventListener(eventName, handler);
+          customListeners.push({ event: eventName, handler });
+
+          wsService.sendMessage({
+            type: "graph_subscribe",
+            subscription_id: subId,
+            query: query
+          });
+
+          return () => {
+            window.removeEventListener(eventName, handler);
+            const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+            if (idx !== -1) customListeners.splice(idx, 1);
+
+            wsService.sendMessage({
+              type: "graph_unsubscribe",
+              subscription_id: subId
+            });
+          };
+        },
+        mutate: async (actions: any[]) => {
+          const res = await fetch(`${API_BASE}/api/graph/mutate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ actions })
+          });
+          if (!res.ok) throw new Error("Failed to mutate graph");
+          return res.json();
         }
       }
     };

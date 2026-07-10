@@ -79,7 +79,7 @@ class IntentRouter:
             # Extract JSON block using regex
             json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
             if not json_match:
-                raise ValueError("LLM response did not contain a valid JSON object.")
+                raise ValueError(f"LLM response did not contain a valid JSON object. Raw response: {raw_response}")
             
             parsed = json.loads(json_match.group(0))
             is_coding = bool(parsed.get("is_coding", False))

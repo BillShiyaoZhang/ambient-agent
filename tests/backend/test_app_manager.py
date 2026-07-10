@@ -35,8 +35,7 @@ def test_create_and_get_app(temp_apps_dir):
     assert metadata["id"] == app_id
     assert metadata["title"] == title
     
-    # data.json should be initialized as empty dict {}
-    assert (app_dir / "data.json").read_text() == "{}"
+
 
     # 2. Get app files
     app_files = manager.get_app_files(app_id)
@@ -78,25 +77,7 @@ def test_delete_app(temp_apps_dir):
     success = manager.delete_app("non-existent")
     assert success is False
 
-def test_get_and_save_data(temp_apps_dir):
-    manager = AppManager()
-    
-    manager.create_or_update_app("data-app", "Data App", "<div></div>", "", "")
-    
-    # Default data
-    data = manager.get_app_data("data-app")
-    assert data == {}
-    
-    # Save new data
-    new_data = {"tasks": ["task1", "task2"], "settings": {"theme": "dark"}}
-    manager.save_app_data("data-app", new_data)
-    
-    # Read back
-    retrieved = manager.get_app_data("data-app")
-    assert retrieved == new_data
-    
-    # Non-existent app data should return empty dict
-    assert manager.get_app_data("non-existent") == {}
+
 
 def test_auto_heal_missing_metadata(temp_apps_dir):
     manager = AppManager()

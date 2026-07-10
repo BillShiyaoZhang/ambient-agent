@@ -175,6 +175,7 @@ class FastAPIACPClient(Client):
     ) -> RequestPermissionResponse:
         policy_mgr = PermissionPolicyManager()
         tool_kind = getattr(tool_call, "kind", "other")
+        logger.info(f"request_permission request received: tool_kind={tool_kind}, title={getattr(tool_call, 'title', None)}, raw_input={getattr(tool_call, 'raw_input', None)}")
         
         is_allowed = False
         details = ""
@@ -199,14 +200,31 @@ class FastAPIACPClient(Client):
         elif tool_kind in ("edit", "read", "delete", "move"):
             # File system operations
             path_str = ""
-            if isinstance(tool_call.raw_input, dict):
-                path_str = tool_call.raw_input.get("path", "")
+            raw_in = getattr(tool_call, "raw_input", None)
+            if isinstance(raw_in, str):
+                try:
+                    import json
+                    raw_in = json.loads(raw_in)
+                except Exception:
+                    pass
+            
+            if isinstance(raw_in, dict):
+                path_str = raw_in.get("path", "")
             
             if not path_str and tool_call.content:
                 for item in tool_call.content:
                     if hasattr(item, "path"):
                         path_str = item.path
                         break
+                    elif isinstance(item, dict) and "path" in item:
+                        path_str = item["path"]
+                        break
+
+            if not path_str and getattr(tool_call, "title", None):
+                import re
+                match = re.search(r"([\w\-_\.\/]+\.[a-zA-Z0-9]+)", tool_call.title)
+                if match:
+                    path_str = match.group(1)
                         
             details = f"File {tool_kind}: {path_str}"
             
@@ -440,7 +458,8 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
     (Kept for backwards compatibility / synchronous fallback).
     """
     opencode_cmd = os.getenv("OPENCODE_COMMAND", "opencode")
-    apps_dir = os.getenv("APPS_DIR", os.path.join("backend", "apps"))
+    workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
+    apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
     target_dir = os.path.join(apps_dir, app_id)
     
     os.makedirs(target_dir, exist_ok=True)
@@ -499,7 +518,8 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
         if resolved:
             opencode_cmd = resolved
 
-    apps_dir = os.getenv("APPS_DIR", os.path.join("backend", "apps"))
+    workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
+    apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
     target_dir = Path(apps_dir) / app_id
     
     os.makedirs(target_dir, exist_ok=True)

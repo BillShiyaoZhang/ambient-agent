@@ -50,11 +50,7 @@ class AppManager:
         with open(os.path.join(app_path, "controller.js"), "w", encoding="utf-8") as f:
             f.write(js)
 
-        # Write empty data.json (Model) if not already exists
-        data_path = os.path.join(app_path, "data.json")
-        if not os.path.exists(data_path):
-            with open(data_path, "w", encoding="utf-8") as f:
-                f.write("{}")
+
 
     def _ensure_metadata(self, app_id: str, app_path: str, meta_path: str) -> Optional[Dict[str, Any]]:
         import re
@@ -157,24 +153,4 @@ class AppManager:
         except Exception:
             return False
 
-    def get_app_data(self, app_id: str) -> Dict[str, Any]:
-        app_path = self._get_app_path(app_id)
-        data_path = os.path.join(app_path, "data.json")
-        if not os.path.exists(data_path):
-            return {}
-        try:
-            with open(data_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
 
-    def save_app_data(self, app_id: str, data: Dict[str, Any]) -> None:
-        app_path = self._get_app_path(app_id)
-        # Ensure directory exists if they save data
-        os.makedirs(app_path, exist_ok=True)
-        data_path = os.path.join(app_path, "data.json")
-        try:
-            with open(data_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass

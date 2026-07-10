@@ -25,6 +25,9 @@ app_manager = AppManager()
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
 
+from backend.graph_db import GraphDatabase
+graph_db = GraphDatabase(WORKSPACE_DIR)
+
 def get_db():
     yield db_storage
 
@@ -118,24 +121,55 @@ async def delete_app(app_id: str):
         return {"status": "ok"}
     return {"status": "error", "message": "App not found"}
 
-@app.get("/api/apps/{app_id}/data")
-async def get_app_data(app_id: str):
-    return app_manager.get_app_data(app_id)
 
-@app.post("/api/apps/{app_id}/data")
-async def save_app_data(app_id: str, data: Dict[str, Any]):
-    app_manager.save_app_data(app_id, data)
-    # Broadcast data update to all active web socket connections for real-time synchronization
-    for ws in list(active_websockets):
-        try:
-            await ws.send_json({
-                "type": "app_data_update",
-                "app_id": app_id,
-                "data": data
-            })
-        except Exception:
-            pass
-    return {"status": "ok"}
+
+# --- Graph Mutations endpoint ---
+
+class GraphMutateRequest(BaseModel):
+    actions: List[Dict[str, Any]]
+
+@app.post("/api/graph/mutate")
+async def mutate_graph(data: GraphMutateRequest):
+    try:
+        for action in data.actions:
+            act_type = action.get("action")
+            if act_type == "create_node":
+                graph_db.create_node(
+                    node_id=action.get("id"),
+                    node_type=action.get("type", "Generic"),
+                    properties=action.get("properties")
+                )
+            elif act_type == "update_node_property":
+                graph_db.update_node_property(
+                    node_id=action.get("id"),
+                    properties=action.get("properties")
+                )
+            elif act_type == "delete_node":
+                graph_db.delete_node(node_id=action.get("id"))
+            elif act_type == "create_edge":
+                graph_db.create_edge(
+                    from_id=action.get("from_id"),
+                    to_id=action.get("to_id"),
+                    edge_type=action.get("type"),
+                    properties=action.get("properties")
+                )
+            elif act_type == "delete_edge":
+                graph_db.delete_edge(
+                    from_id=action.get("from_id"),
+                    to_id=action.get("to_id"),
+                    edge_type=action.get("type")
+                )
+        # Broadcast changes to all websocket subscribers
+        from backend.graph_subscription import subscription_manager
+        async def send_ws(ws, payload):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                pass
+        await subscription_manager.broadcast_updates(graph_db, send_ws)
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 # --- WebSocket Chat Handler ---
 
@@ -253,6 +287,20 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                         resolved = True
                 if not resolved:
                     print(f"Warning: permission request {request_id} not found in active clients.")
+            elif msg_type == "graph_subscribe":
+                sub_id = data.get("subscription_id")
+                query = data.get("query", {})
+                from backend.graph_subscription import subscription_manager
+                initial_res = subscription_manager.register(websocket, sub_id, query, graph_db)
+                await websocket.send_json({
+                    "type": "graph_query_update",
+                    "subscription_id": sub_id,
+                    "data": initial_res
+                })
+            elif msg_type == "graph_unsubscribe":
+                sub_id = data.get("subscription_id")
+                from backend.graph_subscription import subscription_manager
+                subscription_manager.unregister(websocket, sub_id)
             else:
                 sender = data.get("sender", "user")
                 content = data.get("content", "")
@@ -263,3 +311,5 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
         pass
     finally:
         active_websockets.discard(websocket)
+        from backend.graph_subscription import subscription_manager
+        subscription_manager.unregister_all(websocket)

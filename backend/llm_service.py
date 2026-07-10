@@ -113,14 +113,19 @@ async def call_llm_api(
             async with httpx.AsyncClient(trust_env=trust_env) as client:
                 response = await client.post(api_url, json=payload, headers=headers, timeout=300.0)
                 if response.status_code == 200:
-                    choices = response.json().get("choices", [])
+                    res_json = response.json()
+                    choices = res_json.get("choices", [])
                     if choices:
                         msg_data = choices[0].get("message", {})
                         return {
                             "content": msg_data.get("content", "") or "",
                             "tool_calls": msg_data.get("tool_calls", None)
                         }
-                    return {"content": "No response content received from API.", "tool_calls": None}
+                    # Log detail to assist troubleshooting
+                    import logging
+                    logger = logging.getLogger("backend.llm_service")
+                    logger.error(f"LLM API returned 200 but choices list is empty or missing. Raw response: {response.text}")
+                    return {"content": f"No response content received from API. Raw: {response.text}", "tool_calls": None}
                 else:
                     return {
                         "content": f"API Error (status code {response.status_code}): {response.text}",
