@@ -101,3 +101,21 @@ a-input, a-select {
   width: 100%;
   margin-bottom: 12px;
 }
+
+/* Responsive widget span utility */
+.widget-grid-item {
+  grid-column: span 12;
+  grid-row: span var(--widget-rows, 4);
+}
+
+@media (min-width: 768px) {
+  .widget-grid-item {
+    grid-column: span var(--widget-cols-md, 6);
+  }
+}
+
+@media (min-width: 1280px) {
+  .widget-grid-item {
+    grid-column: span var(--widget-cols-xl, 4);
+  }
+}

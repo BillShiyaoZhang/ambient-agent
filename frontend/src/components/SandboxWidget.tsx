@@ -197,7 +197,7 @@ class AmbientInput extends HTMLElement {
         this.setAttribute('value', e.target.value);
         this.dispatchEvent(new CustomEvent('input', { bubbles: true, composed: true }));
       });
-      inputEl.addEventListener('change', (e: any) => {
+      inputEl.addEventListener('change', () => {
         this.dispatchEvent(new CustomEvent('change', { bubbles: true, composed: true }));
       });
     }

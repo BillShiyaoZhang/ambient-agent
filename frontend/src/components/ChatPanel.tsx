@@ -12,6 +12,7 @@ interface ChatPanelProps {
   onSendMessage: (text: string) => void;
   isConnected: boolean;
   width?: number;
+  onHideChat?: () => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
@@ -19,6 +20,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onSendMessage,
   isConnected,
   width = 320,
+  onHideChat,
 }) => {
   const [inputText, setInputText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -41,19 +43,33 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     >
       {/* Header */}
       <div className="p-4 border-b border-white/5 flex items-center justify-between">
-        <h2 className="text-lg font-semibold tracking-wide text-white/90">
-          Ambient Chat
-        </h2>
         <div className="flex items-center gap-2">
-          <span
-            className={`w-2 h-2 rounded-full ${
-              isConnected ? "bg-green-400 animate-pulse" : "bg-red-400"
-            }`}
-          />
-          <span className="text-xs text-white/40">
-            {isConnected ? "Connected" : "Offline"}
-          </span>
+          <h2 className="text-lg font-semibold tracking-wide text-white/90">
+            Ambient Chat
+          </h2>
+          <div className="flex items-center gap-1.5">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                isConnected ? "bg-green-400 animate-pulse" : "bg-red-400"
+              }`}
+            />
+            <span className="text-[10px] text-white/40">
+              {isConnected ? "Connected" : "Offline"}
+            </span>
+          </div>
         </div>
+        
+        {onHideChat && (
+          <button
+            onClick={onHideChat}
+            className="p-1.5 hover:bg-white/10 rounded-lg text-white/40 hover:text-white/80 transition-colors cursor-pointer"
+            title="Hide Chat & History"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Messages list */}

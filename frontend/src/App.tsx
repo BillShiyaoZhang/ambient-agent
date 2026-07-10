@@ -23,7 +23,7 @@ function App() {
       await fetch(`${API_BASE}/api/canvas`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned_ids: ids, widget_spans: spans }),
+        body: JSON.stringify({ pinned_ids: ids, widget_spans: spans, version: 2 }),
       });
     } catch (err) {
       console.error("Error saving canvas configuration:", err);
@@ -150,7 +150,24 @@ function App() {
         if (res.ok) {
           const config = await res.json();
           const ids = config.pinned_ids || [];
-          const spans = config.widget_spans || {};
+          let spans = config.widget_spans || {};
+          const version = config.version || 1;
+
+          if (version < 2) {
+            const migratedSpans: Record<string, {cols: number, rows: number}> = {};
+            for (const key of Object.keys(spans)) {
+              let cols = spans[key].cols || 1;
+              let rows = spans[key].rows || 1;
+              // Map old 1-3 cols to 4-12 cols
+              cols = Math.min(12, cols * 4);
+              // Map old 1-4 rows to 4-16 rows (where 1 old row of 320px = 4 new rows of 80px)
+              rows = Math.min(16, rows * 4);
+              migratedSpans[key] = { cols, rows };
+            }
+            spans = migratedSpans;
+            saveCanvasConfig(ids, spans);
+          }
+
           setPinnedIds(ids);
           setWidgetSpans(spans);
 
@@ -319,27 +336,40 @@ function App() {
         onSelectSession={(id) => {
           setActiveSessionId(id);
           localStorage.setItem("last_active_session", id);
+          if (!isSidebarOpen) {
+            setIsSidebarOpen(true);
+          }
         }}
-        onCreateSession={handleCreateSession}
+        onCreateSession={() => {
+          handleCreateSession();
+          if (!isSidebarOpen) {
+            setIsSidebarOpen(true);
+          }
+        }}
         onDeleteSession={handleDeleteSession}
         isOpen={isSidebarOpen}
         onToggleOpen={() => setIsSidebarOpen(!isSidebarOpen)}
       />
 
       {/* Chat Panel */}
-      <ChatPanel
-        messages={messages}
-        onSendMessage={handleSendMessage}
-        isConnected={isConnected}
-        width={chatWidth}
-      />
+      {isSidebarOpen && (
+        <ChatPanel
+          messages={messages}
+          onSendMessage={handleSendMessage}
+          isConnected={isConnected}
+          width={chatWidth}
+          onHideChat={() => setIsSidebarOpen(false)}
+        />
+      )}
 
       {/* Drag Splitter Handle */}
-      <div
-        onMouseDown={handleMouseDown}
-        className="w-1.5 h-full cursor-col-resize hover:bg-purple-500/40 active:bg-purple-600/60 transition-colors bg-white/5 shrink-0"
-        title="Drag to resize panels"
-      />
+      {isSidebarOpen && (
+        <div
+          onMouseDown={handleMouseDown}
+          className="w-1.5 h-full cursor-col-resize hover:bg-purple-500/40 active:bg-purple-600/60 transition-colors bg-white/5 shrink-0"
+          title="Drag to resize panels"
+        />
+      )}
 
       {/* Workspace Canvas */}
       <DashboardCanvas
@@ -361,6 +391,8 @@ function App() {
           setWidgetSpans(updatedSpans);
           saveCanvasConfig(pinnedIds, updatedSpans);
         }}
+        showChat={isSidebarOpen}
+        onToggleChat={() => setIsSidebarOpen(!isSidebarOpen)}
       />
 
       {/* Audit Log Panel Overlay */}

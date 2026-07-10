@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React from "react";
 
 export interface Widget {
   id: string;
@@ -19,6 +19,8 @@ interface DashboardCanvasProps {
   fullscreenAppId?: string | null;
   widgetSpans: WidgetSpans;
   onWidgetSpansChange: (spans: WidgetSpans) => void;
+  showChat: boolean;
+  onToggleChat: () => void;
 }
 
 interface WidgetSpans {
@@ -39,6 +41,8 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
   fullscreenAppId = null,
   widgetSpans,
   onWidgetSpansChange,
+  showChat,
+  onToggleChat,
 }) => {
   const handleResizeMouseDown = (
     e: React.MouseEvent,
@@ -52,19 +56,28 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
     const startX = e.clientX;
     const startY = e.clientY;
 
+    const gridContainer = e.currentTarget.closest(".grid") as HTMLElement | null;
+    if (!gridContainer) return;
+
+    const rect = gridContainer.getBoundingClientRect();
+    const containerWidth = rect.width;
+    const computedStyle = window.getComputedStyle(gridContainer);
+    
+    const gapX = parseFloat(computedStyle.columnGap) || parseFloat(computedStyle.gap) || 16;
+    const gapY = parseFloat(computedStyle.rowGap) || parseFloat(computedStyle.gap) || 16;
+
+    const colUnit = (containerWidth + gapX) / 12;
+    const rowUnit = 80 + gapY;
+
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaX = moveEvent.clientX - startX;
       const deltaY = moveEvent.clientY - startY;
 
-      // Column unit is ~380px, Row unit is ~344px (including gaps)
-      const colUnit = 380;
-      const rowUnit = 344;
-
       const addedCols = Math.round(deltaX / colUnit);
       const addedRows = Math.round(deltaY / rowUnit);
 
-      const newCols = Math.max(1, Math.min(3, startCols + addedCols));
-      const newRows = Math.max(1, Math.min(4, startRows + addedRows));
+      const newCols = Math.max(2, Math.min(12, startCols + addedCols));
+      const newRows = Math.max(1, Math.min(24, startRows + addedRows));
 
       const updated = {
         ...widgetSpans,
@@ -96,6 +109,21 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
         </div>
         
         <div className="flex gap-2">
+          <button
+            onClick={onToggleChat}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors cursor-pointer ${
+              showChat
+                ? "bg-white/5 hover:bg-white/10 text-white/80 border-white/10"
+                : "bg-purple-600/20 hover:bg-purple-600/35 text-purple-200 border-purple-500/20"
+            }`}
+            title={showChat ? "Hide Chat Panel" : "Show Chat Panel"}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            {showChat ? "Hide Chat" : "Show Chat"}
+          </button>
+
           {onOpenAppStore && (
             <button
               onClick={onOpenAppStore}
@@ -146,28 +174,29 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
           </div>
         ) : (
           <div
-            style={{ gridAutoRows: "320px" }}
-            className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6"
+            style={{ gridAutoRows: "80px" }}
+            className="grid grid-cols-1 md:grid-cols-6 xl:grid-cols-12 gap-4"
           >
             {widgets.map((widget) => {
               const isFullscreen = widget.id === fullscreenAppId;
-              const span = widgetSpans[widget.id] || { cols: 1, rows: 1 };
+              const span = widgetSpans[widget.id] || { cols: 4, rows: 4 };
               return (
                 <div
                   key={widget.id}
                   style={
                     isFullscreen
                       ? {}
-                      : {
-                          gridColumn: `span ${span.cols}`,
-                          gridRow: `span ${span.rows}`,
+                      : ({
+                          "--widget-cols-xl": span.cols,
+                          "--widget-cols-md": Math.min(6, span.cols),
+                          "--widget-rows": span.rows,
                           height: "100%",
-                        }
+                        } as React.CSSProperties)
                   }
                   className={`glass-card overflow-hidden flex flex-col border border-white/5 transition-all duration-300 relative ${
                     isFullscreen
                       ? "fixed inset-0 z-50 w-screen h-screen max-w-none max-h-none rounded-none bg-[#07050d]"
-                      : "rounded-2xl relative group"
+                      : "widget-grid-item rounded-2xl relative group"
                   }`}
                 >
                   {/* Widget Header */}
