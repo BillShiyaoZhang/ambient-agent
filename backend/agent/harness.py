@@ -12,7 +12,8 @@ from backend.agent_parser import parse_widget_from_text
 from backend.opencode_service import run_opencode_agent_acp
 from backend.agent.router import IntentRouter
 from backend.agent.providers import get_llm_provider
-from backend.llm_service import SYSTEM_PROMPT
+from backend.agent.prompts.manager import PromptManager
+from backend.agent.tools import registry as tool_registry
 
 logger = logging.getLogger("agent.harness")
 
@@ -124,10 +125,18 @@ class AgentOrchestrator:
             model_name = os.getenv("LLM_MODEL", "llama3")
             provider = get_llm_provider(provider_name, model_name)
 
-            llm_prompt_messages = self.context_manager.build_llm_prompt(session_id)
-            llm_prompt_messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+            pm = PromptManager()
+            agent_system_prompt = pm.get_prompt("agent_system.md")
 
-            raw_response = await provider.generate(llm_prompt_messages, db_session=self.db)
+            llm_prompt_messages = self.context_manager.build_llm_prompt(session_id)
+            llm_prompt_messages.insert(0, {"role": "system", "content": agent_system_prompt})
+
+            tools = tool_registry.get_tool_schemas()
+            raw_response = await provider.generate(
+                messages=llm_prompt_messages,
+                db_session=self.db,
+                tools=tools
+            )
             widget_to_send = parse_widget_from_text(raw_response)
 
             if widget_to_send:

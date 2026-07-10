@@ -54,7 +54,7 @@ classDiagram
 
     class LLMService {
         +generate_agent_response(messages: List~dict~) str
-        +call_llm_api(provider: str, model: str, messages: List~dict~) str
+        +call_llm_api(provider: str, model: str, messages: List~dict~, tools: List~dict~|None) dict
     }
 
     class AgentOrchestrator {
@@ -66,12 +66,19 @@ classDiagram
         -_run_callback(callback: Callable, data: Any) void
     }
 
+    class PromptManager {
+        +prompts_dir: Path
+        +env: Environment
+        +get_prompt(template_name, kwargs) str
+    }
+
     ChatSession "1" --* "0..*" ChatMessage : contains
     ContextManager --> AppManager : references
     ContextManager --> ChatMessage : queries database
     AgentOrchestrator --> ContextManager : constructs message history
     AgentOrchestrator --> AppManager : references
     AgentOrchestrator --> AgentParser : extracts XML widgets
+    AgentOrchestrator --> PromptManager : loads system prompt
     LLMService --> LLMAuditLog : writes prompt audit logs
 ```
 

@@ -97,3 +97,40 @@ def test_get_and_save_data(temp_apps_dir):
     
     # Non-existent app data should return empty dict
     assert manager.get_app_data("non-existent") == {}
+
+def test_auto_heal_missing_metadata(temp_apps_dir):
+    manager = AppManager()
+    
+    app_id = "manual-weather"
+    app_dir = temp_apps_dir / app_id
+    app_dir.mkdir()
+    
+    # Write only index.html, style.css, controller.js but no metadata.json
+    html_content = "<html><head><title>My Awesome Weather</title></head><body></body></html>"
+    (app_dir / "index.html").write_text(html_content, encoding="utf-8")
+    (app_dir / "style.css").write_text("body {}", encoding="utf-8")
+    (app_dir / "controller.js").write_text("console.log('weather')", encoding="utf-8")
+    
+    # Check that metadata.json does not exist yet
+    assert not (app_dir / "metadata.json").exists()
+    
+    # get_app_files should heal it and return the correct dict
+    app_files = manager.get_app_files(app_id)
+    assert app_files is not None
+    assert app_files["id"] == app_id
+    assert app_files["title"] == "My Awesome Weather"
+    assert app_files["html"] == html_content
+    
+    # metadata.json should now exist on disk
+    assert (app_dir / "metadata.json").exists()
+    
+    # delete metadata.json to test listing self-heal
+    os.remove(app_dir / "metadata.json")
+    assert not (app_dir / "metadata.json").exists()
+    
+    apps = manager.list_apps()
+    # Find manual-weather in apps
+    weather_app = next((a for a in apps if a["id"] == app_id), None)
+    assert weather_app is not None
+    assert weather_app["title"] == "My Awesome Weather"
+    assert (app_dir / "metadata.json").exists()

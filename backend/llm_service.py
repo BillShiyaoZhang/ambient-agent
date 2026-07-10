@@ -38,9 +38,15 @@ Always make widgets look visually stunning, glassmorphic, responsive, and functi
 import json
 from typing import List, Dict
 
-async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]) -> str:
+async def call_llm_api(
+    provider: str,
+    model: str,
+    messages: List[Dict[str, str]],
+    tools: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """
     Directly contacts Ollama (chat endpoint) or cloud providers using HTTP clients.
+    Returns a dict: {"content": str, "tool_calls": Optional[List[Dict[str, Any]]]}
     """
     if provider == "ollama":
         # Ollama local chat endpoint
@@ -56,15 +62,28 @@ async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]
             "messages": messages,
             "stream": False
         }
+        if tools:
+            payload["tools"] = tools
+
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, json=payload, timeout=300.0)
                 if response.status_code == 200:
-                    return response.json().get("message", {}).get("content", "")
+                    msg_data = response.json().get("message", {})
+                    return {
+                        "content": msg_data.get("content", "") or "",
+                        "tool_calls": msg_data.get("tool_calls", None)
+                    }
                 else:
-                    return f"Error from Ollama server (status code {response.status_code}): {response.text}"
+                    return {
+                        "content": f"Error from Ollama server (status code {response.status_code}): {response.text}",
+                        "tool_calls": None
+                    }
         except Exception as e:
-            return f"Failed to connect to local Ollama server. Make sure Ollama is running. Error: {str(e)}"
+            return {
+                "content": f"Failed to connect to local Ollama server. Make sure Ollama is running. Error: {str(e)}",
+                "tool_calls": None
+            }
             
     else:
         # Default fallback to mock or generic OpenAI compatible API if configured
@@ -72,8 +91,10 @@ async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]
         api_url = os.getenv("LLM_API_URL", "https://api.openai.com/v1/chat/completions")
         
         if not api_key:
-            prompt_summary = messages[-1]["content"] if messages else ""
-            return f"Mock response: You requested using provider '{provider}' and model '{model}', but no API key was configured."
+            return {
+                "content": f"Mock response: You requested using provider '{provider}' and model '{model}', but no API key was configured.",
+                "tool_calls": None
+            }
             
         # Standard OpenAI compatible completions payload
         payload = {
@@ -81,6 +102,9 @@ async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]
             "messages": messages,
             "temperature": 0.7
         }
+        if tools:
+            payload["tools"] = tools
+
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -92,14 +116,24 @@ async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]
                 if response.status_code == 200:
                     choices = response.json().get("choices", [])
                     if choices:
-                        return choices[0].get("message", {}).get("content", "")
-                    return "No response content received from API."
+                        msg_data = choices[0].get("message", {})
+                        return {
+                            "content": msg_data.get("content", "") or "",
+                            "tool_calls": msg_data.get("tool_calls", None)
+                        }
+                    return {"content": "No response content received from API.", "tool_calls": None}
                 else:
-                    return f"API Error (status code {response.status_code}): {response.text}"
+                    return {
+                        "content": f"API Error (status code {response.status_code}): {response.text}",
+                        "tool_calls": None
+                    }
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {str(e)}"
+            return {
+                "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {str(e)}",
+                "tool_calls": None
+            }
 
 async def generate_agent_response(
     messages: Optional[List[Dict[str, str]]] = None,
@@ -122,7 +156,11 @@ async def generate_agent_response(
             messages = []
 
     # 1. Trigger LLM call
-    response_text = await call_llm_api(provider, model, messages)
+    response_data = await call_llm_api(provider, model, messages)
+    if isinstance(response_data, str):
+        response_text = response_data
+    else:
+        response_text = response_data.get("content", "")
     
     # Extract last user message or serialize full messages for audit log
     prompt_str = ""
@@ -146,11 +184,16 @@ async def generate_agent_response(
 
 class LLMService:
     @staticmethod
-    async def call_llm_api(provider: str, model: str, messages: List[Dict[str, str]]) -> str:
+    async def call_llm_api(
+        provider: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
         """
         Wrapper matching UML definition for call_llm_api.
         """
-        return await call_llm_api(provider, model, messages)
+        return await call_llm_api(provider, model, messages, tools)
 
     @staticmethod
     async def generate_agent_response(

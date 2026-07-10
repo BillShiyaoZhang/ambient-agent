@@ -23,7 +23,7 @@ classDiagram
     class BaseLLMProvider {
         <<abstract>>
         +model: str
-        +generate(messages, db_session) str
+        +generate(messages, db_session, tools) str
         #_log_to_db(db_session, provider, prompt, response) void
     }
 
@@ -44,10 +44,18 @@ classDiagram
         +create_or_update_app(app_id, title, html, css, js) void
     }
 
+    class PromptManager {
+        +prompts_dir: Path
+        +env: Environment
+        +get_prompt(template_name, kwargs) str
+    }
+
     AgentOrchestrator --> IntentRouter : 消息意图分类
     AgentOrchestrator --> BaseLLMProvider : 请求模型生成
     AgentOrchestrator --> ContextManager : 组装上下文 Prompt
     AgentOrchestrator --> AppManager : 读写小程序文件
+    AgentOrchestrator --> PromptManager : 加载系统提示词
+    IntentRouter --> PromptManager : 加载路由提示词
     BaseLLMProvider <|-- OllamaProvider : 继承扩展
     BaseLLMProvider <|-- CloudLLMProvider : 继承扩展
 ```

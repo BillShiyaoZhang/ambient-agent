@@ -20,6 +20,23 @@ function App() {
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
   const [fullscreenAppId, setFullscreenAppId] = useState<string | null>(null);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
+  
+  interface PermissionRequest {
+    request_id: string;
+    tool_call: string;
+    details: string;
+  }
+  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
+
+  const handleResolvePermission = (approved: boolean) => {
+    if (!pendingPermission) return;
+    wsService.sendMessage({
+      type: "permission_response",
+      request_id: pendingPermission.request_id,
+      approved: approved
+    });
+    setPendingPermission(null);
+  };
 
   const [chatWidth, setChatWidth] = useState<number>(() => {
     const saved = localStorage.getItem("chat_panel_width");
@@ -176,6 +193,8 @@ function App() {
             detail: data.data,
           })
         );
+      } else if (data.type === "permission_request") {
+        setPendingPermission(data);
       }
     });
 
@@ -327,6 +346,38 @@ function App() {
         onUnpinWidget={handleRemoveWidget}
         onRunFullscreen={handleRunFullscreen}
       />
+
+      {/* 🛡️ OpenCode Permission Request Modal */}
+      {pendingPermission && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-[#150e2b] border border-purple-500/40 p-6 rounded-2xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
+              🛡️ OpenCode 授权请求
+            </h3>
+            <p className="text-slate-300 text-sm mb-4 leading-relaxed">
+              OpenCode 正在请求执行以下敏感操作。请确认是否允许此操作：
+            </p>
+            <div className="bg-black/40 border border-white/5 rounded-xl p-3 mb-6 font-mono text-xs text-purple-300 break-all select-all">
+              <span className="text-slate-400 font-sans block mb-1">【类型: {pendingPermission.tool_call}】</span>
+              {pendingPermission.details}
+            </div>
+            <div className="flex items-center justify-end gap-3 font-semibold">
+              <button
+                onClick={() => handleResolvePermission(false)}
+                className="px-4 py-2 rounded-xl text-slate-300 hover:bg-white/10 transition-colors text-sm"
+              >
+                拒绝 (Deny)
+              </button>
+              <button
+                onClick={() => handleResolvePermission(true)}
+                className="px-5 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 transition-all text-white text-sm shadow-lg shadow-purple-600/20"
+              >
+                允许 (Allow)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

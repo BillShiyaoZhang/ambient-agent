@@ -1,5 +1,6 @@
 import re
 import os
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -191,19 +192,33 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
         
     orchestrator = AgentOrchestrator(db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp)
     
-    try:
-        while True:
-            # Receive message from user client
-            data = await websocket.receive_json()
-            sender = data.get("sender", "user")
-            content = data.get("content", "")
-            
+    # Callback to send incremental updates to client
+    async def send_ws_update(data: Any):
+        try:
+            if isinstance(data, dict):
+                await websocket.send_json(data)
+            else:
+                await websocket.send_json({
+                    "type": "reply",
+                    "message": {
+                        "id": -1,
+                        "sender": "agent",
+                        "role": "agent",
+                        "content": data,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                })
+        except Exception:
+            pass
+
+    async def process_user_message(content_str: str, sender_str: str):
+        try:
             # Save user message to database (committed immediately so we get the ID for ack)
             user_msg = ChatMessage(
                 session_id=session_id,
                 role="user",
-                sender=sender,
-                content=content
+                sender=sender_str,
+                content=content_str
             )
             session.add(user_msg)
             
@@ -224,27 +239,11 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                     "timestamp": user_msg.timestamp.isoformat() if user_msg.timestamp else None
                 }
             })
-            
-            # Callback to send incremental updates to client
-            async def send_ws_update(text: str):
-                try:
-                    await websocket.send_json({
-                        "type": "reply",
-                        "message": {
-                            "id": -1,
-                            "sender": "agent",
-                            "role": "agent",
-                            "content": text,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        }
-                    })
-                except Exception:
-                    pass
 
             # Delegate execution to orchestrator
             agent_msg, widget_to_send = await orchestrator.handle_message(
                 session_id=session_id,
-                content=content,
+                content=content_str,
                 on_update=send_ws_update
             )
 
@@ -269,6 +268,32 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                     })
                 except Exception:
                     pass
+        except Exception as e:
+            print("Error in process_user_message:", e)
+
+    try:
+        while True:
+            # Receive message from user client
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+            
+            if msg_type == "permission_response":
+                request_id = data.get("request_id")
+                approved = data.get("approved", False)
+                
+                from backend.opencode_service import active_acp_clients
+                resolved = False
+                for client in active_acp_clients.values():
+                    if request_id in client.pending_permissions:
+                        client.resolve_permission(request_id, approved)
+                        resolved = True
+                if not resolved:
+                    print(f"Warning: permission request {request_id} not found in active clients.")
+            else:
+                sender = data.get("sender", "user")
+                content = data.get("content", "")
+                # Run the orchestrator logic in a concurrent background task to avoid blocking the WS read loop
+                asyncio.create_task(process_user_message(content, sender))
             
     except WebSocketDisconnect:
         pass

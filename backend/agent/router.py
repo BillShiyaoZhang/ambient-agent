@@ -59,39 +59,14 @@ class IntentRouter:
         # 2. Call LLM for Intent Routing
         provider_name = os.getenv("LLM_PROVIDER", "ollama")
         model_name = os.getenv("LLM_MODEL", "llama3")
-        
         # Import dynamically to avoid circular dependencies
         from backend.agent.providers import get_llm_provider
+        from backend.agent.prompts.manager import PromptManager
+        
         provider = get_llm_provider(provider_name, model_name)
+        prompt_manager = PromptManager()
 
-        # Format list of existing apps
-        if existing_apps:
-            apps_list_str = "\n".join([f"- ID: {app['id']}, Title: {app.get('title', '')}" for app in existing_apps])
-        else:
-            apps_list_str = "(None)"
-
-        system_prompt = f"""You are an intent routing assistant for Ambient Agent.
-Your task is to classify whether a user's request is a widget coding task (creating a new app/widget, or modifying/updating/fixing/optimizing an existing app/widget) OR a general conversational question/message.
-
-We have these existing widgets in the workspace:
-{apps_list_str}
-
-Please respond in JSON format with three fields:
-1. "is_coding": boolean (true if the user is asking to build, update, change, fix, style, create, or modify a widget/app; false if it's general conversation/question/greeting).
-2. "app_id": string or null (if is_coding is true, this is the ID of the widget. If it refers to an existing widget, use that widget's exact ID from the list. If it is a new widget, suggest a URL-friendly name in kebab-case like "todo-app", "clock-app", "weather-app", etc., appending a random 4-character hex suffix like "-8f3a").
-3. "instruction": string (if is_coding is true, extract the specific modification or creation task instruction; if is_coding is false, return the original message).
-
-Examples of is_coding=true:
-- "Make clock-app-1234 look glassmorphic" -> {{"is_coding": true, "app_id": "clock-app-1234", "instruction": "Make clock-app-1234 look glassmorphic"}}
-- "帮我改一下待办清单，加上删除按钮" (where existing apps has "todo-app-abcd") -> {{"is_coding": true, "app_id": "todo-app-abcd", "instruction": "加上删除按钮"}}
-- "创建天气小程序" -> {{"is_coding": true, "app_id": "weather-app-8f3a", "instruction": "创建天气小程序"}}
-
-Examples of is_coding=false:
-- "Hello, who are you?" -> {{"is_coding": false, "app_id": null, "instruction": "Hello, who are you?"}}
-- "Tell me a joke" -> {{"is_coding": false, "app_id": null, "instruction": "Tell me a joke"}}
-
-Response MUST be a valid JSON object ONLY.
-"""
+        system_prompt = prompt_manager.get_prompt("router.md", existing_apps=existing_apps)
 
         messages = [
             {"role": "system", "content": system_prompt},

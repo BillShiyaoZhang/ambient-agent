@@ -1,0 +1,25 @@
+{
+  "policy_mode": "interactive",
+  "files": {
+    "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
+    "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"]
+  },
+  "commands": {
+    "allowed_commands": [
+      "npm test",
+      "npm run build",
+      "npm install"
+    ],
+    "allowed_prefixes": [
+      "npm install ",
+      "echo "
+    ],
+    "blocklist": [
+      "rm -rf",
+      "curl",
+      "wget",
+      "sudo",
+      "mv"
+    ]
+  }
+}

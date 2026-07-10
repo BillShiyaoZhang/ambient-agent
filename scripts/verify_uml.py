@@ -19,6 +19,7 @@ CLASS_TO_FILE = {
     "OllamaProvider": "backend/agent/providers.py",
     "CloudLLMProvider": "backend/agent/providers.py",
     "ToolRegistry": "backend/agent/tools.py",
+    "PromptManager": "backend/agent/prompts/manager.py",
 }
 
 def parse_uml_classes(uml_path: str) -> Dict[str, Dict[str, any]]:
