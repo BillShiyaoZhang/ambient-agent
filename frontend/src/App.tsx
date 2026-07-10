@@ -328,7 +328,7 @@ function App() {
 
 
   return (
-    <div className="flex w-screen h-screen overflow-hidden text-slate-100 font-sans bg-[#0c081c]">
+    <div className="flex w-screen h-screen overflow-hidden text-slate-100 font-sans bg-[#08080a]">
       {/* Session History Sidebar */}
       <SessionSidebar
         sessions={sessions}
@@ -366,7 +366,7 @@ function App() {
       {isSidebarOpen && (
         <div
           onMouseDown={handleMouseDown}
-          className="w-1.5 h-full cursor-col-resize hover:bg-purple-500/40 active:bg-purple-600/60 transition-colors bg-white/5 shrink-0"
+          className="w-1 h-full cursor-col-resize hover:bg-cyan-500/30 active:bg-cyan-600/50 transition-colors bg-white/[0.04] shrink-0"
           title="Drag to resize panels"
         />
       )}
@@ -410,28 +410,28 @@ function App() {
 
       {/* 🛡️ OpenCode Permission Request Modal */}
       {pendingPermission && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#150e2b] border border-purple-500/40 p-6 rounded-2xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
-            <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md">
+          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
               🛡️ OpenCode 授权请求
             </h3>
-            <p className="text-slate-300 text-sm mb-4 leading-relaxed">
+            <p className="text-slate-400 text-xs mb-4 leading-relaxed">
               OpenCode 正在请求执行以下敏感操作。请确认是否允许此操作：
             </p>
-            <div className="bg-black/40 border border-white/5 rounded-xl p-3 mb-6 font-mono text-xs text-purple-300 break-all select-all">
-              <span className="text-slate-400 font-sans block mb-1">【类型: {pendingPermission.tool_call}】</span>
+            <div className="bg-black/40 border border-white/5 rounded-lg p-3 mb-5 font-mono text-xs text-cyan-400 break-all select-all">
+              <span className="text-slate-500 font-sans block mb-1">【类型: {pendingPermission.tool_call}】</span>
               {pendingPermission.details}
             </div>
-            <div className="flex items-center justify-end gap-3 font-semibold">
+            <div className="flex items-center justify-end gap-3 font-medium">
               <button
                 onClick={() => handleResolvePermission(false)}
-                className="px-4 py-2 rounded-xl text-slate-300 hover:bg-white/10 transition-colors text-sm"
+                className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs"
               >
                 拒绝 (Deny)
               </button>
               <button
                 onClick={() => handleResolvePermission(true)}
-                className="px-5 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 transition-all text-white text-sm shadow-lg shadow-purple-600/20"
+                className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
               >
                 允许 (Allow)
               </button>

@@ -39,18 +39,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   return (
     <div
       style={{ width: `${width}px` }}
-      className="h-full flex flex-col glass border-r border-white/5 shrink-0 overflow-hidden"
+      className="h-full flex flex-col glass border-r border-white/[0.06] shrink-0 overflow-hidden"
     >
       {/* Header */}
-      <div className="p-4 border-b border-white/5 flex items-center justify-between">
+      <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold tracking-wide text-white/90">
+          <h2 className="text-sm font-semibold tracking-tight text-white/90">
             Ambient Chat
           </h2>
           <div className="flex items-center gap-1.5">
             <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                isConnected ? "bg-green-400 animate-pulse" : "bg-red-400"
+              className={`w-1.5 h-1.5 rounded-full transition-all duration-300 ${
+                isConnected
+                  ? "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.6)] animate-pulse"
+                  : "bg-red-400"
               }`}
             />
             <span className="text-[10px] text-white/40">
@@ -62,7 +64,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         {onHideChat && (
           <button
             onClick={onHideChat}
-            className="p-1.5 hover:bg-white/10 rounded-lg text-white/40 hover:text-white/80 transition-colors cursor-pointer"
+            className="p-1 hover:bg-white/5 text-white/40 hover:text-white/80 rounded-lg transition-colors cursor-pointer"
             title="Hide Chat & History"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -73,9 +75,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Messages list */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
         {messages.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-center text-sm text-white/30 p-4">
+          <div className="h-full flex items-center justify-center text-center text-xs text-white/30 p-4">
             Start talking to your Ambient Agent. The agent can spawn custom widgets on your canvas workspace.
           </div>
         ) : (
@@ -87,15 +89,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               }`}
             >
               <div
-                className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm leading-relaxed ${
+                className={`max-w-[85%] rounded-lg px-3 py-1.5 text-xs leading-relaxed ${
                   msg.sender === "user"
-                    ? "bg-purple-600/70 text-white border border-purple-500/30"
-                    : "bg-white/5 text-white/90 border border-white/5"
+                    ? "bg-[#0f141c] text-white border border-cyan-500/20 shadow-sm"
+                    : "bg-white/[0.02] text-white/90 border border-white/[0.06]"
                 }`}
               >
                 {msg.content}
               </div>
-              <span className="text-[10px] text-white/20 mt-1 px-1">
+              <span className="text-[9px] text-white/20 mt-0.5 px-0.5">
                 {msg.sender === "user" ? "You" : "Agent"}
               </span>
             </div>
@@ -105,7 +107,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Input Form */}
-      <form onSubmit={handleSend} className="p-4 border-t border-white/5 bg-white/[0.01]">
+      <form onSubmit={handleSend} className="p-3 border-t border-white/[0.06] bg-black/[0.05]">
         <div className="flex gap-2">
           <input
             type="text"
@@ -113,12 +115,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             onChange={(e) => setInputText(e.target.value)}
             disabled={!isConnected}
             placeholder={isConnected ? "Send a message..." : "Connecting..."}
-            className="flex-1 px-4 py-2 text-sm bg-white/5 border border-white/10 rounded-xl text-white placeholder-white/30 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30 transition-all disabled:opacity-50"
+            className="flex-1 px-3 py-1.5 text-xs bg-white/[0.02] border border-white/10 rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-cyan-500/40 focus:ring-1 focus:ring-cyan-500/10 transition-all disabled:opacity-50"
           />
           <button
             type="submit"
             disabled={!isConnected || !inputText.trim()}
-            className="px-4 py-2 text-sm font-medium bg-purple-600 hover:bg-purple-500 disabled:bg-purple-800 disabled:opacity-50 text-white rounded-xl transition-colors cursor-pointer"
+            className="px-3 py-1.5 text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] disabled:bg-white/[0.01] disabled:opacity-30 disabled:border-white/5 disabled:hover:shadow-none text-white rounded-lg border border-white/10 hover:border-cyan-500/30 hover:shadow-[0_0_8px_rgba(6,182,212,0.1)] transition-all cursor-pointer"
           >
             Send
           </button>

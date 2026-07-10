@@ -62,6 +62,16 @@ describe("Frontend Global Canvas & Message Merging TDD", () => {
               }),
           });
         }
+        if (url.includes("/api/canvas")) {
+          const savedPinned = localStorage.getItem("pinned_widgets_global");
+          const pinned_ids = savedPinned ? JSON.parse(savedPinned) : [];
+          const savedSpans = localStorage.getItem("widget_spans_global");
+          const widget_spans = savedSpans ? JSON.parse(savedSpans) : {};
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ pinned_ids, widget_spans }),
+          });
+        }
         return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
       })
     );

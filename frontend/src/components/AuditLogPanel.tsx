@@ -125,7 +125,7 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
                 >
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/20">
+                      <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
                         {log.provider}
                       </span>
                       <span className="text-xs font-semibold text-white/80">
@@ -169,7 +169,7 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
                     </div>
                     <div>
                       <div className="font-semibold text-white/40 mb-1">RAW LLM RESPONSE RECEIVED:</div>
-                      <pre className="p-3 bg-black/40 border border-white/5 rounded-lg overflow-x-auto text-[11px] text-purple-300 font-mono whitespace-pre-wrap">
+                      <pre className="p-3 bg-black/40 border border-white/5 rounded-lg overflow-x-auto text-[11px] text-cyan-300 font-mono whitespace-pre-wrap">
                         {log.response}
                       </pre>
                     </div>
