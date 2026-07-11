@@ -61,7 +61,7 @@ cp .env.example .env
 5. **在容器内启动服务**：
    - 打开终端 1，启动后端：
      ```bash
-     uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+     uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
      ```
    - 打开终端 2，启动前端：
      ```bash
