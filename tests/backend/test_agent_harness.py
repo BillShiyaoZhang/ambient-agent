@@ -21,7 +21,9 @@ async def test_intent_router(monkeypatch):
         elif "待办" in user_message:
             return '{"is_coding": true, "app_id": "todo-app-1234", "instruction": "给我创建一个待办 widget"}'
         elif "weather" in user_message:
-            return '{"is_coding": true, "app_id": "weather-app-5678", "instruction": "build a new widget to show weather"}'
+            return (
+                '{"is_coding": true, "app_id": "weather-app-5678", "instruction": "build a new widget to show weather"}'
+            )
         elif "Make clock-app-1234 look glassmorphic" in user_message:
             return '{"is_coding": true, "app_id": "clock-app-1234", "instruction": "Make clock-app-1234 look glassmorphic"}'
         elif "把时钟修改一下" in user_message:
@@ -71,12 +73,13 @@ async def test_intent_router(monkeypatch):
     # 7. Test Ambiguity Resolution (multiple apps match base_name)
     existing_multiple = [
         {"id": "clock-app-1234", "title": "First Clock"},
-        {"id": "clock-app-5678", "title": "Second Clock"}
+        {"id": "clock-app-5678", "title": "Second Clock"},
     ]
     is_coding, app_id, instr = await IntentRouter.route("把时钟修改一下", existing_multiple)
     assert not is_coding
     assert app_id is None
     assert "我发现您有多个同类型应用" in instr
+
 
 def test_tool_registry():
     reg = ToolRegistry()
@@ -101,6 +104,7 @@ def test_tool_registry():
     assert params["name"]["type"] == "string"
     assert params["count"]["type"] == "integer"
     assert "name" in func_schema["parameters"]["required"]
+
 
 @pytest.mark.asyncio
 async def test_agent_orchestrator_conversational(monkeypatch):
@@ -128,9 +132,7 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     on_update = AsyncMock()
 
     agent_msg, widget = await orchestrator.handle_message(
-        session_id="sess-1",
-        content="Who are you?",
-        on_update=on_update
+        session_id="sess-1", content="Who are you?", on_update=on_update
     )
 
     assert agent_msg.content == "Hello! I am here to help you."

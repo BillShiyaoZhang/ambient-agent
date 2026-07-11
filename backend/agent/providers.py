@@ -11,6 +11,7 @@ from backend.models import LLMAuditLog
 
 logger = logging.getLogger("agent.providers")
 
+
 class BaseLLMProvider(ABC):
     def __init__(self, model: str):
         self.model = model
@@ -20,7 +21,7 @@ class BaseLLMProvider(ABC):
         self,
         messages: list[dict[str, str]],
         db_session: Session | None = None,
-        tools: list[dict[str, Any]] | None = None
+        tools: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Generates a completion response given the list of chat messages.
@@ -28,7 +29,9 @@ class BaseLLMProvider(ABC):
         """
         pass
 
-    def _log_to_db(self, db_session: Session | None, provider: str, prompt: list[dict[str, str]], response: str) -> None:
+    def _log_to_db(
+        self, db_session: Session | None, provider: str, prompt: list[dict[str, str]], response: str
+    ) -> None:
         if db_session is None:
             return
         try:
@@ -37,12 +40,7 @@ class BaseLLMProvider(ABC):
             except Exception:
                 prompt_str = str(prompt)
 
-            audit_log = LLMAuditLog(
-                provider=provider,
-                model=self.model,
-                prompt=prompt_str,
-                response=response
-            )
+            audit_log = LLMAuditLog(provider=provider, model=self.model, prompt=prompt_str, response=response)
             db_session.add(audit_log)
             db_session.commit()
             db_session.refresh(audit_log)
@@ -54,7 +52,7 @@ class BaseLLMProvider(ABC):
         provider_name: str,
         messages: list[dict[str, str]],
         db_session: Session | None = None,
-        tools: list[dict[str, Any]] | None = None
+        tools: list[dict[str, Any]] | None = None,
     ) -> str:
         from backend.agent.tools import registry as tool_registry
 
@@ -65,6 +63,7 @@ class BaseLLMProvider(ABC):
         for iteration in range(max_iterations):
             func = backend.llm_service.call_llm_api
             import inspect
+
             try:
                 sig = inspect.signature(func)
                 accepts_tools = len(sig.parameters) >= 4 or any(
@@ -75,18 +74,9 @@ class BaseLLMProvider(ABC):
                 accepts_tools = True
 
             if accepts_tools:
-                response_data = await func(
-                    provider_name,
-                    self.model,
-                    local_messages,
-                    tools
-                )
+                response_data = await func(provider_name, self.model, local_messages, tools)
             else:
-                response_data = await func(
-                    provider_name,
-                    self.model,
-                    local_messages
-                )
+                response_data = await func(provider_name, self.model, local_messages)
 
             if isinstance(response_data, str):
                 response_data = {"content": response_data, "tool_calls": None}
@@ -101,11 +91,7 @@ class BaseLLMProvider(ABC):
                 return content
 
             # Append assistant message with tool calls to prompt history
-            assistant_msg = {
-                "role": "assistant",
-                "content": content or "",
-                "tool_calls": tool_calls
-            }
+            assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
             local_messages.append(assistant_msg)
 
             # Execute each requested tool call
@@ -134,12 +120,7 @@ class BaseLLMProvider(ABC):
                     result_str = f"Error: {e!s}"
 
                 # Append tool response message to history
-                tool_msg = {
-                    "role": "tool",
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": result_str
-                }
+                tool_msg = {"role": "tool", "tool_call_id": tool_id, "name": tool_name, "content": result_str}
                 local_messages.append(tool_msg)
 
         logger.warning(f"Tool loop exceeded maximum iterations ({max_iterations})")
@@ -151,7 +132,7 @@ class OllamaProvider(BaseLLMProvider):
         self,
         messages: list[dict[str, str]],
         db_session: Session | None = None,
-        tools: list[dict[str, Any]] | None = None
+        tools: list[dict[str, Any]] | None = None,
     ) -> str:
         return await self._run_tool_loop("ollama", messages, db_session, tools)
 
@@ -161,7 +142,7 @@ class CloudLLMProvider(BaseLLMProvider):
         self,
         messages: list[dict[str, str]],
         db_session: Session | None = None,
-        tools: list[dict[str, Any]] | None = None
+        tools: list[dict[str, Any]] | None = None,
     ) -> str:
         provider_name = os.getenv("LLM_PROVIDER", "openai")
         return await self._run_tool_loop(provider_name, messages, db_session, tools)

@@ -19,21 +19,26 @@ def test_session_fixture(tmp_path):
     yield storage
     app_manager.apps_dir = old_apps_dir
 
+
 def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
+
     # 1. Mock routing to treat as coding task
     async def mock_route(content, existing_apps, db_session=None):
         return True, "test-app", content
+
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # 2. Mock Schema alignment to return empty proposal (approved immediately in test)
     async def mock_align_schemas(*args, **kwargs):
         return {"reused_schemas": [], "new_schemas": []}
+
     monkeypatch.setattr("backend.schema_alignment.SchemaAlignmentService.align_schemas", mock_align_schemas)
 
     # 3. Mock Plan Generation to return a standard plan
     async def mock_generate_plan(*args, **kwargs):
         return "Initial Test Plan"
+
     monkeypatch.setattr("backend.plan_generation.PlanGenerationService.generate_plan", mock_generate_plan)
 
     # 4. Mock ACP OpenCode agent call
@@ -43,6 +48,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
     # Mock Schema Verification to pass
     async def mock_verify(*args, **kwargs):
         return "✅ Schema Verification PASSED"
+
     monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
 
     def override_get_db():
@@ -58,11 +64,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
     client = TestClient(app)
 
     with client.websocket_connect("/ws/chat?session_id=session-123") as websocket:
-
-        websocket.send_json({
-            "sender": "user",
-            "content": "Create a new visual card"
-        })
+        websocket.send_json({"sender": "user", "content": "Create a new visual card"})
 
         # Expect active list on connect
         active_list = websocket.receive_json()
@@ -96,13 +98,15 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
         assert "等待开发计划" in waiting_msg["message"]["content"]
 
         # Send approved response for plan back
-        websocket.send_json({
-            "type": "plan_approval_response",
-            "request_id": request_id,
-            "approved": "approve",
-            "plan": "Initial Test Plan",
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "plan_approval_response",
+                "request_id": request_id,
+                "approved": "approve",
+                "plan": "Initial Test Plan",
+                "feedback": "",
+            }
+        )
 
         # PHASE 2: Schema alignment thinking update
         status_schema = websocket.receive_json()
@@ -119,13 +123,15 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
         assert "等待数据库 Schema 确认中" in waiting_schema_msg["message"]["content"]
 
         # Send approved response for schema back
-        websocket.send_json({
-            "type": "schema_approval_response",
-            "request_id": schema_request_id,
-            "approved": "approve",
-            "proposal": {"reused_schemas": [], "new_schemas": []},
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "schema_approval_response",
+                "request_id": schema_request_id,
+                "approved": "approve",
+                "proposal": {"reused_schemas": [], "new_schemas": []},
+                "feedback": "",
+            }
+        )
 
         # Expect confirmation message
         confirmed_msg = websocket.receive_json()

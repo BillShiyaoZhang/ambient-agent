@@ -54,13 +54,13 @@ class PermissionPolicyManager:
             "policy_mode": "interactive",
             "files": {
                 "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
-                "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"]
+                "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"],
             },
             "commands": {
                 "allowed_commands": ["npm test", "npm run build", "npm install"],
                 "allowed_prefixes": ["npm install ", "echo "],
-                "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"]
-            }
+                "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"],
+            },
         }
 
     def validate_file_path(self, path_str: str, workspace_root: Path) -> bool:
@@ -177,7 +177,9 @@ class FastAPIACPClient(Client):
     ) -> RequestPermissionResponse:
         policy_mgr = PermissionPolicyManager()
         tool_kind = getattr(tool_call, "kind", "other")
-        logger.info(f"request_permission request received: tool_kind={tool_kind}, title={getattr(tool_call, 'title', None)}, raw_input={getattr(tool_call, 'raw_input', None)}")
+        logger.info(
+            f"request_permission request received: tool_kind={tool_kind}, title={getattr(tool_call, 'title', None)}, raw_input={getattr(tool_call, 'raw_input', None)}"
+        )
 
         is_allowed = False
         details = ""
@@ -206,6 +208,7 @@ class FastAPIACPClient(Client):
             if isinstance(raw_in, str):
                 try:
                     import json
+
                     raw_in = json.loads(raw_in)
                 except Exception:
                     pass
@@ -224,6 +227,7 @@ class FastAPIACPClient(Client):
 
             if not path_str and getattr(tool_call, "title", None):
                 import re
+
                 match = re.search(r"([\w\-_\.\/]+\.[a-zA-Z0-9]+)", tool_call.title)
                 if match:
                     path_str = match.group(1)
@@ -277,19 +281,23 @@ class FastAPIACPClient(Client):
             try:
                 # Send the permission request over the websocket
                 if asyncio.iscoroutinefunction(self.on_update_callback):
-                    await self.on_update_callback({
-                        "type": "permission_request",
-                        "request_id": request_id,
-                        "tool_call": tool_kind,
-                        "details": details
-                    })
+                    await self.on_update_callback(
+                        {
+                            "type": "permission_request",
+                            "request_id": request_id,
+                            "tool_call": tool_kind,
+                            "details": details,
+                        }
+                    )
                 else:
-                    self.on_update_callback({
-                        "type": "permission_request",
-                        "request_id": request_id,
-                        "tool_call": tool_kind,
-                        "details": details
-                    })
+                    self.on_update_callback(
+                        {
+                            "type": "permission_request",
+                            "request_id": request_id,
+                            "tool_call": tool_kind,
+                            "details": details,
+                        }
+                    )
             except Exception as e:
                 logger.error(f"Error sending permission request: {e}")
                 return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
@@ -318,7 +326,7 @@ class FastAPIACPClient(Client):
         env: list[EnvVariable] | None = None,
         cwd: str | None = None,
         output_byte_limit: int | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> CreateTerminalResponse:
         exec_cwd = self.workspace_root
         if cwd:
@@ -339,7 +347,7 @@ class FastAPIACPClient(Client):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(exec_cwd),
-                env=process_env
+                env=process_env,
             )
             terminal_id = str(uuid.uuid4())
             self.terminals[terminal_id] = proc
@@ -360,10 +368,7 @@ class FastAPIACPClient(Client):
                     break
                 self.terminal_buffers[terminal_id] += line
 
-        await asyncio.gather(
-            read_stream(proc.stdout),
-            read_stream(proc.stderr)
-        )
+        await asyncio.gather(read_stream(proc.stdout), read_stream(proc.stderr))
 
     async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> TerminalOutputResponse:
         if terminal_id not in self.terminals:
@@ -379,13 +384,11 @@ class FastAPIACPClient(Client):
         if proc.returncode is not None:
             exit_status = TerminalExitStatus(exit_code=proc.returncode)
 
-        return TerminalOutputResponse(
-            output=decoded_output,
-            truncated=False,
-            exit_status=exit_status
-        )
+        return TerminalOutputResponse(output=decoded_output, truncated=False, exit_status=exit_status)
 
-    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> WaitForTerminalExitResponse:
+    async def wait_for_terminal_exit(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> WaitForTerminalExitResponse:
         if terminal_id not in self.terminals:
             raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
 
@@ -395,10 +398,7 @@ class FastAPIACPClient(Client):
         if terminal_id in self.terminal_tasks:
             self.terminal_tasks[terminal_id].cancel()
 
-        return WaitForTerminalExitResponse(
-            exit_code=proc.returncode,
-            signal=None
-        )
+        return WaitForTerminalExitResponse(exit_code=proc.returncode, signal=None)
 
     async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> KillTerminalResponse | None:
         if terminal_id not in self.terminals:
@@ -410,7 +410,9 @@ class FastAPIACPClient(Client):
             pass
         return KillTerminalResponse()
 
-    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> ReleaseTerminalResponse | None:
+    async def release_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> ReleaseTerminalResponse | None:
         if terminal_id in self.terminals:
             proc = self.terminals[terminal_id]
             try:
@@ -453,6 +455,7 @@ class FastAPIACPClient(Client):
                 else:
                     self.on_update_callback(accumulated_text)
 
+
 def run_opencode_agent(app_id: str, instruction: str) -> str:
     """
     Invokes the OpenCode developer agent as a subprocess to create or modify a widget.
@@ -466,15 +469,11 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
 
     os.makedirs(target_dir, exist_ok=True)
 
-    clean_instruction = instruction.replace('"', "'").replace('\n', ' ').replace('\r', '')
+    clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
     from backend.agent.prompts.manager import PromptManager
+
     pm = PromptManager()
-    prompt = pm.get_prompt(
-        "opencode_system.md",
-        app_id=app_id,
-        target_dir=target_dir,
-        instruction=clean_instruction
-    )
+    prompt = pm.get_prompt("opencode_system.md", app_id=app_id, target_dir=target_dir, instruction=clean_instruction)
 
     full_command = f'{opencode_cmd} run "{prompt}" --auto'
 
@@ -490,7 +489,7 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
             encoding="utf-8",
             errors="ignore",
             cwd=workspace_root,
-            timeout=300.0
+            timeout=300.0,
         )
         stdout_output = process.stdout or ""
         stderr_output = process.stderr or ""
@@ -501,12 +500,12 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
 
         if process.returncode != 0:
             combined_output = (
-                f"OpenCode Agent exited with error code {process.returncode}.\n"
-                f"Command output:\n{combined_output}"
+                f"OpenCode Agent exited with error code {process.returncode}.\nCommand output:\n{combined_output}"
             )
         return combined_output
     except Exception as err:
         return f"Failed to execute OpenCode Agent: {err!s}"
+
 
 async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Callable[[str], None]) -> str:
     """
@@ -536,9 +535,8 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
             await conn.initialize(
                 protocol_version=1,
                 client_capabilities=ClientCapabilities(
-                    fs=FileSystemCapabilities(read_text_file=True, write_text_file=True),
-                    terminal=True
-                )
+                    fs=FileSystemCapabilities(read_text_file=True, write_text_file=True), terminal=True
+                ),
             )
 
             session_resp = await conn.new_session(cwd=str(target_dir.absolute()))
@@ -547,27 +545,23 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
             active_acp_clients[session_id] = client
 
             from backend.agent.prompts.manager import PromptManager
+
             pm = PromptManager()
             prompt_text = pm.get_prompt(
-                "opencode_system.md",
-                app_id=app_id,
-                target_dir=str(target_dir.absolute()),
-                instruction=instruction
+                "opencode_system.md", app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction
             )
 
             opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
             try:
                 await asyncio.wait_for(
-                    conn.prompt(
-                        session_id=session_id,
-                        prompt=[text_block(prompt_text)]
-                    ),
-                    timeout=opencode_timeout
+                    conn.prompt(session_id=session_id, prompt=[text_block(prompt_text)]), timeout=opencode_timeout
                 )
             except TimeoutError:
                 timeout_minutes = int(opencode_timeout // 60)
                 logger.warning(f"OpenCode ACP agent timed out after {opencode_timeout} seconds for app {app_id}.")
-                client.output_buffer.append(f"\n⚠️ OpenCode Agent execution timed out after {timeout_minutes} minutes. The generated application files will be loaded from disk.")
+                client.output_buffer.append(
+                    f"\n⚠️ OpenCode Agent execution timed out after {timeout_minutes} minutes. The generated application files will be loaded from disk."
+                )
             finally:
                 active_acp_clients.pop(session_id, None)
 

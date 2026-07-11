@@ -7,13 +7,11 @@ from backend.agent.providers import get_llm_provider
 
 logger = logging.getLogger("schema_verification")
 
+
 class SchemaVerificationService:
     @staticmethod
     async def verify(
-        app_id: str,
-        widget_code: dict[str, str],
-        registered_schemas: list[dict[str, Any]],
-        db_session: Any = None
+        app_id: str, widget_code: dict[str, str], registered_schemas: list[dict[str, Any]], db_session: Any = None
     ) -> str:
         """
         Uses LLM to verify if database mutations and subscriptions in widget code match registered schemas.
@@ -63,10 +61,7 @@ Please perform the validation and output the Markdown report."""
         model_name = os.getenv("LLM_MODEL", "llama3")
         provider = get_llm_provider(provider_name, model_name)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         try:
             raw_response = await provider.generate(messages, db_session=db_session)

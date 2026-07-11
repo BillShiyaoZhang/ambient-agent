@@ -19,19 +19,13 @@ async def test_agent_react_graph_mutations(monkeypatch, tmp_path):
 
     # Reload Graph DB in tool registry and in main
     from backend import main
+
     main.graph_db = db
 
     # Mock LLM API calls
     mock_call_api = AsyncMock()
 
-    actions = [
-        {
-            "action": "create_node",
-            "id": "t-react-1",
-            "type": "Task",
-            "properties": {"title": "ReAct Task"}
-        }
-    ]
+    actions = [{"action": "create_node", "id": "t-react-1", "type": "Task", "properties": {"title": "ReAct Task"}}]
 
     # First turn: tool call to mutate_graph
     # Second turn: final message
@@ -44,15 +38,12 @@ async def test_agent_react_graph_mutations(monkeypatch, tmp_path):
                     "type": "function",
                     "function": {
                         "name": "mutate_graph",
-                        "arguments": json.dumps({"actions_json": json.dumps(actions)})
-                    }
+                        "arguments": json.dumps({"actions_json": json.dumps(actions)}),
+                    },
                 }
-            ]
+            ],
         },
-        {
-            "content": "I have created the task successfully.",
-            "tool_calls": None
-        }
+        {"content": "I have created the task successfully.", "tool_calls": None},
     ]
 
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_api)
@@ -77,9 +68,7 @@ async def test_agent_react_graph_mutations(monkeypatch, tmp_path):
     on_update = AsyncMock()
 
     agent_msg, widget = await orchestrator.handle_message(
-        session_id="sess-react",
-        content="create a task",
-        on_update=on_update
+        session_id="sess-react", content="create a task", on_update=on_update
     )
 
     # Check that tool was executed and node exists in graph_db
@@ -88,4 +77,3 @@ async def test_agent_react_graph_mutations(monkeypatch, tmp_path):
 
     # Check final response
     assert agent_msg.content == "I have created the task successfully."
-

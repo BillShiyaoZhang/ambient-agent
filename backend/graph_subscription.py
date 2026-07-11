@@ -7,6 +7,7 @@ from backend.graph_query_engine import execute_graph_query
 
 logger = logging.getLogger("graph_subscription")
 
+
 class SubscriptionManager:
     def __init__(self):
         # Maps websocket -> {subscription_id: query}
@@ -59,13 +60,12 @@ class SubscriptionManager:
                     if res_json != last_json:
                         self.last_results[(websocket, sub_id)] = res_json
                         # Call the coroutine function to send update
-                        await send_json_fn(websocket, {
-                            "type": "graph_query_update",
-                            "subscription_id": sub_id,
-                            "data": res
-                        })
+                        await send_json_fn(
+                            websocket, {"type": "graph_query_update", "subscription_id": sub_id, "data": res}
+                        )
                 except Exception as e:
                     logger.error(f"Error executing graph query broadcast for {sub_id}: {e}")
+
 
 # Instantiate global SubscriptionManager
 subscription_manager = SubscriptionManager()

@@ -12,49 +12,55 @@ def test_session_fixture(tmp_path):
     storage = WorkspaceStorage(workspace_dir)
     yield storage
 
+
 def test_websocket_rework_loops_flow(test_session, monkeypatch):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
 
     # 1. Mock routing
     async def mock_route(content, existing_apps, db_session=None):
         return True, "rework-app", content
+
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # 2. Mock Plan Generation
     plan_counter = 0
+
     async def mock_generate_plan(*args, **kwargs):
         nonlocal plan_counter
         plan_counter += 1
         return f"Plan Version {plan_counter}"
+
     monkeypatch.setattr("backend.plan_generation.PlanGenerationService.generate_plan", mock_generate_plan)
 
     # 3. Mock Schema alignment
     schema_counter = 0
+
     async def mock_align_schemas(*args, **kwargs):
         nonlocal schema_counter
         schema_counter += 1
         return {"reused_schemas": [], "new_schemas": []}
+
     monkeypatch.setattr("backend.schema_alignment.SchemaAlignmentService.align_schemas", mock_align_schemas)
 
     # 4. Mock ACP OpenCode agent call
     opencode_counter = 0
+
     async def mock_run_opencode(app_id, instruction, on_update):
         nonlocal opencode_counter
         opencode_counter += 1
         # Retrieve app_manager from main to write test files
         from backend.main import app_manager
+
         app_manager.create_or_update_app(
-            app_id=app_id,
-            title="Rework App",
-            html="<div>Reworked app</div>",
-            css="",
-            js="// code content"
+            app_id=app_id, title="Rework App", html="<div>Reworked app</div>", css="", js="// code content"
         )
         return f"OpenCode ran {opencode_counter} times"
+
     monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
 
     # 5. Mock Schema Verification
     verify_counter = 0
+
     async def mock_verify(app_id, widget_code, registered_schemas, db_session=None):
         nonlocal verify_counter
         verify_counter += 1
@@ -62,6 +68,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             return "❌ DISCREPANCY DETECTED: Missing type validation"
         else:
             return "✅ Schema Verification PASSED"
+
     monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
 
     def override_get_db():
@@ -77,10 +84,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
     client = TestClient(app)
 
     with client.websocket_connect("/ws/chat?session_id=session-rework") as websocket:
-        websocket.send_json({
-            "sender": "user",
-            "content": "Create complex app"
-        })
+        websocket.send_json({"sender": "user", "content": "Create complex app"})
 
         # Expect active list
         assert websocket.receive_json()["type"] == "active_sessions_list"
@@ -100,13 +104,15 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 1
-        websocket.send_json({
-            "type": "plan_approval_response",
-            "request_id": plan_request_id,
-            "approved": "approve",
-            "plan": "Plan Version 1",
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "plan_approval_response",
+                "request_id": plan_request_id,
+                "approved": "approve",
+                "plan": "Plan Version 1",
+                "feedback": "",
+            }
+        )
 
         # Schema alignment thinking & request 1
         assert "正在对齐数据库 Schema" in websocket.receive_json()["message"]["content"]
@@ -118,13 +124,15 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Send rework_plan response back to request Plan Rework!
-        websocket.send_json({
-            "type": "schema_approval_response",
-            "request_id": schema_request_id,
-            "approved": "rework_plan",
-            "proposal": {},
-            "feedback": "Please rework plan to be simpler"
-        })
+        websocket.send_json(
+            {
+                "type": "schema_approval_response",
+                "request_id": schema_request_id,
+                "approved": "rework_plan",
+                "proposal": {},
+                "feedback": "Please rework plan to be simpler",
+            }
+        )
 
         # Expect returning message
         assert "正在返回开发计划制定阶段" in websocket.receive_json()["message"]["content"]
@@ -139,13 +147,15 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 2
-        websocket.send_json({
-            "type": "plan_approval_response",
-            "request_id": plan_request_id_2,
-            "approved": "approve",
-            "plan": "Plan Version 2",
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "plan_approval_response",
+                "request_id": plan_request_id_2,
+                "approved": "approve",
+                "plan": "Plan Version 2",
+                "feedback": "",
+            }
+        )
 
         # Schema alignment thinking & request 2
         assert "正在对齐数据库 Schema" in websocket.receive_json()["message"]["content"]
@@ -156,13 +166,15 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Approve Schema 2
-        websocket.send_json({
-            "type": "schema_approval_response",
-            "request_id": schema_request_id_2,
-            "approved": "approve",
-            "proposal": {"reused_schemas": [], "new_schemas": []},
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "schema_approval_response",
+                "request_id": schema_request_id_2,
+                "approved": "approve",
+                "proposal": {"reused_schemas": [], "new_schemas": []},
+                "feedback": "",
+            }
+        )
 
         # OpenCode starts execution
         assert "正在启动 OpenCode 开发者智能体" in websocket.receive_json()["message"]["content"]
@@ -185,12 +197,14 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert "等待 Schema 校验警告处理指令" in websocket.receive_json()["message"]["content"]
 
         # Send Rework Code response to request Auto-Fix!
-        websocket.send_json({
-            "type": "verification_approval_response",
-            "request_id": verify_request_id,
-            "approved": "rework_code",
-            "feedback": "Please fix type validations"
-        })
+        websocket.send_json(
+            {
+                "type": "verification_approval_response",
+                "request_id": verify_request_id,
+                "approved": "rework_code",
+                "feedback": "Please fix type validations",
+            }
+        )
 
         # Expect returning message
         assert "正在请求 OpenCode 自动修复代码对齐问题" in websocket.receive_json()["message"]["content"]

@@ -6,14 +6,10 @@ from backend.agent.providers import get_llm_provider
 
 logger = logging.getLogger("plan_generation")
 
+
 class PlanGenerationService:
     @staticmethod
-    async def generate_plan(
-        instruction: str,
-        app_id: str,
-        schemas_context: str,
-        db_session: Any = None
-    ) -> str:
+    async def generate_plan(instruction: str, app_id: str, schemas_context: str, db_session: Any = None) -> str:
         """
         Generates a high-level summary implementation plan describing the widget and its UI elements.
         """
@@ -37,26 +33,20 @@ Please write a brief implementation plan for this widget."""
         model_name = os.getenv("LLM_MODEL", "llama3")
         provider = get_llm_provider(provider_name, model_name)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         try:
             raw_response = await provider.generate(messages, db_session=db_session)
             return raw_response.strip()
         except Exception as e:
             logger.error(f"Failed to generate implementation plan: {e}")
-            return f"Implementation Plan for '{app_id}': Build widget UI conforming to the instruction: '{instruction}'."
+            return (
+                f"Implementation Plan for '{app_id}': Build widget UI conforming to the instruction: '{instruction}'."
+            )
 
     @staticmethod
     async def refine_plan(
-        instruction: str,
-        app_id: str,
-        schemas_context: str,
-        current_plan: str,
-        feedback: str,
-        db_session: Any = None
+        instruction: str, app_id: str, schemas_context: str, current_plan: str, feedback: str, db_session: Any = None
     ) -> str:
         """
         Refines the current plan using direct natural language feedback from the user.
@@ -83,10 +73,7 @@ Update and output the refined implementation plan."""
         model_name = os.getenv("LLM_MODEL", "llama3")
         provider = get_llm_provider(provider_name, model_name)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         try:
             raw_response = await provider.generate(messages, db_session=db_session)

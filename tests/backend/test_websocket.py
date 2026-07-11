@@ -19,15 +19,18 @@ def test_session_fixture(tmp_path):
     # Restore original apps dir
     app_manager.apps_dir = old_apps_dir
 
+
 def test_websocket_chat_flow(test_session, monkeypatch):
     # Mock IntentRouter.route to bypass LLM classification in websocket test
     async def mock_route(content, existing_apps, db_session=None):
         return False, None, content
+
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # Mock LLM API call
     async def mock_call_llm_api(provider, model, prompt):
         return "I am your Ambient Agent. You said: 'Hello Agent'"
+
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_llm_api)
 
     # Override get_db dependency to use test database session
@@ -43,10 +46,7 @@ def test_websocket_chat_flow(test_session, monkeypatch):
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
         # Send a chat message
-        websocket.send_json({
-            "sender": "user",
-            "content": "Hello Agent"
-        })
+        websocket.send_json({"sender": "user", "content": "Hello Agent"})
 
         # 1. Expect an acknowledgment containing the saved message from the DB
         ack = websocket.receive_json()
@@ -80,10 +80,12 @@ def test_websocket_chat_flow(test_session, monkeypatch):
     # Clean up dependency overrides
     app.dependency_overrides.clear()
 
+
 def test_websocket_widget_trigger_flow(test_session, monkeypatch):
     # Mock IntentRouter.route to bypass LLM classification in websocket test
     async def mock_route(content, existing_apps, db_session=None):
         return False, None, content
+
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # Mock LLM API call containing widget block
@@ -94,6 +96,7 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         <html-content><div>Beijing Weather</div></html-content>
         </ambient-widget>
         """
+
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_llm_api)
 
     def override_get_db():
@@ -105,10 +108,7 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
     with client.websocket_connect("/ws/chat") as websocket:
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
-        websocket.send_json({
-            "sender": "user",
-            "content": "Give me weather details"
-        })
+        websocket.send_json({"sender": "user", "content": "Give me weather details"})
 
         # 1. ACK
         ack = websocket.receive_json()
@@ -129,7 +129,7 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         reply = websocket.receive_json()
         assert reply["type"] == "reply"
         assert "weather widget" in reply["message"]["content"]
-        assert "<ambient-widget" not in reply["message"]["content"] # XML block must be stripped!
+        assert "<ambient-widget" not in reply["message"]["content"]  # XML block must be stripped!
 
         # 4. Widget
         widget_msg = websocket.receive_json()

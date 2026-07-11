@@ -51,13 +51,14 @@ async def test_client_fs_operations(tmp_path):
     assert (workspace_root / "style.css").exists()
     assert (workspace_root / "style.css").read_text(encoding="utf-8") == "body {color: red;}"
 
+
 @pytest.mark.asyncio
 async def test_client_request_permission():
     client = FastAPIACPClient(workspace_root=Path("."), on_update_callback=lambda x: None)
 
     options = [
         PermissionOption(option_id="opt-allow", name="Allow", kind="allow_always"),
-        PermissionOption(option_id="opt-deny", name="Deny", kind="reject_always")
+        PermissionOption(option_id="opt-deny", name="Deny", kind="reject_always"),
     ]
 
     resp = await client.request_permission(session_id="sess", tool_call=MagicMock(), options=options)
@@ -66,12 +67,14 @@ async def test_client_request_permission():
     assert resp.outcome.option_id == "opt-allow"
     assert resp.outcome.outcome == "selected"
 
+
 @pytest.mark.asyncio
 async def test_client_terminal_operations(tmp_path):
     client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
 
     # Run a simple echo command in subprocess shell
     import sys
+
     cmd = "cmd.exe /c echo hello_terminal" if sys.platform == "win32" else "echo hello_terminal"
     create_resp = await client.create_terminal(session_id="sess", command=cmd)
     assert isinstance(create_resp, CreateTerminalResponse)
@@ -93,9 +96,11 @@ async def test_client_terminal_operations(tmp_path):
     release_resp = await client.release_terminal(session_id="sess", terminal_id=terminal_id)
     assert release_resp is not None
 
+
 @pytest.mark.asyncio
 async def test_client_session_update_callbacks():
     callback_outputs = []
+
     def on_update(text):
         callback_outputs.append(text)
 
@@ -103,9 +108,7 @@ async def test_client_session_update_callbacks():
 
     # Create chunks
     msg_chunk = AgentMessageChunk(
-        session_update="agent_message_chunk",
-        content=text_block("hello world"),
-        message_id="msg-1"
+        session_update="agent_message_chunk", content=text_block("hello world"), message_id="msg-1"
     )
 
     await client.session_update(session_id="sess", update=msg_chunk)
@@ -113,15 +116,12 @@ async def test_client_session_update_callbacks():
     assert callback_outputs[0] == "hello world"
 
     tool_chunk = ToolCallStart(
-        session_update="tool_call",
-        tool_call_id="tc-1",
-        title="write_text_file",
-        kind="edit",
-        status="pending"
+        session_update="tool_call", tool_call_id="tc-1", title="write_text_file", kind="edit", status="pending"
     )
     await client.session_update(session_id="sess", update=tool_chunk)
     assert len(callback_outputs) == 2
     assert "write_text_file" in callback_outputs[1]
+
 
 @pytest.mark.asyncio
 async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
@@ -138,9 +138,7 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
 
         # Simulate some agent updates to test streaming
         msg_chunk = AgentMessageChunk(
-            session_update="agent_message_chunk",
-            content=text_block("OpenCode response text"),
-            message_id="msg-1"
+            session_update="agent_message_chunk", content=text_block("OpenCode response text"), message_id="msg-1"
         )
         await to_client.session_update(session_id="sess-xyz", update=msg_chunk)
 
@@ -150,10 +148,13 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     updates = []
+
     def on_update(text):
         updates.append(text)
 
-    result_log = await run_opencode_agent_acp(app_id="weather-card", instruction="Make it glassmorphic", on_update=on_update)
+    result_log = await run_opencode_agent_acp(
+        app_id="weather-card", instruction="Make it glassmorphic", on_update=on_update
+    )
 
     assert "OpenCode response text" in result_log
     assert len(updates) > 0
@@ -163,6 +164,7 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
     mock_conn.initialize.assert_called_once()
     mock_conn.new_session.assert_called_once()
     mock_conn.prompt.assert_called_once()
+
 
 @pytest.mark.asyncio
 async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
@@ -174,6 +176,7 @@ async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
     async def hanging_prompt(*args, **kwargs):
         await asyncio.sleep(5.0)
         return PromptResponse(stop_reason="end_turn")
+
     mock_conn.prompt = hanging_prompt
 
     @contextlib.asynccontextmanager
@@ -188,6 +191,7 @@ async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
 
     # Mock asyncio.wait_for to raise TimeoutError when timeout is 180.0
     original_wait_for = asyncio.wait_for
+
     async def mock_wait_for(fut, timeout, **kwargs):
         if timeout == 180.0:
             raise TimeoutError()
@@ -195,7 +199,9 @@ async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
 
     monkeypatch.setattr("asyncio.wait_for", mock_wait_for)
 
-    result_log = await run_opencode_agent_acp(app_id="weather-card", instruction="Make it glassmorphic", on_update=lambda x: None)
+    result_log = await run_opencode_agent_acp(
+        app_id="weather-card", instruction="Make it glassmorphic", on_update=lambda x: None
+    )
     assert "timed out after 3 minutes" in result_log
 
 
@@ -210,6 +216,7 @@ async def test_client_directory_traversal(tmp_path):
 
     # Test read_text_file outside workspace
     from acp.exceptions import RequestError
+
     with pytest.raises(RequestError) as excinfo:
         await client.read_text_file(session_id="sess", path="../conftest.py")
     assert "Directory traversal attempt blocked" in getattr(excinfo.value, "data", "")
@@ -226,17 +233,15 @@ def test_permission_policy_manager(tmp_path):
     # Write custom configuration file
     config_file = tmp_path / "custom_policy.json"
     import json
+
     policy_data = {
-      "policy_mode": "interactive",
-      "files": {
-        "allowed_extensions": [".html", ".css", ".js"],
-        "allowed_filenames": ["data.json"]
-      },
-      "commands": {
-        "allowed_commands": ["npm test", "npm run build"],
-        "allowed_prefixes": ["npm install "],
-        "blocklist": ["rm -rf", "curl"]
-      }
+        "policy_mode": "interactive",
+        "files": {"allowed_extensions": [".html", ".css", ".js"], "allowed_filenames": ["data.json"]},
+        "commands": {
+            "allowed_commands": ["npm test", "npm run build"],
+            "allowed_prefixes": ["npm install "],
+            "blocklist": ["rm -rf", "curl"],
+        },
     }
     config_file.write_text(json.dumps(policy_data), encoding="utf-8")
 
@@ -260,6 +265,7 @@ def test_permission_policy_manager(tmp_path):
 async def test_interactive_permission_flow(tmp_path, monkeypatch):
     # Mock PermissionPolicyManager to deny execution by default
     from backend.opencode_service import PermissionPolicyManager
+
     original_validate = PermissionPolicyManager.validate_command
     monkeypatch.setattr(PermissionPolicyManager, "validate_command", lambda self, cmd: False)
 
@@ -267,6 +273,7 @@ async def test_interactive_permission_flow(tmp_path, monkeypatch):
     workspace_root.mkdir()
 
     callback_payloads = []
+
     async def on_update(payload):
         if isinstance(payload, dict):
             callback_payloads.append(payload)
@@ -280,12 +287,12 @@ async def test_interactive_permission_flow(tmp_path, monkeypatch):
         title = "run command"
         content = None
 
-    options = [
-        PermissionOption(option_id="opt-allow", name="Allow", kind="allow_always")
-    ]
+    options = [PermissionOption(option_id="opt-allow", name="Allow", kind="allow_always")]
 
     # Trigger permission request task
-    req_task = asyncio.create_task(client.request_permission(session_id="sess", tool_call=MockToolCall(), options=options))
+    req_task = asyncio.create_task(
+        client.request_permission(session_id="sess", tool_call=MockToolCall(), options=options)
+    )
 
     # Allow task to run and emit the websocket request
     await asyncio.sleep(0.1)

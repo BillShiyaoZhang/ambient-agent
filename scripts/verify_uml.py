@@ -22,6 +22,7 @@ CLASS_TO_FILE = {
     "WorkspaceStorage": "backend/workspace_storage.py",
 }
 
+
 def parse_uml_classes(uml_path: str) -> dict[str, dict[str, any]]:
     if not os.path.exists(uml_path):
         print(f"Error: UML file not found at {uml_path}")
@@ -74,11 +75,9 @@ def parse_uml_classes(uml_path: str) -> dict[str, dict[str, any]]:
                     field_name = name_match.group(1)
                     fields.add((field_name, is_public))
 
-        classes[class_name] = {
-            "fields": fields,
-            "methods": methods
-        }
+        classes[class_name] = {"fields": fields, "methods": methods}
     return classes
+
 
 def parse_python_class(file_path: str, target_class_name: str) -> tuple[set[str], set[str]]:
     if not os.path.exists(file_path):
@@ -109,11 +108,19 @@ def parse_python_class(file_path: str, target_class_name: str) -> tuple[set[str]
                 for subnode in ast.walk(item):
                     if isinstance(subnode, ast.Assign):
                         for target in subnode.targets:
-                            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+                            if (
+                                isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"
+                            ):
                                 fields.add(target.attr)
                     elif isinstance(subnode, ast.AnnAssign):
                         target = subnode.target
-                        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+                        if (
+                            isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == "self"
+                        ):
                             fields.add(target.attr)
         # Look for class level variables (SQLModel fields or class constants)
         elif isinstance(item, ast.AnnAssign):
@@ -126,12 +133,14 @@ def parse_python_class(file_path: str, target_class_name: str) -> tuple[set[str]
 
     return fields, methods
 
+
 def locate_file_in_backend(file_ref: str, search_dir: str = "backend") -> str:
     filename = file_ref if file_ref.endswith(".py") else f"{file_ref}.py"
     for root, dirs, files in os.walk(search_dir):
         if filename in files:
             return os.path.join(root, filename)
     return None
+
 
 def verify_flowchart_symbols(md_path: str) -> list[str]:
     if not os.path.exists(md_path):
@@ -183,6 +192,7 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
 
     return mismatches
 
+
 def main():
     uml_files = ["backend/UML.md", "backend/agent/harness.md"]
     mismatches = []
@@ -197,7 +207,9 @@ def main():
 
         for class_name, uml_data in uml_classes.items():
             if class_name not in CLASS_TO_FILE:
-                mismatches.append(f"Class '{class_name}' in UML ({uml_path}) is not mapped to any Python file in verify_uml.py.")
+                mismatches.append(
+                    f"Class '{class_name}' in UML ({uml_path}) is not mapped to any Python file in verify_uml.py."
+                )
                 continue
 
             file_path = CLASS_TO_FILE[class_name]
@@ -239,7 +251,9 @@ def main():
                     matched = True
 
                 if not matched and uml_method in py_methods:
-                    print(f"Warning: Class '{class_name}' method '{uml_method}' matched in code, but visibility prefix mismatch.")
+                    print(
+                        f"Warning: Class '{class_name}' method '{uml_method}' matched in code, but visibility prefix mismatch."
+                    )
                     matched = True
 
                 if not matched:
@@ -267,6 +281,7 @@ def main():
     else:
         print("✅ Verification Succeeded! All documented UML contracts and flowcharts are satisfied in the codebase.")
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

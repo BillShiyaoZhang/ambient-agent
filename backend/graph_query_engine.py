@@ -35,12 +35,7 @@ def execute_graph_query(query: dict, db: GraphDatabase) -> list[dict[str, Any]]:
             if not props_match:
                 continue
 
-            node_res = {
-                "id": node_id,
-                "type": node_type,
-                "properties": node_props,
-                "relations": []
-            }
+            node_res = {"id": node_id, "type": node_type, "properties": node_props, "relations": []}
 
             # 2. Process includes if specified
             includes = query.get("include", [])
@@ -63,15 +58,17 @@ def execute_graph_query(query: dict, db: GraphDatabase) -> list[dict[str, Any]]:
 
                 out_edges = conn.execute(sql_out, out_params).fetchall()
                 for edge in out_edges:
-                    node_res["relations"].append({
-                        "edge_type": edge["edge_type"],
-                        "properties": json.loads(edge["edge_props"]),
-                        "target": {
-                            "id": edge["target_id"],
-                            "type": edge["target_type"],
-                            "properties": json.loads(edge["target_props"])
+                    node_res["relations"].append(
+                        {
+                            "edge_type": edge["edge_type"],
+                            "properties": json.loads(edge["edge_props"]),
+                            "target": {
+                                "id": edge["target_id"],
+                                "type": edge["target_type"],
+                                "properties": json.loads(edge["target_props"]),
+                            },
                         }
-                    })
+                    )
 
                 # Check incoming relations: target node -> source node (node_id)
                 sql_in = """
@@ -88,15 +85,17 @@ def execute_graph_query(query: dict, db: GraphDatabase) -> list[dict[str, Any]]:
 
                 in_edges = conn.execute(sql_in, in_params).fetchall()
                 for edge in in_edges:
-                    node_res["relations"].append({
-                        "edge_type": edge["edge_type"],
-                        "properties": json.loads(edge["edge_props"]),
-                        "target": {
-                            "id": edge["target_id"],
-                            "type": edge["target_type"],
-                            "properties": json.loads(edge["target_props"])
+                    node_res["relations"].append(
+                        {
+                            "edge_type": edge["edge_type"],
+                            "properties": json.loads(edge["edge_props"]),
+                            "target": {
+                                "id": edge["target_id"],
+                                "type": edge["target_type"],
+                                "properties": json.loads(edge["target_props"]),
+                            },
                         }
-                    })
+                    )
 
             results.append(node_res)
 

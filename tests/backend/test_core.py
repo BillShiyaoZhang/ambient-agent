@@ -12,12 +12,14 @@ def session_fixture(tmp_path):
     storage = WorkspaceStorage(workspace_dir)
     yield storage
 
+
 @pytest.mark.asyncio
 async def test_health_check():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "message": "Ambient Agent is running"}
+
 
 @pytest.mark.asyncio
 async def test_database_initialization(session):

@@ -41,10 +41,7 @@ import json
 
 
 async def call_llm_api(
-    provider: str,
-    model: str,
-    messages: list[dict[str, str]],
-    tools: list[dict[str, Any]] | None = None
+    provider: str, model: str, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """
     Directly contacts Ollama (chat endpoint) or cloud providers using HTTP clients.
@@ -59,11 +56,7 @@ async def call_llm_api(
         else:
             url = raw_url
 
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": False
-        }
+        payload = {"model": model, "messages": messages, "stream": False}
         if tools:
             payload["tools"] = tools
 
@@ -74,17 +67,17 @@ async def call_llm_api(
                     msg_data = response.json().get("message", {})
                     return {
                         "content": msg_data.get("content", "") or "",
-                        "tool_calls": msg_data.get("tool_calls", None)
+                        "tool_calls": msg_data.get("tool_calls", None),
                     }
                 else:
                     return {
                         "content": f"Error from Ollama server (status code {response.status_code}): {response.text}",
-                        "tool_calls": None
+                        "tool_calls": None,
                     }
         except Exception as e:
             return {
                 "content": f"Failed to connect to local Ollama server. Make sure Ollama is running. Error: {e!s}",
-                "tool_calls": None
+                "tool_calls": None,
             }
 
     else:
@@ -95,22 +88,15 @@ async def call_llm_api(
         if not api_key:
             return {
                 "content": f"Mock response: You requested using provider '{provider}' and model '{model}', but no API key was configured.",
-                "tool_calls": None
+                "tool_calls": None,
             }
 
         # Standard OpenAI compatible completions payload
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.7
-        }
+        payload = {"model": model, "messages": messages, "temperature": 0.7}
         if tools:
             payload["tools"] = tools
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         trust_env = os.getenv("LLM_TRUST_ENV", "true").lower() != "false"
         try:
             async with httpx.AsyncClient(trust_env=trust_env) as client:
@@ -122,32 +108,40 @@ async def call_llm_api(
                         msg_data = choices[0].get("message", {})
                         return {
                             "content": msg_data.get("content", "") or "",
-                            "tool_calls": msg_data.get("tool_calls", None)
+                            "tool_calls": msg_data.get("tool_calls", None),
                         }
                     # Log detail to assist troubleshooting
                     import logging
+
                     logger = logging.getLogger("backend.llm_service")
-                    logger.error(f"LLM API returned 200 but choices list is empty or missing. Raw response: {response.text}")
-                    return {"content": f"No response content received from API. Raw: {response.text}", "tool_calls": None}
+                    logger.error(
+                        f"LLM API returned 200 but choices list is empty or missing. Raw response: {response.text}"
+                    )
+                    return {
+                        "content": f"No response content received from API. Raw: {response.text}",
+                        "tool_calls": None,
+                    }
                 else:
                     return {
                         "content": f"API Error (status code {response.status_code}): {response.text}",
-                        "tool_calls": None
+                        "tool_calls": None,
                     }
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             return {
                 "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {e!s}",
-                "tool_calls": None
+                "tool_calls": None,
             }
+
 
 async def generate_agent_response(
     messages: list[dict[str, str]] | None = None,
     provider: str = "ollama",
     model: str = "llama3",
     session: Session = None,
-    user_message: str | None = None
+    user_message: str | None = None,
 ) -> str:
     """
     Coordinates LLM execution, registers prompts and responses in the audit database.
@@ -155,10 +149,7 @@ async def generate_agent_response(
     if messages is None:
         if user_message is not None:
             # Wrap legacy string prompt into structured messages list, including SYSTEM_PROMPT
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message}
-            ]
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_message}]
         else:
             messages = []
 
@@ -177,25 +168,18 @@ async def generate_agent_response(
         prompt_str = str(messages)
 
     # 2. Write to Audit Log database table
-    audit_log = LLMAuditLog(
-        provider=provider,
-        model=model,
-        prompt=prompt_str,
-        response=response_text
-    )
+    audit_log = LLMAuditLog(provider=provider, model=model, prompt=prompt_str, response=response_text)
     session.add(audit_log)
     session.commit()
     session.refresh(audit_log)
 
     return response_text
 
+
 class LLMService:
     @staticmethod
     async def call_llm_api(
-        provider: str,
-        model: str,
-        messages: list[dict[str, str]],
-        tools: list[dict[str, Any]] | None = None
+        provider: str, model: str, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         """
         Wrapper matching UML definition for call_llm_api.
@@ -208,16 +192,11 @@ class LLMService:
         provider: str = "ollama",
         model: str = "llama3",
         session: Session = None,
-        user_message: str | None = None
+        user_message: str | None = None,
     ) -> str:
         """
         Wrapper matching UML definition for generate_agent_response.
         """
         return await generate_agent_response(
-            messages=messages,
-            provider=provider,
-            model=model,
-            session=session,
-            user_message=user_message
+            messages=messages, provider=provider, model=model, session=session, user_message=user_message
         )
-

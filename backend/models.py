@@ -9,6 +9,7 @@ class ChatSession(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+
 class ChatMessage(BaseModel):
     id: int | None = None
     session_id: str | None = "default-session"
@@ -16,6 +17,7 @@ class ChatMessage(BaseModel):
     sender: str = "user"  # 'user' or 'agent', kept for compatibility
     content: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
 
 class LLMAuditLog(BaseModel):
     id: int | None = None

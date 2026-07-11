@@ -12,11 +12,13 @@ def db_session_fixture(tmp_path):
     storage = WorkspaceStorage(workspace_dir)
     yield storage
 
+
 @pytest.fixture
 def temp_apps_dir(tmp_path, monkeypatch, db_session):
     # AppManager resolves self.apps_dir using WORKSPACE_DIR by default
     monkeypatch.setenv("WORKSPACE_DIR", db_session.workspace_dir)
     return db_session.apps_dir
+
 
 def test_session_message_relations(db_session):
     # Create session
@@ -46,6 +48,7 @@ def test_session_message_relations(db_session):
     assert messages[1].role == "agent"
     assert messages[2].role == "code"
 
+
 def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     # 1. Create app files on disk using AppManager
     app_manager = AppManager()
@@ -54,7 +57,7 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
         title="Weather Widget",
         html="<div>Beijing: Sunny</div>",
         css=".sunny { color: yellow; }",
-        js="console.log('weather');"
+        js="console.log('weather');",
     )
 
     # 2. Setup Session and Messages
@@ -68,7 +71,7 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     msg_code = ChatMessage(
         session_id="session-2",
         role="code",
-        content="<ambient-widget id='weather-widget' title='Weather Widget'>...</ambient-widget>"
+        content="<ambient-widget id='weather-widget' title='Weather Widget'>...</ambient-widget>",
     )
     msg_agent1 = ChatMessage(session_id="session-2", role="agent", content="I spawned the widget for you.")
     msg_user2 = ChatMessage(session_id="session-2", role="user", content="Make the text green")

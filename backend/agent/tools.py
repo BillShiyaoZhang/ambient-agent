@@ -5,11 +5,13 @@ from typing import Any
 
 logger = logging.getLogger("agent.tools")
 
+
 class ToolRegistry:
     """
     Hermes-inspired dynamic tool registration and execution manager.
     Parses function signatures and docstrings to build OpenAPI function schemas.
     """
+
     def __init__(self):
         self.tools: dict[str, Callable] = {}
         self.schemas: dict[str, dict[str, Any]] = {}
@@ -58,10 +60,7 @@ class ToolRegistry:
                         param_desc = parts[-1].strip()
                         break
 
-            properties[param_name] = {
-                "type": p_type,
-                "description": param_desc
-            }
+            properties[param_name] = {"type": p_type, "description": param_desc}
 
             if param.default == inspect.Parameter.empty:
                 required.append(param_name)
@@ -71,12 +70,8 @@ class ToolRegistry:
             "function": {
                 "name": name,
                 "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required
-                }
-            }
+                "parameters": {"type": "object", "properties": properties, "required": required},
+            },
         }
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
@@ -106,6 +101,7 @@ class ToolRegistry:
 # Instantiate a global registry for standard agent tools
 registry = ToolRegistry()
 
+
 # Example Tool definitions
 @registry.register
 def list_available_apps() -> list[str]:
@@ -113,8 +109,10 @@ def list_available_apps() -> list[str]:
     Returns a list of IDs of all ambient widget applications currently configured on disk.
     """
     from backend.app_manager import AppManager
+
     mgr = AppManager()
     return [app["id"] for app in mgr.list_apps()]
+
 
 @registry.register
 def delete_widget_app(app_id: str) -> bool:
@@ -123,8 +121,10 @@ def delete_widget_app(app_id: str) -> bool:
     :param app_id: The ID of the widget application to delete.
     """
     from backend.app_manager import AppManager
+
     mgr = AppManager()
     return mgr.delete_app(app_id)
+
 
 @registry.register
 def query_graph(query_json: str) -> str:
@@ -136,12 +136,14 @@ def query_graph(query_json: str) -> str:
 
     from backend.graph_query_engine import execute_graph_query
     from backend.main import graph_db
+
     try:
         query = json.loads(query_json)
         res = execute_graph_query(query, graph_db)
         return json.dumps(res, ensure_ascii=False)
     except Exception as e:
         return f"Error executing query: {e!s}"
+
 
 @registry.register
 async def mutate_graph(actions_json: str) -> str:
@@ -153,6 +155,7 @@ async def mutate_graph(actions_json: str) -> str:
 
     from backend.graph_subscription import subscription_manager
     from backend.main import graph_db
+
     try:
         actions = json.loads(actions_json)
         for action in actions:
@@ -161,13 +164,10 @@ async def mutate_graph(actions_json: str) -> str:
                 graph_db.create_node(
                     node_id=action.get("id"),
                     node_type=action.get("type", "Generic"),
-                    properties=action.get("properties")
+                    properties=action.get("properties"),
                 )
             elif act_type == "update_node_property":
-                graph_db.update_node_property(
-                    node_id=action.get("id"),
-                    properties=action.get("properties")
-                )
+                graph_db.update_node_property(node_id=action.get("id"), properties=action.get("properties"))
             elif act_type == "delete_node":
                 graph_db.delete_node(node_id=action.get("id"))
             elif act_type == "create_edge":
@@ -175,22 +175,21 @@ async def mutate_graph(actions_json: str) -> str:
                     from_id=action.get("from_id"),
                     to_id=action.get("to_id"),
                     edge_type=action.get("type"),
-                    properties=action.get("properties")
+                    properties=action.get("properties"),
                 )
             elif act_type == "delete_edge":
                 graph_db.delete_edge(
-                    from_id=action.get("from_id"),
-                    to_id=action.get("to_id"),
-                    edge_type=action.get("type")
+                    from_id=action.get("from_id"), to_id=action.get("to_id"), edge_type=action.get("type")
                 )
+
         # Broadcast updates
         async def send_ws(ws, payload):
             try:
                 await ws.send_json(payload)
             except Exception:
                 pass
+
         await subscription_manager.broadcast_updates(graph_db, send_ws)
         return "success"
     except Exception as e:
         return f"Error: {e!s}"
-

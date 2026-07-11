@@ -8,7 +8,7 @@ from sqlmodel import Session
 
 class IntentRouter:
     """
-    Decoupled intent routing engine that parses user messages and classifies them 
+    Decoupled intent routing engine that parses user messages and classifies them
     into either:
     - Widget coding tasks (app creation, modifications)
     - General conversational questions
@@ -25,24 +25,56 @@ class IntentRouter:
     }
 
     CREATION_VERBS = [
-        "创建", "制作", "生成", "开发", "写", "设计", "做",
-        "修改", "更新", "增加", "改变", "修复", "优化", "调整",
-        "改下", "完善", "加上", "添加", "重构"
+        "创建",
+        "制作",
+        "生成",
+        "开发",
+        "写",
+        "设计",
+        "做",
+        "修改",
+        "更新",
+        "增加",
+        "改变",
+        "修复",
+        "优化",
+        "调整",
+        "改下",
+        "完善",
+        "加上",
+        "添加",
+        "重构",
     ]
 
     APP_TYPES = [
-        "计算器", "天气", "时钟", "秒表", "计时器", "待办",
-        "任务", "日历", "日程", "笔记", "便签", "图表",
-        "widget", "app", "gui", "应用", "小程序"
+        "计算器",
+        "天气",
+        "时钟",
+        "秒表",
+        "计时器",
+        "待办",
+        "任务",
+        "日历",
+        "日程",
+        "笔记",
+        "便签",
+        "图表",
+        "widget",
+        "app",
+        "gui",
+        "应用",
+        "小程序",
     ]
 
     CREATION_PATTERNS_EN = [
         r"\b(?:create|build|make|generate|write|develop)\s+(?:a\s+)?(?:new\s+)?(?:widget|app|gui|dashboard)\b",
-        r"\b(?:modify|update|add|change|fix)\s+(?:the\s+)?(?:widget|app|gui)\b"
+        r"\b(?:modify|update|add|change|fix)\s+(?:the\s+)?(?:widget|app|gui)\b",
     ]
 
     @classmethod
-    async def route(cls, content: str, existing_apps: list[dict[str, Any]], db_session: Session | None = None) -> tuple[bool, str | None, str]:
+    async def route(
+        cls, content: str, existing_apps: list[dict[str, Any]], db_session: Session | None = None
+    ) -> tuple[bool, str | None, str]:
         """
         Analyzes message content using an LLM.
         Returns:
@@ -69,10 +101,7 @@ class IntentRouter:
 
         system_prompt = prompt_manager.get_prompt("router.md", existing_apps=existing_apps)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content_stripped}
-        ]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content_stripped}]
 
         try:
             raw_response = await provider.generate(messages, db_session=db_session)
@@ -90,7 +119,9 @@ class IntentRouter:
             # Resolve ambiguity
             if is_coding and app_id:
                 base_name = app_id.split("-")[0]
-                matching_apps = [app for app in existing_apps if app["id"] == app_id or app["id"].split("-")[0] == base_name]
+                matching_apps = [
+                    app for app in existing_apps if app["id"] == app_id or app["id"].split("-")[0] == base_name
+                ]
 
                 # If there are multiple matching apps in the workspace, return ambiguity prompt conversational message
                 if len(matching_apps) > 1:

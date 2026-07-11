@@ -11,12 +11,16 @@ def test_graph_db_crud(tmp_path):
     db = GraphDatabase(workspace_dir)
 
     # 1. Test Node Creation
-    node1 = db.create_node(node_id="task-1", node_type="Task", properties={"title": "Buy groceries", "status": "pending"})
+    node1 = db.create_node(
+        node_id="task-1", node_type="Task", properties={"title": "Buy groceries", "status": "pending"}
+    )
     assert node1["id"] == "task-1"
     assert node1["type"] == "Task"
     assert node1["properties"]["title"] == "Buy groceries"
 
-    node2 = db.create_node(node_id="event-1", node_type="CalendarEvent", properties={"summary": "Shopping trip", "time": "2026-07-12"})
+    node2 = db.create_node(
+        node_id="event-1", node_type="CalendarEvent", properties={"summary": "Shopping trip", "time": "2026-07-12"}
+    )
     assert node2["id"] == "event-1"
 
     # Verify node retrieval

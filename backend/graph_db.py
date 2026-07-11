@@ -87,12 +87,7 @@ class GraphDatabase:
             "Task": {
                 "name": "Task",
                 "description": "Represents a todo item or actionable task",
-                "properties": {
-                    "title": "string",
-                    "description": "string",
-                    "status": "string",
-                    "due_date": "string"
-                }
+                "properties": {"title": "string", "description": "string", "status": "string", "due_date": "string"},
             },
             "Event": {
                 "name": "Event",
@@ -102,18 +97,14 @@ class GraphDatabase:
                     "description": "string",
                     "start_time": "string",
                     "end_time": "string",
-                    "location": "string"
-                }
+                    "location": "string",
+                },
             },
             "Note": {
                 "name": "Note",
                 "description": "Represents a freeform text note or document chunk",
-                "properties": {
-                    "title": "string",
-                    "content": "string",
-                    "tags": "string"
-                }
-            }
+                "properties": {"title": "string", "content": "string", "tags": "string"},
+            },
         }
         for schema_id, info in core_schemas.items():
             self.register_schema(
@@ -121,7 +112,7 @@ class GraphDatabase:
                 name=info["name"],
                 description=info["description"],
                 properties=info["properties"],
-                is_core=True
+                is_core=True,
             )
 
     def _migrate_legacy_data(self) -> None:
@@ -146,8 +137,8 @@ class GraphDatabase:
                             node.get("type", "Generic"),
                             json.dumps(node.get("properties", {})),
                             node.get("properties", {}).get("namespace"),
-                            datetime.now(UTC).isoformat()
-                        )
+                            datetime.now(UTC).isoformat(),
+                        ),
                     )
                 # Migrate edges
                 for edge in legacy_edges:
@@ -158,8 +149,8 @@ class GraphDatabase:
                             edge.get("to_id"),
                             edge.get("type"),
                             json.dumps(edge.get("properties", {})),
-                            datetime.now(UTC).isoformat()
-                        )
+                            datetime.now(UTC).isoformat(),
+                        ),
                     )
 
             # Backup old file to avoid re-migration
@@ -173,7 +164,9 @@ class GraphDatabase:
 
     # --- Schema APIs ---
 
-    def register_schema(self, schema_id: str, name: str, description: str, properties: dict[str, str], is_core: bool = False) -> dict[str, Any]:
+    def register_schema(
+        self, schema_id: str, name: str, description: str, properties: dict[str, str], is_core: bool = False
+    ) -> dict[str, Any]:
         with self.get_conn() as conn:
             conn.execute(
                 """
@@ -190,27 +183,23 @@ class GraphDatabase:
                     description,
                     json.dumps(properties),
                     1 if is_core else 0,
-                    datetime.now(UTC).isoformat()
-                )
+                    datetime.now(UTC).isoformat(),
+                ),
             )
-        return {
-            "id": schema_id,
-            "name": name,
-            "description": description,
-            "properties": properties,
-            "is_core": is_core
-        }
+        return {"id": schema_id, "name": name, "description": description, "properties": properties, "is_core": is_core}
 
     def get_schema(self, schema_id: str) -> dict[str, Any] | None:
         with self.get_conn() as conn:
-            row = conn.execute("SELECT id, name, description, properties, is_core FROM graph_schemas WHERE id = ?", (schema_id,)).fetchone()
+            row = conn.execute(
+                "SELECT id, name, description, properties, is_core FROM graph_schemas WHERE id = ?", (schema_id,)
+            ).fetchone()
             if row:
                 return {
                     "id": row["id"],
                     "name": row["name"],
                     "description": row["description"],
                     "properties": json.loads(row["properties"]),
-                    "is_core": bool(row["is_core"])
+                    "is_core": bool(row["is_core"]),
                 }
         return None
 
@@ -223,7 +212,7 @@ class GraphDatabase:
                     "name": row["name"],
                     "description": row["description"],
                     "properties": json.loads(row["properties"]),
-                    "is_core": bool(row["is_core"])
+                    "is_core": bool(row["is_core"]),
                 }
                 for row in rows
             ]
@@ -266,7 +255,9 @@ class GraphDatabase:
 
     # --- Node APIs ---
 
-    def create_node(self, node_id: str | None = None, node_type: str = "Generic", properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_node(
+        self, node_id: str | None = None, node_type: str = "Generic", properties: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         if not node_id:
             node_id = str(uuid.uuid4())
 
@@ -294,30 +285,16 @@ class GraphDatabase:
                     properties=excluded.properties,
                     namespace=excluded.namespace
                 """,
-                (
-                    node_id,
-                    node_type,
-                    json.dumps(validated_properties),
-                    namespace,
-                    datetime.now(UTC).isoformat()
-                )
+                (node_id, node_type, json.dumps(validated_properties), namespace, datetime.now(UTC).isoformat()),
             )
 
-        return {
-            "id": node_id,
-            "type": node_type,
-            "properties": validated_properties
-        }
+        return {"id": node_id, "type": node_type, "properties": validated_properties}
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         with self.get_conn() as conn:
             row = conn.execute("SELECT id, type, properties FROM graph_nodes WHERE id = ?", (node_id,)).fetchone()
             if row:
-                return {
-                    "id": row["id"],
-                    "type": row["type"],
-                    "properties": json.loads(row["properties"])
-                }
+                return {"id": row["id"], "type": row["type"], "properties": json.loads(row["properties"])}
         return None
 
     def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
@@ -335,14 +312,10 @@ class GraphDatabase:
         with self.get_conn() as conn:
             conn.execute(
                 "UPDATE graph_nodes SET properties = ?, namespace = ? WHERE id = ?",
-                (json.dumps(validated_props), namespace, node_id)
+                (json.dumps(validated_props), namespace, node_id),
             )
 
-        return {
-            "id": node_id,
-            "type": node["type"],
-            "properties": validated_props
-        }
+        return {"id": node_id, "type": node["type"], "properties": validated_props}
 
     def delete_node(self, node_id: str) -> bool:
         with self.get_conn() as conn:
@@ -354,7 +327,9 @@ class GraphDatabase:
 
     # --- Edge APIs ---
 
-    def create_edge(self, from_id: str, to_id: str, edge_type: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_edge(
+        self, from_id: str, to_id: str, edge_type: str, properties: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         # Validate that both nodes exist
         if not self.get_node(from_id):
             raise ValueError(f"Source node '{from_id}' does not exist.")
@@ -372,34 +347,23 @@ class GraphDatabase:
                 ON CONFLICT(from_id, to_id, type) DO UPDATE SET
                     properties=excluded.properties
                 """,
-                (
-                    from_id,
-                    to_id,
-                    edge_type,
-                    json.dumps(edge_properties),
-                    datetime.now(UTC).isoformat()
-                )
+                (from_id, to_id, edge_type, json.dumps(edge_properties), datetime.now(UTC).isoformat()),
             )
 
-        return {
-            "from_id": from_id,
-            "to_id": to_id,
-            "type": edge_type,
-            "properties": edge_properties
-        }
+        return {"from_id": from_id, "to_id": to_id, "type": edge_type, "properties": edge_properties}
 
     def get_edges(self, node_id: str) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
             rows = conn.execute(
                 "SELECT from_id, to_id, type, properties FROM graph_edges WHERE from_id = ? OR to_id = ?",
-                (node_id, node_id)
+                (node_id, node_id),
             ).fetchall()
             return [
                 {
                     "from_id": row["from_id"],
                     "to_id": row["to_id"],
                     "type": row["type"],
-                    "properties": json.loads(row["properties"])
+                    "properties": json.loads(row["properties"]),
                 }
                 for row in rows
             ]
@@ -407,8 +371,7 @@ class GraphDatabase:
     def delete_edge(self, from_id: str, to_id: str, edge_type: str) -> bool:
         with self.get_conn() as conn:
             cursor = conn.execute(
-                "DELETE FROM graph_edges WHERE from_id = ? AND to_id = ? AND type = ?",
-                (from_id, to_id, edge_type)
+                "DELETE FROM graph_edges WHERE from_id = ? AND to_id = ? AND type = ?", (from_id, to_id, edge_type)
             )
             return cursor.rowcount > 0
 
@@ -423,11 +386,7 @@ class GraphDatabase:
         with self.get_conn() as conn:
             rows = conn.execute("SELECT id, type, properties FROM graph_nodes").fetchall()
             return {
-                row["id"]: {
-                    "id": row["id"],
-                    "type": row["type"],
-                    "properties": json.loads(row["properties"])
-                }
+                row["id"]: {"id": row["id"], "type": row["type"], "properties": json.loads(row["properties"])}
                 for row in rows
             }
 
@@ -443,7 +402,7 @@ class GraphDatabase:
                     "from_id": row["from_id"],
                     "to_id": row["to_id"],
                     "type": row["type"],
-                    "properties": json.loads(row["properties"])
+                    "properties": json.loads(row["properties"]),
                 }
                 for row in rows
             ]
@@ -454,9 +413,6 @@ class GraphDatabase:
         """
         try:
             with open(self.legacy_filepath, "w", encoding="utf-8") as f:
-                json.dump({
-                    "nodes": self.nodes,
-                    "edges": self.edges
-                }, f, indent=2, ensure_ascii=False)
+                json.dump({"nodes": self.nodes, "edges": self.edges}, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[GraphDB] Error exporting to json: {e}")

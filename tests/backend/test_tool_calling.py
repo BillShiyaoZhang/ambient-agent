@@ -1,4 +1,3 @@
-
 import pytest
 
 from backend.agent.providers import OllamaProvider
@@ -11,6 +10,7 @@ def test_session_fixture(tmp_path):
     workspace_dir = str(tmp_path / "workspace")
     storage = WorkspaceStorage(workspace_dir)
     yield storage
+
 
 @pytest.mark.asyncio
 async def test_tool_calling_loop(test_session, monkeypatch):
@@ -41,18 +41,12 @@ async def test_tool_calling_loop(test_session, monkeypatch):
                     {
                         "id": "call_1",
                         "type": "function",
-                        "function": {
-                            "name": "test_delete_app",
-                            "arguments": '{"app_id": "test-widget"}'
-                        }
+                        "function": {"name": "test_delete_app", "arguments": '{"app_id": "test-widget"}'},
                     }
-                ]
+                ],
             }
         else:
-            return {
-                "content": "Successfully deleted the app.",
-                "tool_calls": None
-            }
+            return {"content": "Successfully deleted the app.", "tool_calls": None}
 
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_llm_api)
 
@@ -63,11 +57,7 @@ async def test_tool_calling_loop(test_session, monkeypatch):
     # We pass the tools schema list
     tools_schema = global_registry.get_tool_schemas()
 
-    response = await provider.generate(
-        messages=messages,
-        db_session=test_session,
-        tools=tools_schema
-    )
+    response = await provider.generate(messages=messages, db_session=test_session, tools=tools_schema)
 
     # 4. Verify tool was executed
     assert tool_executed is True
@@ -89,7 +79,14 @@ async def test_tool_calling_loop(test_session, monkeypatch):
     # 6. Verify audit logging
     logs = test_session.get_audit_logs()
     assert len(logs) == 2
-    tool_req_log = next((l for l in logs if "test_delete_app" in l.response or "call_1" in l.response or "I need to delete the app." in l.response), None)
+    tool_req_log = next(
+        (
+            l
+            for l in logs
+            if "test_delete_app" in l.response or "call_1" in l.response or "I need to delete the app." in l.response
+        ),
+        None,
+    )
     final_resp_log = next((l for l in logs if l.response == "Successfully deleted the app."), None)
     assert tool_req_log is not None
     assert final_resp_log is not None

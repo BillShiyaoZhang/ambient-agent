@@ -32,11 +32,13 @@ active_plan_requests: dict[str, asyncio.Future] = {}
 # Registry to hold active verification approval requests
 active_verification_requests: dict[str, asyncio.Future] = {}
 
+
 class AgentOrchestrator:
     """
-    OpenClaw-inspired main orchestrator. Coordinates user sessions, 
+    OpenClaw-inspired main orchestrator. Coordinates user sessions,
     intent routing, memory/context assembly, tool calling, and providers.
     """
+
     def __init__(self, db_session: Session, app_manager: AppManager, run_opencode_agent_acp_fn=None):
         self.db = db_session
         self.app_manager = app_manager
@@ -44,10 +46,7 @@ class AgentOrchestrator:
         self.run_opencode_agent_acp_fn = run_opencode_agent_acp_fn or run_opencode_agent_acp
 
     async def handle_message(
-        self,
-        session_id: str,
-        content: str,
-        on_update: Callable[[str], Any]
+        self, session_id: str, content: str, on_update: Callable[[str], Any]
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         # 1. Fetch or initialize user session metadata
         db_session_obj = self.db.get(ChatSession, session_id)
@@ -72,7 +71,7 @@ class AgentOrchestrator:
                 session_id=session_id,
                 role="agent",
                 sender="agent",
-                content=f"⚠️ 意图路由分类失败：无法连接大模型服务或解析返回结果。错误信息：{e!s}"
+                content=f"⚠️ 意图路由分类失败：无法连接大模型服务或解析返回结果。错误信息：{e!s}",
             )
             self.db.add(error_msg)
             self.db.commit()
@@ -80,11 +79,15 @@ class AgentOrchestrator:
             return error_msg, None
 
         if is_coding:
-            is_testing = ("pytest" in sys.modules or os.getenv("TESTING") == "true") and os.getenv("FORCE_INTERACTIVE") != "true"
+            is_testing = ("pytest" in sys.modules or os.getenv("TESTING") == "true") and os.getenv(
+                "FORCE_INTERACTIVE"
+            ) != "true"
 
             if is_testing:
                 # Bypass schema alignment entirely in test mode to match exact WebSocket messages expected by test assertions
-                status_text = f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
+                status_text = (
+                    f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
+                )
                 await self._run_callback(on_update, status_text)
                 cli_output = await self.run_opencode_agent_acp_fn(app_id, instruction, on_update=on_update)
                 verification_report = "Bypassed in test mode."
@@ -115,10 +118,7 @@ class AgentOrchestrator:
                         await self._run_callback(on_update, "🔍 正在为您制定开发计划 Plan...")
 
                         plan = await PlanGenerationService.generate_plan(
-                            instruction=instruction,
-                            app_id=app_id,
-                            schemas_context="",
-                            db_session=self.db
+                            instruction=instruction, app_id=app_id, schemas_context="", db_session=self.db
                         )
 
                         plan_approved = False
@@ -130,12 +130,15 @@ class AgentOrchestrator:
                             active_plan_requests[plan_request_id] = future
 
                             # Send plan approval request to the client
-                            await self._run_callback(on_update, {
-                                "type": "plan_approval_request",
-                                "request_id": plan_request_id,
-                                "app_id": app_id,
-                                "plan": plan
-                            })
+                            await self._run_callback(
+                                on_update,
+                                {
+                                    "type": "plan_approval_request",
+                                    "request_id": plan_request_id,
+                                    "app_id": app_id,
+                                    "plan": plan,
+                                },
+                            )
 
                             await self._run_callback(on_update, "⏳ 等待开发计划 Plan 确认中...")
 
@@ -155,7 +158,9 @@ class AgentOrchestrator:
                             elif action == "refine":
                                 feedback_text = response_data.get("feedback", "")
                                 current_plan = response_data.get("plan", plan)
-                                await self._run_callback(on_update, f"🔄 正在根据您的反馈微调 Plan: '{feedback_text}'...")
+                                await self._run_callback(
+                                    on_update, f"🔄 正在根据您的反馈微调 Plan: '{feedback_text}'..."
+                                )
 
                                 plan = await PlanGenerationService.refine_plan(
                                     instruction=instruction,
@@ -163,7 +168,7 @@ class AgentOrchestrator:
                                     schemas_context="",
                                     current_plan=current_plan,
                                     feedback=feedback_text,
-                                    db_session=self.db
+                                    db_session=self.db,
                                 )
                             else:  # deny / cancel
                                 current_state = "cancel_plan"
@@ -174,7 +179,7 @@ class AgentOrchestrator:
                                 session_id=session_id,
                                 role="agent",
                                 sender="agent",
-                                content="❌ 应用生成已被取消：开发计划未获得授权。"
+                                content="❌ 应用生成已被取消：开发计划未获得授权。",
                             )
                             self.db.add(cancel_msg)
                             self.db.commit()
@@ -190,7 +195,7 @@ class AgentOrchestrator:
                             app_id=app_id,
                             db=graph_db,
                             db_session=self.db,
-                            approved_plan=approved_plan
+                            approved_plan=approved_plan,
                         )
 
                         approved = False
@@ -202,12 +207,15 @@ class AgentOrchestrator:
                             active_schema_requests[request_id] = future
 
                             # Send approval request to the client
-                            await self._run_callback(on_update, {
-                                "type": "schema_approval_request",
-                                "request_id": request_id,
-                                "app_id": app_id,
-                                "proposal": proposal
-                            })
+                            await self._run_callback(
+                                on_update,
+                                {
+                                    "type": "schema_approval_request",
+                                    "request_id": request_id,
+                                    "app_id": app_id,
+                                    "proposal": proposal,
+                                },
+                            )
 
                             await self._run_callback(on_update, "⏳ 等待数据库 Schema 确认中...")
 
@@ -231,7 +239,9 @@ class AgentOrchestrator:
                             elif action == "refine":
                                 feedback_text = response_data.get("feedback", "")
                                 current_proposal = response_data.get("proposal", proposal)
-                                await self._run_callback(on_update, f"🔄 正在根据您的反馈微调 Schema: '{feedback_text}'...")
+                                await self._run_callback(
+                                    on_update, f"🔄 正在根据您的反馈微调 Schema: '{feedback_text}'..."
+                                )
 
                                 proposal = await SchemaAlignmentService.refine_proposal(
                                     instruction=instruction,
@@ -240,7 +250,7 @@ class AgentOrchestrator:
                                     feedback=feedback_text,
                                     db=graph_db,
                                     db_session=self.db,
-                                    approved_plan=approved_plan
+                                    approved_plan=approved_plan,
                                 )
                             else:  # deny / cancel
                                 current_state = "cancel_schema"
@@ -251,7 +261,7 @@ class AgentOrchestrator:
                                 session_id=session_id,
                                 role="agent",
                                 sender="agent",
-                                content="❌ 应用生成已被取消：数据库 Schema 对齐提案未获得授权。"
+                                content="❌ 应用生成已被取消：数据库 Schema 对齐提案未获得授权。",
                             )
                             self.db.add(cancel_msg)
                             self.db.commit()
@@ -265,7 +275,7 @@ class AgentOrchestrator:
                                     schema_id=ns.get("id"),
                                     name=ns.get("name", ns.get("id")),
                                     description=ns.get("description", ""),
-                                    properties=ns.get("properties", {})
+                                    properties=ns.get("properties", {}),
                                 )
 
                             reused_schemas = approved_proposal.get("reused_schemas", [])
@@ -282,7 +292,7 @@ class AgentOrchestrator:
                                             name=existing["name"],
                                             description=existing["description"],
                                             properties=merged_props,
-                                            is_core=existing["is_core"]
+                                            is_core=existing["is_core"],
                                         )
 
                     elif current_state == "code_phase":
@@ -300,7 +310,9 @@ class AgentOrchestrator:
                         status_text = "🛠️ Plan 与 Schema 对齐已确认。正在启动 OpenCode 开发者智能体生成 code...\n这可能需要一些时间。"
                         await self._run_callback(on_update, status_text)
 
-                        cli_output = await self.run_opencode_agent_acp_fn(app_id, enriched_instruction, on_update=on_update)
+                        cli_output = await self.run_opencode_agent_acp_fn(
+                            app_id, enriched_instruction, on_update=on_update
+                        )
                         current_state = "verify_phase"
 
                     elif current_state == "verify_phase":
@@ -314,10 +326,12 @@ class AgentOrchestrator:
                                 app_id=app_id,
                                 widget_code=widget_to_send,
                                 registered_schemas=all_registered_schemas,
-                                db_session=self.db
+                                db_session=self.db,
                             )
 
-                        await self._run_callback(on_update, f"### 🔍 Database Schema Verification Report\n\n{verification_report}")
+                        await self._run_callback(
+                            on_update, f"### 🔍 Database Schema Verification Report\n\n{verification_report}"
+                        )
 
                         if "✅ PASSED" in verification_report or "PASSED" in verification_report.upper():
                             current_state = "done"
@@ -330,12 +344,15 @@ class AgentOrchestrator:
                         active_verification_requests[request_id] = future
 
                         # Send verification approval request to client
-                        await self._run_callback(on_update, {
-                            "type": "verification_approval_request",
-                            "request_id": request_id,
-                            "app_id": app_id,
-                            "report": verification_report
-                        })
+                        await self._run_callback(
+                            on_update,
+                            {
+                                "type": "verification_approval_request",
+                                "request_id": request_id,
+                                "app_id": app_id,
+                                "report": verification_report,
+                            },
+                        )
 
                         await self._run_callback(on_update, "⏳ 等待 Schema 校验警告处理指令...")
 
@@ -370,7 +387,7 @@ class AgentOrchestrator:
                 content=(
                     f"OpenCode Execution Log:\n\n```\n{cli_output}\n```\n\n"
                     f"### 🔍 Database Schema Verification Report\n\n{verification_report}"
-                )
+                ),
             )
             self.db.add(agent_msg)
 
@@ -383,11 +400,11 @@ class AgentOrchestrator:
                     sender="agent",
                     content=(
                         f'<ambient-widget id="{widget_to_send["id"]}" title="{widget_to_send["title"]}">\n'
-                        f'<html-content>\n{widget_to_send["html"]}\n</html-content>\n'
-                        f'<css-styles>\n{widget_to_send["css"]}\n</css-styles>\n'
-                        f'<js-script>\n{widget_to_send["js"]}\n</js-script>\n'
-                        f'</ambient-widget>'
-                    )
+                        f"<html-content>\n{widget_to_send['html']}\n</html-content>\n"
+                        f"<css-styles>\n{widget_to_send['css']}\n</css-styles>\n"
+                        f"<js-script>\n{widget_to_send['js']}\n</js-script>\n"
+                        f"</ambient-widget>"
+                    ),
                 )
                 self.db.add(code_msg)
 
@@ -402,7 +419,7 @@ class AgentOrchestrator:
                     title=title,
                     html=widget_to_send["html"],
                     css=widget_to_send["css"],
-                    js=widget_to_send["js"]
+                    js=widget_to_send["js"],
                 )
                 widget_to_send = self.app_manager.get_app_files(app_id)
 
@@ -426,33 +443,21 @@ class AgentOrchestrator:
             llm_prompt_messages.insert(0, {"role": "system", "content": agent_system_prompt})
 
             tools = tool_registry.get_tool_schemas()
-            raw_response = await provider.generate(
-                messages=llm_prompt_messages,
-                db_session=self.db,
-                tools=tools
-            )
+            raw_response = await provider.generate(messages=llm_prompt_messages, db_session=self.db, tools=tools)
             widget_to_send = parse_widget_from_text(raw_response)
 
             if widget_to_send:
-                reply_content = re.sub(r"<ambient-widget.*?>.*?</ambient-widget>", "", raw_response, flags=re.DOTALL).strip()
+                reply_content = re.sub(
+                    r"<ambient-widget.*?>.*?</ambient-widget>", "", raw_response, flags=re.DOTALL
+                ).strip()
             else:
                 reply_content = raw_response
 
-            agent_msg = ChatMessage(
-                session_id=session_id,
-                role="agent",
-                sender="agent",
-                content=reply_content
-            )
+            agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=reply_content)
             self.db.add(agent_msg)
 
             if widget_to_send:
-                code_msg = ChatMessage(
-                    session_id=session_id,
-                    role="code",
-                    sender="agent",
-                    content=raw_response
-                )
+                code_msg = ChatMessage(session_id=session_id, role="code", sender="agent", content=raw_response)
                 self.db.add(code_msg)
 
                 self.app_manager.create_or_update_app(
@@ -460,7 +465,7 @@ class AgentOrchestrator:
                     title=widget_to_send["title"],
                     html=widget_to_send["html"],
                     css=widget_to_send["css"],
-                    js=widget_to_send["js"]
+                    js=widget_to_send["js"],
                 )
 
             self.db.commit()
@@ -471,6 +476,7 @@ class AgentOrchestrator:
     async def _run_callback(self, callback: Callable[[Any], Any], data: Any) -> None:
         try:
             import inspect
+
             if inspect.iscoroutinefunction(callback):
                 await callback(data)
             else:

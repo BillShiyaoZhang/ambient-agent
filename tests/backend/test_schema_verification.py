@@ -12,42 +12,49 @@ def test_session_fixture(tmp_path):
     storage = WorkspaceStorage(workspace_dir)
     yield storage
 
+
 def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
 
     # 1. Mock routing to treat as coding task
     async def mock_route(content, existing_apps, db_session=None):
         return True, "test-app", content
+
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # 2. Mock Plan Generation
     async def mock_generate_plan(*args, **kwargs):
         return "Plan: Build stopwatch"
+
     monkeypatch.setattr("backend.plan_generation.PlanGenerationService.generate_plan", mock_generate_plan)
 
     # 3. Mock Schema alignment
     async def mock_align_schemas(*args, **kwargs):
         assert kwargs.get("approved_plan") == "Plan: Build stopwatch"
         return {"reused_schemas": [], "new_schemas": []}
+
     monkeypatch.setattr("backend.schema_alignment.SchemaAlignmentService.align_schemas", mock_align_schemas)
 
     # 4. Mock ACP OpenCode agent call
     async def mock_run_opencode(app_id, instruction, on_update):
         # Retrieve app_manager from main to write test files
         from backend.main import app_manager
+
         app_manager.create_or_update_app(
             app_id=app_id,
             title="Stopwatch App",
             html="<title>Stopwatch App</title><div>00:00</div>",
             css="",
-            js="console.log('stopwatch active');"
+            js="console.log('stopwatch active');",
         )
         return "OpenCode successfully ran"
+
     monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
 
     # 5. Mock Schema Verification
     async def mock_verify(app_id, widget_code, registered_schemas, db_session=None):
         return "✅ Schema Verification PASSED"
+
     monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
 
     def override_get_db():
@@ -63,10 +70,7 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
     client = TestClient(app)
 
     with client.websocket_connect("/ws/chat?session_id=session-456") as websocket:
-        websocket.send_json({
-            "sender": "user",
-            "content": "Build me a stopwatch"
-        })
+        websocket.send_json({"sender": "user", "content": "Build me a stopwatch"})
 
         # Expect active list on connect
         active_list = websocket.receive_json()
@@ -97,13 +101,15 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
         assert "等待开发计划 Plan 确认中" in waiting_plan["message"]["content"]
 
         # Approve Plan
-        websocket.send_json({
-            "type": "plan_approval_response",
-            "request_id": plan_request_id,
-            "approved": "approve",
-            "plan": "Plan: Build stopwatch",
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "plan_approval_response",
+                "request_id": plan_request_id,
+                "approved": "approve",
+                "plan": "Plan: Build stopwatch",
+                "feedback": "",
+            }
+        )
 
         # PHASE 2: Schema Alignment thinking
         schema_thinking = websocket.receive_json()
@@ -120,13 +126,15 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
         assert "等待数据库 Schema 确认中" in waiting_schema["message"]["content"]
 
         # Approve Schema
-        websocket.send_json({
-            "type": "schema_approval_response",
-            "request_id": schema_request_id,
-            "approved": "approve",
-            "proposal": {"reused_schemas": [], "new_schemas": []},
-            "feedback": ""
-        })
+        websocket.send_json(
+            {
+                "type": "schema_approval_response",
+                "request_id": schema_request_id,
+                "approved": "approve",
+                "proposal": {"reused_schemas": [], "new_schemas": []},
+                "feedback": "",
+            }
+        )
 
         # Expect ACP OpenCode start update
         opencode_start = websocket.receive_json()

@@ -14,6 +14,7 @@ def temp_apps_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("APPS_DIR", str(apps_path))
     return apps_path
 
+
 def test_create_and_get_app(temp_apps_dir):
     manager = AppManager()
 
@@ -37,8 +38,6 @@ def test_create_and_get_app(temp_apps_dir):
     assert metadata["id"] == app_id
     assert metadata["title"] == title
 
-
-
     # 2. Get app files
     app_files = manager.get_app_files(app_id)
     assert app_files is not None
@@ -47,6 +46,7 @@ def test_create_and_get_app(temp_apps_dir):
     assert app_files["html"] == html
     assert app_files["css"] == css
     assert app_files["js"] == js
+
 
 def test_list_apps(temp_apps_dir):
     manager = AppManager()
@@ -64,6 +64,7 @@ def test_list_apps(temp_apps_dir):
     assert "App One" in titles
     assert "App Two" in titles
 
+
 def test_delete_app(temp_apps_dir):
     manager = AppManager()
 
@@ -78,7 +79,6 @@ def test_delete_app(temp_apps_dir):
     # Try deleting non-existent
     success = manager.delete_app("non-existent")
     assert success is False
-
 
 
 def test_auto_heal_missing_metadata(temp_apps_dir):

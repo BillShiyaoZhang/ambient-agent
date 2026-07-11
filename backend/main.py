@@ -30,6 +30,7 @@ latest_session_status: dict[str, Any] = {}
 # Set of active session IDs currently running generation tasks
 active_running_sessions: set[str] = set()
 
+
 async def send_to_session(session_id: str, data: Any):
     """Sends JSON data to all active websockets connected to a specific session."""
     sockets = active_websockets.get(session_id, set())
@@ -39,6 +40,7 @@ async def send_to_session(session_id: str, data: Any):
         except Exception:
             pass
 
+
 async def broadcast_global(data: Any):
     """Sends JSON data to all connected websockets across all sessions."""
     for sockets in list(active_websockets.values()):
@@ -47,6 +49,7 @@ async def broadcast_global(data: Any):
                 await ws.send_json(data)
             except Exception:
                 pass
+
 
 app_manager = AppManager()
 
@@ -58,14 +61,17 @@ from backend.graph_db import GraphDatabase
 
 graph_db = GraphDatabase(WORKSPACE_DIR)
 
+
 def get_db():
     yield db_storage
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Perform automated migration from db.sqlite3 and backend/apps to workspace
     migrate_old_data(WORKSPACE_DIR)
     yield
+
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
 
@@ -78,23 +84,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "message": "Ambient Agent is running"}
+
 
 @app.get("/api/audit-logs")
 async def get_audit_logs(session: WorkspaceStorage = Depends(get_db)):
     return session.get_audit_logs()
 
+
 # --- Multi-Session REST endpoints ---
+
 
 class SessionCreate(BaseModel):
     id: str
     title: str
 
+
 @app.get("/api/sessions")
 async def get_sessions(session: WorkspaceStorage = Depends(get_db)):
     return session.get_sessions()
+
 
 @app.post("/api/sessions")
 async def create_session(data: SessionCreate, session: WorkspaceStorage = Depends(get_db)):
@@ -105,9 +117,11 @@ async def create_session(data: SessionCreate, session: WorkspaceStorage = Depend
         session.commit()
     return db_sess
 
+
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, session: WorkspaceStorage = Depends(get_db)):
     return session.get_messages(session_id)
+
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, session: WorkspaceStorage = Depends(get_db)):
@@ -116,26 +130,33 @@ async def delete_session(session_id: str, session: WorkspaceStorage = Depends(ge
         return {"status": "ok"}
     return {"status": "error", "message": "Session not found"}
 
+
 # --- Canvas Config REST endpoints ---
+
 
 class CanvasConfig(BaseModel):
     pinned_ids: list[str]
     widget_spans: dict[str, Any]
 
+
 @app.get("/api/canvas")
 async def get_canvas(session: WorkspaceStorage = Depends(get_db)):
     return session.get_canvas_config()
+
 
 @app.post("/api/canvas")
 async def save_canvas(data: CanvasConfig, session: WorkspaceStorage = Depends(get_db)):
     session.save_canvas_config(data.model_dump())
     return {"status": "ok"}
 
+
 # --- AppStore REST endpoints ---
+
 
 @app.get("/api/apps")
 async def list_apps():
     return app_manager.list_apps()
+
 
 @app.get("/api/apps/{app_id}")
 async def get_app_files(app_id: str):
@@ -143,6 +164,7 @@ async def get_app_files(app_id: str):
     if files:
         return files
     return {"status": "error", "message": "App not found"}
+
 
 @app.delete("/api/apps/{app_id}")
 async def delete_app(app_id: str):
@@ -152,11 +174,12 @@ async def delete_app(app_id: str):
     return {"status": "error", "message": "App not found"}
 
 
-
 # --- Graph Mutations endpoint ---
+
 
 class GraphMutateRequest(BaseModel):
     actions: list[dict[str, Any]]
+
 
 @app.post("/api/graph/mutate")
 async def mutate_graph(data: GraphMutateRequest):
@@ -167,13 +190,10 @@ async def mutate_graph(data: GraphMutateRequest):
                 graph_db.create_node(
                     node_id=action.get("id"),
                     node_type=action.get("type", "Generic"),
-                    properties=action.get("properties")
+                    properties=action.get("properties"),
                 )
             elif act_type == "update_node_property":
-                graph_db.update_node_property(
-                    node_id=action.get("id"),
-                    properties=action.get("properties")
-                )
+                graph_db.update_node_property(node_id=action.get("id"), properties=action.get("properties"))
             elif act_type == "delete_node":
                 graph_db.delete_node(node_id=action.get("id"))
             elif act_type == "create_edge":
@@ -181,30 +201,34 @@ async def mutate_graph(data: GraphMutateRequest):
                     from_id=action.get("from_id"),
                     to_id=action.get("to_id"),
                     edge_type=action.get("type"),
-                    properties=action.get("properties")
+                    properties=action.get("properties"),
                 )
             elif act_type == "delete_edge":
                 graph_db.delete_edge(
-                    from_id=action.get("from_id"),
-                    to_id=action.get("to_id"),
-                    edge_type=action.get("type")
+                    from_id=action.get("from_id"), to_id=action.get("to_id"), edge_type=action.get("type")
                 )
         # Broadcast changes to all websocket subscribers
         from backend.graph_subscription import subscription_manager
+
         async def send_ws(ws, payload):
             try:
                 await ws.send_json(payload)
             except Exception:
                 pass
+
         await subscription_manager.broadcast_updates(graph_db, send_ws)
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 # --- WebSocket Chat Handler ---
 
+
 @app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket, session_id: str | None = None, session: WorkspaceStorage = Depends(get_db)):
+async def websocket_chat(
+    websocket: WebSocket, session_id: str | None = None, session: WorkspaceStorage = Depends(get_db)
+):
     await websocket.accept()
 
     if not session_id:
@@ -222,7 +246,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
         session.add(db_session_obj)
         session.commit()
 
-    orchestrator = AgentOrchestrator(db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp)
+    orchestrator = AgentOrchestrator(
+        db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp
+    )
 
     # Callback to send incremental updates to client
     async def send_ws_update(data: Any):
@@ -244,8 +270,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
                         "sender": "agent",
                         "role": "agent",
                         "content": data,
-                        "timestamp": datetime.now(UTC).isoformat()
-                    }
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    },
                 }
                 # Store latest status update
                 latest_session_status[session_id] = payload
@@ -257,12 +283,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
     async def process_user_message(content_str: str, sender_str: str):
         try:
             # Save user message to database (committed immediately so we get the ID for ack)
-            user_msg = ChatMessage(
-                session_id=session_id,
-                role="user",
-                sender=sender_str,
-                content=content_str
-            )
+            user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
             session.add(user_msg)
 
             # Update session's updated_at timestamp
@@ -272,51 +293,48 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
             session.refresh(user_msg)
 
             # Send acknowledgement back to client
-            await send_to_session(session_id, {
-                "type": "ack",
-                "message": {
-                    "id": user_msg.id,
-                    "sender": user_msg.sender,
-                    "role": user_msg.role,
-                    "content": user_msg.content,
-                    "timestamp": user_msg.timestamp.isoformat() if user_msg.timestamp else None
-                }
-            })
+            await send_to_session(
+                session_id,
+                {
+                    "type": "ack",
+                    "message": {
+                        "id": user_msg.id,
+                        "sender": user_msg.sender,
+                        "role": user_msg.role,
+                        "content": user_msg.content,
+                        "timestamp": user_msg.timestamp.isoformat() if user_msg.timestamp else None,
+                    },
+                },
+            )
 
             # Mark session as running and broadcast globally
             active_running_sessions.add(session_id)
-            await broadcast_global({
-                "type": "session_status_update",
-                "session_id": session_id,
-                "status": "running"
-            })
+            await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "running"})
 
             # Delegate execution to orchestrator
             agent_msg, widget_to_send = await orchestrator.handle_message(
-                session_id=session_id,
-                content=content_str,
-                on_update=send_ws_update
+                session_id=session_id, content=content_str, on_update=send_ws_update
             )
 
             # Send the final agent explanation/execution log back to client
-            await send_to_session(session_id, {
-                "type": "reply",
-                "message": {
-                    "id": agent_msg.id,
-                    "sender": agent_msg.sender,
-                    "role": agent_msg.role,
-                    "content": agent_msg.content,
-                    "timestamp": agent_msg.timestamp.isoformat() if agent_msg.timestamp else None
-                }
-            })
+            await send_to_session(
+                session_id,
+                {
+                    "type": "reply",
+                    "message": {
+                        "id": agent_msg.id,
+                        "sender": agent_msg.sender,
+                        "role": agent_msg.role,
+                        "content": agent_msg.content,
+                        "timestamp": agent_msg.timestamp.isoformat() if agent_msg.timestamp else None,
+                    },
+                },
+            )
 
             # Send widget creation/update to frontend
             if widget_to_send:
                 try:
-                    await send_to_session(session_id, {
-                        "type": "widget",
-                        "widget": widget_to_send
-                    })
+                    await send_to_session(session_id, {"type": "widget", "widget": widget_to_send})
                 except Exception:
                     pass
         except Exception as e:
@@ -326,19 +344,12 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
             pending_requests.pop(session_id, None)
             latest_session_status.pop(session_id, None)
             active_running_sessions.discard(session_id)
-            await broadcast_global({
-                "type": "session_status_update",
-                "session_id": session_id,
-                "status": "idle"
-            })
+            await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "idle"})
 
     # Restore connection state for the client
     try:
         # Send all active running sessions
-        await websocket.send_json({
-            "type": "active_sessions_list",
-            "active_session_ids": list(active_running_sessions)
-        })
+        await websocket.send_json({"type": "active_sessions_list", "active_session_ids": list(active_running_sessions)})
 
         # Send latest status/logs if session is running
         if session_id in latest_session_status:
@@ -369,6 +380,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
                             pending_requests.pop(sess_id, None)
 
                 from backend.opencode_service import active_acp_clients
+
                 resolved = False
                 for client in active_acp_clients.values():
                     if request_id in client.pending_permissions:
@@ -403,6 +415,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
                     response_data = {"feedback": feedback}
 
                 from backend.agent.harness import active_schema_requests
+
                 fut = active_schema_requests.get(request_id)
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
@@ -430,6 +443,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
                     response_data = {"feedback": feedback, "plan": plan}
 
                 from backend.agent.harness import active_plan_requests
+
                 fut = active_plan_requests.get(request_id)
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
@@ -449,6 +463,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
                 response_data = {"feedback": feedback}
 
                 from backend.agent.harness import active_verification_requests
+
                 fut = active_verification_requests.get(request_id)
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
@@ -456,15 +471,15 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
                 sub_id = data.get("subscription_id")
                 query = data.get("query", {})
                 from backend.graph_subscription import subscription_manager
+
                 initial_res = subscription_manager.register(websocket, sub_id, query, graph_db)
-                await websocket.send_json({
-                    "type": "graph_query_update",
-                    "subscription_id": sub_id,
-                    "data": initial_res
-                })
+                await websocket.send_json(
+                    {"type": "graph_query_update", "subscription_id": sub_id, "data": initial_res}
+                )
             elif msg_type == "graph_unsubscribe":
                 sub_id = data.get("subscription_id")
                 from backend.graph_subscription import subscription_manager
+
                 subscription_manager.unregister(websocket, sub_id)
             else:
                 sender = data.get("sender", "user")
@@ -480,5 +495,5 @@ async def websocket_chat(websocket: WebSocket, session_id: str | None = None, se
             if not active_websockets[session_id]:
                 active_websockets.pop(session_id, None)
         from backend.graph_subscription import subscription_manager
-        subscription_manager.unregister_all(websocket)
 
+        subscription_manager.unregister_all(websocket)

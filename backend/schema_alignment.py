@@ -8,14 +8,11 @@ from backend.graph_db import GraphDatabase
 
 logger = logging.getLogger("schema_alignment")
 
+
 class SchemaAlignmentService:
     @staticmethod
     async def align_schemas(
-        instruction: str,
-        app_id: str,
-        db: GraphDatabase,
-        db_session: Any = None,
-        approved_plan: str = ""
+        instruction: str, app_id: str, db: GraphDatabase, db_session: Any = None, approved_plan: str = ""
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
@@ -82,14 +79,12 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
         # 2. Call LLM
         import os
+
         provider_name = os.getenv("LLM_PROVIDER", "ollama")
         model_name = os.getenv("LLM_MODEL", "llama3")
         provider = get_llm_provider(provider_name, model_name)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         raw_response = ""
         try:
@@ -111,7 +106,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
             start_idx = cleaned.find("{")
             end_idx = cleaned.rfind("}")
             if start_idx != -1 and end_idx != -1:
-                cleaned = cleaned[start_idx:end_idx+1]
+                cleaned = cleaned[start_idx : end_idx + 1]
 
             proposal = json.loads(cleaned)
 
@@ -126,10 +121,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         except Exception as e:
             logger.error(f"Failed to generate or parse schema alignment: {e}. Raw response: {raw_response}")
             # Safe fallback: assume no schemas to reuse or create, just let it proceed
-            return {
-                "reused_schemas": [],
-                "new_schemas": []
-            }
+            return {"reused_schemas": [], "new_schemas": []}
 
     @staticmethod
     async def refine_proposal(
@@ -139,7 +131,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         feedback: str,
         db: GraphDatabase,
         db_session: Any = None,
-        approved_plan: str = ""
+        approved_plan: str = "",
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
@@ -204,14 +196,12 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
 """
 
         import os
+
         provider_name = os.getenv("LLM_PROVIDER", "ollama")
         model_name = os.getenv("LLM_MODEL", "llama3")
         provider = get_llm_provider(provider_name, model_name)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         raw_response = ""
         try:
@@ -227,7 +217,7 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
             start_idx = cleaned.find("{")
             end_idx = cleaned.rfind("}")
             if start_idx != -1 and end_idx != -1:
-                cleaned = cleaned[start_idx:end_idx+1]
+                cleaned = cleaned[start_idx : end_idx + 1]
 
             proposal = json.loads(cleaned)
             if "reused_schemas" not in proposal:

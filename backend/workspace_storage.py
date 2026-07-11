@@ -55,32 +55,36 @@ def migrate_old_data(workspace_dir: str) -> None:
                 # Fetch messages for this session
                 cursor.execute(
                     "SELECT id, role, sender, content, timestamp FROM chatmessage WHERE session_id = ? ORDER BY timestamp ASC",
-                    (s_id,)
+                    (s_id,),
                 )
                 msgs = cursor.fetchall()
                 messages_list = []
                 for m_id, m_role, m_sender, m_content, m_timestamp in msgs:
-                    messages_list.append({
-                        "id": m_id,
-                        "role": m_role or "user",
-                        "sender": m_sender or "user",
-                        "content": m_content,
-                        "timestamp": m_timestamp
-                    })
+                    messages_list.append(
+                        {
+                            "id": m_id,
+                            "role": m_role or "user",
+                            "sender": m_sender or "user",
+                            "content": m_content,
+                            "timestamp": m_timestamp,
+                        }
+                    )
 
                 session_data = {
                     "id": s_id,
                     "title": s_title,
                     "created_at": s_created,
                     "updated_at": s_updated,
-                    "messages": messages_list
+                    "messages": messages_list,
                 }
                 session_file = os.path.join(workspace_dir, "sessions", f"{s_id}.json")
                 with open(session_file, "w", encoding="utf-8") as f:
                     json.dump(session_data, f, indent=2, ensure_ascii=False)
 
             # Fetch LLMAuditLogs
-            cursor.execute("SELECT id, timestamp, provider, model, prompt, response FROM llmauditlog ORDER BY timestamp ASC")
+            cursor.execute(
+                "SELECT id, timestamp, provider, model, prompt, response FROM llmauditlog ORDER BY timestamp ASC"
+            )
             audit_logs = cursor.fetchall()
             audit_file = os.path.join(workspace_dir, "audit_logs.jsonl")
             os.makedirs(os.path.dirname(audit_file), exist_ok=True)
@@ -92,7 +96,7 @@ def migrate_old_data(workspace_dir: str) -> None:
                         "provider": a_provider,
                         "model": a_model,
                         "prompt": a_prompt,
-                        "response": a_response
+                        "response": a_response,
                     }
                     f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
@@ -140,7 +144,7 @@ class WorkspaceStorage:
                         id=data["id"],
                         title=data["title"],
                         created_at=created_at or datetime.now(UTC),
-                        updated_at=updated_at or datetime.now(UTC)
+                        updated_at=updated_at or datetime.now(UTC),
                     )
                 except Exception:
                     return None
@@ -211,14 +215,16 @@ class WorkspaceStorage:
                 t_val = m.get("timestamp")
                 if isinstance(t_val, str):
                     t_val = datetime.fromisoformat(t_val)
-                messages.append(ChatMessage(
-                    id=m.get("id"),
-                    session_id=session_id,
-                    role=m.get("role", "user"),
-                    sender=m.get("sender", "user"),
-                    content=m.get("content", ""),
-                    timestamp=t_val or datetime.now(UTC)
-                ))
+                messages.append(
+                    ChatMessage(
+                        id=m.get("id"),
+                        session_id=session_id,
+                        role=m.get("role", "user"),
+                        sender=m.get("sender", "user"),
+                        content=m.get("content", ""),
+                        timestamp=t_val or datetime.now(UTC),
+                    )
+                )
             return messages
         except Exception:
             return []
@@ -236,14 +242,16 @@ class WorkspaceStorage:
                             t_val = data.get("timestamp")
                             if isinstance(t_val, str):
                                 t_val = datetime.fromisoformat(t_val)
-                            logs.append(LLMAuditLog(
-                                id=data.get("id"),
-                                timestamp=t_val or datetime.now(UTC),
-                                provider=data.get("provider"),
-                                model=data.get("model"),
-                                prompt=data.get("prompt"),
-                                response=data.get("response")
-                            ))
+                            logs.append(
+                                LLMAuditLog(
+                                    id=data.get("id"),
+                                    timestamp=t_val or datetime.now(UTC),
+                                    provider=data.get("provider"),
+                                    model=data.get("model"),
+                                    prompt=data.get("prompt"),
+                                    response=data.get("response"),
+                                )
+                            )
             except Exception:
                 pass
         # Sort by timestamp desc
@@ -285,9 +293,13 @@ class WorkspaceStorage:
         data = {
             "id": session.id,
             "title": session.title,
-            "created_at": session.created_at.isoformat() if isinstance(session.created_at, datetime) else session.created_at,
-            "updated_at": session.updated_at.isoformat() if isinstance(session.updated_at, datetime) else session.updated_at,
-            "messages": []
+            "created_at": session.created_at.isoformat()
+            if isinstance(session.created_at, datetime)
+            else session.created_at,
+            "updated_at": session.updated_at.isoformat()
+            if isinstance(session.updated_at, datetime)
+            else session.updated_at,
+            "messages": [],
         }
         if os.path.exists(session_file):
             try:
@@ -307,7 +319,7 @@ class WorkspaceStorage:
             "title": "Active Chat",
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
-            "messages": []
+            "messages": [],
         }
         if os.path.exists(session_file):
             try:
@@ -324,7 +336,9 @@ class WorkspaceStorage:
             "role": message.role,
             "sender": message.sender,
             "content": message.content,
-            "timestamp": message.timestamp.isoformat() if isinstance(message.timestamp, datetime) else message.timestamp
+            "timestamp": message.timestamp.isoformat()
+            if isinstance(message.timestamp, datetime)
+            else message.timestamp,
         }
 
         replaced = False
@@ -350,7 +364,7 @@ class WorkspaceStorage:
             "provider": log.provider,
             "model": log.model,
             "prompt": log.prompt,
-            "response": log.response
+            "response": log.response,
         }
         with open(audit_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_dict, ensure_ascii=False) + "\n")

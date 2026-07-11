@@ -104,16 +104,28 @@ def test_automatic_migration(tmp_path, monkeypatch):
     db_path = "db.sqlite3"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE chatsession (id VARCHAR PRIMARY KEY, title VARCHAR, created_at DATETIME, updated_at DATETIME)")
-    cursor.execute("CREATE TABLE chatmessage (id INTEGER PRIMARY KEY, session_id VARCHAR, role VARCHAR, sender VARCHAR, content VARCHAR, timestamp DATETIME)")
-    cursor.execute("CREATE TABLE llmauditlog (id INTEGER PRIMARY KEY, timestamp DATETIME, provider VARCHAR, model VARCHAR, prompt VARCHAR, response VARCHAR)")
+    cursor.execute(
+        "CREATE TABLE chatsession (id VARCHAR PRIMARY KEY, title VARCHAR, created_at DATETIME, updated_at DATETIME)"
+    )
+    cursor.execute(
+        "CREATE TABLE chatmessage (id INTEGER PRIMARY KEY, session_id VARCHAR, role VARCHAR, sender VARCHAR, content VARCHAR, timestamp DATETIME)"
+    )
+    cursor.execute(
+        "CREATE TABLE llmauditlog (id INTEGER PRIMARY KEY, timestamp DATETIME, provider VARCHAR, model VARCHAR, prompt VARCHAR, response VARCHAR)"
+    )
 
     # Insert session
-    cursor.execute("INSERT INTO chatsession VALUES ('sess-100', 'Old Chat', '2026-07-10T12:00:00', '2026-07-10T12:05:00')")
+    cursor.execute(
+        "INSERT INTO chatsession VALUES ('sess-100', 'Old Chat', '2026-07-10T12:00:00', '2026-07-10T12:05:00')"
+    )
     # Insert message
-    cursor.execute("INSERT INTO chatmessage VALUES (10, 'sess-100', 'user', 'user', 'Legacy Hello', '2026-07-10T12:01:00')")
+    cursor.execute(
+        "INSERT INTO chatmessage VALUES (10, 'sess-100', 'user', 'user', 'Legacy Hello', '2026-07-10T12:01:00')"
+    )
     # Insert audit log
-    cursor.execute("INSERT INTO llmauditlog VALUES (50, '2026-07-10T12:01:05', 'openai', 'gpt-4', 'Legacy Prompt', 'Legacy Response')")
+    cursor.execute(
+        "INSERT INTO llmauditlog VALUES (50, '2026-07-10T12:01:05', 'openai', 'gpt-4', 'Legacy Prompt', 'Legacy Response')"
+    )
 
     conn.commit()
     conn.close()

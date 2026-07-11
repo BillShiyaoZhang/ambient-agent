@@ -13,6 +13,7 @@ def test_session_fixture(tmp_path):
     storage = WorkspaceStorage(workspace_dir)
     yield storage
 
+
 @pytest.mark.asyncio
 async def test_llm_audit_logging(test_session, monkeypatch):
     # Mock the actual LLM call to return a fixed string
@@ -25,10 +26,7 @@ async def test_llm_audit_logging(test_session, monkeypatch):
 
     # Run the generate service
     response = await generate_agent_response(
-        user_message="Hello!",
-        provider="ollama",
-        model="llama3",
-        session=test_session
+        user_message="Hello!", provider="ollama", model="llama3", session=test_session
     )
 
     assert response == mock_response
@@ -42,15 +40,11 @@ async def test_llm_audit_logging(test_session, monkeypatch):
     assert logs[0].response == mock_response
     assert logs[0].timestamp is not None
 
+
 @pytest.mark.asyncio
 async def test_audit_logs_api(test_session):
     # Add a mock log
-    log_entry = LLMAuditLog(
-        provider="openai",
-        model="gpt-4o",
-        prompt="Tell me a joke",
-        response="Joke content"
-    )
+    log_entry = LLMAuditLog(provider="openai", model="gpt-4o", prompt="Tell me a joke", response="Joke content")
     test_session.add(log_entry)
     test_session.commit()
 

@@ -19,6 +19,7 @@ def test_session_fixture(tmp_path):
     # Restore original apps directory
     app_manager.apps_dir = old_apps_dir
 
+
 def test_websocket_opencode_routing(test_session, monkeypatch):
     # Mock run_opencode_agent_acp to avoid running a real command line process
     async def mock_run_opencode_agent_acp(app_id, instruction, on_update):
@@ -30,7 +31,7 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
             title="Test Timer App",
             html="<title>Test Timer App</title><div class='timer'>12:34</div>",
             css=".timer { color: green; }",
-            js="// Timer controller"
+            js="// Timer controller",
         )
         return "Mocked OpenCode success: stopwatch files updated on disk."
 
@@ -47,10 +48,7 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
         # Send a message starting with /app to trigger OpenCode routing
-        websocket.send_json({
-            "sender": "user",
-            "content": "/app test-timer Add standard start/stop buttons"
-        })
+        websocket.send_json({"sender": "user", "content": "/app test-timer Add standard start/stop buttons"})
 
         # 1. Expect acknowledgment
         ack = websocket.receive_json()

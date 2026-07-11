@@ -9,7 +9,7 @@ def parse_widget_from_text(text: str) -> dict[str, str] | None:
       <css-styles>...</css-styles>
       <js-script>...</js-script>
     </ambient-widget>
-    
+
     Returns a dict with keys: id, title, html, css, js or None if no match found.
     """
     pattern = r"<ambient-widget\s+id=\"([^\"]+)\"\s+title=\"([^\"]+)\">(.*?)</ambient-widget>"
@@ -28,8 +28,9 @@ def parse_widget_from_text(text: str) -> dict[str, str] | None:
         "title": title.strip(),
         "html": html_match.group(1).strip() if html_match else "",
         "css": css_match.group(1).strip() if css_match else "",
-        "js": js_match.group(1).strip() if js_match else ""
+        "js": js_match.group(1).strip() if js_match else "",
     }
+
 
 class AgentParser:
     @staticmethod
@@ -40,4 +41,3 @@ class AgentParser:
         """
         widget = parse_widget_from_text(text)
         return [widget] if widget else []
-

@@ -26,10 +26,12 @@ def test_parse_valid_widget():
     assert ".weather {" in widget["css"]
     assert 'console.log("hello");' in widget["js"]
 
+
 def test_parse_no_widget():
     sample_text = "Hello, how can I help you today?"
     widget = parse_widget_from_text(sample_text)
     assert widget is None
+
 
 def test_parse_partial_widget():
     # Test widget missing js-script

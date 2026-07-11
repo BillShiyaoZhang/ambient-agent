@@ -39,12 +39,7 @@ def test_execute_graph_query(tmp_path):
     q3 = {
         "type": "Task",
         "properties": {"status": "pending"},
-        "include": [
-            {
-                "relation": "ASSOCIATED_WITH",
-                "target_type": "CalendarEvent"
-            }
-        ]
+        "include": [{"relation": "ASSOCIATED_WITH", "target_type": "CalendarEvent"}],
     }
     res3 = execute_graph_query(q3, db)
     assert len(res3) == 1
@@ -57,12 +52,14 @@ def test_execute_graph_query(tmp_path):
     assert rel["target"]["id"] == "e1"
     assert rel["target"]["properties"]["summary"] == "Meeting 1"
 
+
 def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     workspace_dir = str(tmp_path / "workspace")
     monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
 
     # Force Main App backend configuration to reload / use this temp directory
     from backend import main
+
     # Re-initialize the GraphDatabase in main using the mocked env
     main.graph_db = GraphDatabase(workspace_dir)
 
@@ -75,21 +72,21 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
                 "action": "create_node",
                 "id": "t-mut-1",
                 "type": "Task",
-                "properties": {"title": "Task Mut 1", "status": "pending"}
+                "properties": {"title": "Task Mut 1", "status": "pending"},
             },
             {
                 "action": "create_node",
                 "id": "e-mut-1",
                 "type": "CalendarEvent",
-                "properties": {"summary": "Event Mut 1"}
+                "properties": {"summary": "Event Mut 1"},
             },
             {
                 "action": "create_edge",
                 "from_id": "t-mut-1",
                 "to_id": "e-mut-1",
                 "type": "ASSOCIATED_WITH",
-                "properties": {"note": "mutation check"}
-            }
+                "properties": {"note": "mutation check"},
+            },
         ]
     }
 
@@ -114,24 +111,15 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     # Test update and delete
     payload2 = {
         "actions": [
-            {
-                "action": "update_node_property",
-                "id": "t-mut-1",
-                "properties": {"status": "completed"}
-            },
-            {
-                "action": "delete_edge",
-                "from_id": "t-mut-1",
-                "to_id": "e-mut-1",
-                "type": "ASSOCIATED_WITH"
-            }
+            {"action": "update_node_property", "id": "t-mut-1", "properties": {"status": "completed"}},
+            {"action": "delete_edge", "from_id": "t-mut-1", "to_id": "e-mut-1", "type": "ASSOCIATED_WITH"},
         ]
     }
 
     response2 = client.post("/api/graph/mutate", json=payload2)
     assert response2.status_code == 200
 
-    db.load() # Refresh
+    db.load()  # Refresh
     node_t = db.get_node("t-mut-1")
     assert node_t["properties"]["status"] == "completed"
     assert len(db.get_edges("t-mut-1")) == 0

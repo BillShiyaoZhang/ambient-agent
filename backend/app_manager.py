@@ -34,7 +34,7 @@ class AppManager:
             "id": app_id,
             "title": title,
             "created_at": created_at,
-            "updated_at": datetime.now(UTC).isoformat()
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2, ensure_ascii=False)
@@ -51,10 +51,9 @@ class AppManager:
         with open(os.path.join(app_path, "controller.js"), "w", encoding="utf-8") as f:
             f.write(js)
 
-
-
     def _ensure_metadata(self, app_id: str, app_path: str, meta_path: str) -> dict[str, Any] | None:
         import re
+
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, encoding="utf-8") as f:
@@ -82,7 +81,7 @@ class AppManager:
             "id": app_id,
             "title": title,
             "created_at": datetime.now(UTC).isoformat(),
-            "updated_at": datetime.now(UTC).isoformat()
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         try:
             with open(meta_path, "w", encoding="utf-8") as f:
@@ -117,13 +116,7 @@ class AppManager:
                 with open(js_path, encoding="utf-8") as f:
                     js = f.read()
 
-            return {
-                "id": app_id,
-                "title": meta.get("title", app_id),
-                "html": html,
-                "css": css,
-                "js": js
-            }
+            return {"id": app_id, "title": meta.get("title", app_id), "html": html, "css": css, "js": js}
         except Exception:
             return None
 
@@ -153,5 +146,3 @@ class AppManager:
             return True
         except Exception:
             return False
-
-

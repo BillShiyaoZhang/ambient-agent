@@ -11,6 +11,7 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
     # Reload Graph DB instance in main
     main_db = GraphDatabase(workspace_dir)
     from backend import main
+
     main.graph_db = main_db
 
     client = TestClient(app)
@@ -19,11 +20,7 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
         # 1. Subscribe to Task nodes
-        sub_msg = {
-            "type": "graph_subscribe",
-            "subscription_id": "sub-tasks",
-            "query": {"type": "Task"}
-        }
+        sub_msg = {"type": "graph_subscribe", "subscription_id": "sub-tasks", "query": {"type": "Task"}}
         websocket.send_json(sub_msg)
 
         # 2. Check for initial query result message
@@ -39,7 +36,7 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
                     "action": "create_node",
                     "id": "t-sync-1",
                     "type": "Task",
-                    "properties": {"title": "Sync Task 1", "status": "pending"}
+                    "properties": {"title": "Sync Task 1", "status": "pending"},
                 }
             ]
         }
@@ -55,21 +52,13 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
         assert data2["data"][0]["properties"]["title"] == "Sync Task 1"
 
         # 5. Unsubscribe
-        unsub_msg = {
-            "type": "graph_unsubscribe",
-            "subscription_id": "sub-tasks"
-        }
+        unsub_msg = {"type": "graph_unsubscribe", "subscription_id": "sub-tasks"}
         websocket.send_json(unsub_msg)
 
         # 6. Trigger another mutation
         mutate_payload2 = {
             "actions": [
-                {
-                    "action": "create_node",
-                    "id": "t-sync-2",
-                    "type": "Task",
-                    "properties": {"title": "Sync Task 2"}
-                }
+                {"action": "create_node", "id": "t-sync-2", "type": "Task", "properties": {"title": "Sync Task 2"}}
             ]
         }
         response2 = client.post("/api/graph/mutate", json=mutate_payload2)
