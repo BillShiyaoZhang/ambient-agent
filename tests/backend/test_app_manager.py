@@ -1,8 +1,10 @@
-import os
-import shutil
-import pytest
 import json
+import os
+
+import pytest
+
 from backend.app_manager import AppManager
+
 
 @pytest.fixture
 def temp_apps_dir(tmp_path, monkeypatch):
@@ -14,27 +16,27 @@ def temp_apps_dir(tmp_path, monkeypatch):
 
 def test_create_and_get_app(temp_apps_dir):
     manager = AppManager()
-    
+
     app_id = "test-todo"
     title = "Test Todo App"
     html = "<div>Todo List</div>"
     css = "div { color: red; }"
     js = "console.log('init');"
-    
+
     # 1. Create app
     manager.create_or_update_app(app_id, title, html, css, js)
-    
+
     # Verify directory and files exist
     app_dir = temp_apps_dir / app_id
     assert app_dir.exists()
     assert (app_dir / "index.html").read_text() == html
     assert (app_dir / "style.css").read_text() == css
     assert (app_dir / "controller.js").read_text() == js
-    
+
     metadata = json.loads((app_dir / "metadata.json").read_text())
     assert metadata["id"] == app_id
     assert metadata["title"] == title
-    
+
 
 
     # 2. Get app files
@@ -48,31 +50,31 @@ def test_create_and_get_app(temp_apps_dir):
 
 def test_list_apps(temp_apps_dir):
     manager = AppManager()
-    
+
     manager.create_or_update_app("app1", "App One", "<h1>1</h1>", "", "")
     manager.create_or_update_app("app2", "App Two", "<h1>2</h1>", "", "")
-    
+
     apps = manager.list_apps()
     assert len(apps) == 2
     ids = [a["id"] for a in apps]
     assert "app1" in ids
     assert "app2" in ids
-    
+
     titles = [a["title"] for a in apps]
     assert "App One" in titles
     assert "App Two" in titles
 
 def test_delete_app(temp_apps_dir):
     manager = AppManager()
-    
+
     manager.create_or_update_app("app-to-delete", "Delete Me", "<div></div>", "", "")
     assert (temp_apps_dir / "app-to-delete").exists()
-    
+
     # Delete
     success = manager.delete_app("app-to-delete")
     assert success is True
     assert not (temp_apps_dir / "app-to-delete").exists()
-    
+
     # Try deleting non-existent
     success = manager.delete_app("non-existent")
     assert success is False
@@ -81,34 +83,34 @@ def test_delete_app(temp_apps_dir):
 
 def test_auto_heal_missing_metadata(temp_apps_dir):
     manager = AppManager()
-    
+
     app_id = "manual-weather"
     app_dir = temp_apps_dir / app_id
     app_dir.mkdir()
-    
+
     # Write only index.html, style.css, controller.js but no metadata.json
     html_content = "<html><head><title>My Awesome Weather</title></head><body></body></html>"
     (app_dir / "index.html").write_text(html_content, encoding="utf-8")
     (app_dir / "style.css").write_text("body {}", encoding="utf-8")
     (app_dir / "controller.js").write_text("console.log('weather')", encoding="utf-8")
-    
+
     # Check that metadata.json does not exist yet
     assert not (app_dir / "metadata.json").exists()
-    
+
     # get_app_files should heal it and return the correct dict
     app_files = manager.get_app_files(app_id)
     assert app_files is not None
     assert app_files["id"] == app_id
     assert app_files["title"] == "My Awesome Weather"
     assert app_files["html"] == html_content
-    
+
     # metadata.json should now exist on disk
     assert (app_dir / "metadata.json").exists()
-    
+
     # delete metadata.json to test listing self-heal
     os.remove(app_dir / "metadata.json")
     assert not (app_dir / "metadata.json").exists()
-    
+
     apps = manager.list_apps()
     # Find manual-weather in apps
     weather_app = next((a for a in apps if a["id"] == app_id), None)

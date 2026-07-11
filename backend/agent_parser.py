@@ -1,7 +1,7 @@
 import re
-from typing import List, Dict, Optional
 
-def parse_widget_from_text(text: str) -> Optional[Dict[str, str]]:
+
+def parse_widget_from_text(text: str) -> dict[str, str] | None:
     """
     Parses a widget structured as:
     <ambient-widget id="widget-id" title="Widget Title">
@@ -16,13 +16,13 @@ def parse_widget_from_text(text: str) -> Optional[Dict[str, str]]:
     match = re.search(pattern, text, re.DOTALL)
     if not match:
         return None
-        
+
     widget_id, title, content = match.groups()
-    
+
     html_match = re.search(r"<html-content>(.*?)</html-content>", content, re.DOTALL)
     css_match = re.search(r"<css-styles>(.*?)</css-styles>", content, re.DOTALL)
     js_match = re.search(r"<js-script>(.*?)</js-script>", content, re.DOTALL)
-    
+
     return {
         "id": widget_id.strip(),
         "title": title.strip(),
@@ -33,7 +33,7 @@ def parse_widget_from_text(text: str) -> Optional[Dict[str, str]]:
 
 class AgentParser:
     @staticmethod
-    def parse_widgets(text: str) -> List[Dict[str, str]]:
+    def parse_widgets(text: str) -> list[dict[str, str]]:
         """
         Parses all widgets from text. Currently parses a single widget
         and returns it inside a list, matching UML specification.

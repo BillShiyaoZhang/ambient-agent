@@ -1,36 +1,38 @@
-import os
-import shutil
-import uuid
 import asyncio
 import logging
+import json
+import os
+import shutil
 import subprocess
+import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Any, Dict, List
+from typing import Any
 
-from acp import Client, PROTOCOL_VERSION, spawn_agent_process, text_block
+from acp import Client, spawn_agent_process, text_block
 from acp.exceptions import RequestError
 from acp.schema import (
+    AllowedOutcome,
     ClientCapabilities,
-    FileSystemCapabilities,
-    ReadTextFileResponse,
-    WriteTextFileResponse,
     CreateTerminalResponse,
+    DeniedOutcome,
+    EnvVariable,
+    FileSystemCapabilities,
+    KillTerminalResponse,
+    PermissionOption,
+    ReadTextFileResponse,
+    ReleaseTerminalResponse,
+    RequestPermissionResponse,
+    TerminalExitStatus,
     TerminalOutputResponse,
     WaitForTerminalExitResponse,
-    ReleaseTerminalResponse,
-    KillTerminalResponse,
-    RequestPermissionResponse,
-    AllowedOutcome,
-    DeniedOutcome,
-    PermissionOption,
-    EnvVariable,
-    TerminalExitStatus,
+    WriteTextFileResponse,
 )
 
 logger = logging.getLogger("opencode_service")
 
 # Registry of active ACP clients to map incoming WebSocket permission responses
-active_acp_clients: Dict[str, "FastAPIACPClient"] = {}
+active_acp_clients: dict[str, "FastAPIACPClient"] = {}
 
 
 class PermissionPolicyManager:
@@ -44,7 +46,7 @@ class PermissionPolicyManager:
     def _load_policy(self) -> dict:
         try:
             if os.path.exists(self.config_path):
-                with open(self.config_path, "r", encoding="utf-8") as f:
+                with open(self.config_path, encoding="utf-8") as f:
                     return json.load(f)
         except Exception as e:
             logger.error(f"Error loading permission policy: {e}")
@@ -78,10 +80,10 @@ class PermissionPolicyManager:
         # Validate file suffix/name
         filename = resolved_path.name
         ext = resolved_path.suffix
-        
+
         allowed_filenames = self.policy.get("files", {}).get("allowed_filenames", [])
         allowed_extensions = self.policy.get("files", {}).get("allowed_extensions", [])
-        
+
         if filename in allowed_filenames or ext in allowed_extensions:
             return True
         return False
@@ -89,24 +91,24 @@ class PermissionPolicyManager:
     def validate_command(self, command_str: str) -> bool:
         command_str = command_str.strip()
         commands_cfg = self.policy.get("commands", {})
-        
+
         # Check blocklist first
         blocklist = commands_cfg.get("blocklist", [])
         for blocked in blocklist:
             if blocked in command_str:
                 return False
-                
+
         # Check allowed commands exactly
         allowed_commands = commands_cfg.get("allowed_commands", [])
         if command_str in allowed_commands:
             return True
-            
+
         # Check allowed prefixes
         allowed_prefixes = commands_cfg.get("allowed_prefixes", [])
         for prefix in allowed_prefixes:
             if command_str.startswith(prefix):
                 return True
-                
+
         return False
 
 
@@ -114,11 +116,11 @@ class FastAPIACPClient(Client):
     def __init__(self, workspace_root: Path, on_update_callback: Callable[[str], None]):
         self.workspace_root = workspace_root
         self.on_update_callback = on_update_callback
-        self.terminals: Dict[str, asyncio.subprocess.Process] = {}
-        self.terminal_buffers: Dict[str, bytes] = {}
-        self.terminal_tasks: Dict[str, asyncio.Task] = {}
-        self.output_buffer: List[str] = []
-        self.pending_permissions: Dict[str, asyncio.Future] = {}
+        self.terminals: dict[str, asyncio.subprocess.Process] = {}
+        self.terminal_buffers: dict[str, bytes] = {}
+        self.terminal_tasks: dict[str, asyncio.Task] = {}
+        self.output_buffer: list[str] = []
+        self.pending_permissions: dict[str, asyncio.Future] = {}
 
     def resolve_permission(self, request_id: str, approved: bool):
         fut = self.pending_permissions.get(request_id)
@@ -129,19 +131,19 @@ class FastAPIACPClient(Client):
         self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: Any
     ) -> ReadTextFileResponse:
         full_path = self.workspace_root / path
-        
+
         # Directory traversal jail check
         try:
             resolved_workspace = self.workspace_root.resolve()
             resolved_path = full_path.resolve()
         except Exception as e:
-            raise RequestError.invalid_params(f"Invalid path: {str(e)}")
+            raise RequestError.invalid_params(f"Invalid path: {e!s}")
 
         if not str(resolved_path).startswith(str(resolved_workspace)):
             raise RequestError.invalid_params("Directory traversal attempt blocked.")
 
         try:
-            with open(full_path, "r", encoding="utf-8") as f:
+            with open(full_path, encoding="utf-8") as f:
                 content = f.read()
             return ReadTextFileResponse(content=content)
         except Exception as e:
@@ -151,13 +153,13 @@ class FastAPIACPClient(Client):
         self, session_id: str, path: str, content: str, **kwargs: Any
     ) -> WriteTextFileResponse | None:
         full_path = self.workspace_root / path
-        
+
         # Directory traversal jail check
         try:
             resolved_workspace = self.workspace_root.resolve()
             resolved_path = full_path.resolve()
         except Exception as e:
-            raise RequestError.invalid_params(f"Invalid path: {str(e)}")
+            raise RequestError.invalid_params(f"Invalid path: {e!s}")
 
         if not str(resolved_path).startswith(str(resolved_workspace)):
             raise RequestError.invalid_params("Directory traversal attempt blocked.")
@@ -176,10 +178,10 @@ class FastAPIACPClient(Client):
         policy_mgr = PermissionPolicyManager()
         tool_kind = getattr(tool_call, "kind", "other")
         logger.info(f"request_permission request received: tool_kind={tool_kind}, title={getattr(tool_call, 'title', None)}, raw_input={getattr(tool_call, 'raw_input', None)}")
-        
+
         is_allowed = False
         details = ""
-        
+
         if tool_kind == "execute":
             # Command execution
             cmd = ""
@@ -189,14 +191,14 @@ class FastAPIACPClient(Client):
                 args = tool_call.raw_input.get("args", [])
             elif hasattr(tool_call, "title") and tool_call.title:
                 cmd = tool_call.title
-                
+
             cmd_full = cmd
             if args:
                 cmd_full = f"{cmd} " + " ".join(args)
-                
+
             details = f"Command: {cmd_full}"
             is_allowed = policy_mgr.validate_command(cmd_full)
-            
+
         elif tool_kind in ("edit", "read", "delete", "move"):
             # File system operations
             path_str = ""
@@ -207,10 +209,10 @@ class FastAPIACPClient(Client):
                     raw_in = json.loads(raw_in)
                 except Exception:
                     pass
-            
+
             if isinstance(raw_in, dict):
                 path_str = raw_in.get("path", "")
-            
+
             if not path_str and tool_call.content:
                 for item in tool_call.content:
                     if hasattr(item, "path"):
@@ -225,9 +227,9 @@ class FastAPIACPClient(Client):
                 match = re.search(r"([\w\-_\.\/]+\.[a-zA-Z0-9]+)", tool_call.title)
                 if match:
                     path_str = match.group(1)
-                        
+
             details = f"File {tool_kind}: {path_str}"
-            
+
             # Directory traversal check
             is_traversal_safe = False
             try:
@@ -240,20 +242,20 @@ class FastAPIACPClient(Client):
                 is_traversal_safe = str(resolved_path).startswith(str(resolved_workspace))
             except Exception:
                 is_traversal_safe = False
-                
+
             if not is_traversal_safe:
                 logger.warning(f"Blocking directory traversal attempt in permission request: {path_str}")
                 return RequestPermissionResponse(
                     outcome=DeniedOutcome(outcome="cancelled", message="Directory traversal blocked")
                 )
-                
+
             is_allowed = policy_mgr.validate_file_path(path_str, self.workspace_root)
-            
+
         else:
             # Fallback auto-approve for other tool types
             details = f"Action: {tool_kind}"
             is_allowed = True
-            
+
         if is_allowed:
             for opt in options:
                 if opt.kind in ("allow_once", "allow_always"):
@@ -261,16 +263,16 @@ class FastAPIACPClient(Client):
                         outcome=AllowedOutcome(option_id=opt.option_id, outcome="selected")
                     )
             return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-            
+
         # Strict policy mode -> fail immediately
         if policy_mgr.policy.get("policy_mode") == "strict":
             return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-            
+
         # Interactive mode -> prompt user
         request_id = str(uuid.uuid4())
         fut = asyncio.Future()
         self.pending_permissions[request_id] = fut
-        
+
         if self.on_update_callback:
             try:
                 # Send the permission request over the websocket
@@ -291,15 +293,15 @@ class FastAPIACPClient(Client):
             except Exception as e:
                 logger.error(f"Error sending permission request: {e}")
                 return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-                
+
         # Wait up to 60 seconds for approval response
         try:
             approved = await asyncio.wait_for(fut, timeout=60.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             approved = False
         finally:
             self.pending_permissions.pop(request_id, None)
-            
+
         if approved:
             for opt in options:
                 if opt.kind in ("allow_once", "allow_always"):
@@ -342,7 +344,7 @@ class FastAPIACPClient(Client):
             terminal_id = str(uuid.uuid4())
             self.terminals[terminal_id] = proc
             self.terminal_buffers[terminal_id] = b""
-            
+
             task = asyncio.create_task(self._read_terminal_output(terminal_id, proc))
             self.terminal_tasks[terminal_id] = task
 
@@ -357,7 +359,7 @@ class FastAPIACPClient(Client):
                 if not line:
                     break
                 self.terminal_buffers[terminal_id] += line
-                
+
         await asyncio.gather(
             read_stream(proc.stdout),
             read_stream(proc.stderr)
@@ -366,17 +368,17 @@ class FastAPIACPClient(Client):
     async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> TerminalOutputResponse:
         if terminal_id not in self.terminals:
             raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
-        
+
         proc = self.terminals[terminal_id]
         buffer = self.terminal_buffers.get(terminal_id, b"")
         self.terminal_buffers[terminal_id] = b""
-        
+
         decoded_output = buffer.decode("utf-8", errors="ignore")
-        
+
         exit_status = None
         if proc.returncode is not None:
             exit_status = TerminalExitStatus(exit_code=proc.returncode)
-            
+
         return TerminalOutputResponse(
             output=decoded_output,
             truncated=False,
@@ -386,13 +388,13 @@ class FastAPIACPClient(Client):
     async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> WaitForTerminalExitResponse:
         if terminal_id not in self.terminals:
             raise RequestError.invalid_params(f"Terminal {terminal_id} not found")
-        
+
         proc = self.terminals[terminal_id]
         await proc.wait()
-        
+
         if terminal_id in self.terminal_tasks:
             self.terminal_tasks[terminal_id].cancel()
-            
+
         return WaitForTerminalExitResponse(
             exit_code=proc.returncode,
             signal=None
@@ -444,7 +446,7 @@ class FastAPIACPClient(Client):
         if content_text:
             self.output_buffer.append(content_text)
             accumulated_text = "".join(self.output_buffer)
-            
+
             if self.on_update_callback:
                 if asyncio.iscoroutinefunction(self.on_update_callback):
                     await self.on_update_callback(accumulated_text)
@@ -461,7 +463,7 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
     target_dir = os.path.join(apps_dir, app_id)
-    
+
     os.makedirs(target_dir, exist_ok=True)
 
     clean_instruction = instruction.replace('"', "'").replace('\n', ' ').replace('\r', '')
@@ -475,9 +477,9 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
     )
 
     full_command = f'{opencode_cmd} run "{prompt}" --auto'
-    
+
     logger.info(f"Executing OpenCode CLI agent: {full_command}")
-    
+
     try:
         workspace_root = os.path.abspath(os.path.join(apps_dir, "..", ".."))
         process = subprocess.run(
@@ -492,11 +494,11 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
         )
         stdout_output = process.stdout or ""
         stderr_output = process.stderr or ""
-        
+
         combined_output = stdout_output
         if stderr_output.strip():
             combined_output += f"\n\n--- Standard Error ---\n{stderr_output}"
-            
+
         if process.returncode != 0:
             combined_output = (
                 f"OpenCode Agent exited with error code {process.returncode}.\n"
@@ -504,14 +506,14 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
             )
         return combined_output
     except Exception as err:
-        return f"Failed to execute OpenCode Agent: {str(err)}"
+        return f"Failed to execute OpenCode Agent: {err!s}"
 
 async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Callable[[str], None]) -> str:
     """
     Spawns OpenCode agent in ACP mode, runs its loop, and streams the output/logs back via on_update callback.
     """
     opencode_cmd = os.getenv("OPENCODE_COMMAND", "opencode")
-    
+
     # Resolve cmd suffix on Windows
     if os.name == "nt" and opencode_cmd == "opencode":
         resolved = shutil.which("opencode")
@@ -521,9 +523,9 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
     target_dir = Path(apps_dir) / app_id
-    
+
     os.makedirs(target_dir, exist_ok=True)
-    
+
     client = FastAPIACPClient(workspace_root=target_dir, on_update_callback=on_update)
     workspace_root = os.path.abspath(os.path.join(apps_dir, "..", ".."))
 
@@ -538,12 +540,12 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
                     terminal=True
                 )
             )
-            
+
             session_resp = await conn.new_session(cwd=str(target_dir.absolute()))
             session_id = session_resp.session_id
-            
+
             active_acp_clients[session_id] = client
-            
+
             from backend.agent.prompts.manager import PromptManager
             pm = PromptManager()
             prompt_text = pm.get_prompt(
@@ -552,7 +554,7 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
                 target_dir=str(target_dir.absolute()),
                 instruction=instruction
             )
-            
+
             opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
             try:
                 await asyncio.wait_for(
@@ -562,15 +564,15 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
                     ),
                     timeout=opencode_timeout
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 timeout_minutes = int(opencode_timeout // 60)
                 logger.warning(f"OpenCode ACP agent timed out after {opencode_timeout} seconds for app {app_id}.")
                 client.output_buffer.append(f"\n⚠️ OpenCode Agent execution timed out after {timeout_minutes} minutes. The generated application files will be loaded from disk.")
             finally:
                 active_acp_clients.pop(session_id, None)
-            
+
             return "".join(client.output_buffer)
-            
+
     except Exception as e:
         logger.error(f"Error running OpenCode ACP agent: {e}")
-        return f"Failed to execute OpenCode ACP: {str(e)}"
+        return f"Failed to execute OpenCode ACP: {e!s}"

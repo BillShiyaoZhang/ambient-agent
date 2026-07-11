@@ -1,5 +1,5 @@
-import pytest
 from backend.agent_parser import parse_widget_from_text
+
 
 def test_parse_valid_widget():
     sample_text = """
@@ -17,7 +17,7 @@ def test_parse_valid_widget():
     </ambient-widget>
     Hope you like it!
     """
-    
+
     widget = parse_widget_from_text(sample_text)
     assert widget is not None
     assert widget["id"] == "weather-card"

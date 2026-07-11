@@ -1,10 +1,10 @@
-import os
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from backend.models import ChatMessage
 from backend.main import app
+from backend.models import ChatMessage
 from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.fixture(name="session")
 def session_fixture(tmp_path):
@@ -26,7 +26,7 @@ async def test_database_initialization(session):
     session.add(msg)
     session.commit()
     session.refresh(msg)
-    
+
     # Read the message back
     assert msg.id is not None
     assert msg.sender == "user"

@@ -1,7 +1,9 @@
 import os
+from typing import Any
+
 import httpx
-from typing import Optional, List, Dict, Any
 from sqlmodel import Session
+
 from backend.models import LLMAuditLog
 
 # Default system prompt for the Ambient Agent
@@ -37,12 +39,13 @@ Always make widgets look visually stunning, glassmorphic, responsive, and functi
 
 import json
 
+
 async def call_llm_api(
     provider: str,
     model: str,
-    messages: List[Dict[str, str]],
-    tools: Optional[List[Dict[str, Any]]] = None
-) -> Dict[str, Any]:
+    messages: list[dict[str, str]],
+    tools: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """
     Directly contacts Ollama (chat endpoint) or cloud providers using HTTP clients.
     Returns a dict: {"content": str, "tool_calls": Optional[List[Dict[str, Any]]]}
@@ -55,7 +58,7 @@ async def call_llm_api(
             url = raw_url.replace("generate", "chat")
         else:
             url = raw_url
-            
+
         payload = {
             "model": model,
             "messages": messages,
@@ -80,21 +83,21 @@ async def call_llm_api(
                     }
         except Exception as e:
             return {
-                "content": f"Failed to connect to local Ollama server. Make sure Ollama is running. Error: {str(e)}",
+                "content": f"Failed to connect to local Ollama server. Make sure Ollama is running. Error: {e!s}",
                 "tool_calls": None
             }
-            
+
     else:
         # Default fallback to mock or generic OpenAI compatible API if configured
         api_key = os.getenv("LLM_API_KEY", "")
         api_url = os.getenv("LLM_API_URL", "https://api.openai.com/v1/chat/completions")
-        
+
         if not api_key:
             return {
                 "content": f"Mock response: You requested using provider '{provider}' and model '{model}', but no API key was configured.",
                 "tool_calls": None
             }
-            
+
         # Standard OpenAI compatible completions payload
         payload = {
             "model": model,
@@ -135,16 +138,16 @@ async def call_llm_api(
             import traceback
             traceback.print_exc()
             return {
-                "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {str(e)}",
+                "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {e!s}",
                 "tool_calls": None
             }
 
 async def generate_agent_response(
-    messages: Optional[List[Dict[str, str]]] = None,
+    messages: list[dict[str, str]] | None = None,
     provider: str = "ollama",
     model: str = "llama3",
     session: Session = None,
-    user_message: Optional[str] = None
+    user_message: str | None = None
 ) -> str:
     """
     Coordinates LLM execution, registers prompts and responses in the audit database.
@@ -165,7 +168,7 @@ async def generate_agent_response(
         response_text = response_data
     else:
         response_text = response_data.get("content", "")
-    
+
     # Extract last user message or serialize full messages for audit log
     prompt_str = ""
     try:
@@ -183,7 +186,7 @@ async def generate_agent_response(
     session.add(audit_log)
     session.commit()
     session.refresh(audit_log)
-    
+
     return response_text
 
 class LLMService:
@@ -191,9 +194,9 @@ class LLMService:
     async def call_llm_api(
         provider: str,
         model: str,
-        messages: List[Dict[str, str]],
-        tools: Optional[List[Dict[str, Any]]] = None
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Wrapper matching UML definition for call_llm_api.
         """
@@ -201,11 +204,11 @@ class LLMService:
 
     @staticmethod
     async def generate_agent_response(
-        messages: Optional[List[Dict[str, str]]] = None,
+        messages: list[dict[str, str]] | None = None,
         provider: str = "ollama",
         model: str = "llama3",
         session: Session = None,
-        user_message: Optional[str] = None
+        user_message: str | None = None
     ) -> str:
         """
         Wrapper matching UML definition for generate_agent_response.

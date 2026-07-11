@@ -1,10 +1,10 @@
-import os
 import pytest
-from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
+
 from backend.main import app, get_db
-from backend.workspace_storage import WorkspaceStorage
 from backend.models import ChatSession
+from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):

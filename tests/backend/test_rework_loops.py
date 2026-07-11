@@ -1,10 +1,10 @@
-import os
 import pytest
-from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
+
 from backend.main import app, get_db
-from backend.workspace_storage import WorkspaceStorage
 from backend.models import ChatSession
+from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):
@@ -95,7 +95,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert plan_req["type"] == "plan_approval_request"
         assert plan_req["plan"] == "Plan Version 1"
         plan_request_id = plan_req["request_id"]
-        
+
         # Expect waiting message
         assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
@@ -113,7 +113,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         schema_req = websocket.receive_json()
         assert schema_req["type"] == "schema_approval_request"
         schema_request_id = schema_req["request_id"]
-        
+
         # Expect waiting message
         assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
@@ -135,7 +135,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         assert plan_req_2["type"] == "plan_approval_request"
         assert plan_req_2["plan"] == "Plan Version 2"
         plan_request_id_2 = plan_req_2["request_id"]
-        
+
         assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 2
@@ -152,7 +152,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         schema_req_2 = websocket.receive_json()
         assert schema_req_2["type"] == "schema_approval_request"
         schema_request_id_2 = schema_req_2["request_id"]
-        
+
         assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Approve Schema 2

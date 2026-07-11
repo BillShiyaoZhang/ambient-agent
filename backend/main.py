@@ -1,33 +1,34 @@
-import re
-import os
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+import os
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Any
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from backend.models import ChatSession, ChatMessage, LLMAuditLog
-from backend.app_manager import AppManager
 from backend.agent.harness import AgentOrchestrator
+from backend.app_manager import AppManager
+from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import run_opencode_agent_acp
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 
 # Global registry of active WebSockets mapping session_id -> Set[WebSocket]
-active_websockets: Dict[str, Set[WebSocket]] = {}
+active_websockets: dict[str, set[WebSocket]] = {}
 
 # Registry of pending interactive requests: session_id -> dict of request_id -> request_payload
-pending_requests: Dict[str, Dict[str, Any]] = {}
+pending_requests: dict[str, dict[str, Any]] = {}
 
 # Registry of latest status updates (Thinking/logs): session_id -> payload dict
-latest_session_status: Dict[str, Any] = {}
+latest_session_status: dict[str, Any] = {}
 
 # Set of active session IDs currently running generation tasks
-active_running_sessions: Set[str] = set()
+active_running_sessions: set[str] = set()
 
 async def send_to_session(session_id: str, data: Any):
     """Sends JSON data to all active websockets connected to a specific session."""
@@ -54,6 +55,7 @@ WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
 
 from backend.graph_db import GraphDatabase
+
 graph_db = GraphDatabase(WORKSPACE_DIR)
 
 def get_db():
@@ -117,8 +119,8 @@ async def delete_session(session_id: str, session: WorkspaceStorage = Depends(ge
 # --- Canvas Config REST endpoints ---
 
 class CanvasConfig(BaseModel):
-    pinned_ids: List[str]
-    widget_spans: Dict[str, Any]
+    pinned_ids: list[str]
+    widget_spans: dict[str, Any]
 
 @app.get("/api/canvas")
 async def get_canvas(session: WorkspaceStorage = Depends(get_db)):
@@ -154,7 +156,7 @@ async def delete_app(app_id: str):
 # --- Graph Mutations endpoint ---
 
 class GraphMutateRequest(BaseModel):
-    actions: List[Dict[str, Any]]
+    actions: list[dict[str, Any]]
 
 @app.post("/api/graph/mutate")
 async def mutate_graph(data: GraphMutateRequest):
@@ -202,9 +204,9 @@ async def mutate_graph(data: GraphMutateRequest):
 # --- WebSocket Chat Handler ---
 
 @app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None, session: WorkspaceStorage = Depends(get_db)):
+async def websocket_chat(websocket: WebSocket, session_id: str | None = None, session: WorkspaceStorage = Depends(get_db)):
     await websocket.accept()
-    
+
     if not session_id:
         session_id = "default-session"
 
@@ -212,16 +214,16 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
     if session_id not in active_websockets:
         active_websockets[session_id] = set()
     active_websockets[session_id].add(websocket)
-    
+
     # Ensure session exists in DB
     db_session_obj = session.get(ChatSession, session_id)
     if not db_session_obj:
         db_session_obj = ChatSession(id=session_id, title="Active Chat")
         session.add(db_session_obj)
         session.commit()
-        
+
     orchestrator = AgentOrchestrator(db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp)
-    
+
     # Callback to send incremental updates to client
     async def send_ws_update(data: Any):
         try:
@@ -242,12 +244,12 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                         "sender": "agent",
                         "role": "agent",
                         "content": data,
-                        "timestamp": datetime.now(timezone.utc).isoformat()
+                        "timestamp": datetime.now(UTC).isoformat()
                     }
                 }
                 # Store latest status update
                 latest_session_status[session_id] = payload
-                
+
             await send_to_session(session_id, payload)
         except Exception:
             pass
@@ -262,13 +264,13 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 content=content_str
             )
             session.add(user_msg)
-            
+
             # Update session's updated_at timestamp
-            db_session_obj.updated_at = datetime.now(timezone.utc)
+            db_session_obj.updated_at = datetime.now(UTC)
             session.add(db_session_obj)
             session.commit()
             session.refresh(user_msg)
-            
+
             # Send acknowledgement back to client
             await send_to_session(session_id, {
                 "type": "ack",
@@ -337,11 +339,11 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
             "type": "active_sessions_list",
             "active_session_ids": list(active_running_sessions)
         })
-        
+
         # Send latest status/logs if session is running
         if session_id in latest_session_status:
             await websocket.send_json(latest_session_status[session_id])
-            
+
         # Send any pending requests
         if session_id in pending_requests:
             for req_data in pending_requests[session_id].values():
@@ -354,18 +356,18 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
             # Receive message from user client
             data = await websocket.receive_json()
             msg_type = data.get("type")
-            
+
             if msg_type == "permission_response":
                 request_id = data.get("request_id")
                 approved = data.get("approved", False)
-                
+
                 # Remove from pending_requests
                 for sess_id, reqs in list(pending_requests.items()):
                     if request_id in reqs:
                         reqs.pop(request_id)
                         if not reqs:
                             pending_requests.pop(sess_id, None)
-                
+
                 from backend.opencode_service import active_acp_clients
                 resolved = False
                 for client in active_acp_clients.values():
@@ -379,17 +381,17 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 approved_status = data.get("approved")
                 proposal = data.get("proposal", {})
                 feedback = data.get("feedback", "")
-                
+
                 # Remove from pending_requests
                 for sess_id, reqs in list(pending_requests.items()):
                     if request_id in reqs:
                         reqs.pop(request_id)
                         if not reqs:
                             pending_requests.pop(sess_id, None)
-                
+
                 action = "deny"
                 response_data = None
-                
+
                 if approved_status is True or approved_status == "approve":
                     action = "approve"
                     response_data = proposal
@@ -399,7 +401,7 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 elif approved_status == "rework_plan":
                     action = "rework_plan"
                     response_data = {"feedback": feedback}
-                
+
                 from backend.agent.harness import active_schema_requests
                 fut = active_schema_requests.get(request_id)
                 if fut and not fut.done():
@@ -409,24 +411,24 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 approved_status = data.get("approved")
                 plan = data.get("plan", "")
                 feedback = data.get("feedback", "")
-                
+
                 # Remove from pending_requests
                 for sess_id, reqs in list(pending_requests.items()):
                     if request_id in reqs:
                         reqs.pop(request_id)
                         if not reqs:
                             pending_requests.pop(sess_id, None)
-                
+
                 action = "deny"
                 response_data = None
-                
+
                 if approved_status is True or approved_status == "approve":
                     action = "approve"
                     response_data = plan
                 elif approved_status == "refine":
                     action = "refine"
                     response_data = {"feedback": feedback, "plan": plan}
-                
+
                 from backend.agent.harness import active_plan_requests
                 fut = active_plan_requests.get(request_id)
                 if fut and not fut.done():
@@ -435,17 +437,17 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")  # "approve", "rework_code", "rework_schema", "rework_plan"
                 feedback = data.get("feedback", "")
-                
+
                 # Remove from pending_requests
                 for sess_id, reqs in list(pending_requests.items()):
                     if request_id in reqs:
                         reqs.pop(request_id)
                         if not reqs:
                             pending_requests.pop(sess_id, None)
-                
+
                 action = approved_status or "approve"
                 response_data = {"feedback": feedback}
-                
+
                 from backend.agent.harness import active_verification_requests
                 fut = active_verification_requests.get(request_id)
                 if fut and not fut.done():
@@ -469,7 +471,7 @@ async def websocket_chat(websocket: WebSocket, session_id: Optional[str] = None,
                 content = data.get("content", "")
                 # Run the orchestrator logic in a concurrent background task to avoid blocking the WS read loop
                 asyncio.create_task(process_user_message(content, sender))
-            
+
     except WebSocketDisconnect:
         pass
     finally:

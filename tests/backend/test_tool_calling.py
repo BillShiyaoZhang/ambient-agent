@@ -1,10 +1,10 @@
+
 import pytest
-from unittest.mock import AsyncMock
+
 from backend.agent.providers import OllamaProvider
 from backend.agent.tools import registry as global_registry
-from backend.models import LLMAuditLog
-import backend.llm_service
 from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):
@@ -59,10 +59,10 @@ async def test_tool_calling_loop(test_session, monkeypatch):
     # 3. Instantiate OllamaProvider and run generate
     provider = OllamaProvider(model="test-model")
     messages = [{"role": "user", "content": "Delete test-widget"}]
-    
+
     # We pass the tools schema list
     tools_schema = global_registry.get_tool_schemas()
-    
+
     response = await provider.generate(
         messages=messages,
         db_session=test_session,

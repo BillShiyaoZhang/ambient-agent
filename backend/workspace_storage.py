@@ -1,12 +1,14 @@
-import os
 import json
-import sqlite3
+import os
 import shutil
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Type
+import sqlite3
+from datetime import UTC, datetime
+from typing import Any
+
 from pydantic import BaseModel
 
-from backend.models import ChatSession, ChatMessage, LLMAuditLog
+from backend.models import ChatMessage, ChatSession, LLMAuditLog
+
 
 def migrate_old_data(workspace_dir: str) -> None:
     """
@@ -42,13 +44,13 @@ def migrate_old_data(workspace_dir: str) -> None:
         try:
             conn = sqlite3.connect(old_db_path)
             cursor = conn.cursor()
-            
+
             # Fetch sessions
             cursor.execute("SELECT id, title, created_at, updated_at FROM chatsession")
             sessions = cursor.fetchall()
-            
+
             os.makedirs(os.path.join(workspace_dir, "sessions"), exist_ok=True)
-            
+
             for s_id, s_title, s_created, s_updated in sessions:
                 # Fetch messages for this session
                 cursor.execute(
@@ -65,7 +67,7 @@ def migrate_old_data(workspace_dir: str) -> None:
                         "content": m_content,
                         "timestamp": m_timestamp
                     })
-                
+
                 session_data = {
                     "id": s_id,
                     "title": s_title,
@@ -76,7 +78,7 @@ def migrate_old_data(workspace_dir: str) -> None:
                 session_file = os.path.join(workspace_dir, "sessions", f"{s_id}.json")
                 with open(session_file, "w", encoding="utf-8") as f:
                     json.dump(session_data, f, indent=2, ensure_ascii=False)
-            
+
             # Fetch LLMAuditLogs
             cursor.execute("SELECT id, timestamp, provider, model, prompt, response FROM llmauditlog ORDER BY timestamp ASC")
             audit_logs = cursor.fetchall()
@@ -93,7 +95,7 @@ def migrate_old_data(workspace_dir: str) -> None:
                         "response": a_response
                     }
                     f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-            
+
             conn.close()
             # Backup database file
             shutil.move(old_db_path, old_db_path + ".backup")
@@ -103,19 +105,19 @@ def migrate_old_data(workspace_dir: str) -> None:
 
 
 class WorkspaceStorage:
-    def __init__(self, workspace_dir: Optional[str] = None):
+    def __init__(self, workspace_dir: str | None = None):
         if not workspace_dir:
             workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
         self.workspace_dir = workspace_dir
         self.sessions_dir = os.path.join(self.workspace_dir, "sessions")
         self.apps_dir = os.path.join(self.workspace_dir, "apps")
-        
+
         os.makedirs(self.sessions_dir, exist_ok=True)
         os.makedirs(self.apps_dir, exist_ok=True)
-        
+
         self._pending_adds = []
 
-    def get(self, model_class: Type[BaseModel], obj_id: str) -> Optional[BaseModel]:
+    def get(self, model_class: type[BaseModel], obj_id: str) -> BaseModel | None:
         """
         Emulates SQLAlchemy Session.get() for backward compatibility.
         """
@@ -123,9 +125,9 @@ class WorkspaceStorage:
             session_file = os.path.join(self.sessions_dir, f"{obj_id}.json")
             if os.path.exists(session_file):
                 try:
-                    with open(session_file, "r", encoding="utf-8") as f:
+                    with open(session_file, encoding="utf-8") as f:
                         data = json.load(f)
-                    
+
                     # Parse timestamp strings
                     created_at = data.get("created_at")
                     if isinstance(created_at, str):
@@ -133,12 +135,12 @@ class WorkspaceStorage:
                     updated_at = data.get("updated_at")
                     if isinstance(updated_at, str):
                         updated_at = datetime.fromisoformat(updated_at)
-                        
+
                     return ChatSession(
                         id=data["id"],
                         title=data["title"],
-                        created_at=created_at or datetime.now(timezone.utc),
-                        updated_at=updated_at or datetime.now(timezone.utc)
+                        created_at=created_at or datetime.now(UTC),
+                        updated_at=updated_at or datetime.now(UTC)
                     )
                 except Exception:
                     return None
@@ -172,18 +174,18 @@ class WorkspaceStorage:
             msg_count = 0
             if os.path.exists(session_file):
                 try:
-                    with open(session_file, "r", encoding="utf-8") as f:
+                    with open(session_file, encoding="utf-8") as f:
                         data = json.load(f)
                         msg_count = len(data.get("messages", []))
                 except Exception:
                     pass
             obj.id = msg_count + 1
         elif isinstance(obj, LLMAuditLog) and obj.id is None:
-            obj.id = int(datetime.now(timezone.utc).timestamp() * 1000)
+            obj.id = int(datetime.now(UTC).timestamp() * 1000)
 
     # --- Domain Specific Storage Accessors ---
 
-    def get_sessions(self) -> List[ChatSession]:
+    def get_sessions(self) -> list[ChatSession]:
         sessions = []
         if not os.path.exists(self.sessions_dir):
             return []
@@ -197,12 +199,12 @@ class WorkspaceStorage:
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
 
-    def get_messages(self, session_id: str) -> List[ChatMessage]:
+    def get_messages(self, session_id: str) -> list[ChatMessage]:
         session_file = os.path.join(self.sessions_dir, f"{session_id}.json")
         if not os.path.exists(session_file):
             return []
         try:
-            with open(session_file, "r", encoding="utf-8") as f:
+            with open(session_file, encoding="utf-8") as f:
                 data = json.load(f)
             messages = []
             for m in data.get("messages", []):
@@ -215,18 +217,18 @@ class WorkspaceStorage:
                     role=m.get("role", "user"),
                     sender=m.get("sender", "user"),
                     content=m.get("content", ""),
-                    timestamp=t_val or datetime.now(timezone.utc)
+                    timestamp=t_val or datetime.now(UTC)
                 ))
             return messages
         except Exception:
             return []
 
-    def get_audit_logs(self) -> List[LLMAuditLog]:
+    def get_audit_logs(self) -> list[LLMAuditLog]:
         audit_file = os.path.join(self.workspace_dir, "audit_logs.jsonl")
         logs = []
         if os.path.exists(audit_file):
             try:
-                with open(audit_file, "r", encoding="utf-8") as f:
+                with open(audit_file, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if line:
@@ -236,7 +238,7 @@ class WorkspaceStorage:
                                 t_val = datetime.fromisoformat(t_val)
                             logs.append(LLMAuditLog(
                                 id=data.get("id"),
-                                timestamp=t_val or datetime.now(timezone.utc),
+                                timestamp=t_val or datetime.now(UTC),
                                 provider=data.get("provider"),
                                 model=data.get("model"),
                                 prompt=data.get("prompt"),
@@ -258,17 +260,17 @@ class WorkspaceStorage:
                 return False
         return False
 
-    def get_canvas_config(self) -> Dict[str, Any]:
+    def get_canvas_config(self) -> dict[str, Any]:
         canvas_file = os.path.join(self.workspace_dir, "canvas.json")
         if os.path.exists(canvas_file):
             try:
-                with open(canvas_file, "r", encoding="utf-8") as f:
+                with open(canvas_file, encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
                 pass
         return {"pinned_ids": [], "widget_spans": {}}
 
-    def save_canvas_config(self, config: Dict[str, Any]) -> None:
+    def save_canvas_config(self, config: dict[str, Any]) -> None:
         canvas_file = os.path.join(self.workspace_dir, "canvas.json")
         try:
             with open(canvas_file, "w", encoding="utf-8") as f:
@@ -289,7 +291,7 @@ class WorkspaceStorage:
         }
         if os.path.exists(session_file):
             try:
-                with open(session_file, "r", encoding="utf-8") as f:
+                with open(session_file, encoding="utf-8") as f:
                     existing = json.load(f)
                     data["messages"] = existing.get("messages", [])
                     data["created_at"] = existing.get("created_at", data["created_at"])
@@ -303,20 +305,20 @@ class WorkspaceStorage:
         data = {
             "id": message.session_id,
             "title": "Active Chat",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "messages": []
         }
         if os.path.exists(session_file):
             try:
-                with open(session_file, "r", encoding="utf-8") as f:
+                with open(session_file, encoding="utf-8") as f:
                     data = json.load(f)
             except Exception:
                 pass
-        
+
         if message.id is None:
             self.refresh(message)
-            
+
         msg_dict = {
             "id": message.id,
             "role": message.role,
@@ -324,7 +326,7 @@ class WorkspaceStorage:
             "content": message.content,
             "timestamp": message.timestamp.isoformat() if isinstance(message.timestamp, datetime) else message.timestamp
         }
-        
+
         replaced = False
         for i, m in enumerate(data["messages"]):
             if m.get("id") == message.id:
@@ -333,8 +335,8 @@ class WorkspaceStorage:
                 break
         if not replaced:
             data["messages"].append(msg_dict)
-            
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        data["updated_at"] = datetime.now(UTC).isoformat()
         with open(session_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 

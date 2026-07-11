@@ -1,20 +1,21 @@
-import os
-import pytest
-import asyncio
 from unittest.mock import AsyncMock
+
+import pytest
 from fastapi.testclient import TestClient
-from backend.main import app, get_db, app_manager
-from backend.workspace_storage import WorkspaceStorage
+
+from backend.main import app, app_manager, get_db
 from backend.models import ChatSession
+from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):
     workspace_dir = str(tmp_path / "workspace")
     storage = WorkspaceStorage(workspace_dir)
-    
+
     old_apps_dir = app_manager.apps_dir
     app_manager.apps_dir = storage.apps_dir
-    
+
     yield storage
     app_manager.apps_dir = old_apps_dir
 
@@ -43,26 +44,26 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
     async def mock_verify(*args, **kwargs):
         return "✅ Schema Verification PASSED"
     monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
-    
+
     def override_get_db():
         yield test_session
-        
+
     app.dependency_overrides[get_db] = override_get_db
-    
+
     # Save a chat session to the DB
     session_obj = ChatSession(id="session-123", title="Active Test Chat")
     test_session.add(session_obj)
     test_session.commit()
 
     client = TestClient(app)
-    
+
     with client.websocket_connect("/ws/chat?session_id=session-123") as websocket:
 
         websocket.send_json({
             "sender": "user",
             "content": "Create a new visual card"
         })
-        
+
         # Expect active list on connect
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
@@ -70,7 +71,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
         # Expect user ACK
         ack = websocket.receive_json()
         assert ack["type"] == "ack"
-        
+
         # Expect session status running update
         status_running = websocket.receive_json()
         assert status_running["type"] == "session_status_update"
@@ -88,7 +89,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
         assert plan_req["app_id"] == "test-app"
         assert plan_req["plan"] == "Initial Test Plan"
         request_id = plan_req["request_id"]
-        
+
         # Expect waiting message for plan
         waiting_msg = websocket.receive_json()
         assert waiting_msg["type"] == "reply"
@@ -107,16 +108,16 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
         status_schema = websocket.receive_json()
         assert status_schema["type"] == "reply"
         assert "正在对齐数据库 Schema" in status_schema["message"]["content"]
-        
+
         # Expect Schema Approval Request modal payload
         schema_req = websocket.receive_json()
         assert schema_req["type"] == "schema_approval_request"
         schema_request_id = schema_req["request_id"]
-        
+
         # Expect waiting message for schema
         waiting_schema_msg = websocket.receive_json()
         assert "等待数据库 Schema 确认中" in waiting_schema_msg["message"]["content"]
-        
+
         # Send approved response for schema back
         websocket.send_json({
             "type": "schema_approval_response",

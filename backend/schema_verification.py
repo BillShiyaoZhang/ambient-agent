@@ -1,7 +1,8 @@
-import os
-import logging
 import json
-from typing import Dict, Any, List
+import logging
+import os
+from typing import Any
+
 from backend.agent.providers import get_llm_provider
 
 logger = logging.getLogger("schema_verification")
@@ -10,8 +11,8 @@ class SchemaVerificationService:
     @staticmethod
     async def verify(
         app_id: str,
-        widget_code: Dict[str, str],
-        registered_schemas: List[Dict[str, Any]],
+        widget_code: dict[str, str],
+        registered_schemas: list[dict[str, Any]],
         db_session: Any = None
     ) -> str:
         """

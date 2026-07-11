@@ -1,6 +1,5 @@
-import pytest
-from pathlib import Path
 from backend.agent.prompts.manager import PromptManager
+
 
 def test_prompt_manager_initialization():
     pm = PromptManager()
@@ -13,7 +12,7 @@ def test_router_prompt_rendering():
         {"id": "clock-app-5678", "title": "My Clock App"}
     ]
     prompt = pm.get_prompt("router.md", existing_apps=existing_apps)
-    
+
     assert "todo-app-1234" in prompt
     assert "My Clock App" in prompt
     assert "is_coding" in prompt
@@ -26,7 +25,7 @@ def test_router_prompt_rendering_empty():
 def test_agent_system_prompt_inclusion():
     pm = PromptManager()
     prompt = pm.get_prompt("agent_system.md")
-    
+
     assert "You are Ambient Agent" in prompt
 
 def test_opencode_system_prompt_inclusion():
@@ -37,7 +36,7 @@ def test_opencode_system_prompt_inclusion():
         target_dir="/some/path",
         instruction="make weather blue"
     )
-    
+
     assert "weather-app" in prompt
     assert "/some/path" in prompt
     assert "make weather blue" in prompt

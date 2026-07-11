@@ -1,7 +1,7 @@
 import inspect
 import logging
-from typing import Callable, Any, Dict, List, Optional
-from sqlmodel import Session
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger("agent.tools")
 
@@ -11,8 +11,8 @@ class ToolRegistry:
     Parses function signatures and docstrings to build OpenAPI function schemas.
     """
     def __init__(self):
-        self.tools: Dict[str, Callable] = {}
-        self.schemas: Dict[str, Dict[str, Any]] = {}
+        self.tools: dict[str, Callable] = {}
+        self.schemas: dict[str, dict[str, Any]] = {}
 
     def register(self, func: Callable) -> Callable:
         name = func.__name__
@@ -21,22 +21,22 @@ class ToolRegistry:
         logger.info(f"Registered tool: {name}")
         return func
 
-    def _generate_schema(self, func: Callable) -> Dict[str, Any]:
+    def _generate_schema(self, func: Callable) -> dict[str, Any]:
         name = func.__name__
         sig = inspect.signature(func)
         doc = func.__doc__ or ""
-        
+
         doc_lines = [line.strip() for line in doc.split("\n") if line.strip()]
         description = doc_lines[0] if doc_lines else f"Execute tool function {func.__name__}"
-        
+
         properties = {}
         required = []
-        
+
         for param_name, param in sig.parameters.items():
             # Filter out context parameters that should be injected by the harness
             if param_name in ("self", "db_session", "session_id"):
                 continue
-            
+
             p_type = "string"
             if param.annotation == int:
                 p_type = "integer"
@@ -44,11 +44,11 @@ class ToolRegistry:
                 p_type = "number"
             elif param.annotation == bool:
                 p_type = "boolean"
-            elif param.annotation in (list, List, List[str], List[Any]):
+            elif param.annotation in (list, list, list[str], list[Any]):
                 p_type = "array"
-            elif param.annotation in (dict, Dict, Dict[str, Any]):
+            elif param.annotation in (dict, dict, dict[str, Any]):
                 p_type = "object"
-                
+
             # Extract description from subsequent docstring lines if match parameter name
             param_desc = f"Parameter {param_name}"
             for line in doc_lines[1:]:
@@ -57,15 +57,15 @@ class ToolRegistry:
                     if len(parts) >= 2:
                         param_desc = parts[-1].strip()
                         break
-                        
+
             properties[param_name] = {
                 "type": p_type,
                 "description": param_desc
             }
-            
+
             if param.default == inspect.Parameter.empty:
                 required.append(param_name)
-                
+
         return {
             "type": "function",
             "function": {
@@ -78,25 +78,25 @@ class ToolRegistry:
                 }
             }
         }
-        
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
         return list(self.schemas.values())
-        
-    async def execute(self, name: str, args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Any:
+
+    async def execute(self, name: str, args: dict[str, Any], context: dict[str, Any] | None = None) -> Any:
         if name not in self.tools:
             raise ValueError(f"Tool '{name}' is not registered.")
-            
+
         func = self.tools[name]
         sig = inspect.signature(func)
         merged_args = {}
-        
+
         # Bind expected arguments
         for param_name in sig.parameters:
             if param_name in args:
                 merged_args[param_name] = args[param_name]
             elif context and param_name in context:
                 merged_args[param_name] = context[param_name]
-                
+
         if inspect.iscoroutinefunction(func):
             return await func(**merged_args)
         else:
@@ -108,7 +108,7 @@ registry = ToolRegistry()
 
 # Example Tool definitions
 @registry.register
-def list_available_apps() -> List[str]:
+def list_available_apps() -> list[str]:
     """
     Returns a list of IDs of all ambient widget applications currently configured on disk.
     """
@@ -133,6 +133,7 @@ def query_graph(query_json: str) -> str:
     :param query_json: The declarative graph query in JSON string format.
     """
     import json
+
     from backend.graph_query_engine import execute_graph_query
     from backend.main import graph_db
     try:
@@ -140,7 +141,7 @@ def query_graph(query_json: str) -> str:
         res = execute_graph_query(query, graph_db)
         return json.dumps(res, ensure_ascii=False)
     except Exception as e:
-        return f"Error executing query: {str(e)}"
+        return f"Error executing query: {e!s}"
 
 @registry.register
 async def mutate_graph(actions_json: str) -> str:
@@ -149,8 +150,9 @@ async def mutate_graph(actions_json: str) -> str:
     :param actions_json: The list of actions in JSON string format. Actions can be create_node, update_node_property, delete_node, create_edge, delete_edge.
     """
     import json
-    from backend.main import graph_db
+
     from backend.graph_subscription import subscription_manager
+    from backend.main import graph_db
     try:
         actions = json.loads(actions_json)
         for action in actions:
@@ -190,5 +192,5 @@ async def mutate_graph(actions_json: str) -> str:
         await subscription_manager.broadcast_updates(graph_db, send_ws)
         return "success"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e!s}"
 

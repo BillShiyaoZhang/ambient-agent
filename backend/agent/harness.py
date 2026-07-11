@@ -1,34 +1,36 @@
-import re
-import os
-import sys
-import logging
-import uuid
 import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Callable, Any, Dict, List, Optional
+import logging
+import os
+import re
+import sys
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
+
 from sqlmodel import Session
 
-from backend.models import ChatMessage, ChatSession
+from backend.agent.prompts.manager import PromptManager
+from backend.agent.providers import get_llm_provider
+from backend.agent.router import IntentRouter
+from backend.agent.tools import registry as tool_registry
+from backend.agent_parser import parse_widget_from_text
 from backend.app_manager import AppManager
 from backend.context_manager import ContextManager
-from backend.agent_parser import parse_widget_from_text
+from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import run_opencode_agent_acp
-from backend.agent.router import IntentRouter
-from backend.agent.providers import get_llm_provider
-from backend.agent.prompts.manager import PromptManager
-from backend.agent.tools import registry as tool_registry
 
 logger = logging.getLogger("agent.harness")
 
 # Registry to hold active schema approval requests
-active_schema_requests: Dict[str, asyncio.Future] = {}
+active_schema_requests: dict[str, asyncio.Future] = {}
 
 # Registry to hold active plan approval requests
-active_plan_requests: Dict[str, asyncio.Future] = {}
+active_plan_requests: dict[str, asyncio.Future] = {}
 
 # Registry to hold active verification approval requests
-active_verification_requests: Dict[str, asyncio.Future] = {}
+active_verification_requests: dict[str, asyncio.Future] = {}
 
 class AgentOrchestrator:
     """
@@ -46,7 +48,7 @@ class AgentOrchestrator:
         session_id: str,
         content: str,
         on_update: Callable[[str], Any]
-    ) -> tuple[ChatMessage, Optional[dict[str, Any]]]:
+    ) -> tuple[ChatMessage, dict[str, Any] | None]:
         # 1. Fetch or initialize user session metadata
         db_session_obj = self.db.get(ChatSession, session_id)
         if not db_session_obj:
@@ -56,7 +58,7 @@ class AgentOrchestrator:
             self.db.refresh(db_session_obj)
 
         # Update updated_at timestamp
-        db_session_obj.updated_at = datetime.now(timezone.utc)
+        db_session_obj.updated_at = datetime.now(UTC)
         self.db.add(db_session_obj)
         self.db.commit()
 
@@ -70,7 +72,7 @@ class AgentOrchestrator:
                 session_id=session_id,
                 role="agent",
                 sender="agent",
-                content=f"⚠️ 意图路由分类失败：无法连接大模型服务或解析返回结果。错误信息：{str(e)}"
+                content=f"⚠️ 意图路由分类失败：无法连接大模型服务或解析返回结果。错误信息：{e!s}"
             )
             self.db.add(error_msg)
             self.db.commit()
@@ -79,7 +81,7 @@ class AgentOrchestrator:
 
         if is_coding:
             is_testing = ("pytest" in sys.modules or os.getenv("TESTING") == "true") and os.getenv("FORCE_INTERACTIVE") != "true"
-            
+
             if is_testing:
                 # Bypass schema alignment entirely in test mode to match exact WebSocket messages expected by test assertions
                 status_text = f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
@@ -88,45 +90,45 @@ class AgentOrchestrator:
                 verification_report = "Bypassed in test mode."
             else:
                 current_state = "plan_phase"
-                
+
                 approved_plan = ""
                 approved_proposal = None
                 all_registered_schemas = []
                 schema_context_text = ""
                 cli_output = ""
                 verification_report = ""
-                
+
                 # In case of rework code, we feed the verification report back into instructions
                 verification_feedback_context = ""
-                
+
+                from backend.graph_db import GraphDatabase
                 from backend.plan_generation import PlanGenerationService
                 from backend.schema_alignment import SchemaAlignmentService
-                from backend.graph_db import GraphDatabase
                 from backend.schema_verification import SchemaVerificationService
-                
+
                 workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
                 graph_db = GraphDatabase(workspace_dir)
-                
+
                 while current_state != "done":
                     if current_state == "plan_phase":
                         # --- PHASE 1: IMPLEMENTATION PLAN ---
                         await self._run_callback(on_update, "🔍 正在为您制定开发计划 Plan...")
-                        
+
                         plan = await PlanGenerationService.generate_plan(
                             instruction=instruction,
                             app_id=app_id,
                             schemas_context="",
                             db_session=self.db
                         )
-                        
+
                         plan_approved = False
                         approved_plan = plan
-                        
+
                         while not plan_approved:
                             plan_request_id = f"plan-{uuid.uuid4()}"
                             future = asyncio.Future()
                             active_plan_requests[plan_request_id] = future
-                            
+
                             # Send plan approval request to the client
                             await self._run_callback(on_update, {
                                 "type": "plan_approval_request",
@@ -134,9 +136,9 @@ class AgentOrchestrator:
                                 "app_id": app_id,
                                 "plan": plan
                             })
-                            
+
                             await self._run_callback(on_update, "⏳ 等待开发计划 Plan 确认中...")
-                            
+
                             try:
                                 action, response_data = await future
                             except Exception as e:
@@ -145,7 +147,7 @@ class AgentOrchestrator:
                                 logger.error(f"Error waiting for plan approval: {e}")
                             finally:
                                 active_plan_requests.pop(plan_request_id, None)
-                                
+
                             if action == "approve":
                                 plan_approved = True
                                 approved_plan = response_data
@@ -154,7 +156,7 @@ class AgentOrchestrator:
                                 feedback_text = response_data.get("feedback", "")
                                 current_plan = response_data.get("plan", plan)
                                 await self._run_callback(on_update, f"🔄 正在根据您的反馈微调 Plan: '{feedback_text}'...")
-                                
+
                                 plan = await PlanGenerationService.refine_plan(
                                     instruction=instruction,
                                     app_id=app_id,
@@ -166,7 +168,7 @@ class AgentOrchestrator:
                             else:  # deny / cancel
                                 current_state = "cancel_plan"
                                 break
-                                
+
                         if current_state == "cancel_plan":
                             cancel_msg = ChatMessage(
                                 session_id=session_id,
@@ -182,7 +184,7 @@ class AgentOrchestrator:
                     elif current_state == "schema_phase":
                         # --- PHASE 2: DATABASE SCHEMA ALIGNMENT ---
                         await self._run_callback(on_update, "🔍 正在对齐数据库 Schema...")
-                        
+
                         proposal = await SchemaAlignmentService.align_schemas(
                             instruction=instruction,
                             app_id=app_id,
@@ -190,15 +192,15 @@ class AgentOrchestrator:
                             db_session=self.db,
                             approved_plan=approved_plan
                         )
-                        
+
                         approved = False
                         approved_proposal = None
-                        
+
                         while not approved:
                             request_id = f"schema-{uuid.uuid4()}"
                             future = asyncio.Future()
                             active_schema_requests[request_id] = future
-                            
+
                             # Send approval request to the client
                             await self._run_callback(on_update, {
                                 "type": "schema_approval_request",
@@ -206,9 +208,9 @@ class AgentOrchestrator:
                                 "app_id": app_id,
                                 "proposal": proposal
                             })
-                            
+
                             await self._run_callback(on_update, "⏳ 等待数据库 Schema 确认中...")
-                            
+
                             try:
                                 action, response_data = await future
                             except Exception as e:
@@ -217,7 +219,7 @@ class AgentOrchestrator:
                                 logger.error(f"Error waiting for schema approval: {e}")
                             finally:
                                 active_schema_requests.pop(request_id, None)
-                                
+
                             if action == "approve":
                                 approved = True
                                 approved_proposal = response_data
@@ -230,7 +232,7 @@ class AgentOrchestrator:
                                 feedback_text = response_data.get("feedback", "")
                                 current_proposal = response_data.get("proposal", proposal)
                                 await self._run_callback(on_update, f"🔄 正在根据您的反馈微调 Schema: '{feedback_text}'...")
-                                
+
                                 proposal = await SchemaAlignmentService.refine_proposal(
                                     instruction=instruction,
                                     app_id=app_id,
@@ -243,7 +245,7 @@ class AgentOrchestrator:
                             else:  # deny / cancel
                                 current_state = "cancel_schema"
                                 break
-                                
+
                         if current_state == "cancel_schema":
                             cancel_msg = ChatMessage(
                                 session_id=session_id,
@@ -255,7 +257,7 @@ class AgentOrchestrator:
                             self.db.commit()
                             self.db.refresh(cancel_msg)
                             return cancel_msg, None
-                            
+
                         if current_state == "code_phase":
                             new_schemas = approved_proposal.get("new_schemas", [])
                             for ns in new_schemas:
@@ -265,7 +267,7 @@ class AgentOrchestrator:
                                     description=ns.get("description", ""),
                                     properties=ns.get("properties", {})
                                 )
-                                
+
                             reused_schemas = approved_proposal.get("reused_schemas", [])
                             for rs in reused_schemas:
                                 schema_id = rs.get("id")
@@ -289,22 +291,22 @@ class AgentOrchestrator:
                         schema_context_text = "Here is the exact schema definitions registered in the system. Your JavaScript client code MUST conform to these fields and types:\n"
                         for s in all_registered_schemas:
                             schema_context_text += f"- Type '{s['id']}': {json.dumps(s['properties'])}\n"
-                        
+
                         enriched_instruction = f"{instruction}\n\n[APPROVED DEVELOPMENT PLAN]\n{approved_plan}\n\n[CRITICAL GRAPH DATABASE SCHEMA CONSTRAINTS]\n{schema_context_text}"
                         if verification_feedback_context:
                             enriched_instruction += f"\n\n[CRITICAL: PREVIOUS SCHEMA VERIFICATION ERRORS TO FIX]\n{verification_feedback_context}"
-                        
+
                         # Spawns OpenCode agent via ACP mode
-                        status_text = f"🛠️ Plan 与 Schema 对齐已确认。正在启动 OpenCode 开发者智能体生成 code...\n这可能需要一些时间。"
+                        status_text = "🛠️ Plan 与 Schema 对齐已确认。正在启动 OpenCode 开发者智能体生成 code...\n这可能需要一些时间。"
                         await self._run_callback(on_update, status_text)
-                        
+
                         cli_output = await self.run_opencode_agent_acp_fn(app_id, enriched_instruction, on_update=on_update)
                         current_state = "verify_phase"
 
                     elif current_state == "verify_phase":
                         # --- PHASE 4: SCHEMA VERIFICATION ---
                         await self._run_callback(on_update, "🔍 正在校验代码与 Database Schema 的对齐情况...")
-                        
+
                         widget_to_send = self.app_manager.get_app_files(app_id)
                         verification_report = "✅ Schema Verification PASSED (No widget files found for verification)"
                         if widget_to_send:
@@ -314,9 +316,9 @@ class AgentOrchestrator:
                                 registered_schemas=all_registered_schemas,
                                 db_session=self.db
                             )
-                        
+
                         await self._run_callback(on_update, f"### 🔍 Database Schema Verification Report\n\n{verification_report}")
-                        
+
                         if "✅ PASSED" in verification_report or "PASSED" in verification_report.upper():
                             current_state = "done"
                         else:
@@ -326,7 +328,7 @@ class AgentOrchestrator:
                         request_id = f"verify-{uuid.uuid4()}"
                         future = asyncio.Future()
                         active_verification_requests[request_id] = future
-                        
+
                         # Send verification approval request to client
                         await self._run_callback(on_update, {
                             "type": "verification_approval_request",
@@ -334,9 +336,9 @@ class AgentOrchestrator:
                             "app_id": app_id,
                             "report": verification_report
                         })
-                        
+
                         await self._run_callback(on_update, "⏳ 等待 Schema 校验警告处理指令...")
-                        
+
                         try:
                             action, response_data = await future
                         except Exception as e:
@@ -345,7 +347,7 @@ class AgentOrchestrator:
                             logger.error(f"Error waiting for verification approval: {e}")
                         finally:
                             active_verification_requests.pop(request_id, None)
-                            
+
                         if action == "rework_code":
                             verification_feedback_context = response_data.get("feedback", "") or verification_report
                             current_state = "code_phase"
@@ -359,7 +361,7 @@ class AgentOrchestrator:
                         else:  # approve / bypass
                             current_state = "done"
                             await self._run_callback(on_update, "⚠️ 用户已确认绕过 Schema 校验警告，完成生成。")
-            
+
             # Save agent run logs
             agent_msg = ChatMessage(
                 session_id=session_id,
@@ -371,7 +373,7 @@ class AgentOrchestrator:
                 )
             )
             self.db.add(agent_msg)
-            
+
             # Retrieve updated widget details from disk
             widget_to_send = self.app_manager.get_app_files(app_id)
             if widget_to_send:
@@ -388,13 +390,13 @@ class AgentOrchestrator:
                     )
                 )
                 self.db.add(code_msg)
-                
+
                 # Dynamic visual title extraction
                 title = app_id.replace("-", " ").title()
                 title_match = re.search(r"<title>(.*?)</title>", widget_to_send["html"], re.IGNORECASE)
                 if title_match:
                     title = title_match.group(1).strip()
-                
+
                 self.app_manager.create_or_update_app(
                     app_id=widget_to_send["id"],
                     title=title,

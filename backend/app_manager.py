@@ -1,8 +1,9 @@
-import os
 import json
+import os
 import shutil
-from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+from datetime import UTC, datetime
+from typing import Any
+
 
 class AppManager:
     def __init__(self):
@@ -18,12 +19,12 @@ class AppManager:
 
         # Write metadata.json
         meta_path = os.path.join(app_path, "metadata.json")
-        created_at = datetime.now(timezone.utc).isoformat()
-        
+        created_at = datetime.now(UTC).isoformat()
+
         # Preserve created_at if already exists
         if os.path.exists(meta_path):
             try:
-                with open(meta_path, "r", encoding="utf-8") as f:
+                with open(meta_path, encoding="utf-8") as f:
                     existing_meta = json.load(f)
                     created_at = existing_meta.get("created_at", created_at)
             except Exception:
@@ -33,7 +34,7 @@ class AppManager:
             "id": app_id,
             "title": title,
             "created_at": created_at,
-            "updated_at": datetime.now(timezone.utc).isoformat()
+            "updated_at": datetime.now(UTC).isoformat()
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2, ensure_ascii=False)
@@ -52,15 +53,15 @@ class AppManager:
 
 
 
-    def _ensure_metadata(self, app_id: str, app_path: str, meta_path: str) -> Optional[Dict[str, Any]]:
+    def _ensure_metadata(self, app_id: str, app_path: str, meta_path: str) -> dict[str, Any] | None:
         import re
         if os.path.exists(meta_path):
             try:
-                with open(meta_path, "r", encoding="utf-8") as f:
+                with open(meta_path, encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
                 pass
-        
+
         # If metadata.json does not exist, verify that index.html exists
         html_path = os.path.join(app_path, "index.html")
         if not os.path.exists(html_path):
@@ -69,7 +70,7 @@ class AppManager:
         # Extract title from index.html if possible, fallback to clean app_id
         title = app_id.replace("-", " ").title()
         try:
-            with open(html_path, "r", encoding="utf-8") as f:
+            with open(html_path, encoding="utf-8") as f:
                 html_content = f.read()
             title_match = re.search(r"<title>(.*?)</title>", html_content, re.IGNORECASE)
             if title_match:
@@ -80,8 +81,8 @@ class AppManager:
         meta_data = {
             "id": app_id,
             "title": title,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat()
         }
         try:
             with open(meta_path, "w", encoding="utf-8") as f:
@@ -90,7 +91,7 @@ class AppManager:
         except Exception:
             return None
 
-    def get_app_files(self, app_id: str) -> Optional[Dict[str, str]]:
+    def get_app_files(self, app_id: str) -> dict[str, str] | None:
         app_path = self._get_app_path(app_id)
         meta_path = os.path.join(app_path, "metadata.json")
         meta = self._ensure_metadata(app_id, app_path, meta_path)
@@ -101,19 +102,19 @@ class AppManager:
             html = ""
             html_path = os.path.join(app_path, "index.html")
             if os.path.exists(html_path):
-                with open(html_path, "r", encoding="utf-8") as f:
+                with open(html_path, encoding="utf-8") as f:
                     html = f.read()
 
             css = ""
             css_path = os.path.join(app_path, "style.css")
             if os.path.exists(css_path):
-                with open(css_path, "r", encoding="utf-8") as f:
+                with open(css_path, encoding="utf-8") as f:
                     css = f.read()
 
             js = ""
             js_path = os.path.join(app_path, "controller.js")
             if os.path.exists(js_path):
-                with open(js_path, "r", encoding="utf-8") as f:
+                with open(js_path, encoding="utf-8") as f:
                     js = f.read()
 
             return {
@@ -126,7 +127,7 @@ class AppManager:
         except Exception:
             return None
 
-    def list_apps(self) -> List[Dict[str, Any]]:
+    def list_apps(self) -> list[dict[str, Any]]:
         if not os.path.exists(self.apps_dir):
             return []
 

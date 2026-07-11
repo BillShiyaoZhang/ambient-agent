@@ -1,16 +1,19 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from backend.agent.router import IntentRouter
-from backend.agent.tools import ToolRegistry, registry as global_registry
+
+import pytest
+
 from backend.agent.harness import AgentOrchestrator
-from backend.models import ChatMessage, ChatSession
+from backend.agent.router import IntentRouter
+from backend.agent.tools import ToolRegistry
+from backend.models import ChatSession
 from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.mark.asyncio
 async def test_intent_router(monkeypatch):
     # Mock LLM provider that returns dynamic response depending on the query
     mock_provider = AsyncMock()
-    
+
     async def mock_generate(messages, db_session=None):
         user_message = messages[-1]["content"]
         if "Hello" in user_message:
@@ -92,7 +95,7 @@ def test_tool_registry():
     func_schema = schemas[0]["function"]
     assert func_schema["name"] == "dummy_tool"
     assert func_schema["description"] == "A dummy test tool."
-    
+
     params = func_schema["parameters"]["properties"]
     assert "name" in params
     assert params["name"]["type"] == "string"
@@ -104,32 +107,32 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     # Mock LLM provider
     mock_provider = AsyncMock()
     mock_provider.generate.return_value = "Hello! I am here to help you."
-    
+
     # Mock the get_llm_provider function to return our mock provider
     monkeypatch.setattr("backend.agent.harness.get_llm_provider", lambda p, m: mock_provider)
-    
+
     # Mock IntentRouter.route directly to avoid calling the real LLM endpoint
     mock_route = AsyncMock(return_value=(False, None, "Who are you?"))
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
-    
+
     # Mock database session
     db_session = MagicMock(spec=WorkspaceStorage)
     db_session.get.return_value = ChatSession(id="sess-1", title="Test")
-    
+
     # Mock app manager
     app_manager = MagicMock()
     app_manager.list_apps.return_value = []
-    
+
     orchestrator = AgentOrchestrator(db_session=db_session, app_manager=app_manager)
-    
+
     on_update = AsyncMock()
-    
+
     agent_msg, widget = await orchestrator.handle_message(
         session_id="sess-1",
         content="Who are you?",
         on_update=on_update
     )
-    
+
     assert agent_msg.content == "Hello! I am here to help you."
     assert agent_msg.role == "agent"
     assert widget is None

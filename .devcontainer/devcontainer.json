@@ -1,0 +1,39 @@
+{
+  "name": "Ambient Agent Developer Environment",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "${workspaceRoot}/.venv/bin/python",
+        "python.linting.enabled": false,
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll": "explicit",
+          "source.organizeImports": "explicit"
+        },
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "[typescript]": {
+          "editor.defaultFormatter": "vscode.typescript-language-features"
+        },
+        "[typescriptreact]": {
+          "editor.defaultFormatter": "vscode.typescript-language-features"
+        }
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "dbaeumer.vscode-eslint",
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  },
+  "forwardPorts": [8000, 5173],
+  "postCreateCommand": "uv sync && cd frontend && npm install",
+  "remoteUser": "root"
+}

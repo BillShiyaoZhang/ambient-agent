@@ -1,15 +1,16 @@
 import re
-from typing import List, Dict, Set
-from backend.workspace_storage import WorkspaceStorage
-from backend.models import ChatMessage
+
 from backend.app_manager import AppManager
+from backend.models import ChatMessage
+from backend.workspace_storage import WorkspaceStorage
+
 
 class ContextManager:
     def __init__(self, db_session: WorkspaceStorage, app_manager: AppManager):
         self.db = db_session
         self.app_manager = app_manager
 
-    def _extract_app_ids(self, messages: List[ChatMessage]) -> Set[str]:
+    def _extract_app_ids(self, messages: list[ChatMessage]) -> set[str]:
         """
         Scans messages for <ambient-widget id="some-id" ...> tags and
         /app <app_id> references to identify which apps have been created
@@ -20,18 +21,18 @@ class ContextManager:
         xml_pattern = r"<ambient-widget\s+[^>]*?id=[\"']([^\"']+)[\"']"
         # Match slash command: /app <app_id> (with optional spaces/word boundaries)
         slash_pattern = r"(?:^|\s)/app\s+([a-zA-Z0-9_-]+)"
-        
+
         for msg in messages:
             # Extract from XML tags
             xml_matches = re.findall(xml_pattern, msg.content)
             for m in xml_matches:
                 app_ids.add(m.strip())
-            
+
             # Extract from /app slash commands
             slash_matches = re.findall(slash_pattern, msg.content)
             for m in slash_matches:
                 app_ids.add(m.strip())
-                
+
         return app_ids
 
     def _prune_message_content(self, content: str) -> str:
@@ -44,10 +45,10 @@ class ContextManager:
             # Find the ID and Title attributes matching single or double quotes
             id_match = re.search(r"id=[\"']([^\"']+)[\"']", widget_tag)
             title_match = re.search(r"title=[\"']([^\"']+)[\"']", widget_tag)
-            
+
             widget_id = id_match.group(1) if id_match else "unknown"
             widget_title = title_match.group(1) if title_match else "Widget"
-            
+
             return (
                 f'<ambient-widget id="{widget_id}" title="{widget_title}">\n'
                 f'  <!-- [HTML, CSS, JS source code omitted from history to save context space] -->\n'
@@ -58,7 +59,7 @@ class ContextManager:
         pattern = r"<ambient-widget\s+[^>]*?id=[\"']([^\"']+)[\"'][^>]*?title=[\"']([^\"']+)[\"'][^>]*?>.*?</ambient-widget>"
         return re.sub(pattern, replace_block, content, flags=re.DOTALL)
 
-    def build_llm_prompt(self, session_id: str) -> List[Dict[str, str]]:
+    def build_llm_prompt(self, session_id: str) -> list[dict[str, str]]:
         """
         Loads the chat session message history, prunes old code payloads to prevent
         token explosion, identifies active apps, and injects their latest files from disk.

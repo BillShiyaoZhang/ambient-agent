@@ -1,19 +1,20 @@
-import os
 import json
-import uuid
+import os
 import sqlite3
-from typing import Dict, Any, List, Optional
+import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
+
 
 class GraphDatabase:
-    def __init__(self, workspace_dir: Optional[str] = None):
+    def __init__(self, workspace_dir: str | None = None):
         if not workspace_dir:
             workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
         self.workspace_dir = workspace_dir
         self.db_path = os.path.join(self.workspace_dir, "graph.db")
         self.legacy_filepath = os.path.join(self.workspace_dir, "graph.json")
-        
+
         # Ensure workspace dir exists
         os.makedirs(self.workspace_dir, exist_ok=True)
         self.load()
@@ -69,7 +70,7 @@ class GraphDatabase:
                     PRIMARY KEY (from_id, to_id, type)
                 )
             """)
-            
+
             # 2. Indexes
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON graph_nodes(type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_id)")
@@ -126,15 +127,15 @@ class GraphDatabase:
     def _migrate_legacy_data(self) -> None:
         if not os.path.exists(self.legacy_filepath):
             return
-        
+
         try:
-            print(f"[GraphDB] Migrating legacy graph.json to graph.db...")
-            with open(self.legacy_filepath, "r", encoding="utf-8") as f:
+            print("[GraphDB] Migrating legacy graph.json to graph.db...")
+            with open(self.legacy_filepath, encoding="utf-8") as f:
                 data = json.load(f)
-            
+
             legacy_nodes = data.get("nodes", {})
             legacy_edges = data.get("edges", [])
-            
+
             with self.get_conn() as conn:
                 # Migrate nodes
                 for node_id, node in legacy_nodes.items():
@@ -145,7 +146,7 @@ class GraphDatabase:
                             node.get("type", "Generic"),
                             json.dumps(node.get("properties", {})),
                             node.get("properties", {}).get("namespace"),
-                            datetime.now(timezone.utc).isoformat()
+                            datetime.now(UTC).isoformat()
                         )
                     )
                 # Migrate edges
@@ -157,10 +158,10 @@ class GraphDatabase:
                             edge.get("to_id"),
                             edge.get("type"),
                             json.dumps(edge.get("properties", {})),
-                            datetime.now(timezone.utc).isoformat()
+                            datetime.now(UTC).isoformat()
                         )
                     )
-            
+
             # Backup old file to avoid re-migration
             backup_path = self.legacy_filepath + ".backup"
             if os.path.exists(backup_path):
@@ -172,7 +173,7 @@ class GraphDatabase:
 
     # --- Schema APIs ---
 
-    def register_schema(self, schema_id: str, name: str, description: str, properties: Dict[str, str], is_core: bool = False) -> Dict[str, Any]:
+    def register_schema(self, schema_id: str, name: str, description: str, properties: dict[str, str], is_core: bool = False) -> dict[str, Any]:
         with self.get_conn() as conn:
             conn.execute(
                 """
@@ -189,7 +190,7 @@ class GraphDatabase:
                     description,
                     json.dumps(properties),
                     1 if is_core else 0,
-                    datetime.now(timezone.utc).isoformat()
+                    datetime.now(UTC).isoformat()
                 )
             )
         return {
@@ -200,7 +201,7 @@ class GraphDatabase:
             "is_core": is_core
         }
 
-    def get_schema(self, schema_id: str) -> Optional[Dict[str, Any]]:
+    def get_schema(self, schema_id: str) -> dict[str, Any] | None:
         with self.get_conn() as conn:
             row = conn.execute("SELECT id, name, description, properties, is_core FROM graph_schemas WHERE id = ?", (schema_id,)).fetchone()
             if row:
@@ -213,7 +214,7 @@ class GraphDatabase:
                 }
         return None
 
-    def list_schemas(self) -> List[Dict[str, Any]]:
+    def list_schemas(self) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
             rows = conn.execute("SELECT id, name, description, properties, is_core FROM graph_schemas").fetchall()
             return [
@@ -229,14 +230,14 @@ class GraphDatabase:
 
     # --- Node/Edge Property Validation ---
 
-    def validate_properties(self, node_type: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_properties(self, node_type: str, properties: dict[str, Any]) -> dict[str, Any]:
         schema = self.get_schema(node_type)
         if not schema:
             return properties
-        
+
         schema_props = schema.get("properties", {})
         validated_props = dict(properties)
-        
+
         for k, v in properties.items():
             if k in schema_props:
                 expected_type = schema_props[k].lower()
@@ -265,12 +266,12 @@ class GraphDatabase:
 
     # --- Node APIs ---
 
-    def create_node(self, node_id: Optional[str] = None, node_type: str = "Generic", properties: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def create_node(self, node_id: str | None = None, node_type: str = "Generic", properties: dict[str, Any] | None = None) -> dict[str, Any]:
         if not node_id:
             node_id = str(uuid.uuid4())
-        
+
         raw_properties = properties or {}
-        
+
         # 1. Namespace Extraction & Verification
         namespace = raw_properties.get("namespace")
         if not namespace and node_id.startswith("app:"):
@@ -279,10 +280,10 @@ class GraphDatabase:
             if len(parts) >= 2:
                 namespace = parts[1]
                 raw_properties["namespace"] = namespace
-        
+
         # 2. Schema Validation
         validated_properties = self.validate_properties(node_type, raw_properties)
-        
+
         with self.get_conn() as conn:
             conn.execute(
                 """
@@ -298,17 +299,17 @@ class GraphDatabase:
                     node_type,
                     json.dumps(validated_properties),
                     namespace,
-                    datetime.now(timezone.utc).isoformat()
+                    datetime.now(UTC).isoformat()
                 )
             )
-        
+
         return {
             "id": node_id,
             "type": node_type,
             "properties": validated_properties
         }
 
-    def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+    def get_node(self, node_id: str) -> dict[str, Any] | None:
         with self.get_conn() as conn:
             row = conn.execute("SELECT id, type, properties FROM graph_nodes WHERE id = ?", (node_id,)).fetchone()
             if row:
@@ -319,24 +320,24 @@ class GraphDatabase:
                 }
         return None
 
-    def update_node_property(self, node_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+    def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
         node = self.get_node(node_id)
         if not node:
             raise ValueError(f"Node with ID '{node_id}' does not exist.")
-        
+
         updated_props = dict(node["properties"])
         updated_props.update(properties)
-        
+
         validated_props = self.validate_properties(node["type"], updated_props)
-        
+
         namespace = validated_props.get("namespace")
-        
+
         with self.get_conn() as conn:
             conn.execute(
                 "UPDATE graph_nodes SET properties = ?, namespace = ? WHERE id = ?",
                 (json.dumps(validated_props), namespace, node_id)
             )
-        
+
         return {
             "id": node_id,
             "type": node["type"],
@@ -353,15 +354,15 @@ class GraphDatabase:
 
     # --- Edge APIs ---
 
-    def create_edge(self, from_id: str, to_id: str, edge_type: str, properties: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def create_edge(self, from_id: str, to_id: str, edge_type: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
         # Validate that both nodes exist
         if not self.get_node(from_id):
             raise ValueError(f"Source node '{from_id}' does not exist.")
         if not self.get_node(to_id):
             raise ValueError(f"Target node '{to_id}' does not exist.")
-            
+
         edge_properties = properties or {}
-        
+
         with self.get_conn() as conn:
             # Upsert edge
             conn.execute(
@@ -376,10 +377,10 @@ class GraphDatabase:
                     to_id,
                     edge_type,
                     json.dumps(edge_properties),
-                    datetime.now(timezone.utc).isoformat()
+                    datetime.now(UTC).isoformat()
                 )
             )
-        
+
         return {
             "from_id": from_id,
             "to_id": to_id,
@@ -387,7 +388,7 @@ class GraphDatabase:
             "properties": edge_properties
         }
 
-    def get_edges(self, node_id: str) -> List[Dict[str, Any]]:
+    def get_edges(self, node_id: str) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
             rows = conn.execute(
                 "SELECT from_id, to_id, type, properties FROM graph_edges WHERE from_id = ? OR to_id = ?",
@@ -413,7 +414,7 @@ class GraphDatabase:
 
     # Backwards compatibility mappings for tests or direct node/edge lookups
     @property
-    def nodes(self) -> Dict[str, Dict[str, Any]]:
+    def nodes(self) -> dict[str, dict[str, Any]]:
         """
         Emulates the old dict nodes mapping.
         Note: Reading all nodes in-memory can be slow for huge databases,
@@ -431,7 +432,7 @@ class GraphDatabase:
             }
 
     @property
-    def edges(self) -> List[Dict[str, Any]]:
+    def edges(self) -> list[dict[str, Any]]:
         """
         Emulates the old list edges mapping.
         """

@@ -1,21 +1,21 @@
-import os
 import pytest
-import shutil
 from fastapi.testclient import TestClient
-from backend.main import app, get_db, app_manager
+
+from backend.main import app, app_manager, get_db
 from backend.workspace_storage import WorkspaceStorage
+
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):
     workspace_dir = str(tmp_path / "workspace")
     storage = WorkspaceStorage(workspace_dir)
-    
+
     # Isolate apps directory for app_manager inside this test
     old_apps_dir = app_manager.apps_dir
     app_manager.apps_dir = storage.apps_dir
-    
+
     yield storage
-    
+
     # Restore original apps directory
     app_manager.apps_dir = old_apps_dir
 
@@ -33,16 +33,16 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
             js="// Timer controller"
         )
         return "Mocked OpenCode success: stopwatch files updated on disk."
-        
+
     monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode_agent_acp)
 
     # Override get_db dependency
     def override_get_db():
         yield test_session
-        
+
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
-    
+
     with client.websocket_connect("/ws/chat") as websocket:
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
@@ -51,22 +51,22 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
             "sender": "user",
             "content": "/app test-timer Add standard start/stop buttons"
         })
-        
+
         # 1. Expect acknowledgment
         ack = websocket.receive_json()
         assert ack["type"] == "ack"
-        
+
         # Expect session status running update
         status_running = websocket.receive_json()
         assert status_running["type"] == "session_status_update"
         assert status_running["status"] == "running"
-        
+
         # 2. Expect the status message about OpenCode starting
         status = websocket.receive_json()
         assert status["type"] == "reply"
         assert "🛠️ Starting OpenCode agent" in status["message"]["content"]
         assert status["message"]["id"] == -1
-        
+
         # 3. Expect the mocked progress update
         progress = websocket.receive_json()
         assert progress["type"] == "reply"
@@ -77,14 +77,14 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         reply = websocket.receive_json()
         assert reply["type"] == "reply"
         assert "Mocked OpenCode success" in reply["message"]["content"]
-        
+
         # 5. Expect the updated widget to be sent
         widget_msg = websocket.receive_json()
         assert widget_msg["type"] == "widget"
         assert widget_msg["widget"]["id"] == "test-timer"
         assert widget_msg["widget"]["title"] == "Test Timer App"
         assert "12:34" in widget_msg["widget"]["html"]
-        
+
         # Expect session status idle update
         status_idle = websocket.receive_json()
         assert status_idle["type"] == "session_status_update"

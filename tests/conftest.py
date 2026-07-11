@@ -1,6 +1,7 @@
-import os
 import pytest
+
 from backend.main import app_manager
+
 
 @pytest.fixture(autouse=True)
 def isolate_apps_dir(tmp_path, monkeypatch):
@@ -12,9 +13,9 @@ def isolate_apps_dir(tmp_path, monkeypatch):
     """
     temp_dir = tmp_path / "global_apps"
     temp_dir.mkdir(exist_ok=True)
-    
+
     # Patch environment and the global app_manager's apps_dir
     monkeypatch.setenv("APPS_DIR", str(temp_dir))
     monkeypatch.setattr(app_manager, "apps_dir", str(temp_dir))
-    
+
     return temp_dir

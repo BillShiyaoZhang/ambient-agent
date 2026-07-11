@@ -1,12 +1,13 @@
-import os
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, Any
+from typing import Any
+
 from sqlmodel import Session
 
-from backend.models import LLMAuditLog
 import backend.llm_service
+from backend.models import LLMAuditLog
 
 logger = logging.getLogger("agent.providers")
 
@@ -17,9 +18,9 @@ class BaseLLMProvider(ABC):
     @abstractmethod
     async def generate(
         self,
-        messages: List[Dict[str, str]],
-        db_session: Optional[Session] = None,
-        tools: Optional[List[Dict[str, Any]]] = None
+        messages: list[dict[str, str]],
+        db_session: Session | None = None,
+        tools: list[dict[str, Any]] | None = None
     ) -> str:
         """
         Generates a completion response given the list of chat messages.
@@ -27,7 +28,7 @@ class BaseLLMProvider(ABC):
         """
         pass
 
-    def _log_to_db(self, db_session: Optional[Session], provider: str, prompt: List[Dict[str, str]], response: str) -> None:
+    def _log_to_db(self, db_session: Session | None, provider: str, prompt: list[dict[str, str]], response: str) -> None:
         if db_session is None:
             return
         try:
@@ -51,16 +52,16 @@ class BaseLLMProvider(ABC):
     async def _run_tool_loop(
         self,
         provider_name: str,
-        messages: List[Dict[str, str]],
-        db_session: Optional[Session] = None,
-        tools: Optional[List[Dict[str, Any]]] = None
+        messages: list[dict[str, str]],
+        db_session: Session | None = None,
+        tools: list[dict[str, Any]] | None = None
     ) -> str:
         from backend.agent.tools import registry as tool_registry
-        
+
         local_messages = list(messages)
         max_iterations = 5
         content = ""
-        
+
         for iteration in range(max_iterations):
             func = backend.llm_service.call_llm_api
             import inspect
@@ -89,16 +90,16 @@ class BaseLLMProvider(ABC):
 
             if isinstance(response_data, str):
                 response_data = {"content": response_data, "tool_calls": None}
-            
+
             content = response_data.get("content", "")
             tool_calls = response_data.get("tool_calls", None)
-            
+
             # Log this specific LLM call to DB
             self._log_to_db(db_session, provider_name, local_messages, content)
-            
+
             if not tool_calls:
                 return content
-                
+
             # Append assistant message with tool calls to prompt history
             assistant_msg = {
                 "role": "assistant",
@@ -106,13 +107,13 @@ class BaseLLMProvider(ABC):
                 "tool_calls": tool_calls
             }
             local_messages.append(assistant_msg)
-            
+
             # Execute each requested tool call
             for tool_call in tool_calls:
                 tool_name = tool_call.get("function", {}).get("name")
                 tool_args_raw = tool_call.get("function", {}).get("arguments", {})
                 tool_id = tool_call.get("id")
-                
+
                 # Parse arguments
                 if isinstance(tool_args_raw, str):
                     try:
@@ -122,7 +123,7 @@ class BaseLLMProvider(ABC):
                         tool_args = {}
                 else:
                     tool_args = tool_args_raw or {}
-                    
+
                 logger.info(f"Executing tool '{tool_name}' with args {tool_args}")
                 try:
                     tool_context = {"db_session": db_session}
@@ -130,8 +131,8 @@ class BaseLLMProvider(ABC):
                     result_str = str(result)
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}': {e}")
-                    result_str = f"Error: {str(e)}"
-                    
+                    result_str = f"Error: {e!s}"
+
                 # Append tool response message to history
                 tool_msg = {
                     "role": "tool",
@@ -140,7 +141,7 @@ class BaseLLMProvider(ABC):
                     "content": result_str
                 }
                 local_messages.append(tool_msg)
-                
+
         logger.warning(f"Tool loop exceeded maximum iterations ({max_iterations})")
         return content
 
@@ -148,9 +149,9 @@ class BaseLLMProvider(ABC):
 class OllamaProvider(BaseLLMProvider):
     async def generate(
         self,
-        messages: List[Dict[str, str]],
-        db_session: Optional[Session] = None,
-        tools: Optional[List[Dict[str, Any]]] = None
+        messages: list[dict[str, str]],
+        db_session: Session | None = None,
+        tools: list[dict[str, Any]] | None = None
     ) -> str:
         return await self._run_tool_loop("ollama", messages, db_session, tools)
 
@@ -158,9 +159,9 @@ class OllamaProvider(BaseLLMProvider):
 class CloudLLMProvider(BaseLLMProvider):
     async def generate(
         self,
-        messages: List[Dict[str, str]],
-        db_session: Optional[Session] = None,
-        tools: Optional[List[Dict[str, Any]]] = None
+        messages: list[dict[str, str]],
+        db_session: Session | None = None,
+        tools: list[dict[str, Any]] | None = None
     ) -> str:
         provider_name = os.getenv("LLM_PROVIDER", "openai")
         return await self._run_tool_loop(provider_name, messages, db_session, tools)
