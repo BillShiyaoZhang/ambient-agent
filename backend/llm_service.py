@@ -22,10 +22,9 @@ To spawn a widget, output a block in this exact XML-like format anywhere in your
 <js-script>
   // Scoped JavaScript. You are passed 'root' (the widget's HTML content div) and 'ambient' (the client SDK).
   // Use root.querySelector to select elements. Do NOT write global variables.
-  // To persist and sync data/state:
-  //   const data = await ambient.model.get(); // returns dict, initially {}
-  //   await ambient.model.set(newData);       // saves to backend data.json and syncs
-  //   ambient.model.onChange(data => { ... }); // triggers on data updates (e.g. from other devices)
+  // To persist and sync data/state via the Knowledge Graph:
+  //   ambient.graph.subscribe(query, callback); // listen for data changes matching a graph query
+  //   ambient.graph.mutate(operation);          // write data to the graph (triggers sync across devices)
   // To interact with chat:
   //   ambient.sendMessage("message text"); // sends user message in chat
   // To control window:
