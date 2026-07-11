@@ -186,6 +186,8 @@ async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
     
+    monkeypatch.setenv("OPENCODE_TIMEOUT", "180.0")
+    
     # Mock asyncio.wait_for to raise TimeoutError when timeout is 180.0
     original_wait_for = asyncio.wait_for
     async def mock_wait_for(fut, timeout, **kwargs):

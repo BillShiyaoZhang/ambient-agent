@@ -51,6 +51,217 @@ function App() {
     setPendingPermission(null);
   };
 
+  interface SchemaProposal {
+    reused_schemas: Array<{
+      id: string;
+      reason: string;
+      extended_properties: Record<string, string>;
+    }>;
+    new_schemas: Array<{
+      id: string;
+      name: string;
+      description: string;
+      properties: Record<string, string>;
+    }>;
+  }
+  interface SchemaApprovalRequest {
+    request_id: string;
+    app_id: string;
+    proposal: SchemaProposal;
+  }
+
+  interface PlanApprovalRequest {
+    type: "plan_approval_request";
+    request_id: string;
+    app_id: string;
+    plan: string;
+  }
+
+  interface VerificationApprovalRequest {
+    type: "verification_approval_request";
+    request_id: string;
+    app_id: string;
+    report: string;
+  }
+
+  const [pendingSchemaRequest, setPendingSchemaRequest] = useState<SchemaApprovalRequest | null>(null);
+  const [editedProposal, setEditedProposal] = useState<SchemaProposal | null>(null);
+  const [pendingPlanRequest, setPendingPlanRequest] = useState<PlanApprovalRequest | null>(null);
+  const [planFeedback, setPlanFeedback] = useState("");
+  const [runningSessions, setRunningSessions] = useState<string[]>([]);
+
+  const [schemaFeedback, setSchemaFeedback] = useState("");
+  const [pendingVerificationRequest, setPendingVerificationRequest] = useState<VerificationApprovalRequest | null>(null);
+  const [verificationFeedback, setVerificationFeedback] = useState("");
+
+  useEffect(() => {
+    if (pendingSchemaRequest) {
+      setEditedProposal(JSON.parse(JSON.stringify(pendingSchemaRequest.proposal)));
+      setSchemaFeedback("");
+    } else {
+      setEditedProposal(null);
+      setSchemaFeedback("");
+    }
+  }, [pendingSchemaRequest]);
+
+  useEffect(() => {
+    if (!pendingVerificationRequest) {
+      setVerificationFeedback("");
+    }
+  }, [pendingVerificationRequest]);
+
+  const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
+    if (!pendingSchemaRequest) return;
+    wsService.sendMessage({
+      type: "schema_approval_response",
+      request_id: pendingSchemaRequest.request_id,
+      approved: approved,
+      proposal: editedProposal || pendingSchemaRequest.proposal,
+      feedback: feedbackText || ""
+    });
+    setPendingSchemaRequest(null);
+  };
+
+  const handleResolveVerificationRequest = (approved: "approve" | "rework_code" | "rework_schema" | "rework_plan", feedbackText?: string) => {
+    if (!pendingVerificationRequest) return;
+    wsService.sendMessage({
+      type: "verification_approval_response",
+      request_id: pendingVerificationRequest.request_id,
+      approved: approved,
+      feedback: feedbackText || ""
+    });
+    setPendingVerificationRequest(null);
+  };
+
+  const handleResolvePlanRequest = (approved: boolean | "refine", feedbackText?: string) => {
+    if (!pendingPlanRequest) return;
+    wsService.sendMessage({
+      type: "plan_approval_response",
+      request_id: pendingPlanRequest.request_id,
+      approved: approved,
+      plan: pendingPlanRequest.plan,
+      feedback: feedbackText || ""
+    });
+    setPendingPlanRequest(null);
+  };
+
+  // Helper functions for editing Reused Schema extensions
+  const handleAddExtendedProperty = (schemaIndex: number) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    const schema = updated.reused_schemas[schemaIndex];
+    let counter = 1;
+    let newKey = `new_field_${counter}`;
+    while (newKey in schema.extended_properties) {
+      counter++;
+      newKey = `new_field_${counter}`;
+    }
+    schema.extended_properties[newKey] = "string";
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateExtendedPropertyKey = (schemaIndex: number, oldKey: string, newKey: string) => {
+    if (!editedProposal || !newKey || oldKey === newKey) return;
+    const updated = { ...editedProposal };
+    const schema = updated.reused_schemas[schemaIndex];
+    if (newKey in schema.extended_properties) return;
+    
+    const val = schema.extended_properties[oldKey];
+    delete schema.extended_properties[oldKey];
+    schema.extended_properties[newKey] = val;
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateExtendedPropertyType = (schemaIndex: number, key: string, newType: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    updated.reused_schemas[schemaIndex].extended_properties[key] = newType;
+    setEditedProposal(updated);
+  };
+
+  const handleRemoveExtendedProperty = (schemaIndex: number, key: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    delete updated.reused_schemas[schemaIndex].extended_properties[key];
+    setEditedProposal(updated);
+  };
+
+  // Helper functions for editing New Schemas
+  const handleAddNewSchemaProperty = (schemaIndex: number) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    const schema = updated.new_schemas[schemaIndex];
+    let counter = 1;
+    let newKey = `field_${counter}`;
+    while (newKey in schema.properties) {
+      counter++;
+      newKey = `field_${counter}`;
+    }
+    schema.properties[newKey] = "string";
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateNewSchemaPropertyKey = (schemaIndex: number, oldKey: string, newKey: string) => {
+    if (!editedProposal || !newKey || oldKey === newKey) return;
+    const updated = { ...editedProposal };
+    const schema = updated.new_schemas[schemaIndex];
+    if (newKey in schema.properties) return;
+    
+    const val = schema.properties[oldKey];
+    delete schema.properties[oldKey];
+    schema.properties[newKey] = val;
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateNewSchemaPropertyType = (schemaIndex: number, key: string, newType: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    updated.new_schemas[schemaIndex].properties[key] = newType;
+    setEditedProposal(updated);
+  };
+
+  const handleRemoveNewSchemaProperty = (schemaIndex: number, key: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    delete updated.new_schemas[schemaIndex].properties[key];
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateNewSchemaMeta = (schemaIndex: number, field: "name" | "description" | "id", val: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    updated.new_schemas[schemaIndex][field] = val;
+    if (field === "id") {
+      updated.new_schemas[schemaIndex].name = val.replace(/([A-Z])/g, ' $1').trim();
+    }
+    setEditedProposal(updated);
+  };
+
+  const handleRemoveNewSchema = (schemaIndex: number) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    updated.new_schemas.splice(schemaIndex, 1);
+    setEditedProposal(updated);
+  };
+
+  const handleAddNewSchema = () => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    let counter = 1;
+    let newId = `CustomEntity${counter}`;
+    while (updated.new_schemas.some(s => s.id === newId)) {
+      counter++;
+      newId = `CustomEntity${counter}`;
+    }
+    updated.new_schemas.push({
+      id: newId,
+      name: `Custom Entity ${counter}`,
+      description: "Custom entity registered by user",
+      properties: { "title": "string" }
+    });
+    setEditedProposal(updated);
+  };
+
   const [chatWidth, setChatWidth] = useState<number>(() => {
     const saved = localStorage.getItem("chat_panel_width");
     return saved ? parseInt(saved, 10) : 320;
@@ -234,6 +445,22 @@ function App() {
         );
       } else if (data.type === "permission_request") {
         setPendingPermission(data);
+      } else if (data.type === "schema_approval_request") {
+        setPendingSchemaRequest(data);
+      } else if (data.type === "plan_approval_request") {
+        setPendingPlanRequest(data);
+      } else if (data.type === "verification_approval_request") {
+        setPendingVerificationRequest(data);
+      } else if (data.type === "active_sessions_list") {
+        setRunningSessions(data.active_session_ids);
+      } else if (data.type === "session_status_update") {
+        setRunningSessions((prev) => {
+          if (data.status === "running") {
+            return prev.includes(data.session_id) ? prev : [...prev, data.session_id];
+          } else {
+            return prev.filter((id) => id !== data.session_id);
+          }
+        });
       }
     });
 
@@ -333,6 +560,7 @@ function App() {
       <SessionSidebar
         sessions={sessions}
         activeSessionId={activeSessionId}
+        runningSessions={runningSessions}
         onSelectSession={(id) => {
           setActiveSessionId(id);
           localStorage.setItem("last_active_session", id);
@@ -435,6 +663,355 @@ function App() {
               >
                 允许 (Allow)
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🧠 App 数据 Schema 智能对齐 Modal */}
+      {pendingSchemaRequest && editedProposal && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md overflow-y-auto py-10">
+          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
+            <div>
+              <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
+                🧠 App 数据 Schema 对齐
+              </h3>
+              <p className="text-slate-400 text-xs leading-relaxed">
+                为应用 <span className="text-cyan-400 font-mono font-bold">{pendingSchemaRequest.app_id}</span> 规划最规范的全局关联与数据结构，消除数据碎片并确保多 Widget 协同。
+              </p>
+            </div>
+
+            {/* Reused Schemas list */}
+            {editedProposal.reused_schemas.length > 0 && (
+              <div className="flex flex-col gap-3">
+                <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
+                  🔄 复用全局核心 Schema (推荐公共共享)
+                </h4>
+                {editedProposal.reused_schemas.map((rs, sIdx) => (
+                  <div key={rs.id} className="border border-cyan-500/20 bg-cyan-950/10 rounded-xl p-4 flex flex-col gap-3">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <span className="bg-cyan-500/10 text-cyan-400 text-[10px] px-2 py-0.5 rounded font-bold font-mono">
+                          {rs.id}
+                        </span>
+                        <p className="text-slate-400 text-[11px] mt-1">{rs.reason}</p>
+                      </div>
+                    </div>
+
+                    {/* Extended Properties */}
+                    <div className="flex flex-col gap-2">
+                      <span className="text-[11px] text-slate-400 font-medium">应用自定义扩展属性:</span>
+                      {Object.keys(rs.extended_properties).length === 0 ? (
+                        <p className="text-slate-500 text-[11px] italic">无自定义扩展属性</p>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {Object.entries(rs.extended_properties).map(([key, val]) => (
+                            <div key={key} className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={key}
+                                onChange={(e) => handleUpdateExtendedPropertyKey(sIdx, key, e.target.value)}
+                                className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-cyan-500"
+                                placeholder="属性名称"
+                              />
+                              <select
+                                value={val}
+                                onChange={(e) => handleUpdateExtendedPropertyType(sIdx, key, e.target.value)}
+                                className="bg-black/30 border border-white/10 px-2 py-1 rounded text-xs text-slate-300 w-1/3 focus:outline-none focus:border-cyan-500"
+                              >
+                                <option value="string">String</option>
+                                <option value="integer">Integer</option>
+                                <option value="number">Number</option>
+                                <option value="boolean">Boolean</option>
+                              </select>
+                              <button
+                                onClick={() => handleRemoveExtendedProperty(sIdx, key)}
+                                className="text-red-400 hover:text-red-300 p-1 text-xs"
+                                title="删除属性"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => handleAddExtendedProperty(sIdx)}
+                        className="text-cyan-400 hover:text-cyan-300 text-xs font-semibold self-start flex items-center gap-1 mt-1"
+                      >
+                        + 扩展新字段
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* New Schemas list */}
+            {editedProposal.new_schemas.length > 0 && (
+              <div className="flex flex-col gap-3">
+                <h4 className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
+                  ✨ 注册全新 Schema (本应用特有概念)
+                </h4>
+                {editedProposal.new_schemas.map((ns, sIdx) => (
+                  <div key={sIdx} className="border border-indigo-500/20 bg-indigo-950/10 rounded-xl p-4 flex flex-col gap-3">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={ns.id}
+                        onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "id", e.target.value)}
+                        className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-indigo-500 font-mono font-bold"
+                        placeholder="Schema ID (例: Pomodoro)"
+                      />
+                      <button
+                        onClick={() => handleRemoveNewSchema(sIdx)}
+                        className="text-red-400 hover:text-red-300 text-xs ml-auto"
+                      >
+                        删除此实体
+                      </button>
+                    </div>
+
+                    <input
+                      type="text"
+                      value={ns.description}
+                      onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "description", e.target.value)}
+                      className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-slate-300 placeholder-slate-500 w-full focus:outline-none focus:border-indigo-500"
+                      placeholder="实体说明"
+                    />
+
+                    {/* Properties List */}
+                    <div className="flex flex-col gap-2">
+                      <span className="text-[11px] text-slate-400 font-medium">属性结构定义:</span>
+                      {Object.keys(ns.properties).length === 0 ? (
+                        <p className="text-slate-500 text-[11px] italic">未定义属性</p>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {Object.entries(ns.properties).map(([key, val]) => (
+                            <div key={key} className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={key}
+                                onChange={(e) => handleUpdateNewSchemaPropertyKey(sIdx, key, e.target.value)}
+                                className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-indigo-500"
+                                placeholder="属性名称"
+                              />
+                              <select
+                                value={val}
+                                onChange={(e) => handleUpdateNewSchemaPropertyType(sIdx, key, e.target.value)}
+                                className="bg-black/30 border border-white/10 px-2 py-1 rounded text-xs text-slate-300 w-1/3 focus:outline-none focus:border-indigo-500"
+                              >
+                                <option value="string">String</option>
+                                <option value="integer">Integer</option>
+                                <option value="number">Number</option>
+                                <option value="boolean">Boolean</option>
+                              </select>
+                              <button
+                                onClick={() => handleRemoveNewSchemaProperty(sIdx, key)}
+                                className="text-red-400 hover:text-red-300 p-1 text-xs"
+                                title="删除属性"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => handleAddNewSchemaProperty(sIdx)}
+                        className="text-indigo-400 hover:text-indigo-300 text-xs font-semibold self-start flex items-center gap-1 mt-1"
+                      >
+                        + 新增属性
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 💬 自然语言微调反馈输入 */}
+            <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
+              <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
+                💬 使用自然语言调整 Schema 定义 (可选):
+              </span>
+              <textarea
+                value={schemaFeedback}
+                onChange={(e) => setSchemaFeedback(e.target.value)}
+                placeholder="例如：'将 PomodoroSession 重命名为 TomatoTimer'、'为 Task 添加 priority 属性并设定为 String 类型'..."
+                className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-cyan-500 resize-none font-sans"
+              />
+            </div>
+
+            {/* Bottom Actions */}
+            <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
+              <button
+                onClick={handleAddNewSchema}
+                className="px-3 py-1.5 rounded-lg border border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10 transition-colors text-xs"
+              >
+                + 添加全新自定义 Schema
+              </button>
+              
+              <div className="flex items-center gap-3 ml-auto">
+                <button
+                  onClick={() => handleResolveSchemaRequest("rework_plan")}
+                  className="px-3.5 py-1.5 rounded-lg border border-yellow-500/30 text-yellow-400 hover:bg-yellow-500/10 transition-colors text-xs font-sans"
+                >
+                  返回开发计划阶段 (Back to Plan)
+                </button>
+                <button
+                  onClick={() => handleResolveSchemaRequest(false)}
+                  className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs"
+                >
+                  拒绝并取消生成 (Cancel)
+                </button>
+                {schemaFeedback.trim() && (
+                  <button
+                    onClick={() => handleResolveSchemaRequest("refine", schemaFeedback)}
+                    className="px-4 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-500/30 text-indigo-300 text-xs transition-colors"
+                  >
+                    调整 Schema (Refine)
+                  </button>
+                )}
+                <button
+                  onClick={() => handleResolveSchemaRequest(true)}
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
+                >
+                  确认对齐并编码 (Approve)
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 📝 App 开发计划 智能对齐 Modal */}
+      {pendingPlanRequest && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md overflow-y-auto py-10">
+          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
+            <div>
+              <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2 font-sans">
+                📝 App 开发计划确认
+              </h3>
+              <p className="text-slate-400 text-xs leading-relaxed font-sans">
+                为应用 <span className="text-cyan-400 font-mono font-bold">{pendingPlanRequest.app_id}</span> 确认最终开发方案。
+              </p>
+            </div>
+
+            {/* Read-only Plan content */}
+            <div className="border border-white/10 bg-white/[0.02] rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
+              <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
+                📋 开发方案概述
+              </h4>
+              <div className="text-slate-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto pr-1">
+                {pendingPlanRequest.plan}
+              </div>
+            </div>
+
+            {/* 💬 自然语言微调反馈输入 */}
+            <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
+              <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5 font-sans">
+                💬 使用自然语言微调开发计划 (可选):
+              </span>
+              <textarea
+                value={planFeedback}
+                onChange={(e) => setPlanFeedback(e.target.value)}
+                placeholder="例如：'请使用深蓝色玻璃拟态风格'、'为计算器增加负数输入功能'..."
+                className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-cyan-500 resize-none font-sans"
+              />
+            </div>
+
+            {/* Bottom Actions */}
+            <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
+              <div className="flex items-center gap-3 ml-auto">
+                <button
+                  onClick={() => handleResolvePlanRequest(false)}
+                  className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs font-sans"
+                >
+                  拒绝并取消生成 (Cancel)
+                </button>
+                {planFeedback.trim() && (
+                  <button
+                    onClick={() => handleResolvePlanRequest("refine", planFeedback)}
+                    className="px-4 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-500/30 text-indigo-300 text-xs transition-colors font-sans"
+                  >
+                    调整开发计划 (Refine)
+                  </button>
+                )}
+                <button
+                  onClick={() => handleResolvePlanRequest(true)}
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10 font-sans"
+                >
+                  确认计划并开始开发 (Approve)
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 🔍 Schema 校验警告与返工 Modal */}
+      {pendingVerificationRequest && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md overflow-y-auto py-10">
+          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
+            <div>
+              <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2 font-sans">
+                ⚠️ Schema 校验未完全对齐
+              </h3>
+              <p className="text-slate-400 text-xs leading-relaxed font-sans">
+                应用 <span className="text-cyan-400 font-mono font-bold">{pendingVerificationRequest.app_id}</span> 的代码在 Graph DB 校验中发现不一致，请选择处理方式。
+              </p>
+            </div>
+
+            {/* Verification Report content */}
+            <div className="border border-red-500/20 bg-red-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
+              <h4 className="text-xs font-semibold text-red-400 uppercase tracking-wider font-sans">
+                📋 校验报告 (Verification Report)
+              </h4>
+              <div className="text-slate-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto pr-1 font-mono text-[11px]">
+                {pendingVerificationRequest.report}
+              </div>
+            </div>
+
+            {/* 💬 返工反馈输入 (可选) */}
+            <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
+              <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5 font-sans">
+                💬 返工修改指令 (供智能体修复代码或重新规划):
+              </span>
+              <textarea
+                value={verificationFeedback}
+                onChange={(e) => setVerificationFeedback(e.target.value)}
+                placeholder="例如：'请修复 mutations 使用的字段名，使其与 schema 严格一致'、'我们将 Schema 属性重新对齐'..."
+                className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-red-500 resize-none font-sans"
+              />
+            </div>
+
+            {/* Bottom Actions */}
+            <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
+              <button
+                onClick={() => handleResolveVerificationRequest("approve", verificationFeedback)}
+                className="px-3.5 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-white/5 transition-colors text-xs font-sans"
+              >
+                直接忽略并保存 (Bypass & Save)
+              </button>
+
+              <div className="flex items-center gap-2.5 ml-auto">
+                <button
+                  onClick={() => handleResolveVerificationRequest("rework_plan", verificationFeedback)}
+                  className="px-3 py-1.5 rounded-lg border border-yellow-500/20 text-yellow-400 hover:bg-yellow-500/10 transition-colors text-xs font-sans"
+                >
+                  返工 Plan
+                </button>
+                <button
+                  onClick={() => handleResolveVerificationRequest("rework_schema", verificationFeedback)}
+                  className="px-3 py-1.5 rounded-lg border border-orange-500/20 text-orange-400 hover:bg-orange-500/10 transition-colors text-xs font-sans"
+                >
+                  返工 Schema
+                </button>
+                <button
+                  onClick={() => handleResolveVerificationRequest("rework_code", verificationFeedback)}
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 transition-all text-white text-xs shadow-md shadow-red-600/10 font-sans"
+                >
+                  智能修复代码 (Auto-Fix)
+                </button>
+              </div>
             </div>
           </div>
         </div>

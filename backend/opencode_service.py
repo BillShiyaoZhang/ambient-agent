@@ -553,17 +553,19 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
                 instruction=instruction
             )
             
+            opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
             try:
                 await asyncio.wait_for(
                     conn.prompt(
                         session_id=session_id,
                         prompt=[text_block(prompt_text)]
                     ),
-                    timeout=180.0  # 3 minutes timeout
+                    timeout=opencode_timeout
                 )
             except asyncio.TimeoutError:
-                logger.warning(f"OpenCode ACP agent timed out after 180 seconds for app {app_id}.")
-                client.output_buffer.append("\n⚠️ OpenCode Agent execution timed out after 3 minutes. The generated application files will be loaded from disk.")
+                timeout_minutes = int(opencode_timeout // 60)
+                logger.warning(f"OpenCode ACP agent timed out after {opencode_timeout} seconds for app {app_id}.")
+                client.output_buffer.append(f"\n⚠️ OpenCode Agent execution timed out after {timeout_minutes} minutes. The generated application files will be loaded from disk.")
             finally:
                 active_acp_clients.pop(session_id, None)
             

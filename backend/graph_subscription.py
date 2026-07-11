@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Set
 from backend.graph_db import GraphDatabase
 from backend.graph_query_engine import execute_graph_query
 
@@ -35,10 +35,21 @@ class SubscriptionManager:
             for sub_id in subs.keys():
                 self.last_results.pop((websocket, sub_id), None)
 
-    async def broadcast_updates(self, db: GraphDatabase, send_json_fn: Any):
+    async def broadcast_updates(self, db: GraphDatabase, send_json_fn: Any, mutated_types: Optional[Set[str]] = None):
         # Evaluate all subscriptions and push updates if the output changed
         for websocket, subs in list(self.active_subscriptions.items()):
             for sub_id, query in list(subs.items()):
+                # Optimization check: skip executing query if the mutation doesn't affect its types
+                if mutated_types is not None:
+                    query_type = query.get("type")
+                    includes = query.get("include", [])
+                    include_types = {inc.get("target_type") for inc in includes if inc.get("target_type")}
+                    
+                    # If query matches a specific type and that type isn't in mutated_types,
+                    # and none of the included types are in mutated_types, we can skip
+                    if query_type and query_type not in mutated_types and not (include_types & mutated_types):
+                        continue
+
                 try:
                     res = execute_graph_query(query, db)
                     res_json = json.dumps(res, sort_keys=True)

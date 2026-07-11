@@ -42,10 +42,10 @@ Your JavaScript code in `controller.js` runs in an isolated function scope with 
        }
      ]);
      ```
-4. **DO NOT use ambient.model APIs (CRITICAL)**:
-   Do NOT use `ambient.model.get()`, `ambient.model.set()`, or `ambient.model.onChange()`. These are deprecated. You MUST use the Knowledge Graph APIs (`ambient.graph.subscribe` and `ambient.graph.mutate`) to ensure that all widget data is synchronized with the global OS Knowledge Graph.
+ 4. **DO NOT use ambient.model APIs & Conform to Schema Definitions (CRITICAL)**:
+    - Do NOT use `ambient.model.get()`, `ambient.model.set()`, or `ambient.model.onChange()`. These are deprecated. You MUST use the Knowledge Graph APIs (`ambient.graph.subscribe` and `ambient.graph.mutate`).
+    - **Schema Type Constraint**: Your JS database writes and reads must strictly match the types and fields documented in `[CRITICAL GRAPH DATABASE SCHEMA CONSTRAINTS]` (e.g. key names, string vs integer vs boolean). Violating the schema types will cause write failures in the backend SQLite validator.
 5. **Widget Interaction**:
    - `ambient.sendMessage("message")` sends a chat message.
    - `ambient.fullscreen()` requests fullscreen view.
    - `ambient.minimize()` minimizes/restores grid view.
-

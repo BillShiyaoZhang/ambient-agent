@@ -17,6 +17,8 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
     client = TestClient(app)
     
     with client.websocket_connect("/ws/chat?session_id=sync-sess-1") as websocket:
+        active_list = websocket.receive_json()
+        assert active_list["type"] == "active_sessions_list"
         # 1. Subscribe to Task nodes
         sub_msg = {
             "type": "graph_subscribe",

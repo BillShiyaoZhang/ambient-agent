@@ -40,6 +40,8 @@ def test_websocket_chat_flow(test_session, monkeypatch):
     
     # Connect to WebSocket
     with client.websocket_connect("/ws/chat") as websocket:
+        active_list = websocket.receive_json()
+        assert active_list["type"] == "active_sessions_list"
         # Send a chat message
         websocket.send_json({
             "sender": "user",
@@ -53,6 +55,11 @@ def test_websocket_chat_flow(test_session, monkeypatch):
         assert ack["message"]["content"] == "Hello Agent"
         assert ack["message"]["id"] is not None
         
+        # Expect session status running update
+        status_running = websocket.receive_json()
+        assert status_running["type"] == "session_status_update"
+        assert status_running["status"] == "running"
+        
         # 2. Expect thinking indicator
         thinking = websocket.receive_json()
         assert thinking["type"] == "reply"
@@ -64,6 +71,11 @@ def test_websocket_chat_flow(test_session, monkeypatch):
         assert reply["type"] == "reply"
         assert reply["message"]["sender"] == "agent"
         assert "Hello Agent" in reply["message"]["content"]
+        
+        # Expect session status idle update
+        status_idle = websocket.receive_json()
+        assert status_idle["type"] == "session_status_update"
+        assert status_idle["status"] == "idle"
         
     # Clean up dependency overrides
     app.dependency_overrides.clear()
@@ -91,6 +103,8 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
     client = TestClient(app)
     
     with client.websocket_connect("/ws/chat") as websocket:
+        active_list = websocket.receive_json()
+        assert active_list["type"] == "active_sessions_list"
         websocket.send_json({
             "sender": "user",
             "content": "Give me weather details"
@@ -99,6 +113,11 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         # 1. ACK
         ack = websocket.receive_json()
         assert ack["type"] == "ack"
+        
+        # Expect session status running update
+        status_running = websocket.receive_json()
+        assert status_running["type"] == "session_status_update"
+        assert status_running["status"] == "running"
         
         # 2. Expect thinking indicator
         thinking = websocket.receive_json()
@@ -118,5 +137,10 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         assert widget_msg["widget"]["id"] == "weather-card"
         assert widget_msg["widget"]["title"] == "Local Weather"
         assert "Beijing" in widget_msg["widget"]["html"]
+        
+        # Expect session status idle update
+        status_idle = websocket.receive_json()
+        assert status_idle["type"] == "session_status_update"
+        assert status_idle["status"] == "idle"
         
     app.dependency_overrides.clear()

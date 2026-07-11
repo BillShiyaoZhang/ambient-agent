@@ -1,72 +1,101 @@
+import json
 from typing import Dict, Any, List
 from backend.graph_db import GraphDatabase
 
 def execute_graph_query(query: dict, db: GraphDatabase) -> List[Dict[str, Any]]:
-    results = []
-    
-    # 1. Fetch matching root nodes
     target_type = query.get("type")
     properties_filter = query.get("properties", {})
     
-    for node_id, node in db.nodes.items():
-        if target_type and node.get("type") != target_type:
-            continue
+    results = []
+    
+    # 1. Fetch matching root nodes
+    sql = "SELECT id, type, properties FROM graph_nodes WHERE 1=1"
+    params = []
+    if target_type:
+        sql += " AND type = ?"
+        params.append(target_type)
+        
+    with db.get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        
+        for row in rows:
+            node_id = row["id"]
+            node_type = row["type"]
+            node_props = json.loads(row["properties"])
             
-        # Match properties
-        props_match = True
-        node_props = node.get("properties", {})
-        for k, v in properties_filter.items():
-            if node_props.get(k) != v:
-                props_match = False
-                break
+            # Match properties
+            props_match = True
+            for k, v in properties_filter.items():
+                if node_props.get(k) != v:
+                    props_match = False
+                    break
+                    
+            if not props_match:
+                continue
                 
-        if not props_match:
-            continue
+            node_res = {
+                "id": node_id,
+                "type": node_type,
+                "properties": node_props,
+                "relations": []
+            }
             
-        # Clone node data to avoid modifying database reference directly
-        node_res = {
-            "id": node["id"],
-            "type": node["type"],
-            "properties": dict(node.get("properties", {})),
-            "relations": []
-        }
-        
-        # 2. Process includes if specified
-        includes = query.get("include", [])
-        for inc in includes:
-            relation_type = inc.get("relation")
-            target_type_filter = inc.get("target_type")
+            # 2. Process includes if specified
+            includes = query.get("include", [])
+            for inc in includes:
+                relation_type = inc.get("relation")
+                target_type_filter = inc.get("target_type")
+                
+                # Check outgoing relations: source node (node_id) -> target node
+                sql_out = """
+                    SELECT e.type AS edge_type, e.properties AS edge_props,
+                           n.id AS target_id, n.type AS target_type, n.properties AS target_props
+                    FROM graph_edges e
+                    JOIN graph_nodes n ON e.to_id = n.id
+                    WHERE e.from_id = ? AND e.type = ?
+                """
+                out_params = [node_id, relation_type]
+                if target_type_filter:
+                    sql_out += " AND n.type = ?"
+                    out_params.append(target_type_filter)
+                    
+                out_edges = conn.execute(sql_out, out_params).fetchall()
+                for edge in out_edges:
+                    node_res["relations"].append({
+                        "edge_type": edge["edge_type"],
+                        "properties": json.loads(edge["edge_props"]),
+                        "target": {
+                            "id": edge["target_id"],
+                            "type": edge["target_type"],
+                            "properties": json.loads(edge["target_props"])
+                        }
+                    })
+                
+                # Check incoming relations: target node -> source node (node_id)
+                sql_in = """
+                    SELECT e.type AS edge_type, e.properties AS edge_props,
+                           n.id AS target_id, n.type AS target_type, n.properties AS target_props
+                    FROM graph_edges e
+                    JOIN graph_nodes n ON e.from_id = n.id
+                    WHERE e.to_id = ? AND e.type = ?
+                """
+                in_params = [node_id, relation_type]
+                if target_type_filter:
+                    sql_in += " AND n.type = ?"
+                    in_params.append(target_type_filter)
+                    
+                in_edges = conn.execute(sql_in, in_params).fetchall()
+                for edge in in_edges:
+                    node_res["relations"].append({
+                        "edge_type": edge["edge_type"],
+                        "properties": json.loads(edge["edge_props"]),
+                        "target": {
+                            "id": edge["target_id"],
+                            "type": edge["target_type"],
+                            "properties": json.loads(edge["target_props"])
+                        }
+                    })
+                    
+            results.append(node_res)
             
-            # Find all edges connecting from or to this root node
-            for edge in db.edges:
-                if edge["type"] == relation_type:
-                    # Check outgoing relation
-                    if edge["from_id"] == node_id:
-                        to_node = db.get_node(edge["to_id"])
-                        if to_node and (not target_type_filter or to_node["type"] == target_type_filter):
-                            node_res["relations"].append({
-                                "edge_type": edge["type"],
-                                "properties": dict(edge.get("properties", {})),
-                                "target": {
-                                    "id": to_node["id"],
-                                    "type": to_node["type"],
-                                    "properties": dict(to_node.get("properties", {}))
-                                }
-                            })
-                    # Check incoming relation (for bidirectionality support)
-                    elif edge["to_id"] == node_id:
-                        from_node = db.get_node(edge["from_id"])
-                        if from_node and (not target_type_filter or from_node["type"] == target_type_filter):
-                            node_res["relations"].append({
-                                "edge_type": edge["type"],
-                                "properties": dict(edge.get("properties", {})),
-                                "target": {
-                                    "id": from_node["id"],
-                                    "type": from_node["type"],
-                                    "properties": dict(from_node.get("properties", {}))
-                                }
-                            })
-                            
-        results.append(node_res)
-        
     return results

@@ -44,6 +44,8 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
     client = TestClient(app)
     
     with client.websocket_connect("/ws/chat") as websocket:
+        active_list = websocket.receive_json()
+        assert active_list["type"] == "active_sessions_list"
         # Send a message starting with /app to trigger OpenCode routing
         websocket.send_json({
             "sender": "user",
@@ -53,6 +55,11 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         # 1. Expect acknowledgment
         ack = websocket.receive_json()
         assert ack["type"] == "ack"
+        
+        # Expect session status running update
+        status_running = websocket.receive_json()
+        assert status_running["type"] == "session_status_update"
+        assert status_running["status"] == "running"
         
         # 2. Expect the status message about OpenCode starting
         status = websocket.receive_json()
@@ -77,5 +84,10 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         assert widget_msg["widget"]["id"] == "test-timer"
         assert widget_msg["widget"]["title"] == "Test Timer App"
         assert "12:34" in widget_msg["widget"]["html"]
+        
+        # Expect session status idle update
+        status_idle = websocket.receive_json()
+        assert status_idle["type"] == "session_status_update"
+        assert status_idle["status"] == "idle"
 
     app.dependency_overrides.clear()
