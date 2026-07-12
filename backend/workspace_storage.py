@@ -250,6 +250,7 @@ class WorkspaceStorage:
                                     model=data.get("model"),
                                     prompt=data.get("prompt"),
                                     response=data.get("response"),
+                                    stage=data.get("stage", "chat"),
                                 )
                             )
             except Exception:
@@ -365,6 +366,7 @@ class WorkspaceStorage:
             "model": log.model,
             "prompt": log.prompt,
             "response": log.response,
+            "stage": getattr(log, "stage", "chat"),
         }
         with open(audit_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_dict, ensure_ascii=False) + "\n")

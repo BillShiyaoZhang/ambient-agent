@@ -22,13 +22,19 @@ def test_session_fixture(tmp_path):
 
 def test_websocket_chat_flow(test_session, monkeypatch):
     # Mock IntentRouter.route to bypass LLM classification in websocket test
-    async def mock_route(content, existing_apps, db_session=None):
-        return False, None, content
+    async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
+        from backend.agent.intent_plan import IntentKind, IntentPlan
+
+        return IntentPlan(
+            kind=IntentKind.CONVERSE,
+            rationale="chitchat",
+            instruction=content,
+        )
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # Mock LLM API call
-    async def mock_call_llm_api(provider, model, prompt):
+    async def mock_call_llm_api(provider, model, prompt, tools=None):
         return "I am your Ambient Agent. You said: 'Hello Agent'"
 
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_llm_api)
@@ -83,13 +89,19 @@ def test_websocket_chat_flow(test_session, monkeypatch):
 
 def test_websocket_widget_trigger_flow(test_session, monkeypatch):
     # Mock IntentRouter.route to bypass LLM classification in websocket test
-    async def mock_route(content, existing_apps, db_session=None):
-        return False, None, content
+    async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
+        from backend.agent.intent_plan import IntentKind, IntentPlan
+
+        return IntentPlan(
+            kind=IntentKind.CONVERSE,
+            rationale="chitchat",
+            instruction=content,
+        )
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # Mock LLM API call containing widget block
-    async def mock_call_llm_api(provider, model, prompt):
+    async def mock_call_llm_api(provider, model, prompt, tools=None):
         return """
         I've generated a weather widget on your workspace canvas.
         <ambient-widget id="weather-card" title="Local Weather">

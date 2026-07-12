@@ -57,7 +57,7 @@ cp .env.example .env
 1. 确保本地已安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/) 并启动，且 VS Code 安装了 `Dev Containers` 插件。
 2. 用 VS Code 打开项目根目录。
 3. 按下 `Cmd+Shift+P` (Windows/Linux 上是 `Ctrl+Shift+P`)，选择 **`Dev Containers: Reopen in Container`**。
-4. 容器会自动在本地启动并安装 Node.js 22、Python 3.11 及 `uv` 依赖。
+4. 容器会自动在本地启动并安装 Node.js 22、Python 3.11、`uv` 依赖，以及通过官方安装脚本拉取的最新 `opencode` CLI（默认放置于 `/usr/local/bin/opencode`，**宿主机无需预装**）。
 5. **在容器内启动服务**：
    - 打开终端 1，启动后端：
      ```bash
@@ -86,6 +86,10 @@ cp .env.example .env
    - 后端服务运行在：`http://localhost:8000`
    - 前端服务运行在：`http://localhost:5173`
    - 本地代码修改会自动挂载并同步热重载至容器内。
+   - 构建过程中会自动通过官方安装脚本拉取最新 `opencode` 并放入 `/usr/local/bin`，**宿主机无需预装 opencode**。如需校验：
+     ```bash
+     docker compose run --rm backend opencode --version
+     ```
 
 ---
 

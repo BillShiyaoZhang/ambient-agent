@@ -17,8 +17,15 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
 
     # 1. Mock routing
-    async def mock_route(content, existing_apps, db_session=None):
-        return True, "rework-app", content
+    async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
+        from backend.agent.intent_plan import IntentKind, IntentPlan
+
+        return IntentPlan(
+            kind=IntentKind.WIDGET_MODIFY,
+            rationale="test",
+            app_id="rework-app",
+            instruction=content,
+        )
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 

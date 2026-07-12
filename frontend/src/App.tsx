@@ -6,6 +6,7 @@ import { SandboxWidget } from "./components/SandboxWidget";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { SessionSidebar, type Session } from "./components/SessionSidebar";
 import { AppStoreModal } from "./components/AppStoreModal";
+import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
 
 
 function App() {
@@ -267,6 +268,8 @@ function App() {
     return saved ? parseInt(saved, 10) : 320;
   });
 
+  const [mutationPreview, setMutationPreview] = useState<MutationPreviewData | null>(null);
+
   const handleMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -453,6 +456,19 @@ function App() {
         setPendingVerificationRequest(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
+      } else if (data.type === "mutation_preview") {
+        setMutationPreview({
+          ticket_id: data.ticket_id,
+          session_id: data.session_id,
+          actions: data.actions || [],
+          summary: data.summary || "已更新数据",
+          soft_window_seconds: data.soft_window_seconds || 60,
+        });
+      } else if (data.type === "rollback_mutation_response") {
+        // Drop preview when rollback succeeded
+        setMutationPreview((curr) => (curr && curr.ticket_id === data.ticket_id ? null : curr));
+      } else if (data.type === "pin_mutation_response") {
+        // Pin acknowledged; visual stays — soft window may continue, but we keep the preview
       } else if (data.type === "session_status_update") {
         setRunningSessions((prev) => {
           if (data.status === "running") {
@@ -625,6 +641,20 @@ function App() {
 
       {/* Audit Log Panel Overlay */}
       <AuditLogPanel isOpen={isAuditOpen} onClose={() => setIsAuditOpen(false)} />
+
+      {/* 🧮 Mutation preview / rollback */}
+      <MutationPreview
+        preview={mutationPreview}
+        onRollback={(ticketId) => {
+          wsService.sendMessage({ type: "rollback_mutation", ticket_id: ticketId });
+        }}
+        onPin={(ticketId) => {
+          wsService.sendMessage({ type: "pin_mutation_history", ticket_id: ticketId });
+        }}
+        onDismiss={(ticketId) => {
+          setMutationPreview((curr) => (curr && curr.ticket_id === ticketId ? null : curr));
+        }}
+      />
 
       {/* AppStore Floating Modal */}
       <AppStoreModal

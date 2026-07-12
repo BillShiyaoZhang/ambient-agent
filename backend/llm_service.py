@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import Any
 
@@ -97,42 +98,76 @@ async def call_llm_api(
 
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         trust_env = os.getenv("LLM_TRUST_ENV", "true").lower() != "false"
-        try:
-            async with httpx.AsyncClient(trust_env=trust_env) as client:
-                response = await client.post(api_url, json=payload, headers=headers, timeout=300.0)
-                if response.status_code == 200:
-                    res_json = response.json()
-                    choices = res_json.get("choices", [])
-                    if choices:
-                        msg_data = choices[0].get("message", {})
+
+        # Retry policy: 5 attempts with exponential backoff for rate-limit (2062)
+        # and longer backoff for usage-cap (2056).
+        max_retries = int(os.getenv("LLM_MAX_RETRIES", "5"))
+        backoff_base = float(os.getenv("LLM_BACKOFF_BASE", "2.0"))
+        usage_cap_backoff = float(os.getenv("LLM_USAGE_CAP_BACKOFF", "30.0"))
+
+        import logging
+
+        logger = logging.getLogger("backend.llm_service")
+
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(trust_env=trust_env) as client:
+                    response = await client.post(api_url, json=payload, headers=headers, timeout=300.0)
+                    if response.status_code == 200:
+                        res_json = response.json()
+                        base_resp = res_json.get("base_resp") or {}
+                        status_code = base_resp.get("status_code")
+                        status_msg = base_resp.get("status_msg", "")
+
+                        if status_code == 2062:
+                            # Soft rate limit — short backoff
+                            logger.warning(
+                                f"LLM rate-limited (2062), attempt {attempt+1}/{max_retries+1}: {status_msg}"
+                            )
+                            if attempt < max_retries:
+                                await asyncio.sleep(backoff_base ** attempt)
+                                continue
+                        elif status_code == 2056:
+                            # Hard usage cap — longer backoff, may need to wait
+                            logger.warning(
+                                f"LLM usage cap (2056), attempt {attempt+1}/{max_retries+1}: {status_msg}"
+                            )
+                            if attempt < max_retries:
+                                await asyncio.sleep(usage_cap_backoff * (attempt + 1))
+                                continue
+                            return {
+                                "content": f"Usage cap: {status_msg}",
+                                "tool_calls": None,
+                            }
+
+                        choices = res_json.get("choices", [])
+                        if choices:
+                            msg_data = choices[0].get("message", {})
+                            return {
+                                "content": msg_data.get("content", "") or "",
+                                "tool_calls": msg_data.get("tool_calls", None),
+                            }
+                        logger.error(
+                            f"LLM API returned 200 but choices list is empty. Raw response: {response.text}"
+                        )
                         return {
-                            "content": msg_data.get("content", "") or "",
-                            "tool_calls": msg_data.get("tool_calls", None),
+                            "content": f"No response content received from API. Raw: {response.text}",
+                            "tool_calls": None,
                         }
-                    # Log detail to assist troubleshooting
-                    import logging
+                    else:
+                        return {
+                            "content": f"API Error (status code {response.status_code}): {response.text}",
+                            "tool_calls": None,
+                        }
+            except Exception as e:
+                import traceback
 
-                    logger = logging.getLogger("backend.llm_service")
-                    logger.error(
-                        f"LLM API returned 200 but choices list is empty or missing. Raw response: {response.text}"
-                    )
-                    return {
-                        "content": f"No response content received from API. Raw: {response.text}",
-                        "tool_calls": None,
-                    }
-                else:
-                    return {
-                        "content": f"API Error (status code {response.status_code}): {response.text}",
-                        "tool_calls": None,
-                    }
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            return {
-                "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {e!s}",
-                "tool_calls": None,
-            }
+                traceback.print_exc()
+                return {
+                    "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {e!s}",
+                    "tool_calls": None,
+                }
+        return {"content": "Exhausted retries", "tool_calls": None}
 
 
 async def generate_agent_response(

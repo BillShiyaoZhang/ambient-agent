@@ -70,11 +70,27 @@ class GraphDatabase:
                     PRIMARY KEY (from_id, to_id, type)
                 )
             """)
+            # Mutation history table for rollback semantics
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS graph_mutation_history (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    forward_actions TEXT NOT NULL,
+                    reverse_actions TEXT NOT NULL,
+                    snapshot_before TEXT,
+                    pinned INTEGER DEFAULT 0,
+                    consumed_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
 
             # 2. Indexes
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON graph_nodes(type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_to ON graph_edges(to_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_session ON graph_mutation_history(session_id)"
+            )
 
         # 3. Seed core schemas
         self._seed_core_schemas()
@@ -416,3 +432,106 @@ class GraphDatabase:
                 json.dump({"nodes": self.nodes, "edges": self.edges}, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[GraphDB] Error exporting to json: {e}")
+
+    # --- Mutation History (for undo of graph_mutation tickets) ---
+
+    def record_mutation_history(
+        self,
+        ticket_id: str,
+        session_id: str,
+        forward_actions: list[dict[str, Any]],
+        reverse_actions: list[dict[str, Any]],
+        snapshot_before: dict[str, Any],
+        pinned: bool = False,
+    ) -> dict[str, Any]:
+        """Persist a mutation ticket so it remains rollback-able."""
+        with self.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO graph_mutation_history (
+                    id, session_id, forward_actions, reverse_actions,
+                    snapshot_before, pinned, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    forward_actions=excluded.forward_actions,
+                    reverse_actions=excluded.reverse_actions,
+                    snapshot_before=excluded.snapshot_before,
+                    pinned=excluded.pinned
+                """,
+                (
+                    ticket_id,
+                    session_id,
+                    json.dumps(forward_actions or []),
+                    json.dumps(reverse_actions or []),
+                    json.dumps(snapshot_before or {}),
+                    1 if pinned else 0,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        return {
+            "ticket_id": ticket_id,
+            "session_id": session_id,
+            "forward_actions": list(forward_actions or []),
+            "reverse_actions": list(reverse_actions or []),
+            "snapshot_before": dict(snapshot_before or {}),
+            "pinned": bool(pinned),
+        }
+
+    def pin_mutation_history(self, ticket_id: str) -> bool:
+        with self.get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE graph_mutation_history SET pinned = 1 WHERE id = ?", (ticket_id,)
+            )
+            return cursor.rowcount > 0
+
+    def load_mutation_history(self, ticket_id: str) -> dict[str, Any] | None:
+        with self.get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, session_id, forward_actions, reverse_actions,
+                       snapshot_before, pinned, consumed_at, created_at
+                FROM graph_mutation_history WHERE id = ?
+                """,
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "ticket_id": row["id"],
+                "session_id": row["session_id"],
+                "forward_actions": json.loads(row["forward_actions"]),
+                "reverse_actions": json.loads(row["reverse_actions"]),
+                "snapshot_before": json.loads(row["snapshot_before"] or "{}"),
+                "pinned": bool(row["pinned"]),
+                "consumed_at": row["consumed_at"],
+                "created_at": row["created_at"],
+            }
+
+    def list_mutation_history(self, session_id: str) -> list[dict[str, Any]]:
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, forward_actions, reverse_actions,
+                       snapshot_before, pinned, consumed_at, created_at
+                FROM graph_mutation_history WHERE session_id = ?
+                ORDER BY created_at DESC
+                """,
+                (session_id,),
+            ).fetchall()
+            return [
+                {
+                    "ticket_id": row["id"],
+                    "session_id": row["session_id"],
+                    "forward_actions": json.loads(row["forward_actions"]),
+                    "reverse_actions": json.loads(row["reverse_actions"]),
+                    "snapshot_before": json.loads(row["snapshot_before"] or "{}"),
+                    "pinned": bool(row["pinned"]),
+                    "consumed_at": row["consumed_at"],
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
+
+
+# Module-level convenience: callers construct their own manager per session/db.
+# See ``backend.mutation_tickets.MutationTicketManager``.

@@ -40,3 +40,4 @@ To spawn or update a widget, output a block in this exact XML-like format anywhe
 
 # Design System Guidelines
 Always make widgets look visually stunning, glassmorphic, responsive, and functional! Keep user data private and run locally when possible.
+

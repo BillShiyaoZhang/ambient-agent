@@ -1,3 +1,14 @@
+# ---------- Stage 1: fetch latest opencode binary via official installer ----------
+FROM debian:bookworm-slim AS opencode
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    tar \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# The official installer writes the binary to $HOME/.opencode/bin/opencode.
+RUN curl -fsSL https://opencode.ai/install | bash
+
+# ---------- Stage 2: dev environment ----------
 FROM python:3.11-slim-bookworm
 
 # Prevent Python from writing .pyc files and buffer output
@@ -27,3 +38,6 @@ RUN ARCH=$(uname -m) && \
 
 # Install uv globally
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Pull in opencode binary from the builder stage so it is available on PATH.
+COPY --from=opencode /root/.opencode/bin/opencode /usr/local/bin/opencode

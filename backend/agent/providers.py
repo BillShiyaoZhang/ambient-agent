@@ -30,7 +30,12 @@ class BaseLLMProvider(ABC):
         pass
 
     def _log_to_db(
-        self, db_session: Session | None, provider: str, prompt: list[dict[str, str]], response: str
+        self,
+        db_session: Session | None,
+        provider: str,
+        prompt: list[dict[str, str]],
+        response: str,
+        stage: str = "chat",
     ) -> None:
         if db_session is None:
             return
@@ -40,7 +45,13 @@ class BaseLLMProvider(ABC):
             except Exception:
                 prompt_str = str(prompt)
 
-            audit_log = LLMAuditLog(provider=provider, model=self.model, prompt=prompt_str, response=response)
+            audit_log = LLMAuditLog(
+                provider=provider,
+                model=self.model,
+                prompt=prompt_str,
+                response=response,
+                stage=stage,
+            )
             db_session.add(audit_log)
             db_session.commit()
             db_session.refresh(audit_log)

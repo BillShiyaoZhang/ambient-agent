@@ -20,6 +20,15 @@ CLASS_TO_FILE = {
     "ToolRegistry": "backend/agent/tools.py",
     "PromptManager": "backend/agent/prompts/manager.py",
     "WorkspaceStorage": "backend/workspace_storage.py",
+    "IntentPlan": "backend/agent/intent_plan.py",
+    "IntentKind": "backend/agent/intent_plan.py",
+    "RouterContext": "backend/router_context.py",
+    "GraphSnapshot": "backend/router_context.py",
+    "MutationTicketManager": "backend/mutation_tickets.py",
+    "PlanExecutor": "backend/agent/plan_executor.py",
+    "CodingPlanExecutor": "backend/agent/plan_executor.py",
+    "MutationPlanExecutor": "backend/agent/plan_executor.py",
+    "PlanPhaseResult": "backend/agent/plan_executor.py",
 }
 
 
@@ -156,8 +165,10 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
     node_pattern = r"\b(\w+)(?:\[\s*|\[\s*\(\s*|\[\s*\(\s*|\(\s*\[\s*|\(\s*\[\s*\(\s*|\{\s*|\(\s*|\(\(\s*)([a-zA-Z0-9_\-\.]+)\s*:\s*([a-zA-Z0-9_]+)"
 
     for block in mermaid_blocks:
-        if not re.search(r"\bgraph\b", block):
-            continue  # Only check flowchart diagrams
+        # Only flowcharts (line starts with `graph TD/LR/BT` or `flowchart ...`)
+        first_line = block.strip().splitlines()[0] if block.strip() else ""
+        if not re.match(r"^\s*(graph|flowchart)\b", first_line):
+            continue
 
         nodes = re.findall(node_pattern, block)
         for node_id, file_ref, symbol_name in nodes:
