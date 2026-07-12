@@ -2,8 +2,10 @@
 
 ## Status
 
-Discussion proposal. This document does not define an accepted implementation
-plan and does not change runtime behavior.
+Discussion proposal, updated after the initial maintainer feedback in
+[Issue #2](https://github.com/BillShiyaoZhang/ambient-agent/issues/2).
+It documents the intended boundary for a future implementation and does not
+change runtime behavior.
 
 ## Context
 
@@ -17,208 +19,164 @@ workspace/apps/<app-id>/
 └── controller.js
 ```
 
-`AppManager` creates and reads `metadata.json`, `list_apps()` supplies that
-metadata to both the App Store and the intent-routing path, and
-`get_app_files()` supplies the latest source to the runtime and conversation
-context.
+The existing `metadata.json` contains stable identity, display title, and
+platform-maintained timestamps. That is sufficient for storage and the current
+App Store, but it does not provide a versioned declaration of what an App is
+for.
 
-The existing metadata contract is intentionally small:
+The platform can infer purpose from the App ID, title, source, or conversation
+context. Those signals remain useful, but they are not one uniform contract
+that can be validated, compared between revisions, or translated into a
+consistent user-facing explanation.
 
-```json
-{
-  "id": "morning-planner",
-  "title": "Morning Planner",
-  "created_at": "2026-07-12T00:00:00+00:00",
-  "updated_at": "2026-07-12T00:00:00+00:00"
-}
+The proposed `manifest.json` fills that narrow gap:
+
+> `manifest.json` is a machine-readable contract between each generated App
+> and the Ambient Agent platform.
+
+It describes what the App declares itself to be. It does not prove what the
+source code does, grant permissions, or replace runtime enforcement.
+
+## Three separate layers
+
+```text
+manifest.json
+Describes identity, purpose, contract version, and discovery hints
+
+index.html / style.css / controller.js
+Implements how the App behaves
+
+User data / Graph Database
+Stores the data the App works with
 ```
 
-This is sufficient for storage and display, but it does not provide a
-versioned, machine-readable description of an App's purpose. A future router,
-permission layer, or App evolution workflow should not need to infer that
-purpose from an ID or repeatedly inspect the full source tree.
-
-The goal of a Manifest should therefore be modest: establish one stable place
-for App identity and descriptive declarations. It should not become a shortcut
-for implementing several unrelated product features at once.
+Keeping these layers separate prevents descriptive declarations from becoming
+an accidental authorization or data schema mechanism.
 
 ## Design principles
 
-1. **Preserve existing Apps.** An App created before the Manifest work should
-   continue to load, appear in the App Store, and be available to the router.
-2. **Keep one source of truth where possible.** Two overlapping metadata files
-   create synchronization rules that the current system does not yet need.
-3. **Separate declaration from enforcement.** A declared capability must never
-   grant runtime permission by itself.
-4. **Version the contract, not every future idea.** The initial schema should
-   contain only fields with a clear meaning and owner.
-5. **Avoid hidden migration.** Compatibility repair may preserve current
-   behavior, but reading an otherwise valid legacy file should not silently
-   rewrite it merely to add optional fields.
-6. **Make invalid state observable.** Since routing may eventually depend on
-   the Manifest, parse and validation failures should have defined behavior
-   rather than being indistinguishable from a valid empty declaration.
+1. **Use a clear contract boundary.** Store App declarations in
+   `manifest.json`, rather than gradually turning platform metadata into a
+   mixed-purpose file.
+2. **Preserve existing Apps during development.** Legacy Apps should remain
+   loadable while compatibility is needed, even though dual files are not the
+   final architecture.
+3. **Separate declaration from enforcement.** Manifest fields never grant
+   runtime permission by themselves.
+4. **Version the contract explicitly.** The runtime must reject unsupported
+   contract versions rather than guess their meaning.
+5. **Keep Phase 1 small.** Add only fields with clear semantics, owners, and
+   validation rules.
+6. **Make invalid state observable and isolated.** One malformed App must not
+   make the rest of the workspace unusable.
+7. **Design for people as well as machines.** Users should not read raw JSON;
+   the platform should translate relevant declarations into concise UI.
 
-## Direction A: Extend metadata without a schema version
+## Considered storage directions
 
-The smallest change is to add descriptive fields to the current file:
+### A. Add descriptive fields to `metadata.json`
 
-```json
-{
-  "id": "morning-planner",
-  "title": "Morning Planner",
-  "description": "Helps the user organize a morning plan.",
-  "app_version": "0.1.0",
-  "intents": [
-    "plan my morning",
-    "organize today's priorities"
-  ],
-  "created_at": "2026-07-12T00:00:00+00:00",
-  "updated_at": "2026-07-12T00:00:00+00:00"
-}
-```
+This is the smallest implementation, but it combines App declarations with
+platform-maintained storage state and leaves the contract boundary implicit.
 
-### Advantages
+### B. Turn `metadata.json` into a versioned Manifest
 
-- Minimal implementation and migration cost.
-- Preserves the existing file layout and API response shape.
-- Easy to consume from `AppManager.list_apps()`.
+This adds a schema version without introducing another file. It was the
+initial recommendation because it reused the existing read path with the
+smallest implementation change.
 
-### Limitations
+Its main drawback is conceptual: a file named `metadata.json` would become the
+long-term public contract while continuing to carry platform-owned fields.
 
-- There is no explicit way to distinguish old and new contract versions.
-- Future readers cannot reliably decide which validation rules apply.
-- Optional additions can gradually turn the file into an unbounded collection
-  of unrelated settings.
+### C. Use a standalone `manifest.json`
 
-## Direction B: Evolve `metadata.json` into a versioned Manifest
-
-This direction retains the existing file and adds an explicit schema version:
-
-```json
-{
-  "manifest_version": 1,
-  "id": "morning-planner",
-  "title": "Morning Planner",
-  "description": "Helps the user organize a morning plan.",
-  "app_version": "0.1.0",
-  "intents": [
-    "plan my morning",
-    "organize today's priorities"
-  ],
-  "created_at": "2026-07-12T00:00:00+00:00",
-  "updated_at": "2026-07-12T00:00:00+00:00"
-}
-```
-
-Here, `manifest_version` versions the file contract while `app_version`
-describes the generated App. They are independent.
-
-### Advantages
-
-- Introduces an explicit evolution boundary without adding a second file.
-- Reuses the existing `AppManager`, API, App Store, and router data path.
-- Supports backward-compatible reads of existing metadata.
-- Keeps the first implementation focused and reversible.
-
-### Limitations
-
-- The name `metadata.json` is less explicit than `manifest.json`.
-- Platform-maintained timestamps and App declarations remain in one object, so
-  field ownership must be documented.
-- The schema still needs discipline to avoid accumulating unrelated concerns.
-
-## Direction C: Add a separate `manifest.json`
-
-This direction separates declarative App information from platform-maintained
-metadata:
+The intended final layout is:
 
 ```text
 workspace/apps/<app-id>/
 ├── manifest.json
-├── metadata.json
 ├── index.html
 ├── style.css
 └── controller.js
 ```
 
-For example, `manifest.json` could contain identity, purpose, App version, and
-intent hints, while `metadata.json` retains timestamps and other platform
-state.
+This gives the declaration an explicit name and avoids retaining two
+overlapping sources of identity in the final architecture.
 
-### Advantages
-
-- Provides the clearest conceptual boundary between declaration and runtime
-  metadata.
-- Makes `manifest.json` an obvious future integration point.
-- Allows the two contracts to evolve independently.
-
-### Limitations
-
-- Creates two overlapping files immediately.
-- Requires precedence and consistency rules for fields such as `id` and
-  `title`.
-- Expands missing-file, migration, write-order, and recovery behavior before
-  the project has demonstrated a need for that complexity.
-- Increases the Phase 1 implementation and test surface without changing the
-  user-visible outcome.
+During development, the implementation may temporarily read or retain
+`metadata.json` to keep legacy Apps usable. That is a migration aid, not a
+permanent dual-file design.
 
 ## Recommendation
 
-For Phase 1, use **Direction B**: incrementally evolve the existing
-`metadata.json` into a small, versioned Manifest.
+Use **Direction C: a standalone `manifest.json`**.
 
-This recommendation is based on the current architecture rather than a claim
-that one-file storage is universally preferable. `metadata.json` is already
-the object returned by `list_apps()`, consumed by the App Store, and passed to
-the intent router. Reusing that path provides a useful contract with the
-smallest compatibility risk.
+This follows the maintainer's preference and is also the clearer long-term
+boundary. Phase 1 should introduce the standalone contract, validation, and a
+deliberate compatibility path. It should not preserve `metadata.json` as an
+indefinite second source of truth.
 
-A separate `manifest.json` can still be introduced later if a concrete need
-emerges—for example, if signed or developer-authored declarations must be
-managed independently from platform-maintained state. Phase 1 should not pay
-that coordination cost in advance.
+The migration rule should be explicit:
+
+- `manifest.json` is authoritative when present and valid;
+- legacy `metadata.json` may be read only by a compatibility path;
+- explicit migration or App update can produce `manifest.json`;
+- final writes should not require both files to remain synchronized;
+- unsupported or corrupted Manifests must not silently fall back in a way that
+  hides the error.
+
+## User-facing meaning
+
+The Manifest is machine-readable, but its value is not limited to internal
+execution. When a user asks to modify an App, the Agent and platform can use a
+validated Manifest to present:
+
+- the App's current declared purpose;
+- the proposed purpose or version change;
+- a concise explanation of the user-visible impact;
+- whether the candidate Manifest passed contract validation;
+- a confirmation step when a meaningful change warrants one.
+
+The user should see a readable change summary, not `manifest.json`.
+
+Not every update should interrupt the user. A future UX policy may distinguish
+meaningful purpose or behavior changes from low-risk visual corrections. The
+Manifest supplies structured input to that decision; it does not, by itself,
+fully determine risk.
+
+See [Manifest UX Workflow](manifest-ux-workflow.md) for the proposed UX,
+responsibility, and lifecycle boundaries.
 
 ## Fields deliberately deferred
 
 ### Capabilities and permissions
 
-Capability declarations should be deferred until the runtime permission model
-defines:
-
-- the supported capability vocabulary;
-- whether declarations are informational, required, or user-approved;
-- which component validates and enforces them;
-- how an App behaves when declarations and observed behavior disagree.
-
-Adding an empty `capabilities` array now would appear extensible, but it would
-freeze a field name before its security semantics are clear. More importantly,
-a Manifest declaration must never be treated as authorization.
+Capability declarations should wait until the runtime permission model defines
+their vocabulary, validation, approval, and enforcement semantics. A declared
+capability must never be treated as authorization.
 
 ### Data schemas and migrations
 
 The project already has a graph schema approval path. The Manifest should not
-duplicate graph schema definitions or silently introduce an App data migration
-protocol in Phase 1.
+duplicate graph schemas or silently introduce an App data migration protocol.
 
-### App revision history and rollback
+### Revision history and rollback
 
-`app_version` can identify the App's declared version, but it does not imply
-that the platform already supports snapshots, rollback, atomic activation, or
-data migration. Those reliability mechanisms require a separate design.
+An App version can identify a declaration, but it does not imply that the
+platform already supports snapshots, atomic activation, rollback, or data
+migration. Those mechanisms require a separate design.
 
-### Conversation-to-Skill and automatic recommendations
+### Automatic recommendations
 
-Intent hints can provide future routing input. Phase 1 should not introduce
-behavior that proactively creates, recommends, or modifies Apps.
+Intent hints may later help discovery. Phase 1 should not change routing,
+proactively recommend Apps, or automatically create or modify them.
 
-## Questions for maintainers
+## Remaining design questions
 
-1. Is evolving the current `metadata.json` preferable to introducing a second
-   `manifest.json` in the first phase?
-2. Should capabilities remain out of the schema until their enforcement model
-   is designed?
-3. Is it acceptable for Phase 1 to define intent hints without changing router
-   behavior yet?
-4. Are there use cases that already require platform metadata and App
-   declarations to be stored independently?
+1. Which existing write path should first become responsible for producing
+   complete Manifest descriptions and intent hints?
+2. Should legacy Apps be migrated only on explicit update, or should there be
+   a separate migration command?
+3. Which user-visible changes should require confirmation once the UX is
+   implemented?
+4. When should the temporary `metadata.json` compatibility path be removed?
