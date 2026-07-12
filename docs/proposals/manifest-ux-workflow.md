@@ -12,14 +12,15 @@ These diagrams clarify three different questions:
 2. Which responsibilities belong to the user, Agent, and platform?
 3. What future lifecycle boundary keeps the current App available on failure?
 
-Only the contract and validation foundations belong to Phase 1. The review,
-activation, and recovery flows are product and architecture boundaries for
-later work, not implementation commitments.
+Only the contract, validation, one-time migration, and AppManager integration
+belong to Phase 1. The review, activation, and recovery flows are product and
+architecture boundaries for later work, not implementation commitments.
 
-## 1. User-facing modification workflow
+## 1. Future user-facing modification workflow
 
-The primary path separates machine validation from user-facing review while
-avoiding unnecessary confirmation for low-risk updates.
+This future path, which is not implemented in Phase 1, separates machine
+validation from user-facing review while avoiding unnecessary confirmation
+for low-risk updates.
 
 ```mermaid
 %%{init: {
@@ -64,17 +65,19 @@ flowchart LR
 ```
 
 The Manifest can support the explanation by providing validated identity,
-purpose, and version fields. It does not prove that the code has no other
-behavioral or data-access changes.
+purpose, version, intent hints, and central schema references. It does not
+prove that the code has no other behavioral or data-access changes, and schema
+references do not grant permissions or authorize graph mutations.
 
 `Review needed?` represents a future UX policy. Meaningful purpose or behavior
 changes may warrant a preview, while a low-risk visual correction should not
 necessarily interrupt the user.
 
-## 2. Responsibility boundary
+## 2. Future responsibility boundary
 
-This compact platform-gate view keeps ownership visible without three heavy
-containers. Platform validation is the central product guarantee.
+This future platform-gate view keeps ownership visible without three heavy
+containers. Phase 1 establishes only Manifest contract validation; activation
+and preservation remain later platform responsibilities.
 
 ```mermaid
 %%{init: {
@@ -124,14 +127,14 @@ The responsibilities are:
   accept or cancel when review is required.
 - **Agent:** interpret the request, prepare a candidate, and write a readable
   explanation.
-- **Platform:** validate the contract, control activation, and preserve the
-  current App when the candidate cannot proceed.
+- **Platform (future lifecycle):** validate the contract, control activation,
+  and preserve the current App when the candidate cannot proceed.
 
-## 3. Candidate lifecycle and recovery boundary
+## 3. Future candidate lifecycle and recovery boundary
 
-A state diagram expresses lifecycle guarantees more accurately than another
-workflow. It separates stable states from validation, consent, activation, and
-recovery transitions.
+A state diagram expresses desired lifecycle boundaries more accurately than
+another workflow. It separates stable states from validation, consent,
+activation, and recovery transitions.
 
 ```mermaid
 %%{init: {
@@ -180,5 +183,5 @@ stateDiagram-v2
 
 Candidate staging, atomic activation, previous-version recovery, and
 activation-failure handling are beyond Phase 1. The diagram records a safety
-boundary for later design: an unsuccessful candidate should not destroy the
-currently usable App.
+boundary for later design, not a guarantee implemented by the Manifest PR: an
+unsuccessful candidate should not destroy the currently usable App.

@@ -42,8 +42,9 @@ three constraints:
 ### Opportunity
 
 An Ambient App currently has a durable directory, source files, and basic
-metadata. Its purpose, however, is still mostly inferred from its ID, title,
-conversation history, or source code.
+platform metadata. Its purpose and relationship to the central graph schemas,
+however, are still mostly inferred from its ID, title, conversation history,
+or source code.
 
 A small Manifest could turn that implicit meaning into a versioned,
 machine-readable contract. In time, the same contract might provide consistent
@@ -57,22 +58,30 @@ letting each subsystem independently infer what an App is intended to do.
 
 ### Engineering boundary
 
-The Manifest should begin smaller than its possible future uses. A first phase
-can define identity, purpose, contract version, App version, and optional
-intent hints while preserving existing Apps.
+The Manifest should begin smaller than its possible future uses. The accepted
+first-phase direction defines identity, purpose, contract version, App
+version, optional intent hints, and references to registered central graph
+schemas. Together, `description`, `intents`, and `schema_refs` provide minimal
+capability context without introducing a formal capability taxonomy.
 
 It should not simultaneously introduce automatic recommendations, permission
-enforcement, rollback, data migration, or a general plugin system. In
-particular, a capability declaration must never be treated as permission.
+enforcement, router scoring changes, graph mutation behavior, rollback, data
+schema migration, or a general plugin system. In particular, a declaration of
+purpose, intent, or schema association must never be treated as permission.
+The one-time `metadata.json` to `manifest.json` declaration migration is part
+of Phase 1 and does not migrate graph or user data.
 
 ### Current status
 
-Selected for detailed design discussion:
+Selected for a focused implementation after alignment in
+[Issue #2](https://github.com/BillShiyaoZhang/ambient-agent/issues/2):
 
 - [Manifest design directions](manifest-design-directions.md)
 - [Manifest Phase 1 design](manifest-phase-1.md)
 
-No implementation is proposed until the contract and scope are reviewed.
+The implementation remains limited to the accepted Manifest contract,
+validation, one-time legacy repair or migration, `AppManager` integration, API
+compatibility, and tests.
 
 ## Reliable App evolution
 
@@ -399,7 +408,7 @@ For example:
 If the maintainer considers any of these directions useful, a conservative
 sequence could be:
 
-1. Discuss the smallest Manifest contract and compatibility behavior.
+1. Record the accepted Manifest contract and one-time migration boundary.
 2. Implement only that accepted boundary with tests.
 3. Observe whether routing, App maintenance, or user transparency has the next
    clearest problem in the working system.
@@ -408,14 +417,11 @@ sequence could be:
 This sequence is only a contribution proposal. It is intended to keep changes
 reviewable and to let evidence from the project guide later architecture.
 
-## Questions for maintainers
+## Maintainer alignment
 
-1. Does the framing of Ambient Apps as durable, user-controlled software fit
-   the intended direction of the project?
-2. Beyond the Manifest discussion, is any one of these problem areas worth
-   developing into a separate, bounded proposal?
-3. Are any of these directions inconsistent with product decisions or
-   experiments already underway?
-
-No response to every direction is required. The immediate discussion can
-remain limited to the Manifest Phase 1 proposal.
+Issue #2 established the Phase 1 direction: use a standalone `manifest.json`,
+remove `metadata.json` from the final normal runtime paths, expose compact App
+capability and schema context through normalized App records for future
+routing, and keep the graph database as the single data center. The other
+contribution directions in this document remain exploratory and require
+separate discussions before implementation.

@@ -2,13 +2,14 @@
 
 ## Status
 
-Discussion proposal. The design is limited to a standalone storage contract,
-compatibility behavior, validation boundaries, and tests. It does not change
-runtime behavior or implement the proposed UX by itself.
+Accepted implementation design. The scope is limited to a standalone storage
+contract, validation, one-time repair or migration, `AppManager` integration,
+API compatibility, and tests. It does not implement router behavior, graph
+mutation, or the proposed UX.
 
 ## Summary
 
-Phase 1 proposes adding a versioned `manifest.json` for each generated App:
+Phase 1 adds a versioned `manifest.json` for each generated App:
 
 ```text
 workspace/apps/<app-id>/
@@ -18,28 +19,33 @@ workspace/apps/<app-id>/
 └── controller.js
 ```
 
-`manifest.json` makes identity and purpose explicit for the platform. Relevant
-fields can later support user-readable change explanations, but Phase 1 does
-not add frontend UI, semantic routing, permissions, activation, or rollback.
+`manifest.json` makes identity, purpose, discovery hints, and central graph
+schema associations explicit for the platform. Those fields can supply compact
+context to routing and later user-readable change explanations, but Phase 1
+does not change router scoring, graph mutation, frontend UI, permissions,
+activation, or rollback.
 
-Legacy `metadata.json` may remain readable during development and migration.
-It is not part of the intended final layout.
+Legacy `metadata.json` may exist temporarily while the migration is developed.
+In the final implementation it is consumed only by a one-time migration and
+deleted after the resulting Manifest has been written and verified. It is not
+part of normal runtime operation.
 
 ## Assumptions
 
 - `manifest.json` is the authoritative declaration when present and valid.
 - The App directory name remains the storage identity boundary.
 - Existing public APIs must retain the fields used by the current frontend.
-- Compatibility must not turn malformed or unsupported Manifests into
-  apparently valid legacy Apps.
+- A valid Manifest read does not mutate App files.
+- Migration must not turn malformed or unsupported Manifests into apparently
+  valid legacy Apps.
 - The first implementation should modify only the Manifest/AppManager path and
   its tests.
 
 ## Goals
 
 1. Define a small, explicitly versioned standalone Manifest contract.
-2. Preserve loading and listing of legacy Apps during a bounded compatibility
-   period.
+2. Repair or migrate existing Apps to the standalone contract without
+   retaining a metadata fallback.
 3. Centralize normalization and validation near `AppManager`.
 4. Define observable behavior for malformed, mismatched, and unsupported
    Manifests.
@@ -50,10 +56,11 @@ It is not part of the intended final layout.
 
 Phase 1 will not:
 
-- change router selection using Manifest intents;
-- implement capability declarations or grant runtime permissions;
+- change router selection using Manifest context;
+- introduce a formal capability taxonomy or grant runtime permissions;
 - implement candidate staging, atomic activation, rollback, or recovery;
 - modify graph schema registration or approval;
+- authorize or execute graph mutations from Manifest declarations;
 - implement the user-facing change preview;
 - add a general plugin or package format;
 - require an eager bulk rewrite of all workspaces;
@@ -71,6 +78,10 @@ Phase 1 will not:
   "intents": [
     "plan my morning",
     "organize today's priorities"
+  ],
+  "schema_refs": [
+    "Task",
+    "Event"
   ]
 }
 ```
@@ -85,24 +96,29 @@ Phase 1 will not:
 | `description` | Yes, may be empty | App declaration | Concise description of the App's purpose. |
 | `app_version` | Yes | App declaration | Version of the generated App, independent of `manifest_version`. |
 | `intents` | Yes, may be empty | App declaration | Natural-language discovery hints for possible future routing. |
+| `schema_refs` | Yes, may be empty | App declaration, validated structurally by platform | IDs of related schemas in the central `graph_schemas` registry. |
 
 Platform-maintained timestamps do not need to be part of the App declaration.
-If the current API still requires `created_at` and `updated_at`, the
-compatibility implementation may derive or retain that state separately while
-the migration boundary is established. The implementation PR should document
-the selected storage source rather than quietly adding those fields back to
-the Manifest.
+The current API still requires `created_at` and `updated_at`, so Phase 1 must
+preserve their public shape while keeping them outside the Manifest contract.
+The implementation must first audit every current reader and writer, then
+choose a platform-owned source that does not recreate a second App declaration
+or silently change the timestamps' logical meaning. Required-file modification
+times are not assumed to be equivalent to logical creation and update times.
 
-`description` and `intents` may be empty because current creation paths cannot
-yet populate them reliably. The contract should not invent low-quality
-content merely to satisfy a non-empty constraint.
+`description`, `intents`, and `schema_refs` may be empty because current
+creation paths cannot yet populate them reliably. The contract should not
+invent low-quality content or schema associations merely to satisfy a
+non-empty constraint.
 
 ### Intentionally absent fields
 
-Version 1 does not include capabilities, permissions, graph schemas, source
-contents, model prompts, revision history, or user data.
+Version 1 does not include a formal `capabilities` taxonomy, permissions, full
+graph schema definitions, source contents, model prompts, revision history, or
+user data. Its minimum capability context is the combination of
+`description`, `intents`, and `schema_refs`.
 
-## Read precedence and compatibility
+## Read, repair, and migration behavior
 
 ### Valid standalone Manifest
 
@@ -113,7 +129,7 @@ unsupported contract.
 
 ### Legacy App with only `metadata.json`
 
-During the compatibility period, a legacy App may be normalized in memory:
+A one-time migration constructs a Version 1 candidate:
 
 ```json
 {
@@ -122,18 +138,21 @@ During the compatibility period, a legacy App may be normalized in memory:
   "title": "Legacy Widget",
   "description": "",
   "app_version": "0.1.0",
-  "intents": []
+  "intents": [],
+  "schema_refs": []
 }
 ```
 
-Reading a valid legacy App should not necessarily rewrite it. Migration can
-occur on an explicit App update or through a future dedicated command.
+The migration validates the candidate, writes `manifest.json` through a
+failure-aware path, rereads and validates it, and deletes `metadata.json` last.
+It must be idempotent. Once migrated, the App is read only from
+`manifest.json`.
 
 ### App with neither declaration file
 
 The current implementation repairs Apps that have `index.html` but no
-`metadata.json`. Phase 1 should preserve equivalent compatibility: derive a
-title, create a valid Version 1 Manifest, and continue.
+declaration. Phase 1 preserves that useful behavior by deriving a title,
+creating and validating a Version 1 Manifest, and continuing.
 
 This is repair of a missing invariant, not silent replacement of an invalid
 Manifest.
@@ -144,14 +163,18 @@ An explicit App write should produce a complete Version 1 `manifest.json`.
 When updating:
 
 - preserve existing declarations unless replacements are supplied;
-- update `app_version` according to an explicit policy rather than guessing;
-- preserve tolerated unknown fields when safe;
+- preserve `app_version` unless the caller explicitly supplies a replacement;
+- distinguish an omitted declaration field from an explicitly supplied empty
+  value;
 - write the Manifest and source through a failure-aware sequence;
-- do not require a permanent mirrored `metadata.json`.
+- never write or preserve a mirrored `metadata.json`.
 
 Phase 1 does not promise atomic multi-file activation. The implementation must
-nevertheless avoid claiming success after a partial write and should use the
-safest existing filesystem write pattern available in the repository.
+validate inputs before writing, replace `manifest.json` through an atomic
+same-directory temporary file, report any required source or Manifest write
+failure, and never claim that a partial write completed successfully. It does
+not promise automatic restoration of every source file after an arbitrary
+failure; candidate activation and rollback remain separate work.
 
 ## Validation rules
 
@@ -162,6 +185,7 @@ safest existing filesystem write pattern available in the repository.
 - `manifest_version` must be an integer.
 - `id`, `title`, `description`, and `app_version` must be strings.
 - `intents` must be a list of non-empty strings.
+- `schema_refs` must be a list of unique, non-empty schema ID strings.
 - Reasonable size limits should prevent an accidental or malicious Manifest
   from becoming unbounded input.
 
@@ -171,19 +195,37 @@ The Manifest `id` must equal the App directory name. The directory is the
 storage lookup boundary and API path component; silently accepting two
 identities would make listing, loading, updating, and deletion disagree.
 
+The same App ID validator is used by create, read, list, update, delete,
+migration, and repair paths. Version 1 IDs are lowercase ASCII slugs matching
+`^[a-z0-9]+(?:-[a-z0-9]+)*$`, are at most 64 characters, and must not be
+Windows reserved device names. Resolved App paths must be direct children of
+the configured Apps directory.
+
 ### Version validation
 
 - `manifest_version: 1` is supported.
 - Unsupported versions are diagnosed and excluded from normal use.
-- A missing version is valid only on the legacy `metadata.json` compatibility
-  path, not in a new `manifest.json`.
+- A missing version is valid only when constructing a migration candidate from
+  legacy metadata, not in a new `manifest.json`.
 
 ### Unknown fields
 
-Readers may tolerate unknown fields within a supported contract version.
-Writers should preserve them when doing so cannot conflict with
-platform-validated identity. Tolerating fields is not the same as accepting an
-unsupported `manifest_version`.
+Version 1 rejects unknown fields. A strict contract prevents misspelled or
+unreviewed declarations from silently entering router context. Future fields
+require a new documented contract decision; unsupported versions remain
+explicit errors.
+
+### Schema reference validation
+
+The Manifest layer validates the structure of `schema_refs`, including type,
+empty values, duplicates, count, and length. The central graph schema registry
+remains responsible for registration, approval, definitions, and runtime
+validation. Phase 1 does not couple ordinary Manifest parsing to graph
+mutation or schema registration.
+
+All string lengths, list counts, and the total Manifest byte size use
+centralized, documented limits with boundary tests. They are not redefined
+independently inside `AppManager`.
 
 ## Error behavior
 
@@ -199,6 +241,11 @@ The first implementation should distinguish:
 
 A structured internal exception plus standard logging may be sufficient.
 One invalid App must not prevent valid Apps from being listed.
+Listing is deterministic by App ID. Per-App migration, repair, update, and
+delete operations are serialized so concurrent operations cannot publish two
+different migration results or delete migration input before verification.
+The acceptance suite must exercise competing migration/update/delete attempts,
+not only single-threaded success paths.
 
 ## API compatibility
 
@@ -213,6 +260,12 @@ updated_at
 
 The first implementation may add normalized Manifest information, but it
 should not change existing field meaning.
+
+`created_at` and `updated_at` remain UTC ISO 8601 platform record fields rather
+than Manifest declarations. Their post-migration source is an implementation
+decision that must preserve the existing API contract and avoid a second App
+declaration source; Phase 1 must resolve it from the current call sites before
+code is merged.
 
 `GET /api/apps/{app_id}` should retain:
 
@@ -230,14 +283,18 @@ JSON.
 
 ## Proposed implementation boundary
 
-If accepted, the implementation PR should:
+The implementation PR should:
 
 1. Add a focused Manifest representation and validator, either close to
    `AppManager` or in `backend/app_manifest.py`.
 2. Route App declaration reads and writes through that boundary.
-3. Add a temporary, explicit legacy `metadata.json` adapter.
-4. Preserve current public method signatures unless tests require a change.
-5. Extend `tests/backend/test_app_manager.py`.
+3. Add an idempotent, on-demand one-time migration or repair path that may be
+   triggered by the first list/get access and removes `metadata.json` only
+   after successful Manifest verification.
+4. Preserve current public method signatures while allowing optional,
+   explicitly supplied declaration replacements.
+5. Add focused tests in `tests/backend/test_app_manifest.py` and extend
+   `tests/backend/test_app_manager.py`.
 6. Update UML documentation only if public core classes or signatures change.
 
 No router, frontend, permission, graph database, or agent-harness behavior
@@ -246,27 +303,34 @@ should change in the same PR.
 ## Test-first acceptance cases
 
 1. **New App write:** creates a valid standalone Version 1 Manifest.
-2. **Standalone read:** a valid Manifest loads without consulting legacy
+2. **No metadata write:** new and updated Apps do not create
+   `metadata.json`.
+3. **Standalone read:** a valid Manifest loads without consulting legacy
    metadata.
-3. **Legacy read:** metadata-only App loads through compatibility without an
-   incidental rewrite.
-4. **Missing declaration repair:** App with `index.html` and neither file gets
+4. **Legacy migration:** a metadata-only App is converted to a valid Manifest
+   and metadata is deleted only after verification.
+5. **Missing declaration repair:** App with `index.html` and neither file gets
    a valid Manifest.
-5. **Update preservation:** a source update retains declarations and tolerated
-   unknown fields.
-6. **Manifest precedence:** an invalid Manifest does not silently fall back to
+6. **Update preservation:** a source update retains `description`,
+   `app_version`, `intents`, and `schema_refs` unless explicitly replaced.
+7. **Manifest precedence:** an invalid Manifest does not silently fall back to
    valid-looking legacy metadata.
-7. **Malformed JSON isolation:** one malformed App does not prevent other Apps
+8. **Malformed JSON isolation:** one malformed App does not prevent other Apps
    from being listed.
-8. **Wrong root type:** an array or scalar is rejected.
-9. **ID mismatch:** Manifest and directory identity cannot diverge silently.
-10. **Unsupported version:** a future version is not interpreted as Version 1.
-11. **Intent validation:** invalid entries do not enter normalized discovery
+9. **Wrong root type:** an array or scalar is rejected.
+10. **ID mismatch:** Manifest and directory identity cannot diverge silently.
+11. **Unsupported version:** a future version is not interpreted as Version 1.
+12. **Intent validation:** invalid entries do not enter normalized discovery
     data.
-12. **Oversized input:** an unreasonable Manifest is rejected predictably.
-13. **Partial write failure:** failure is reported and is not presented as a
+13. **Schema reference validation:** invalid, empty, or duplicate entries are
+    rejected.
+14. **Unknown fields:** undeclared Version 1 fields are rejected.
+15. **Oversized input:** an unreasonable Manifest is rejected predictably.
+16. **Path safety:** invalid IDs, traversal attempts, and non-child paths are
+    rejected consistently.
+17. **Partial write failure:** failure is reported and is not presented as a
     completed update.
-14. **API compatibility:** current frontend fields remain available.
+18. **API compatibility:** current frontend fields remain available.
 
 ## Execution-path simulations
 
@@ -286,8 +350,11 @@ App Store or router
 AppManager.list_apps()
   -> manifest.json absent
   -> metadata.json present
-  -> normalize through explicit legacy adapter
-  -> do not rewrite during a valid read
+  -> acquire the App operation lock
+  -> construct and validate Version 1 candidate
+  -> atomically write and reread manifest.json
+  -> delete metadata.json last
+  -> continue from the validated Manifest
 ```
 
 ### Missing declaration
@@ -296,8 +363,9 @@ AppManager.list_apps()
 AppManager.list_apps() or get_app_files()
   -> both declaration files absent
   -> verify index.html exists
+  -> acquire the App operation lock
   -> derive identity and title
-  -> write Version 1 manifest.json
+  -> atomically write Version 1 manifest.json
   -> continue
 ```
 
@@ -316,7 +384,7 @@ AppManager.list_apps()
 ```text
 AgentOrchestrator
   -> AppManager.create_or_update_app(...)
-  -> load current validated declaration or legacy normalization
+  -> load current validated declaration or perform one-time migration
   -> merge supplied and preserved fields
   -> perform failure-aware writes
   -> return success only after required writes complete
@@ -337,10 +405,10 @@ Phase 1.
 
 ## Risks and mitigations
 
-### Two files become permanent
+### Legacy migration loses its source
 
-Mitigation: make `metadata.json` an explicitly temporary adapter, define
-Manifest precedence, and avoid mirrored writes as the final design.
+Mitigation: validate before writing, use a failure-aware Manifest write,
+reread and validate the result, and delete `metadata.json` only after success.
 
 ### Source and Manifest diverge
 
@@ -353,9 +421,9 @@ atomic updates.
 Mitigation: document that the Manifest describes declared identity and
 purpose. It does not verify code behavior or grant permissions.
 
-### Compatibility hides corruption
+### Migration hides corruption
 
-Mitigation: fall back only when `manifest.json` is absent, never when it is
+Mitigation: migrate only when `manifest.json` is absent, never when it is
 present but invalid.
 
 ### Schema becomes a catch-all
@@ -363,8 +431,9 @@ present but invalid.
 Mitigation: require a clear owner, consumer, validation rule, and security
 meaning for every future field.
 
-## Acceptance decision requested
+## Accepted implementation boundary
 
-Is this a suitable boundary for a future implementation PR: standalone
-`manifest.json`, temporary legacy compatibility, validation and tests only,
-with the UX and activation lifecycle kept as separate follow-up work?
+Issue #2 confirms this Phase 1 boundary: standalone `manifest.json`, references
+to registered central schemas, no permanent metadata fallback, validation and
+tests, with router scoring, graph mutation, permissions, UX, activation, and
+recovery kept as separate work.
