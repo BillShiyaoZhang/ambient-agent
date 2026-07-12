@@ -55,7 +55,7 @@ classDiagram
     class AppManager {
         +list_apps() List
         +get_app_files(app_id) Dict
-        +create_or_update_app(app_id, title, html, css, js) void
+        +create_or_update_app(app_id, title, html, css, js, kwargs) void
     }
 
     class PromptManager {
