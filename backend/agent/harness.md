@@ -173,7 +173,6 @@ classDiagram
     class MutationPlanExecutor {
         +run_plan(plan, instruction, on_update) PlanPhaseResult
     }
-
     class PlanPhaseResult {
         +success: bool
         +output: str
@@ -194,6 +193,12 @@ classDiagram
         -_handle_multi_intent(plan, session_id, on_update) tuple
         -_handle_converse(plan, session_id, content, on_update) tuple
         -_handle_widget_build(plan, session_id, on_update) tuple
+    }
+
+    class AppManager {
+        +list_apps() List
+        +get_app_files(app_id) Dict
+        +create_or_update_app(app_id, title, html, css, js, kwargs) void
     }
 
     class PromptManager {

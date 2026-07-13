@@ -33,10 +33,18 @@ classDiagram
 
     class AppManager {
         +apps_dir: str
-        +create_or_update_app(app_id: str, title: str, html: str, css: str, js: str) void
+        +create_or_update_app(app_id: str, title: str, html: str, css: str, js: str, kwargs) void
         +get_app_files(app_id: str) dict
         +list_apps() List~dict~
         +delete_app(app_id: str) bool
+    }
+
+    class AppRecordStore {
+        +db_path: Path
+        +serialized() Iterator
+        +get(transaction, app_id) AppRecord
+        +put(transaction, app_id, created_at, updated_at) AppRecord
+        +delete(transaction, app_id) void
     }
 
     class WorkspaceStorage {
@@ -236,6 +244,7 @@ classDiagram
 
     ChatSession "1" --* "0..*" ChatMessage : contains
     ContextManager --> AppManager : references
+    AppManager --> AppRecordStore : persists lifecycle timestamps
     ContextManager --> ChatMessage : queries database
     AgentOrchestrator --> ContextManager : constructs message history
     AgentOrchestrator --> AppManager : references

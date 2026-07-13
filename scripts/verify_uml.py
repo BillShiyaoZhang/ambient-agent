@@ -9,6 +9,7 @@ CLASS_TO_FILE = {
     "ChatMessage": "backend/models.py",
     "LLMAuditLog": "backend/models.py",
     "AppManager": "backend/app_manager.py",
+    "AppRecordStore": "backend/app_records.py",
     "ContextManager": "backend/context_manager.py",
     "AgentParser": "backend/agent_parser.py",
     "LLMService": "backend/llm_service.py",
@@ -302,12 +303,12 @@ def main():
 
     print("-" * 50)
     if mismatches:
-        print("❌ Verification Failed! The following mismatches were found:")
+        print("Verification failed! The following mismatches were found:")
         for m in mismatches:
             print(f"  - {m}")
         sys.exit(1)
     else:
-        print("✅ Verification Succeeded! All documented UML contracts and flowcharts are satisfied in the codebase.")
+        print("Verification succeeded! All documented UML contracts and flowcharts are satisfied in the codebase.")
         sys.exit(0)
 
 
