@@ -28,8 +28,8 @@ class SubIntentKind(StrEnum):
     WIDGET_CREATE = "widget_create"
     WIDGET_MODIFY = "widget_modify"
     WIDGET_EXTEND_SCHEMA = "widget_extend_schema"  # NEW: granular schema extension
-    WIDGET_FIX_CODE = "widget_fix_code"            # NEW: targeted code patch
-    WIDGET_REWRITE = "widget_rewrite"              # NEW: full re-plan + regen
+    WIDGET_FIX_CODE = "widget_fix_code"  # NEW: targeted code patch
+    WIDGET_REWRITE = "widget_rewrite"  # NEW: full re-plan + regen
 
 
 @dataclass
@@ -44,8 +44,8 @@ class SubIntent:
     kind: SubIntentKind
     app_id: str | None = None
     instruction: str | None = None
-    actions: list[dict[str, Any]] = field(default_factory=list)         # for graph_mutation
-    query: dict[str, Any] | None = None                                # for graph_query
+    actions: list[dict[str, Any]] = field(default_factory=list)  # for graph_mutation
+    query: dict[str, Any] | None = None  # for graph_query
     # For widget_extend_schema: {node_type: {prop_name: type_string}}
     extend_schema_props: dict[str, dict[str, str]] | None = None
     # For widget_fix_code: free-text feedback used by OpenCode regen
@@ -62,9 +62,7 @@ class SubIntent:
         if self.query is not None:
             d["query"] = self.query
         if self.extend_schema_props:
-            d["extend_schema_props"] = {
-                k: dict(v) for k, v in self.extend_schema_props.items()
-            }
+            d["extend_schema_props"] = {k: dict(v) for k, v in self.extend_schema_props.items()}
         if self.feedback is not None:
             d["feedback"] = self.feedback
         return d

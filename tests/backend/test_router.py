@@ -108,9 +108,7 @@ async def test_route_function_call_clarify_picks_options(monkeypatch):
     )
     monkeypatch.setattr("backend.agent.router.call_llm_api", mock_call)
 
-    ctx = RouterContext(
-        app_manifests=[{"id": "todo-a", "title": "Work"}, {"id": "todo-b", "title": "Personal"}]
-    )
+    ctx = RouterContext(app_manifests=[{"id": "todo-a", "title": "Work"}, {"id": "todo-b", "title": "Personal"}])
     plan = await IntentRouter.route("add to todos", ctx, provider_name="openai", model_name="gpt-4")
     assert plan.kind == IntentKind.CLARIFY
     assert len(plan.clarification_options) == 2

@@ -27,9 +27,7 @@ async def test_router_logs_route_stage_in_audit(monkeypatch, tmp_path):
                     "type": "function",
                     "function": {
                         "name": "classify_intent",
-                        "arguments": json.dumps(
-                            {"kind": "converse", "rationale": "ok"}
-                        ),
+                        "arguments": json.dumps({"kind": "converse", "rationale": "ok"}),
                     },
                 }
             ],

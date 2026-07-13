@@ -83,9 +83,7 @@ class SubExecutor:
         return {"error": f"unsupported sub_intent kind: {sub.kind!r}"}
 
 
-async def _sub_graph_mutation(
-    sub: SubIntent, session_id: str, on_update, db_session, graph_db
-) -> dict[str, Any]:
+async def _sub_graph_mutation(sub: SubIntent, session_id: str, on_update, db_session, graph_db) -> dict[str, Any]:
     from backend.mutation_tickets import MutationTicketManager
 
     forward_actions = [a for a in (sub.actions or []) if isinstance(a, dict)]
@@ -161,9 +159,7 @@ async def _sub_graph_query(sub: SubIntent, session_id: str, on_update, graph_db)
     return {"results": results}
 
 
-async def _sub_widget_build(
-    sub: SubIntent, session_id: str, on_update, db_session, graph_db
-) -> dict[str, Any]:
+async def _sub_widget_build(sub: SubIntent, session_id: str, on_update, db_session, graph_db) -> dict[str, Any]:
     """Widget sub-intents reuse the DAG via the harness internals; for now
     we fall back to the legacy plan-and-modify path. The DAG variant is
     reachable through the regular widget_modify entry point."""
@@ -403,7 +399,7 @@ async def _task_regen_code(ctx: TaskContext) -> TaskResult:
     schema_text = "Here is the exact schema definitions registered in the system. Your JavaScript client code MUST conform to these fields and types:\n"
     for s in schemas:
         schema_text += f"- Type '{s['id']}': {json.dumps(s['properties'])}\n"
-    enriched = f"{instruction}\n\n[APPROVED DEVELOPMENT PLAN]\n{ctx.extra.get('plan','')}\n\n[CRITICAL GRAPH DATABASE SCHEMA CONSTRAINTS]\n{schema_text}"
+    enriched = f"{instruction}\n\n[APPROVED DEVELOPMENT PLAN]\n{ctx.extra.get('plan', '')}\n\n[CRITICAL GRAPH DATABASE SCHEMA CONSTRAINTS]\n{schema_text}"
     if feedback:
         enriched += f"\n\n[CRITICAL: PREVIOUS SCHEMA VERIFICATION ERRORS TO FIX]\n{feedback}"
 
@@ -521,9 +517,7 @@ async def _task_apply_user_actions(ctx: TaskContext) -> TaskResult:
                     )
             await ctx.extra["on_update"](
                 "✅ 已为以下类型扩展属性："
-                + ", ".join(
-                    "{} ({})".format(t, ", ".join(p.keys())) for t, p in extend_props.items()
-                )
+                + ", ".join("{} ({})".format(t, ", ".join(p.keys())) for t, p in extend_props.items())
             )
             return TaskResult(
                 outputs={"applied": applied},
@@ -821,10 +815,14 @@ class AgentOrchestrator:
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         app_id = plan.app_id or ""
         instruction = plan.instruction or ""
-        is_testing = ("pytest" in sys.modules or os.getenv("TESTING") == "true") and os.getenv("FORCE_INTERACTIVE") != "true"
+        is_testing = ("pytest" in sys.modules or os.getenv("TESTING") == "true") and os.getenv(
+            "FORCE_INTERACTIVE"
+        ) != "true"
 
         if is_testing:
-            status_text = f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
+            status_text = (
+                f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
+            )
             await self._run_callback(on_update, status_text)
             cli_output = await self.run_opencode_agent_acp_fn(app_id, instruction, on_update=on_update)
             verification_report = "Bypassed in test mode."
@@ -850,9 +848,7 @@ class AgentOrchestrator:
 
             dag = WidgetDAG()
             dag.register(TaskNode("plan", _task_plan))
-            dag.register(
-                TaskNode("align_schemas", _task_align_schemas, invalidates={"regen_code", "verify"})
-            )
+            dag.register(TaskNode("align_schemas", _task_align_schemas, invalidates={"regen_code", "verify"}))
             dag.register(TaskNode("regen_code", _task_regen_code, invalidates={"verify"}))
             dag.register(TaskNode("verify", _task_verify))
             dag.register(TaskNode("decode_user_intent", _task_decode_user_intent))
@@ -876,7 +872,9 @@ class AgentOrchestrator:
                 if "diff" in outputs:
                     ctx.extra["last_diff"] = outputs["diff"]
                     if outputs.get("verification_passed"):
-                        verification_report = outputs["diff"].to_markdown() if isinstance(outputs["diff"], VerificationDiff) else "✅"
+                        verification_report = (
+                            outputs["diff"].to_markdown() if isinstance(outputs["diff"], VerificationDiff) else "✅"
+                        )
                 if "cli_output" in outputs:
                     cli_output = outputs["cli_output"]
                 if "applied_action" in outputs:
@@ -977,9 +975,7 @@ class AgentOrchestrator:
                         properties=action.get("properties"),
                     )
                 elif act == "update_node_property":
-                    graph_db.update_node_property(
-                        node_id=action.get("id"), properties=action.get("properties", {})
-                    )
+                    graph_db.update_node_property(node_id=action.get("id"), properties=action.get("properties", {}))
                 elif act == "delete_node":
                     graph_db.delete_node(node_id=action.get("id"))
                 elif act == "create_edge":
@@ -1024,9 +1020,7 @@ class AgentOrchestrator:
         await self._run_callback(on_update, preview_payload)
 
         content = f"✅ {summary}\n（这张改动 60 秒内可撤销，点击气泡上的 ⟲ 即可恢复。）"
-        agent_msg = ChatMessage(
-            session_id=session_id, role="agent", sender="agent", content=content
-        )
+        agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=content)
         self.db.add(agent_msg)
         self.db.commit()
         self.db.refresh(agent_msg)
@@ -1059,9 +1053,7 @@ class AgentOrchestrator:
                 lines.append(f"- {r['type']} `{r['id']}` — {title}")
             content = "📊 Graph 结果：\n" + "\n".join(lines)
 
-        agent_msg = ChatMessage(
-            session_id=session_id, role="agent", sender="agent", content=content
-        )
+        agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=content)
         self.db.add(agent_msg)
         self.db.commit()
         self.db.refresh(agent_msg)
@@ -1128,9 +1120,7 @@ class AgentOrchestrator:
                     rationale="sub_intent",
                     actions=sub.actions,
                 )
-                msg, _ = await self._handle_graph_mutation(
-                    plan=single_plan, session_id=session_id, on_update=on_update
-                )
+                msg, _ = await self._handle_graph_mutation(plan=single_plan, session_id=session_id, on_update=on_update)
                 replies.append(msg.content)
             elif sub.kind == SubIntentKind.GRAPH_QUERY:
                 single_plan = IntentPlan(
@@ -1138,9 +1128,7 @@ class AgentOrchestrator:
                     rationale="sub_intent",
                     query=sub.query or {},
                 )
-                msg, _ = await self._handle_graph_query(
-                    plan=single_plan, session_id=session_id, on_update=on_update
-                )
+                msg, _ = await self._handle_graph_query(plan=single_plan, session_id=session_id, on_update=on_update)
                 replies.append(msg.content)
             elif sub.kind in (
                 SubIntentKind.WIDGET_CREATE,
@@ -1151,7 +1139,9 @@ class AgentOrchestrator:
             ):
                 # Reuse the widget DAG with a synthetic plan_input.
                 synth_plan = IntentPlan(
-                    kind=IntentKind.WIDGET_MODIFY if sub.kind != SubIntentKind.WIDGET_CREATE else IntentKind.WIDGET_CREATE,
+                    kind=IntentKind.WIDGET_MODIFY
+                    if sub.kind != SubIntentKind.WIDGET_CREATE
+                    else IntentKind.WIDGET_CREATE,
                     rationale="sub_intent",
                     app_id=sub.app_id,
                     instruction=sub.instruction or sub.feedback or "",
@@ -1258,7 +1248,9 @@ class AgentOrchestrator:
             if "diff" in outputs:
                 ctx.extra["last_diff"] = outputs["diff"]
                 if outputs.get("verification_passed"):
-                    verification_report = outputs["diff"].to_markdown() if isinstance(outputs["diff"], VerificationDiff) else "✅"
+                    verification_report = (
+                        outputs["diff"].to_markdown() if isinstance(outputs["diff"], VerificationDiff) else "✅"
+                    )
             if "cli_output" in outputs:
                 cli_output = outputs["cli_output"]
 
@@ -1338,9 +1330,7 @@ class AgentOrchestrator:
         return "已完成：" + "; ".join(parts)
 
     def _error_reply(self, session_id: str, content: str) -> tuple[ChatMessage, None]:
-        agent_msg = ChatMessage(
-            session_id=session_id, role="agent", sender="agent", content=content
-        )
+        agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=content)
         self.db.add(agent_msg)
         self.db.commit()
         self.db.refresh(agent_msg)

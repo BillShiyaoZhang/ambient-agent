@@ -88,9 +88,7 @@ class GraphDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON graph_nodes(type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_to ON graph_edges(to_id)")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_history_session ON graph_mutation_history(session_id)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_session ON graph_mutation_history(session_id)")
 
         # 3. Seed core schemas
         self._seed_core_schemas()
@@ -479,9 +477,7 @@ class GraphDatabase:
 
     def pin_mutation_history(self, ticket_id: str) -> bool:
         with self.get_conn() as conn:
-            cursor = conn.execute(
-                "UPDATE graph_mutation_history SET pinned = 1 WHERE id = ?", (ticket_id,)
-            )
+            cursor = conn.execute("UPDATE graph_mutation_history SET pinned = 1 WHERE id = ?", (ticket_id,))
             return cursor.rowcount > 0
 
     def load_mutation_history(self, ticket_id: str) -> dict[str, Any] | None:

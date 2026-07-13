@@ -254,10 +254,7 @@ class IntentRouter:
                 )
             except Exception as e:
                 logger.warning(f"Could not load router_v2.md prompt: {e}")
-                system_prompt = (
-                    "You are Ambient Agent's intent router. "
-                    "Reply by calling the classify_intent function."
-                )
+                system_prompt = "You are Ambient Agent's intent router. Reply by calling the classify_intent function."
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -311,11 +308,7 @@ class IntentRouter:
             plan = IntentPlan.from_tool_call_args(args)
             if plan.kind == IntentKind.CONVERSE and not plan.instruction:
                 plan.instruction = content_stripped
-            if (
-                plan.kind == IntentKind.WIDGET_MODIFY
-                and plan.app_id
-                and isinstance(context, RouterContext)
-            ):
+            if plan.kind == IntentKind.WIDGET_MODIFY and plan.app_id and isinstance(context, RouterContext):
                 plan = cls._resolve_widget_modify_ambiguity(plan, context)
             return plan
         return None
@@ -327,10 +320,33 @@ class IntentRouter:
         keywords: list[str],
     ) -> IntentPlan | None:
         content_lower = content.lower()
-        creation_kw = {"创建", "建一个", "制作", "build", "create", "make",
-                       "生成", "开发", "design", "develop", "generate"}
-        modification_kw = {"修改", "改下", "fix", "update", "modify",
-                           "添加", "加上", "add", "change", "refresh", "重新做", "redo"}
+        creation_kw = {
+            "创建",
+            "建一个",
+            "制作",
+            "build",
+            "create",
+            "make",
+            "生成",
+            "开发",
+            "design",
+            "develop",
+            "generate",
+        }
+        modification_kw = {
+            "修改",
+            "改下",
+            "fix",
+            "update",
+            "modify",
+            "添加",
+            "加上",
+            "add",
+            "change",
+            "refresh",
+            "重新做",
+            "redo",
+        }
 
         is_create = any(k in content or k.lower() in content_lower for k in keywords if k in creation_kw)
         is_modify = any(k in content or k.lower() in content_lower for k in keywords if k in modification_kw)
@@ -384,9 +400,7 @@ class IntentRouter:
             if app_id == requested:
                 return plan
             if app_id.split("-")[0] == requested_base or app_id == requested_base:
-                candidates.append(
-                    {"value": app_id, "label": app.get("title", app_id)}
-                )
+                candidates.append({"value": app_id, "label": app.get("title", app_id)})
 
         if len(candidates) > 1:
             ids_str = ", ".join(f"`{c['value']}`" for c in candidates)
@@ -395,8 +409,7 @@ class IntentRouter:
                 confidence=plan.confidence,
                 rationale=f"multiple apps match base '{requested_base}'",
                 clarification_message=(
-                    f"我发现您有多个同类型应用（{ids_str}），请使用 "
-                    f"`/app <Widget ID> <指令>` 明确指定您想修改哪一个。"
+                    f"我发现您有多个同类型应用（{ids_str}），请使用 `/app <Widget ID> <指令>` 明确指定您想修改哪一个。"
                 ),
                 clarification_options=candidates,
             )

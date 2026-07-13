@@ -55,10 +55,7 @@ class SchemaVerificationService:
             '"unknown_types": [{"type_name": str, "occurrences": int}]}\n'
             "No other text. No markdown fences."
         )
-        user_prompt = (
-            f"Schemas:\n{schemas_info}\n\n"
-            f"JavaScript:\n```js\n{js_source[:8000]}\n```"
-        )
+        user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source[:8000]}\n```"
 
         import os
 

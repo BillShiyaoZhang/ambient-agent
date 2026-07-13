@@ -122,15 +122,15 @@ async def call_llm_api(
                         if status_code == 2062:
                             # Soft rate limit — short backoff
                             logger.warning(
-                                f"LLM rate-limited (2062), attempt {attempt+1}/{max_retries+1}: {status_msg}"
+                                f"LLM rate-limited (2062), attempt {attempt + 1}/{max_retries + 1}: {status_msg}"
                             )
                             if attempt < max_retries:
-                                await asyncio.sleep(backoff_base ** attempt)
+                                await asyncio.sleep(backoff_base**attempt)
                                 continue
                         elif status_code == 2056:
                             # Hard usage cap — longer backoff, may need to wait
                             logger.warning(
-                                f"LLM usage cap (2056), attempt {attempt+1}/{max_retries+1}: {status_msg}"
+                                f"LLM usage cap (2056), attempt {attempt + 1}/{max_retries + 1}: {status_msg}"
                             )
                             if attempt < max_retries:
                                 await asyncio.sleep(usage_cap_backoff * (attempt + 1))
@@ -147,9 +147,7 @@ async def call_llm_api(
                                 "content": msg_data.get("content", "") or "",
                                 "tool_calls": msg_data.get("tool_calls", None),
                             }
-                        logger.error(
-                            f"LLM API returned 200 but choices list is empty. Raw response: {response.text}"
-                        )
+                        logger.error(f"LLM API returned 200 but choices list is empty. Raw response: {response.text}")
                         return {
                             "content": f"No response content received from API. Raw: {response.text}",
                             "tool_calls": None,

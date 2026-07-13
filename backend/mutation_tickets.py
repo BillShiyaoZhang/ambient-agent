@@ -125,8 +125,10 @@ class MutationTicketManager:
         reverse_actions: list[dict[str, Any]] | None = None,
     ) -> MutationTicket:
         ticket_id = ticket_id or f"tkt-{uuid.uuid4().hex[:12]}"
-        reverse = reverse_actions if reverse_actions is not None else compute_reverse_actions(
-            forward_actions, snapshot_before
+        reverse = (
+            reverse_actions
+            if reverse_actions is not None
+            else compute_reverse_actions(forward_actions, snapshot_before)
         )
         ticket = MutationTicket(
             ticket_id=ticket_id,

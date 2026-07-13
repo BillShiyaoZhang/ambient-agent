@@ -76,7 +76,9 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         if verify_counter == 1:
             diff = VerificationDiff()
             diff.unknown_props.append(
-                type("U", (), {"node_type": "Task", "property_name": "bogus", "sample_value_repr": "x", "occurrences": 1})()
+                type(
+                    "U", (), {"node_type": "Task", "property_name": "bogus", "sample_value_repr": "x", "occurrences": 1}
+                )()
             )
             # Manually recompute is_clean since the test mutated the list
             # after dataclass __post_init__.

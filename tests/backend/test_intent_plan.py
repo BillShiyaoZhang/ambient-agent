@@ -56,9 +56,7 @@ def test_intent_plan_from_dict_roundtrip():
         "kind": "graph_mutation",
         "confidence": 0.7,
         "rationale": "user wants to add a task",
-        "actions": [
-            {"action": "create_node", "id": "t1", "type": "Task", "properties": {"title": "x"}}
-        ],
+        "actions": [{"action": "create_node", "id": "t1", "type": "Task", "properties": {"title": "x"}}],
     }
     p = IntentPlan.from_dict(src)
     assert p.kind == IntentKind.GRAPH_MUTATION

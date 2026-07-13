@@ -22,40 +22,56 @@ async def test_intent_router(monkeypatch):
             return {
                 "content": "",
                 "tool_calls": [
-                    {"id": "1", "type": "function", "function": {
-                        "name": "classify_intent",
-                        "arguments": '{"kind": "converse", "rationale": "chitchat"}'
-                    }}
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": '{"kind": "converse", "rationale": "chitchat"}',
+                        },
+                    }
                 ],
             }
         elif "待办" in user_message:
             return {
                 "content": "",
                 "tool_calls": [
-                    {"id": "1", "type": "function", "function": {
-                        "name": "classify_intent",
-                        "arguments": '{"kind": "widget_create", "app_id": "todo-app-1234", "instruction": "给我创建一个待办 widget", "rationale": "build new"}'
-                    }}
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": '{"kind": "widget_create", "app_id": "todo-app-1234", "instruction": "给我创建一个待办 widget", "rationale": "build new"}',
+                        },
+                    }
                 ],
             }
         elif "weather" in user_message:
             return {
                 "content": "",
                 "tool_calls": [
-                    {"id": "1", "type": "function", "function": {
-                        "name": "classify_intent",
-                        "arguments": '{"kind": "widget_create", "app_id": "weather-app-5678", "instruction": "build a new widget to show weather", "rationale": "build new"}'
-                    }}
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": '{"kind": "widget_create", "app_id": "weather-app-5678", "instruction": "build a new widget to show weather", "rationale": "build new"}',
+                        },
+                    }
                 ],
             }
         elif "Make clock-app-1234 look glassmorphic" in user_message:
             return {
                 "content": "",
                 "tool_calls": [
-                    {"id": "1", "type": "function", "function": {
-                        "name": "classify_intent",
-                        "arguments": '{"kind": "widget_modify", "app_id": "clock-app-1234", "instruction": "Make clock-app-1234 look glassmorphic", "rationale": "modify existing"}'
-                    }}
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": '{"kind": "widget_modify", "app_id": "clock-app-1234", "instruction": "Make clock-app-1234 look glassmorphic", "rationale": "modify existing"}',
+                        },
+                    }
                 ],
             }
         elif "把时钟修改一下" in user_message:
@@ -63,20 +79,28 @@ async def test_intent_router(monkeypatch):
             return {
                 "content": "",
                 "tool_calls": [
-                    {"id": "1", "type": "function", "function": {
-                        "name": "classify_intent",
-                        "arguments": '{"kind": "widget_modify", "app_id": "clock-app", "instruction": "把时钟修改一下", "rationale": "modify clock"}'
-                    }}
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": '{"kind": "widget_modify", "app_id": "clock-app", "instruction": "把时钟修改一下", "rationale": "modify clock"}',
+                        },
+                    }
                 ],
             }
         else:
             return {
                 "content": "",
                 "tool_calls": [
-                    {"id": "1", "type": "function", "function": {
-                        "name": "classify_intent",
-                        "arguments": '{"kind": "converse", "rationale": "default"}'
-                    }}
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": '{"kind": "converse", "rationale": "default"}',
+                        },
+                    }
                 ],
             }
 

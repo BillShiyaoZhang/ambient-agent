@@ -31,9 +31,7 @@ async def test_harness_routes_graph_mutation_without_opencode(monkeypatch, tmp_p
     plan = IntentPlan(
         kind=IntentKind.GRAPH_MUTATION,
         rationale="user adds a task",
-        actions=[
-            {"action": "create_node", "id": "t-route-1", "type": "Task", "properties": {"title": "buy milk"}}
-        ],
+        actions=[{"action": "create_node", "id": "t-route-1", "type": "Task", "properties": {"title": "buy milk"}}],
     )
     mock_route = AsyncMock(return_value=plan)
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
@@ -66,9 +64,7 @@ async def test_harness_routes_graph_mutation_without_opencode(monkeypatch, tmp_p
         if isinstance(data, dict):
             preview_payloads.append(data)
 
-    agent_msg, widget = await orch.handle_message(
-        session_id="sess-gr", content="add buy milk", on_update=on_update
-    )
+    agent_msg, widget = await orch.handle_message(session_id="sess-gr", content="add buy milk", on_update=on_update)
 
     # OpenCode NOT invoked
     assert opencode_called["count"] == 0
@@ -142,9 +138,7 @@ async def test_harness_publishes_pinned_ticket_in_history(monkeypatch, tmp_path)
     plan = IntentPlan(
         kind=IntentKind.GRAPH_MUTATION,
         rationale="user adds a task",
-        actions=[
-            {"action": "create_node", "id": "t-pin-1", "type": "Task", "properties": {"title": "pin me"}}
-        ],
+        actions=[{"action": "create_node", "id": "t-pin-1", "type": "Task", "properties": {"title": "pin me"}}],
     )
     mock_route = AsyncMock(return_value=plan)
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)

@@ -101,9 +101,7 @@ class CodingPlanExecutor(PlanExecutor):
 
         runner = self._run_opencode_agent_acp_fn or run_opencode_agent_acp
         try:
-            output = await runner(
-                plan.app_id, plan.instruction or instruction, on_update=on_update
-            )
+            output = await runner(plan.app_id, plan.instruction or instruction, on_update=on_update)
         except Exception as e:
             return PlanPhaseResult(success=False, error=f"opencode failed: {e!s}")
 
@@ -142,9 +140,7 @@ class MutationPlanExecutor(PlanExecutor):
 
         from backend.graph_db import GraphDatabase  # local import
 
-        graph_db: GraphDatabase | None = (
-            self._graph_db_factory() if self._graph_db_factory else None
-        )
+        graph_db: GraphDatabase | None = self._graph_db_factory() if self._graph_db_factory else None
         if graph_db is None:
             import os
 
@@ -171,10 +167,7 @@ class MutationPlanExecutor(PlanExecutor):
 
         snapshot_before: dict[str, dict[str, Any]] = {}
         for action in actions:
-            if (
-                action.get("action") == "update_node_property"
-                and action.get("id")
-            ):
+            if action.get("action") == "update_node_property" and action.get("id"):
                 node = graph_db.get_node(action["id"])
                 if node:
                     snapshot_before[action["id"]] = dict(node["properties"])

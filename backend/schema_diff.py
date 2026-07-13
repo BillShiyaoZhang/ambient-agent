@@ -64,7 +64,7 @@ class PerFieldOption:
     property_name: str
     detected_type: str
     action: str  # "extend_schema" | "rename_in_code" | "drop_field"
-    risk: str    # "safe" | "needs_review"
+    risk: str  # "safe" | "needs_review"
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -561,7 +561,12 @@ def _normalize_js_literal(src: str) -> str:
             j = i
             if src[j] == "-":
                 j += 1
-            while j < len(src) and (src[j].isdigit() or src[j] == "." or src[j].lower() == "e" or (src[j] in "+-" and src[j - 1].lower() == "e")):
+            while j < len(src) and (
+                src[j].isdigit()
+                or src[j] == "."
+                or src[j].lower() == "e"
+                or (src[j] in "+-" and src[j - 1].lower() == "e")
+            ):
                 j += 1
             out.append(src[i:j])
             i = j
@@ -819,9 +824,7 @@ def compute_diff(
 ) -> VerificationDiff:
     diff = VerificationDiff()
 
-    schema_by_id: dict[str, dict[str, Any]] = {
-        s["id"]: s for s in registered_schemas
-    }
+    schema_by_id: dict[str, dict[str, Any]] = {s["id"]: s for s in registered_schemas}
 
     # Collect per-(type, prop) usage from code.
     usage: dict[tuple[str, str], dict[str, Any]] = {}

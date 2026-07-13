@@ -32,9 +32,7 @@ def test_plan_executor_cannot_instantiate_directly():
 @pytest.mark.asyncio
 async def test_stub_executor_returns_plan_result():
     stub = _StubExecutor()
-    result = await stub.run_plan(
-        IntentPlan(kind=IntentKind.PLAN_AND_ACT, instruction="x"), "x", AsyncMock()
-    )
+    result = await stub.run_plan(IntentPlan(kind=IntentKind.PLAN_AND_ACT, instruction="x"), "x", AsyncMock())
     assert isinstance(result, PlanPhaseResult)
     assert result.success
 
@@ -48,9 +46,7 @@ async def test_coding_plan_executor_runs_widget_pipeline(monkeypatch):
         captured["instruction"] = instruction
         return "ran opencode"
 
-    monkeypatch.setattr(
-        "backend.agent.plan_executor.run_opencode_agent_acp", fake_run_opencode
-    )
+    monkeypatch.setattr("backend.agent.plan_executor.run_opencode_agent_acp", fake_run_opencode)
 
     executor = CodingPlanExecutor(graph_db_factory=lambda: None)
     plan = IntentPlan(

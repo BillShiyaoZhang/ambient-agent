@@ -26,9 +26,7 @@ class GraphSnapshot:
         snap = cls()
         with db.get_conn() as conn:
             # Type counts
-            count_rows = conn.execute(
-                "SELECT type, COUNT(*) AS c FROM graph_nodes GROUP BY type"
-            ).fetchall()
+            count_rows = conn.execute("SELECT type, COUNT(*) AS c FROM graph_nodes GROUP BY type").fetchall()
             snap.type_counts = {r["type"]: r["c"] for r in count_rows}
 
             # Total node + edge count for context
@@ -132,16 +130,11 @@ class RouterContext:
             lines.append("")
             lines.append("## Graph State Summary")
             if self.graph_snapshot.type_counts:
-                counts_str = ", ".join(
-                    f"{k}={v}" for k, v in sorted(self.graph_snapshot.type_counts.items())
-                )
+                counts_str = ", ".join(f"{k}={v}" for k, v in sorted(self.graph_snapshot.type_counts.items()))
                 lines.append(f"- Node counts: {counts_str}")
             else:
                 lines.append("- (no nodes yet)")
-            lines.append(
-                f"- Total: {self.graph_snapshot.node_count} nodes, "
-                f"{self.graph_snapshot.edge_count} edges"
-            )
+            lines.append(f"- Total: {self.graph_snapshot.node_count} nodes, {self.graph_snapshot.edge_count} edges")
 
         if "recent_nodes" in sections:
             lines.append("")
@@ -159,9 +152,7 @@ class RouterContext:
             lines.append("## Registered Schemas")
             if self.graph_snapshot.schema_manifest:
                 for s in self.graph_snapshot.schema_manifest:
-                    props_str = ", ".join(
-                        f"{k}:{v}" for k, v in (s.get("properties") or {}).items()
-                    )
+                    props_str = ", ".join(f"{k}:{v}" for k, v in (s.get("properties") or {}).items())
                     lines.append(f"- `{s['id']}` — {s.get('description', '')} [{props_str}]")
             else:
                 lines.append("- (none)")
