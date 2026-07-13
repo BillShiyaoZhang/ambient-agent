@@ -381,18 +381,7 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 
 ---
 
-## 5. 路由实验 (OFAT Phase 4)
-
-新架构通过 `scripts/run_routing_experiments_v2.py` 验证：
-
-- 24 个场景（S01-S24）× 3 次重复 = 72 次试验
-- 总 kind 准确率 95.8%，sub_kinds 准确率 94.4%
-- S21-S24 专门验证 `multi_intent` 路径
-- 详见 `reports/ofat_phase4_summary.md`
-
----
-
-## 6. 测试覆盖
+## 5. 测试覆盖
 
 | 模块                      | 测试文件                                                | 测试数 |
 | ------------------------- | ------------------------------------------------------- | ------ |
@@ -401,6 +390,5 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 | IntentPlan / SubIntent    | `tests/backend/test_intent_plan.py`                     | 10     |
 | Router（含 multi_intent） | `tests/backend/test_router.py` + `test_multi_intent.py` | 17     |
 | Harness / rework loops    | `tests/backend/test_rework_loops.py` 等                 | 12     |
-| 实验基础设施              | `tests/experiments/*.py`                                | 31     |
 
-总计 **143 个单元/集成测试全部通过**。
+总计 **57 个核心单元/集成测试全部通过**。
