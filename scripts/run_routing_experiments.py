@@ -37,7 +37,7 @@ try:
 except Exception:
     pass
 
-from backend.experiments.scenarios import SCENARIOS, get_ambiguous_scenarios
+from backend.experiments.scenarios import SCENARIOS
 from backend.experiments.variants import all_ofat_variants, variant_by_id, make_winner_variant
 from backend.experiments.runner import aggregate, run_variant
 from backend.experiments.report import render_report

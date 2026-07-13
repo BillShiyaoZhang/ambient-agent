@@ -1,7 +1,6 @@
 """Unit tests for runner aggregation and scoring logic."""
 
-from backend.agent.intent_plan import IntentKind
-from backend.experiments.runner import RoutingResult, ScenarioAggregate, VariantAggregate, aggregate
+from backend.experiments.runner import RoutingResult, aggregate
 from backend.experiments.scenarios import Scenario, get_scenario
 from backend.experiments.scoring import compute_winner_metrics, per_choice_winners
 from backend.experiments.variants import Variant

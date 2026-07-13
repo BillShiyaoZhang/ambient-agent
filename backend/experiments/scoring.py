@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.experiments.runner import VariantAggregate, ScenarioAggregate
+from backend.experiments.runner import VariantAggregate
 from backend.experiments.scenarios import Scenario
 
 

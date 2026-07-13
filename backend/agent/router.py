@@ -1,12 +1,18 @@
 """Intent routing for Ambient Agent.
 
 Provides ``IntentRouter.route(content, context)`` returning a structured
-``IntentPlan``. The router is graph-aware: it ingests a ``RouterContext`` that
-includes both the widget inventory and a lightweight graph snapshot.
+``IntentPlan``. Two-layer LLM:
 
-Designed to use the LLM's function-calling capability to obtain a typed
-``classify_intent`` payload. Falls back to a regex-based triage when the LLM
-is unreachable or returns no tool call.
+1. ``route()`` calls LLM #1 with the ``classify_intent`` function-calling
+   schema to obtain the top-level ``kind`` (and ``sub_intents[]`` when
+   ``kind == MULTI_INTENT``).
+2. For ``MULTI_INTENT`` and ``PLAN_AND_ACT`` plans, the harness may call
+   ``refine_sub_intents()`` (LLM #2) which specialises sub-intents into
+   concrete actions, schema extensions, etc., based on the latest graph and
+   widget context.
+
+Falls back to a regex-based triage when the LLM is unreachable or returns no
+tool call.
 """
 
 import json
@@ -17,7 +23,10 @@ from typing import Any
 
 from sqlmodel import Session
 
-from backend.agent.intent_plan import IntentKind, IntentPlan
+from backend.agent.intent_plan import (
+    IntentKind,
+    IntentPlan,
+)
 from backend.agent.prompts.manager import PromptManager
 from backend.llm_service import call_llm_api
 from backend.router_context import RouterContext
@@ -25,6 +34,10 @@ from backend.router_context import RouterContext
 logger = logging.getLogger("agent.router")
 
 _SLASH_APP_PATTERN = re.compile(r"^/app\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?$", re.IGNORECASE)
+
+
+def _default_context_sections() -> list[str]:
+    return ["widgets", "graph_counts", "history"]
 
 
 class IntentRouter:
@@ -43,19 +56,13 @@ class IntentRouter:
         context_sections: list[str] | None = None,
         include_widget_keyword_hint: bool = False,
         fallback_keywords: list[str] | None = None,
-        plan_and_act_enabled: bool = True,
     ) -> IntentPlan:
         """Classify a user message.
 
-        ``context`` may be a ``RouterContext`` (preferred) or a legacy
-        list-of-apps dicts (kept for harness compatibility).
-
-        Experimental knobs (used by routing experiments):
-        - ``override_system_prompt``: replace the router_v2.md template.
-        - ``context_sections``: subset of {widgets, graph_counts, recent_nodes, schemas, history}.
-        - ``include_widget_keyword_hint``: append the C4-lenient keyword hint.
-        - ``fallback_keywords``: list of substring keywords to apply on LLM failure.
-        - ``plan_and_act_enabled``: if False, downgrade PLAN_ANDACT to GRAPH_MUTATION.
+        Two-layer LLM: this call returns the top-level IntentPlan; if the
+        plan kind is ``MULTI_INTENT`` or ``PLAN_AND_ACT``, the harness may
+        additionally call :meth:`refine_sub_intents` to specialise the
+        ``sub_intents`` into concrete actions.
         """
         content_stripped = (content or "").strip()
 
@@ -80,9 +87,9 @@ class IntentRouter:
         elif context is None:
             ctx = RouterContext()
         else:
-            # Duck-typed: keep as-is for backward compat (will fall back to converse
-            # if not a RouterContext).
             ctx = context
+
+        sections = context_sections if context_sections is not None else _default_context_sections()
 
         # 3. LLM-driven routing via function-calling.
         try:
@@ -93,23 +100,15 @@ class IntentRouter:
                 model_name=model_name or os.getenv("LLM_MODEL", "llama3"),
                 db_session=db_session,
                 override_system_prompt=override_system_prompt,
-                context_sections=context_sections,
+                context_sections=sections,
                 include_widget_keyword_hint=include_widget_keyword_hint,
             )
             if plan is not None:
-                if not plan_and_act_enabled and plan.kind == IntentKind.PLAN_AND_ACT:
-                    plan = IntentPlan(
-                        kind=IntentKind.GRAPH_MUTATION,
-                        confidence=plan.confidence,
-                        rationale=plan.rationale or "downgraded from plan_and_act",
-                        actions=plan.actions,
-                        instruction=plan.instruction,
-                    )
                 return plan
         except Exception as e:
             logger.warning(f"LLM routing failed: {e}")
 
-        # 4. Keyword-based fallback (experimental, C7).
+        # 4. Keyword-based fallback (deprecated path; off by default).
         if fallback_keywords:
             plan = cls._fallback_with_keywords(content_stripped, ctx, fallback_keywords)
             if plan is not None:
@@ -124,13 +123,100 @@ class IntentRouter:
         )
 
     @classmethod
+    async def refine_sub_intents(
+        cls,
+        plan: IntentPlan,
+        context: RouterContext | list[dict[str, Any]] | None = None,
+        db_session: Session | None = None,
+        provider_name: str | None = None,
+        model_name: str | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> IntentPlan:
+        """Layer 2 of the router: specialise sub-intents.
+
+        Called by the harness when the top-level ``kind`` is
+        ``MULTI_INTENT`` or ``PLAN_AND_ACT``. Returns a new plan with
+        concrete actions, extend_schema_props, etc., populated. Falls back
+        to the input plan unchanged on error.
+        """
+        if plan.kind not in (IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT):
+            return plan
+        if not plan.sub_intents:
+            return plan
+
+        if isinstance(context, RouterContext):
+            ctx = context
+        elif isinstance(context, list):
+            ctx = RouterContext(app_manifests=list(context))
+        else:
+            ctx = RouterContext()
+
+        provider_name = provider_name or os.getenv("LLM_PROVIDER", "ollama")
+        model_name = model_name or os.getenv("LLM_MODEL", "llama3")
+
+        prompt_manager = PromptManager()
+        try:
+            system_prompt = prompt_manager.get_prompt(
+                "refine_sub_intent.md",
+                router_context=ctx.render_for_prompt(
+                    sections=["widgets", "graph_counts", "schemas"],
+                ),
+                extra_context=json.dumps(extra_context or {}, ensure_ascii=False),
+            )
+        except Exception as e:
+            logger.warning(f"Could not load refine_sub_intent.md prompt: {e}")
+            return plan
+
+        plan_json = plan.to_dict()
+        user_prompt = (
+            "Top-level plan:\n"
+            f"```json\n{json.dumps(plan_json, ensure_ascii=False)}\n```\n\n"
+            "Refine each sub_intent into a concrete, executable form. "
+            "For widget_extend_schema, fill extend_schema_props with concrete "
+            "{node_type: {prop_name: type_string}} entries. For graph_mutation, "
+            "fill actions[] with concrete create_node / update_node_property / "
+            "delete_node / create_edge / delete_edge actions. "
+            "Respond by calling classify_intent again with the refined plan."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        tools = [IntentPlan.tool_schema()]
+
+        try:
+            response = await call_llm_api(provider_name, model_name, messages, tools)
+        except Exception as e:
+            logger.warning(f"LLM #2 refine_sub_intents failed: {e}")
+            return plan
+
+        if not isinstance(response, dict):
+            return plan
+        tool_calls = response.get("tool_calls") or []
+        for tc in tool_calls:
+            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+            if fn.get("name") != "classify_intent":
+                continue
+            raw_args = fn.get("arguments", "{}")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except Exception:
+                args = {}
+            refined = IntentPlan.from_tool_call_args(args)
+            # Preserve top-level kind from caller; only take sub_intents back.
+            if refined.sub_intents:
+                plan.sub_intents = refined.sub_intents
+            return plan
+        return plan
+
+    @classmethod
     async def route_legacy(
         cls,
         content: str,
         existing_apps: list[dict[str, Any]] | None = None,
         db_session: Session | None = None,
     ) -> IntentPlan:
-        """Legacy entry point kept for harness compatibility."""
         return await cls.route(
             content=content,
             context=existing_apps or [],
@@ -150,15 +236,7 @@ class IntentRouter:
         context_sections: list[str] | None = None,
         include_widget_keyword_hint: bool = False,
     ) -> IntentPlan | None:
-        """Call the LLM with the classify_intent tool schema.
-
-        Returns ``None`` if no tool_call was issued (so caller can decide fallback).
-        """
-        # call_llm_api is imported at module level so tests can monkeypatch
-        # ``backend.agent.router.call_llm_api``.
-
         if override_system_prompt is not None:
-            # Render the {{ router_context }} placeholder if present.
             rendered_ctx = context.render_for_prompt(
                 sections=context_sections,
                 include_widget_keyword_hint=include_widget_keyword_hint,
@@ -189,13 +267,11 @@ class IntentRouter:
 
         response = await call_llm_api(provider_name, model_name, messages, tools)
 
-        # Best-effort audit logging with stage="route" so the audit panel can
-        # distinguish routing LLM calls from regular conversation/plan calls.
         try:
             if db_session is not None and isinstance(response, dict):
-                from backend.models import LLMAuditLog as _LLClass
+                from backend.models import LLMAuditLog
 
-                _LLog = _LLClass(
+                audit_log = LLMAuditLog(
                     provider=provider_name,
                     model=model_name,
                     prompt=json.dumps(messages, ensure_ascii=False),
@@ -204,7 +280,7 @@ class IntentRouter:
                 )
                 if hasattr(db_session, "add") and hasattr(db_session, "commit"):
                     try:
-                        db_session.add(_LLog)
+                        db_session.add(audit_log)
                         db_session.commit()
                     except Exception:
                         pass
@@ -218,7 +294,6 @@ class IntentRouter:
         if not tool_calls:
             return None
 
-        # Find classify_intent call
         for tc in tool_calls:
             fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
             if fn.get("name") != "classify_intent":
@@ -234,11 +309,8 @@ class IntentRouter:
             else:
                 args = {}
             plan = IntentPlan.from_tool_call_args(args)
-            # For chat-style intents, mirror the user's text into instruction so
-            # downstream handlers can fall back to the original message.
             if plan.kind == IntentKind.CONVERSE and not plan.instruction:
                 plan.instruction = content_stripped
-            # Post-process: enforce ambiguity resolution for widget_modify.
             if (
                 plan.kind == IntentKind.WIDGET_MODIFY
                 and plan.app_id
@@ -254,28 +326,18 @@ class IntentRouter:
         context: RouterContext,
         keywords: list[str],
     ) -> IntentPlan | None:
-        """Last-resort heuristic: if any keyword matches the content, classify
-        to widget_create or widget_modify based on substring family.
-
-        Creation keywords: 创建 / 建一个 / 制作 / build / create / make / ...
-        Modification keywords: 修改 / 改下 / fix / update / modify / ...
-
-        Returns ``None`` if no keyword matches (caller falls back to CONVERSE).
-        """
         content_lower = content.lower()
         creation_kw = {"创建", "建一个", "制作", "build", "create", "make",
                        "生成", "开发", "design", "develop", "generate"}
         modification_kw = {"修改", "改下", "fix", "update", "modify",
                            "添加", "加上", "add", "change", "refresh", "重新做", "redo"}
 
-        # Match against the user-supplied keywords list (filtered).
         is_create = any(k in content or k.lower() in content_lower for k in keywords if k in creation_kw)
         is_modify = any(k in content or k.lower() in content_lower for k in keywords if k in modification_kw)
 
         if not is_create and not is_modify:
             return None
 
-        # Try to find an existing widget whose title matches the content.
         target_app_id: str | None = None
         for app in context.app_manifests or []:
             title = (app.get("title") or "").lower()
@@ -293,7 +355,6 @@ class IntentRouter:
             )
 
         if is_create:
-            # Heuristic: pick the first noun-like token to form a kebab-case id.
             topic = "app"
             for app in context.app_manifests or []:
                 t = (app.get("title") or "").lower()
@@ -312,9 +373,6 @@ class IntentRouter:
 
     @staticmethod
     def _resolve_widget_modify_ambiguity(plan: IntentPlan, context: RouterContext) -> IntentPlan:
-        """If multiple existing apps share the requested widget's base name, downgrade
-        the plan to a `clarify` request enumerating the candidates.
-        """
         requested = plan.app_id or ""
         if not requested:
             return plan
@@ -324,7 +382,7 @@ class IntentRouter:
         for app in context.app_manifests or []:
             app_id = app.get("id", "")
             if app_id == requested:
-                return plan  # exact match — no ambiguity
+                return plan
             if app_id.split("-")[0] == requested_base or app_id == requested_base:
                 candidates.append(
                     {"value": app_id, "label": app.get("title", app_id)}

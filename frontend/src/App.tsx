@@ -123,15 +123,26 @@ function App() {
     setPendingSchemaRequest(null);
   };
 
-  const handleResolveVerificationRequest = (approved: "approve" | "rework_code" | "rework_schema" | "rework_plan", feedbackText?: string) => {
+  const handleResolveVerificationRequest = (approved: "approve" | "rework_code" | "rework_schema" | "rework_plan", feedbackText?: string, approvedOptions?: Array<{ node_type: string; property_name: string }>) => {
     if (!pendingVerificationRequest) return;
     wsService.sendMessage({
       type: "verification_approval_response",
       request_id: pendingVerificationRequest.request_id,
       approved: approved,
-      feedback: feedbackText || ""
+      feedback: feedbackText || "",
+      approved_options: approvedOptions || []
     });
     setPendingVerificationRequest(null);
+  };
+
+  const collectCheckedOptions = (req: any): Array<{ node_type: string; property_name: string; detected_type: string; action: string; risk: string }> => {
+    const opts = Array.isArray(req?.options) ? req.options : [];
+    if (typeof document === "undefined") return opts;
+    return opts.filter((opt: any) => {
+      const key = `${opt.node_type}:${opt.property_name}`;
+      const el = document.querySelector<HTMLInputElement>(`input[data-verify-opt="${key}"]`);
+      return el ? el.checked : true;
+    });
   };
 
   const handleResolvePlanRequest = (approved: boolean | "refine", feedbackText?: string) => {
@@ -1000,6 +1011,39 @@ function App() {
               </div>
             </div>
 
+            {/* Per-field options (Direction A: structured diff → checkbox UI) */}
+            {Array.isArray(pendingVerificationRequest.options) && pendingVerificationRequest.options.length > 0 && (
+              <div className="border border-orange-500/20 bg-orange-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
+                <h4 className="text-xs font-semibold text-orange-400 uppercase tracking-wider font-sans">
+                  🧩 待扩展字段 (Extend Schema For)
+                </h4>
+                <div className="flex flex-col gap-2">
+                  {pendingVerificationRequest.options.map((opt: any, idx: number) => (
+                    <label key={idx} className="flex items-start gap-2 cursor-pointer hover:bg-white/5 px-2 py-1.5 rounded transition-colors">
+                      <input
+                        type="checkbox"
+                        defaultChecked
+                        className="mt-0.5 accent-orange-500"
+                        data-verify-opt={`${opt.node_type}:${opt.property_name}`}
+                      />
+                      <div className="flex-1">
+                        <div className="text-slate-200 font-mono">
+                          <span className="text-orange-300 font-bold">{opt.node_type}</span>
+                          <span className="text-slate-500">.</span>
+                          <span className="text-cyan-300">{opt.property_name}</span>
+                          <span className="text-slate-500"> : </span>
+                          <span className="text-emerald-300">{opt.detected_type}</span>
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                          Risk: {opt.risk === "safe" ? "SAFE (auto-extensible)" : "NEEDS REVIEW"}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* 💬 返工反馈输入 (可选) */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5 font-sans">
@@ -1016,7 +1060,7 @@ function App() {
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
               <button
-                onClick={() => handleResolveVerificationRequest("approve", verificationFeedback)}
+                onClick={() => handleResolveVerificationRequest("approve", verificationFeedback, [])}
                 className="px-3.5 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-white/5 transition-colors text-xs font-sans"
               >
                 直接忽略并保存 (Bypass & Save)
@@ -1024,19 +1068,28 @@ function App() {
 
               <div className="flex items-center gap-2.5 ml-auto">
                 <button
-                  onClick={() => handleResolveVerificationRequest("rework_plan", verificationFeedback)}
+                  onClick={() => {
+                    const checked = collectCheckedOptions(pendingVerificationRequest);
+                    handleResolveVerificationRequest("rework_plan", verificationFeedback, checked);
+                  }}
                   className="px-3 py-1.5 rounded-lg border border-yellow-500/20 text-yellow-400 hover:bg-yellow-500/10 transition-colors text-xs font-sans"
                 >
                   返工 Plan
                 </button>
                 <button
-                  onClick={() => handleResolveVerificationRequest("rework_schema", verificationFeedback)}
+                  onClick={() => {
+                    const checked = collectCheckedOptions(pendingVerificationRequest);
+                    handleResolveVerificationRequest("rework_schema", verificationFeedback, checked);
+                  }}
                   className="px-3 py-1.5 rounded-lg border border-orange-500/20 text-orange-400 hover:bg-orange-500/10 transition-colors text-xs font-sans"
                 >
-                  返工 Schema
+                  扩展勾选字段并重新生成 (Extend Selected)
                 </button>
                 <button
-                  onClick={() => handleResolveVerificationRequest("rework_code", verificationFeedback)}
+                  onClick={() => {
+                    const checked = collectCheckedOptions(pendingVerificationRequest);
+                    handleResolveVerificationRequest("rework_code", verificationFeedback, checked);
+                  }}
                   className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 transition-all text-white text-xs shadow-md shadow-red-600/10 font-sans"
                 >
                   智能修复代码 (Auto-Fix)

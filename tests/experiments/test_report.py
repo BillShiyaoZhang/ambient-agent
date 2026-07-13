@@ -1,11 +1,9 @@
 """Unit tests for the markdown report renderer."""
 
-import io
 
-from backend.agent.intent_plan import IntentKind
 from backend.experiments.report import render_report
-from backend.experiments.runner import RoutingResult, ScenarioAggregate, VariantAggregate, aggregate
-from backend.experiments.scenarios import SCENARIOS, get_scenario
+from backend.experiments.runner import RoutingResult, aggregate
+from backend.experiments.scenarios import get_scenario
 from backend.experiments.variants import Variant
 
 

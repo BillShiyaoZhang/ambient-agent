@@ -65,18 +65,27 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
 
     monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
 
-    # 5. Mock Schema Verification
+    # 5. Mock Schema Verification (now uses diff())
+    from backend.schema_diff import VerificationDiff
+
     verify_counter = 0
 
-    async def mock_verify(app_id, widget_code, registered_schemas, db_session=None):
+    async def mock_diff(app_id, widget_code, registered_schemas, db_session=None):
         nonlocal verify_counter
         verify_counter += 1
         if verify_counter == 1:
-            return "❌ DISCREPANCY DETECTED: Missing type validation"
+            diff = VerificationDiff()
+            diff.unknown_props.append(
+                type("U", (), {"node_type": "Task", "property_name": "bogus", "sample_value_repr": "x", "occurrences": 1})()
+            )
+            # Manually recompute is_clean since the test mutated the list
+            # after dataclass __post_init__.
+            diff.is_clean = not (diff.unknown_props or diff.type_mismatches or diff.unknown_types)
+            return diff
         else:
-            return "✅ Schema Verification PASSED"
+            return VerificationDiff()
 
-    monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
+    monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.diff", mock_diff)
 
     def override_get_db():
         yield test_session
@@ -192,13 +201,13 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         # Expect Verification Report showing discrepancies (fails verification 1)
         verify_report_msg = websocket.receive_json()
         assert "Database Schema Verification Report" in verify_report_msg["message"]["content"]
-        assert "❌ DISCREPANCY DETECTED" in verify_report_msg["message"]["content"]
+        assert "WARNING" in verify_report_msg["message"]["content"]
 
         # Expect Verification Approval request payload
         verify_req = websocket.receive_json()
         assert verify_req["type"] == "verification_approval_request"
         verify_request_id = verify_req["request_id"]
-        assert "❌ DISCREPANCY DETECTED" in verify_req["report"]
+        assert "WARNING" in verify_req["report"]
 
         # Expect waiting message
         assert "等待 Schema 校验警告处理指令" in websocket.receive_json()["message"]["content"]

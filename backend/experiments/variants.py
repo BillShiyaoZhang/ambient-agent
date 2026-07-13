@@ -20,9 +20,8 @@ Each variant dict maps ``c1`` ... ``c7`` to a letter.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from backend.router_context import RouterContext
 
 
 @dataclass

@@ -5,16 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from io import StringIO
 
-from backend.experiments.runner import VariantAggregate, ScenarioAggregate
+from backend.experiments.runner import VariantAggregate
 from backend.experiments.scoring import (
     AMBIGUOUS_SCENARIO_MIN_KIND_ACC,
     MIN_STABILITY,
-    WinnerResult,
     compute_winner_metrics,
     per_choice_winners,
 )
 from backend.experiments.scenarios import Scenario, get_ambiguous_scenarios
-from backend.experiments.variants import Variant
 
 
 def _fmt_pct(x: float) -> str:

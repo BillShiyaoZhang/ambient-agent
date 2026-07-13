@@ -29,6 +29,15 @@ CLASS_TO_FILE = {
     "CodingPlanExecutor": "backend/agent/plan_executor.py",
     "MutationPlanExecutor": "backend/agent/plan_executor.py",
     "PlanPhaseResult": "backend/agent/plan_executor.py",
+    # Direction A
+    "SubIntent": "backend/agent/intent_plan.py",
+    "SubIntentKind": "backend/agent/intent_plan.py",
+    "VerificationDiff": "backend/schema_diff.py",
+    "SchemaVerificationService": "backend/schema_verification.py",
+    # Direction B
+    "WidgetDAG": "backend/agent/dag.py",
+    "TaskNode": "backend/agent/dag.py",
+    "TaskResult": "backend/agent/dag.py",
 }
 
 
@@ -188,12 +197,20 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
                 mismatches.append(f"Failed to parse python file {file_path}: {e}")
                 continue
 
-            # Look for symbol_name at top level definitions
+            # Look for symbol_name at top level definitions OR inside classes.
             found = False
             for node in tree.body:
-                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     if node.name == symbol_name:
                         found = True
+                        break
+                if isinstance(node, ast.ClassDef):
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if child.name == symbol_name:
+                                found = True
+                                break
+                    if found:
                         break
             if not found:
                 mismatches.append(

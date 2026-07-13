@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
-from backend.agent.intent_plan import IntentPlan, IntentKind
+from backend.agent.intent_plan import IntentPlan
 from backend.agent.router import IntentRouter
 from backend.experiments.scenarios import Scenario
 from backend.experiments.variants import Variant

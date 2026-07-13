@@ -2,12 +2,14 @@
 
 Each scenario is a tuple of (user_message, expected_kind, expected_app_id, RouterContext,
 notes). The RouterContext is fixed per scenario so that A/B variants see identical state.
+
+OFAT phase 4 adds multi-intent scenarios (S21-S24) to test the new ``multi_intent``
+routing path.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from backend.agent.intent_plan import IntentKind
 from backend.router_context import GraphSnapshot, RouterContext
@@ -24,13 +26,14 @@ class Scenario:
     context: RouterContext
     notes: str = ""
     ambiguous: bool = False  # True for ambiguous cases (S04/S05/S08/S17)
+    # For multi_intent scenarios: list of expected sub_intent kinds (in order).
+    expected_sub_kinds: list[str] | None = None
 
 
 # ── Standard fixtures reused across many scenarios ────────────────────────
 
 _EMPTY_CTX = RouterContext()
 
-# Three-workspace context: a clock, a todo, and a calendar widget already exist.
 _RICH_CTX = RouterContext(
     app_manifests=[
         {"id": "clock-app-abcd", "title": "My Clock"},
@@ -63,7 +66,6 @@ _RICH_CTX = RouterContext(
     ],
 )
 
-# Empty graph context (no graph data yet).
 _NO_GRAPH_CTX = RouterContext(
     app_manifests=[
         {"id": "clock-app-abcd", "title": "My Clock"},
@@ -72,7 +74,6 @@ _NO_GRAPH_CTX = RouterContext(
     graph_snapshot=GraphSnapshot(node_count=0, edge_count=0),
 )
 
-# No widgets context (clean canvas, empty graph).
 _CLEAN_CTX = RouterContext(
     graph_snapshot=GraphSnapshot(node_count=0, edge_count=0),
 )
@@ -130,6 +131,50 @@ SCENARIOS: list[Scenario] = [
     # English converse
     Scenario("S19", "hi", IntentKind.CONVERSE, None, _EMPTY_CTX),
     Scenario("S20", "tell me a joke", IntentKind.CONVERSE, None, _EMPTY_CTX),
+
+    # ── OFAT phase 4: multi-intent scenarios (NEW) ───────────────────────
+    # S21: a clear multi-intent: add an event AND make the calendar widget show it.
+    Scenario(
+        "S21",
+        "在日历里加一个明天下午 3 点的会议并让日历 widget 显示",
+        IntentKind.MULTI_INTENT,
+        None,
+        _RICH_CTX,
+        "AMBIGUOUS: graph_mutation + widget_extend_schema (calendar widget exists)",
+        ambiguous=True,
+        expected_sub_kinds=["graph_mutation", "widget_extend_schema"],
+    ),
+    # S22: graph_mutation with multiple actions is still graph_mutation.
+    Scenario(
+        "S22",
+        "加一个买鸡蛋的任务并把任务标为 pending",
+        IntentKind.GRAPH_MUTATION,
+        None,
+        _RICH_CTX,
+        "single graph_mutation with multiple actions (create_node sets status)",
+    ),
+    # S23: English multi-intent: extend schema + add data.
+    Scenario(
+        "S23",
+        "add a buy eggs Task node and also extend Task schema with priority field",
+        IntentKind.MULTI_INTENT,
+        None,
+        _RICH_CTX,
+        "multi_intent with graph_mutation + widget_extend_schema",
+        ambiguous=True,
+        expected_sub_kinds=["graph_mutation", "widget_extend_schema"],
+    ),
+    # S24: ambiguous — could be plain widget_modify OR multi_intent.
+    Scenario(
+        "S24",
+        "把日历改成显示分类颜色",
+        IntentKind.MULTI_INTENT,
+        "calendar-app-ijkl",
+        _RICH_CTX,
+        "AMBIGUOUS: user wants widget to show new field; multi_intent preferred if schema extension is needed",
+        ambiguous=True,
+        expected_sub_kinds=["widget_extend_schema"],
+    ),
 ]
 
 
