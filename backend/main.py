@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -160,7 +160,10 @@ async def list_apps():
 
 @app.get("/api/apps/{app_id}")
 async def get_app_files(app_id: str):
-    files = app_manager.get_app_files(app_id)
+    try:
+        files = app_manager.get_app_files(app_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if files:
         return files
     return {"status": "error", "message": "App not found"}
@@ -168,7 +171,10 @@ async def get_app_files(app_id: str):
 
 @app.delete("/api/apps/{app_id}")
 async def delete_app(app_id: str):
-    success = app_manager.delete_app(app_id)
+    try:
+        success = app_manager.delete_app(app_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if success:
         return {"status": "ok"}
     return {"status": "error", "message": "App not found"}
