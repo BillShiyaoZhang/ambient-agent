@@ -114,6 +114,12 @@ class RouterContext:
                 for app in self.app_manifests:
                     title = app.get("title", app.get("id"))
                     lines.append(f"- ID: `{app.get('id', '?')}`, Title: {title}")
+                    if app.get("description"):
+                        lines.append(f"  Description: {app['description']}")
+                    if app.get("intents"):
+                        lines.append(f"  Intents: {', '.join(app['intents'])}")
+                    if app.get("schema_refs"):
+                        lines.append(f"  Schema Refs: {', '.join(app['schema_refs'])}")
                 if include_widget_keyword_hint:
                     lines.append(
                         "\n_Note: widget Titles may semantically match user keywords "

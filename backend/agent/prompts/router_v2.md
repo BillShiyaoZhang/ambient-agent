@@ -63,3 +63,4 @@ cheapest, most data-grounded path.
 11. Always set `instruction` to a refined version of the user's request that preserves
     the original intent.
 12. If you are unsure, pick `converse` rather than guessing.
+13. When identifying whether a request targets an existing widget, pay close attention to the widget's Intents, Description, and Title. If the request semantically matches the Intents or Description of an existing widget, you must map it to that widget's ID (preferring `widget_modify` or the appropriate sub-intent).

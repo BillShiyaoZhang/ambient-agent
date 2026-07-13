@@ -104,12 +104,22 @@ def test_router_context_render_for_prompt(tmp_path):
     db.create_node(node_id="t1", node_type="Task", properties={"title": "T1"})
 
     ctx = RouterContext(
-        app_manifests=[{"id": "todo-app-x", "title": "Todo"}],
+        app_manifests=[
+            {
+                "id": "todo-app-x",
+                "title": "Todo",
+                "description": "Manage things to do.",
+                "intents": ["add todo item", "remove todo item"],
+                "schema_refs": ["Task"],
+            }
+        ],
         graph_snapshot=GraphSnapshot.from_db(db),
         session_recent=[],
     )
 
     text = ctx.render_for_prompt()
     assert "todo-app-x" in text
+    assert "Manage things to do." in text
+    assert "add todo item, remove todo item" in text
     assert "Task" in text
     assert "t1" in text
