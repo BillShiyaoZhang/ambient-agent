@@ -1,11 +1,50 @@
 import asyncio
 import os
+import threading
 from typing import Any
 
 import httpx
 from sqlmodel import Session
 
 from backend.models import LLMAuditLog
+
+
+# Thread-local state for retry instrumentation. The OFAT runner uses this to
+# detect when a trial was rate-limited and re-run it.
+_retry_state = threading.local()
+
+
+class RetryStats:
+    """Tracks retry behaviour for a single LLM call."""
+
+    __slots__ = ("attempts", "exhausted", "retried", "status_codes")
+
+    def __init__(self) -> None:
+        self.attempts = 1
+        self.retried = False
+        self.status_codes: list[int] = []
+        self.exhausted = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempts": self.attempts,
+            "retried": self.retried,
+            "status_codes": list(self.status_codes),
+            "exhausted": self.exhausted,
+        }
+
+
+def get_last_retry_stats() -> RetryStats | None:
+    """Return the RetryStats recorded for the most recent ``call_llm_api`` call.
+
+    The runner uses this to detect rate-limit retried trials so they can be
+    re-run on a fresh API quota window.
+    """
+    return getattr(_retry_state, "last_stats", None)
+
+
+def _set_last_retry_stats(stats: RetryStats | None) -> None:
+    _retry_state.last_stats = stats
 
 # Default system prompt for the Ambient Agent
 SYSTEM_PROMPT = """You are Ambient Agent, an agentic personal coding and productivity assistant.
@@ -47,6 +86,11 @@ async def call_llm_api(
     Directly contacts Ollama (chat endpoint) or cloud providers using HTTP clients.
     Returns a dict: {"content": str, "tool_calls": Optional[List[Dict[str, Any]]]}
     """
+    # Reset per-call retry stats so callers can read them after the call.
+    _set_last_retry_stats(None)
+    stats = RetryStats()
+    _set_last_retry_stats(stats)
+
     if provider == "ollama":
         # Ollama local chat endpoint
         raw_url = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
@@ -70,6 +114,7 @@ async def call_llm_api(
                         "tool_calls": msg_data.get("tool_calls", None),
                     }
                 else:
+                    stats.status_codes.append(response.status_code)
                     return {
                         "content": f"Error from Ollama server (status code {response.status_code}): {response.text}",
                         "tool_calls": None,
@@ -110,6 +155,7 @@ async def call_llm_api(
         logger = logging.getLogger("backend.llm_service")
 
         for attempt in range(max_retries + 1):
+            stats.attempts = attempt + 1
             try:
                 async with httpx.AsyncClient(trust_env=trust_env) as client:
                     response = await client.post(api_url, json=payload, headers=headers, timeout=300.0)
@@ -118,12 +164,15 @@ async def call_llm_api(
                         base_resp = res_json.get("base_resp") or {}
                         status_code = base_resp.get("status_code")
                         status_msg = base_resp.get("status_msg", "")
+                        if status_code is not None:
+                            stats.status_codes.append(int(status_code))
 
                         if status_code == 2062:
                             # Soft rate limit — short backoff
                             logger.warning(
                                 f"LLM rate-limited (2062), attempt {attempt+1}/{max_retries+1}: {status_msg}"
                             )
+                            stats.retried = True
                             if attempt < max_retries:
                                 await asyncio.sleep(backoff_base ** attempt)
                                 continue
@@ -132,9 +181,11 @@ async def call_llm_api(
                             logger.warning(
                                 f"LLM usage cap (2056), attempt {attempt+1}/{max_retries+1}: {status_msg}"
                             )
+                            stats.retried = True
                             if attempt < max_retries:
                                 await asyncio.sleep(usage_cap_backoff * (attempt + 1))
                                 continue
+                            stats.exhausted = True
                             return {
                                 "content": f"Usage cap: {status_msg}",
                                 "tool_calls": None,
@@ -155,6 +206,7 @@ async def call_llm_api(
                             "tool_calls": None,
                         }
                     else:
+                        stats.status_codes.append(response.status_code)
                         return {
                             "content": f"API Error (status code {response.status_code}): {response.text}",
                             "tool_calls": None,
@@ -167,6 +219,7 @@ async def call_llm_api(
                     "content": f"Failed to connect to cloud API provider. Error: {type(e).__name__}: {e!s}",
                     "tool_calls": None,
                 }
+        stats.exhausted = True
         return {"content": "Exhausted retries", "tool_calls": None}
 
 

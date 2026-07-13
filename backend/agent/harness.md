@@ -250,7 +250,7 @@ graph TD
     LLMR -->|IntentPlan| Plan
 
     Plan -->|kind=MULTI_INTENT / PLAN_AND_ACT| Refiner[router.py: refine_sub_intents LLM#2]
-    Refiner -->|refined sub_intents[]| PlanRefined
+    Refiner -->|refined sub_intents| PlanRefined
 
     PlanRefined -->|widget_create / widget_modify| BuildFlow[widget DAG 流水线]
     PlanRefined -->|graph_mutation| MutFlow[graph_mutation 直路]
@@ -331,14 +331,14 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 替换了 `while current_state != "done"` 状态机，引入 `WidgetDAG`（在
 `backend/agent/dag.py`），6 个任务节点：
 
-| 节点 | 作用 |
-|---|---|
-| `plan` | 调 `PlanGenerationService` 生成计划，问用户审批 |
-| `align_schemas` | 调 `SchemaAlignmentService` 对齐数据库 schema，问用户审批 |
-| `regen_code` | 调 `run_opencode_agent_acp` 生成代码 |
-| `verify` | 调 `SchemaVerificationService.diff` 结构化校验 |
-| `decode_user_intent` | 解读用户 rework 反馈 |
-| `apply_user_actions` | 应用 schema 扩展 / 代码修复 |
+| 节点                 | 作用                                                      |
+| -------------------- | --------------------------------------------------------- |
+| `plan`               | 调 `PlanGenerationService` 生成计划，问用户审批           |
+| `align_schemas`      | 调 `SchemaAlignmentService` 对齐数据库 schema，问用户审批 |
+| `regen_code`         | 调 `run_opencode_agent_acp` 生成代码                      |
+| `verify`             | 调 `SchemaVerificationService.diff` 结构化校验            |
+| `decode_user_intent` | 解读用户 rework 反馈                                      |
+| `apply_user_actions` | 应用 schema 扩展 / 代码修复                               |
 
 节点的 `invalidates` 字段定义了"本节点重跑时哪些下游节点也要重 dirty"，
 所以下游节点自动跟随。
@@ -361,7 +361,7 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 
 ## 4. 目录结构说明
 
-- [__init__.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/__init__.py): Python 包初始化文件。
+- [**init**.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/__init__.py): Python 包初始化文件。
 - [harness.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/harness.py): 实现核心编排器 `AgentOrchestrator`，负责串联整体生命周期。
 - [dag.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/dag.py): 轻量级 runtime DAG（plan/align_schemas/code/verify/decode/apply），由 harness 在 widget 路径上驱动。
 - [router.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/router.py): 实现意图路由 `IntentRouter`，两层 LLM（`route` + `refine_sub_intents`）。
@@ -389,13 +389,13 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 
 ## 6. 测试覆盖
 
-| 模块 | 测试文件 | 测试数 |
-|---|---|---|
-| Schema Diff | `tests/backend/test_schema_diff.py` | 13 |
-| Widget DAG | `tests/backend/test_dag.py` | 5 |
-| IntentPlan / SubIntent | `tests/backend/test_intent_plan.py` | 10 |
-| Router（含 multi_intent） | `tests/backend/test_router.py` + `test_multi_intent.py` | 17 |
-| Harness / rework loops | `tests/backend/test_rework_loops.py` 等 | 12 |
-| 实验基础设施 | `tests/experiments/*.py` | 31 |
+| 模块                      | 测试文件                                                | 测试数 |
+| ------------------------- | ------------------------------------------------------- | ------ |
+| Schema Diff               | `tests/backend/test_schema_diff.py`                     | 13     |
+| Widget DAG                | `tests/backend/test_dag.py`                             | 5      |
+| IntentPlan / SubIntent    | `tests/backend/test_intent_plan.py`                     | 10     |
+| Router（含 multi_intent） | `tests/backend/test_router.py` + `test_multi_intent.py` | 17     |
+| Harness / rework loops    | `tests/backend/test_rework_loops.py` 等                 | 12     |
+| 实验基础设施              | `tests/experiments/*.py`                                | 31     |
 
 总计 **143 个单元/集成测试全部通过**。

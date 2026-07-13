@@ -22,9 +22,17 @@ classification path that was introduced by Direction D.
 ## Results — `V_baseline` (single-variant)
 
 ```
-n=72 | kind accuracy 95.8% | sub_kinds accuracy 95.8% | amb_kind accuracy 85.7%
-median latency 3593 ms | errors 0
+n=72 | kind accuracy 95.8% | sub_kinds accuracy 94.4% | amb_kind accuracy 85.7%
+median latency 3580 ms | errors 0 | rate-limit retried 0
 ```
+
+The first raw run (without redo) hit MiniMax Token Plan rate limits on
+11 of 72 trials (15%). All trials eventually succeeded via the existing
+exponential-backoff retry mechanism (errors: 0), but 4–8 trials per
+scenario took 10–48 seconds due to multiple retry rounds. The runner's
+new ``redo-rate-limited`` subcommand re-ran the affected trials after
+the rate-limit window cleared; the redo file (`ofat_phase4_v2_final_redo`)
+contains only clean, non-retried results.
 
 ### Per-scenario
 
@@ -40,7 +48,7 @@ median latency 3593 ms | errors 0
 | S17 | 100% | 100% | graph_mutation | english add-to-todos |
 | S18 | 100% | 100% | graph_query | english query |
 | S19-S20 | 100% | 100% | converse | english chitchat |
-| **S21** | 100% | 100% | multi_intent | graph + widget_extend (NEW) |
+| **S21** | 100% | 67% | multi_intent | graph + widget_extend (NEW) |
 | S22 | 100% | 100% | graph_mutation | single graph with multiple actions |
 | **S23** | 100% | 100% | multi_intent | graph + widget_extend (NEW) |
 | **S24** | 0% | 0% | multi_intent | ambiguous vs widget_modify (NEW) |
@@ -96,5 +104,30 @@ reports/ofat_phase4_v2_baseline_3x_conc6.{json,md}      # baseline result
 ## Reproduction
 
 ```bash
-python -m scripts.run_routing_experiments_v2 baseline --repeats 3 --concurrency 6
+# Full phase 4 run (24 scenarios × 3 repeats = 72 trials)
+python -m scripts.run_routing_experiments_v2 baseline --repeats 3 --concurrency 4 \
+    --output reports/ofat_phase4_v2_tracked.json
+
+# Identify and re-run only the trials that hit rate limits.
+# (Use a latency heuristic when retry tracking isn't available.)
+python -m scripts.run_routing_experiments_v2 redo-rate-limited \
+    --concurrency 2 \
+    --input reports/ofat_phase4_v2_final.json \
+    --latency-threshold 10000 \
+    --output reports/ofat_phase4_v2_final.json
 ```
+
+## Rate-limit handling
+
+The `call_llm_api` service in `backend/llm_service.py` has built-in retry with
+exponential backoff for MiniMax HTTP status 2062 (soft rate limit) and 2056
+(hard usage cap). The retry statistics (attempts, retried, status_codes, exhausted)
+are exposed via `get_last_retry_stats()` and the runner records:
+
+- `route_retried: bool` — was the LLM #1 (router) call retried?
+- `refine_retried: bool` — was the LLM #2 (refine_sub_intents) call retried?
+- `rate_limit_retried: bool` — either of the above
+- `route_status_codes: list[int]` / `refine_status_codes: list[int]` — 2062/2056 codes observed
+
+This lets `redo-rate-limited` cherry-pick only the trials that were
+impacted and re-run them after the rate-limit window has cleared.
