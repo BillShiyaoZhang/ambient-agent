@@ -24,8 +24,15 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
 
     # 1. Mock routing to treat as coding task
-    async def mock_route(content, existing_apps, db_session=None):
-        return True, "test-app", content
+    async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
+        from backend.agent.intent_plan import IntentKind, IntentPlan
+
+        return IntentPlan(
+            kind=IntentKind.WIDGET_MODIFY,
+            rationale="test",
+            app_id="test-app",
+            instruction=content,
+        )
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 

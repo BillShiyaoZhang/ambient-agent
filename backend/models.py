@@ -26,3 +26,4 @@ class LLMAuditLog(BaseModel):
     model: str
     prompt: str
     response: str
+    stage: str = "chat"  # e.g. chat | route | plan | mutation | verify

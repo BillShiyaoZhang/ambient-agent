@@ -79,6 +79,149 @@ classDiagram
         +call_llm_api(provider: str, model: str, messages: List~dict~, tools: List~dict~|None) dict
     }
 
+    class IntentPlan {
+        +kind: IntentKind
+        +confidence: float
+        +rationale: str
+        +app_id: str
+        +instruction: str
+        +actions: List~dict~
+        +query: dict
+        +sub_intents: List~SubIntent~
+        +clarification_message: str
+        +clarification_options: List~dict~
+        +deprecated: bool
+        +to_dict() dict
+        +from_dict(data) IntentPlan
+        +from_tool_call_args(args) IntentPlan
+        +tool_schema() dict
+    }
+
+    class SubIntent {
+        +kind: SubIntentKind
+        +app_id: str
+        +instruction: str
+        +actions: List~dict~
+        +query: dict
+        +extend_schema_props: dict
+        +feedback: str
+        +to_dict() dict
+        +from_dict(data) SubIntent
+    }
+
+    class IntentKind {
+        <<enum>>
+        +WIDGET_CREATE
+        +WIDGET_MODIFY
+        +GRAPH_MUTATION
+        +GRAPH_QUERY
+        +PLAN_AND_ACT
+        +MULTI_INTENT
+        +CLARIFY
+        +CONVERSE
+    }
+
+    class SubIntentKind {
+        <<enum>>
+        +GRAPH_MUTATION
+        +GRAPH_QUERY
+        +WIDGET_CREATE
+        +WIDGET_MODIFY
+        +WIDGET_EXTEND_SCHEMA
+        +WIDGET_FIX_CODE
+        +WIDGET_REWRITE
+    }
+
+    class RouterContext {
+        +app_manifests: List~dict~
+        +graph_snapshot: GraphSnapshot
+        +session_recent: List~dict~
+        +build(app_manager, graph_db, session_messages) RouterContext
+        +render_for_prompt() str
+    }
+
+    class GraphSnapshot {
+        +type_counts: Dict
+        +recent_nodes_by_type: Dict
+        +schema_manifest: List~dict~
+        +node_count: int
+        +edge_count: int
+        +from_db(db, recent_per_type) GraphSnapshot
+    }
+
+    class IntentRouter {
+        +route(content, context) IntentPlan
+        +route_legacy(content, existing_apps) IntentPlan
+        +refine_sub_intents(plan, context) IntentPlan
+    }
+
+    class WidgetDAG {
+        +_nodes: Dict
+        +_order: List
+        +_dirty: Set
+        +register(node) void
+        +dirty(names) void
+        +idle() bool
+        +pending() List
+        +step(ctx) TaskResult
+    }
+
+    class TaskNode {
+        +name: str
+        +run: Callable
+        +needs_outputs_from: Set
+        +invalidates: Set
+    }
+
+    class TaskResult {
+        +success: bool
+        +outputs: dict
+        +error: str
+        +ask_user: dict
+        +invalidates_if_redo: Set
+    }
+
+    class VerificationDiff {
+        +unknown_props: List
+        +type_mismatches: List
+        +unknown_types: List
+        +is_clean: bool
+        +to_markdown() str
+        +to_per_field_payload() List
+    }
+
+    class SchemaVerificationService {
+        +diff(app_id, widget_code, schemas) VerificationDiff
+        +verify(app_id, widget_code, schemas) str
+    }
+
+    class MutationTicketManager {
+        +record(session_id, forward_actions, snapshot_before) MutationTicket
+        +pin(session_id, ticket_id) bool
+        +rollback(session_id, ticket_id) List~dict~
+        +get(session_id, ticket_id) MutationTicket
+    }
+
+    class PlanExecutor {
+        <<abstract>>
+        +run_plan(plan, instruction, on_update) PlanPhaseResult
+    }
+
+    class CodingPlanExecutor {
+        +run_plan(plan, instruction, on_update) PlanPhaseResult
+    }
+
+    class MutationPlanExecutor {
+        +run_plan(plan, instruction, on_update) PlanPhaseResult
+    }
+
+    class PlanPhaseResult {
+        +success: bool
+        +output: str
+        +error: str
+        +extra: dict
+    }
+
     class AgentOrchestrator {
         +db: WorkspaceStorage
         +app_manager: AppManager
@@ -86,6 +229,11 @@ classDiagram
         +run_opencode_agent_acp_fn: function
         +handle_message(session_id: str, content: str, on_update: Callable) tuple
         -_run_callback(callback: Callable, data: Any) void
+        -_handle_graph_mutation(plan, session_id, on_update) tuple
+        -_handle_graph_query(plan, session_id, on_update) tuple
+        -_handle_plan_and_act(plan, session_id, on_update) tuple
+        -_handle_multi_intent(plan, session_id, on_update) tuple
+        -_handle_widget_build(plan, session_id, on_update) tuple
     }
 
     class PromptManager {
@@ -102,6 +250,24 @@ classDiagram
     AgentOrchestrator --> AppManager : references
     AgentOrchestrator --> AgentParser : extracts XML widgets
     AgentOrchestrator --> PromptManager : loads system prompt
+    AgentOrchestrator --> IntentRouter : classifies user intent (LLM #1)
+    AgentOrchestrator --> IntentRouter : refines sub_intents (LLM #2)
+    AgentOrchestrator --> PlanExecutor : dispatches to coding/mutation
+    AgentOrchestrator --> WidgetDAG : widget build pipeline
+    AgentOrchestrator --> SchemaVerificationService : structured schema diff
+    IntentRouter --> IntentPlan : returns structured plan
+    IntentRouter --> RouterContext : consumed
+    RouterContext --> GraphSnapshot : embeds snapshot
+    IntentPlan --> IntentKind : kind is an enum value
+    IntentPlan --> SubIntent : 0..* sub_intents
+    SubIntent --> SubIntentKind : kind is an enum value
+    WidgetDAG --> TaskNode : 0..* registered tasks
+    TaskNode --> TaskResult : runs produce results
+    SchemaVerificationService --> VerificationDiff : returns structured diff
+    PlanExecutor <|-- CodingPlanExecutor
+    PlanExecutor <|-- MutationPlanExecutor
+    MutationPlanExecutor --> MutationTicketManager : records rollback tickets
+    MutationTicketManager --> AgentOrchestrator : consumed in graph mutation paths
     LLMService --> LLMAuditLog : writes prompt audit logs
 ```
 
@@ -117,6 +283,17 @@ classDiagram
 *   **ContextManager (`context_manager.py`)**: 负责将数据库中的对话上下文整合为 LLM 兼容的 Prompt。此层会自动剔除冗余代码段并动态注入当前运行中应用的最新源码，在控制 Token 大小的同时给 LLM 提供充分的运行环境上下文。
 *   **AgentParser (`agent_parser.py`)**: 负责用正则表达式和 XML 解析器解析 LLM 返回文本流中携带的 `<ambient-widget>` 语法块，提取 HTML、CSS 和 JS 内容。
 *   **LLMService (`llm_service.py`)**: 提供统一的大模型请求接口（支持本地 Ollama 与 OpenAI/MiniMax 兼容接口），并自动将请求原始数据记录至 `LLMAuditLog` 审计数据库。
+*   **RouterContext (`router_context.py`)**: 收集路由所需的轻量级上下文：已存在的 widgets、Graph 类型与节点摘要、近期对话。供 IntentRouter 在调用 LLM 时一并注入。
+*   **GraphSnapshot**: RouterContext 嵌入的图状态摘要，用于让 LLM 意识到现有数据，避免重复创建。
+*   **IntentPlan / IntentKind / SubIntent / SubIntentKind (`agent/intent_plan.py`)**: 用 `classify_intent` function-calling 协议引导 LLM 返回的结构化输出。`SubIntent` 是 `multi_intent` 顶层意图下的子动作列表。
+*   **IntentRouter (`agent/router.py`)**: 两层 LLM 路由：
+    - `route()` 调用 LLM #1 获取顶层 `kind` + `sub_intents[]`
+    - `refine_sub_intents()` 在 `multi_intent` / `plan_and_act` 时调用 LLM #2 细化 sub_intents
+    - 失败时降级为 `converse`；widget_modify 重名检测必要时降级为 `clarify`
+*   **WidgetDAG / TaskNode / TaskResult (`agent/dag.py`)**: 替换 widget 流水线的 `while current_state` 状态机。6 个任务节点：`plan`、`align_schemas`、`regen_code`、`verify`、`decode_user_intent`、`apply_user_actions`。节点的 `invalidates` 字段定义了"重跑时连带 dirty 哪些下游节点"。
+*   **SchemaVerificationService / VerificationDiff (`schema_verification.py` + `schema_diff.py`)**: 替代旧的纯文本 Markdown 报告，输出结构化 `VerificationDiff`（含 `unknown_props[]` / `type_mismatches[]`），让前端能渲染 per-field checkbox UI。
+*   **PlanExecutor / CodingPlanExecutor / MutationPlanExecutor (`agent/plan_executor.py`)**: 把"计划-审批-执行-校验"流水线抽象为策略类。`CodingPlanExecutor` 包装原有 widget 流；`MutationPlanExecutor` 在用户审批后批量执行 graph_mutation，并把每次调用登记为一个可撤销的 mutation ticket。
+*   **MutationTicketManager (`mutation_tickets.py`)**: 为每次 graph_mutation 提供 60s 软默认 + 用户可星标为永久的撤销窗口。撤销逻辑使用 graph 数据库层新增的 `graph_mutation_history` 表。
 
 ### 2.3 实时多端同步层 (`main.py` WebSocket)
 *   通过长连接管理不同的 Session 连接。

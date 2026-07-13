@@ -43,6 +43,23 @@ jobs:
       - name: Run UML Contract Consistency Check
         run: uv run python scripts/verify_uml.py
 
+  docker-smoke:
+    name: Docker opencode binary smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -f backend/Dockerfile -t ambient-agent-backend:smoke .
+
+      - name: Verify opencode binary is available in image
+        run: |
+          set -euo pipefail
+          docker run --rm ambient-agent-backend:smoke opencode --version
+          docker run --rm ambient-agent-backend:smoke which opencode
+
   frontend-ci:
     name: Frontend Lint & Test
     runs-on: ubuntu-latest

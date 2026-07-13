@@ -53,7 +53,15 @@ async def test_agent_react_graph_mutations(monkeypatch, tmp_path):
     monkeypatch.setattr("backend.agent.harness.get_llm_provider", lambda p, m: provider)
 
     # Mock IntentRouter to route to conversational path
-    mock_route = AsyncMock(return_value=(False, None, "create a task"))
+    from backend.agent.intent_plan import IntentKind, IntentPlan
+
+    mock_route = AsyncMock(
+        return_value=IntentPlan(
+            kind=IntentKind.CONVERSE,
+            rationale="chitchat",
+            instruction="create a task",
+        )
+    )
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     # Mock workspace storage database session

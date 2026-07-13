@@ -487,6 +487,71 @@ async def websocket_chat(
                 from backend.graph_subscription import subscription_manager
 
                 subscription_manager.unregister(websocket, sub_id)
+            elif msg_type == "rollback_mutation":
+                ticket_id = data.get("ticket_id")
+                if ticket_id:
+                    from backend.mutation_tickets import MutationTicketManager
+
+                    mgr = MutationTicketManager(graph_db)
+                    reverses = await mgr.rollback(session_id, ticket_id)
+                    # Apply inverse actions; report success/failure back
+                    applied: list[str] = []
+                    errors: list[str] = []
+                    for r in reverses:
+                        try:
+                            act = r.get("action")
+                            if act == "update_node_property":
+                                graph_db.update_node_property(
+                                    node_id=r.get("id"),
+                                    properties=r.get("properties", {}),
+                                )
+                                applied.append(r.get("id", "?"))
+                            elif act == "delete_node":
+                                graph_db.delete_node(node_id=r.get("id"))
+                                applied.append(r.get("id", "?"))
+                            elif act == "delete_edge":
+                                graph_db.delete_edge(
+                                    from_id=r.get("from_id"),
+                                    to_id=r.get("to_id"),
+                                    edge_type=r.get("type"),
+                                )
+                                applied.append(f"{r.get('from_id')}->{r.get('to_id')}")
+                        except Exception as e:
+                            errors.append(f"{r}: {e!s}")
+
+                    async def _send_ws(ws, payload):
+                        try:
+                            await ws.send_json(payload)
+                        except Exception:
+                            pass
+
+                    from backend.graph_subscription import subscription_manager as _sub_mgr
+
+                    await _sub_mgr.broadcast_updates(graph_db, _send_ws)
+                    await send_to_session(
+                        session_id,
+                        {
+                            "type": "rollback_mutation_response",
+                            "ticket_id": ticket_id,
+                            "applied": applied,
+                            "errors": errors,
+                        },
+                    )
+            elif msg_type == "pin_mutation_history":
+                ticket_id = data.get("ticket_id")
+                if ticket_id:
+                    from backend.mutation_tickets import MutationTicketManager
+
+                    mgr = MutationTicketManager(graph_db)
+                    await mgr.pin(session_id, ticket_id)
+                    await send_to_session(
+                        session_id,
+                        {
+                            "type": "pin_mutation_response",
+                            "ticket_id": ticket_id,
+                            "pinned": True,
+                        },
+                    )
             else:
                 sender = data.get("sender", "user")
                 content = data.get("content", "")

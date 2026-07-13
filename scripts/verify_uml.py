@@ -21,6 +21,24 @@ CLASS_TO_FILE = {
     "ToolRegistry": "backend/agent/tools.py",
     "PromptManager": "backend/agent/prompts/manager.py",
     "WorkspaceStorage": "backend/workspace_storage.py",
+    "IntentPlan": "backend/agent/intent_plan.py",
+    "IntentKind": "backend/agent/intent_plan.py",
+    "RouterContext": "backend/router_context.py",
+    "GraphSnapshot": "backend/router_context.py",
+    "MutationTicketManager": "backend/mutation_tickets.py",
+    "PlanExecutor": "backend/agent/plan_executor.py",
+    "CodingPlanExecutor": "backend/agent/plan_executor.py",
+    "MutationPlanExecutor": "backend/agent/plan_executor.py",
+    "PlanPhaseResult": "backend/agent/plan_executor.py",
+    # Direction A
+    "SubIntent": "backend/agent/intent_plan.py",
+    "SubIntentKind": "backend/agent/intent_plan.py",
+    "VerificationDiff": "backend/schema_diff.py",
+    "SchemaVerificationService": "backend/schema_verification.py",
+    # Direction B
+    "WidgetDAG": "backend/agent/dag.py",
+    "TaskNode": "backend/agent/dag.py",
+    "TaskResult": "backend/agent/dag.py",
 }
 
 
@@ -157,8 +175,10 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
     node_pattern = r"\b(\w+)(?:\[\s*|\[\s*\(\s*|\[\s*\(\s*|\(\s*\[\s*|\(\s*\[\s*\(\s*|\{\s*|\(\s*|\(\(\s*)([a-zA-Z0-9_\-\.]+)\s*:\s*([a-zA-Z0-9_]+)"
 
     for block in mermaid_blocks:
-        if not re.search(r"\bgraph\b", block):
-            continue  # Only check flowchart diagrams
+        # Only flowcharts (line starts with `graph TD/LR/BT` or `flowchart ...`)
+        first_line = block.strip().splitlines()[0] if block.strip() else ""
+        if not re.match(r"^\s*(graph|flowchart)\b", first_line):
+            continue
 
         nodes = re.findall(node_pattern, block)
         for node_id, file_ref, symbol_name in nodes:
@@ -178,12 +198,20 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
                 mismatches.append(f"Failed to parse python file {file_path}: {e}")
                 continue
 
-            # Look for symbol_name at top level definitions
+            # Look for symbol_name at top level definitions OR inside classes.
             found = False
             for node in tree.body:
-                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     if node.name == symbol_name:
                         found = True
+                        break
+                if isinstance(node, ast.ClassDef):
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if child.name == symbol_name:
+                                found = True
+                                break
+                    if found:
                         break
             if not found:
                 mismatches.append(
