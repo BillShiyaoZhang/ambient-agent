@@ -14,7 +14,7 @@ Ambient Agent 围绕动态的 **GUI 卡片工作区 (Canvas Workspace)** 架构�
 graph TB
     Frontend["前端 Canvas & Sandbox"] <-->|WebSocket: /ws/chat| Backend["后端 FastAPI Orchestrator"]
     Frontend -->|HTTP POST: /api/graph/mutate| Backend
-    Frontend -->|HTTP GET: /api/apps/{id}| Backend
+    Frontend -->|"HTTP GET: /api/apps/{id}"| Backend
     Backend <-->|SQLModel ORM| Data["数据与存储层 (SQLite graph.db & 本地磁盘)"]
     Backend <-->|JSON-RPC / HTTPS| External["外部集成 (MCP / LLM)"]
 ```
@@ -32,7 +32,7 @@ graph TB
     end
     WSClient <-->|/ws/chat| BE["后端接口"]
     Sandbox -->|/api/graph/mutate| BE
-    Sandbox -->|/api/apps/{id}| BE
+    Sandbox -->|"/api/apps/{id}"| BE
 ```
 
 ### 1.3 后端核心编排与执行流 (分 - 后端细节)
