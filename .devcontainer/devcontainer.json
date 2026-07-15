@@ -34,6 +34,6 @@
     }
   },
   "forwardPorts": [8000, 5173],
-  "postCreateCommand": "uv sync && cd frontend && npm install",
+  "postCreateCommand": "uv sync && cd frontend && npm install && cd ../docs && npm install",
   "remoteUser": "root"
 }

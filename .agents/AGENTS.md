@@ -2,14 +2,15 @@
 
 This document outlines workspace-specific rules for coding agents. All agents MUST follow these instructions when working on this project.
 
-## 1. Documentation & UML Synchronization
+## 1. Documentation-Driven Development (DDD) & UML Synchronization
 
-- **UML Class Diagram Verification**: The class diagrams in `backend/UML.md` (high-level architecture) and `backend/agent/harness.md` (agent harness architecture) serve as our blueprints. Any modification to database models (`models.py`) or core service classes must be documented in the corresponding Markdown files.
-- **Run Verification Script**: After any code changes affecting the models or service class signatures, run the verification script to check for compliance:
+- **Docs-First development**: For any new features, API updates, or database model changes, you MUST first update or write the corresponding documentation/UML designs in the `docs/` folder before making any codebase changes. Development must align to the documented specification.
+- **UML Class Diagram Verification**: The class diagrams in `docs/architecture/uml.md` (high-level architecture) and `docs/agent/harness.md` (agent harness architecture) serve as our blueprints. Any modification to database models (`models.py`) or core service classes must be documented in these files.
+- **Run Verification Script**: After any changes affecting design/schemas or models, run the verification script to check for compliance:
   ```bash
-  python scripts/verify_uml.py
+  uv run python scripts/verify_uml.py
   ```
-- **Keep UML Concise (Subset Model)**: Only document core public classes, fields, and main methods in `backend/UML.md`. Internal helpers or minor private fields can be omitted to avoid noise, but anything documented *must* match the code.
+- **Keep UML Concise (Subset Model)**: Only document core public classes, fields, and main methods in `docs/architecture/uml.md`. Internal helpers or minor private fields can be omitted to avoid noise, but anything documented *must* match the code.
 - **Python Project Guidelines**: Always use `uv` for python virtual environment operations when running command line commands.
 
 ## 2. App Data Layer & SQLite Schema Alignment Rules
