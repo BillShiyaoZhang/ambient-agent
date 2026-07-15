@@ -237,8 +237,6 @@ classDiagram
     LLMService --> LLMAuditLog : writes prompt audit logs
 ```
 
----
-
 ## 2. 消息执行逻辑流程图
 
 下面的流程图展示了 `AgentOrchestrator.handle_message()` 在处理来自 WebSocket 的新消息时的详细执行顺序：
@@ -319,8 +317,6 @@ graph TD
     WS -->|mutation_preview / rollback 响应| User
 ```
 
----
-
 ## 3. 关键变更（与之前版本对比）
 
 ### Direction A：结构化 Schema Diff
@@ -363,8 +359,6 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 `AgentOrchestrator._handle_multi_intent` 按 `sub_intents` 顺序分发给
 各 SubExecutor。
 
----
-
 ## 4. 目录结构说明
 
 - [**init**.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/__init__.py): Python 包初始化文件。
@@ -379,8 +373,6 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 - [tools.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/agent/tools.py): Hermes 风格的工具注册表。
 - [router_context.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/router_context.py): 收集路由所需的轻量级上下文。
 - [mutation_tickets.py](file:///Users/shiyaozhang/Developer/ambient-agent/backend/mutation_tickets.py): graph_mutation 撤销票。
-
----
 
 ## 5. 测试覆盖
 

@@ -36,17 +36,17 @@ graph TB
     Canvas --> Sandbox
     App <--> WSClient
     WSClient <-->|WebSocket: /ws/chat| Main
-    
+
     %% API Calls
     Sandbox -->|"HTTP POST: /api/graph/mutate"| Main
     Sandbox -->|"HTTP GET: /api/apps/{app_id}"| Main
-    
+
     %% Backend Flow
     Main <--> Orchestrator
     Orchestrator --> Parser
     Orchestrator --> AppMgr
     Main <--> BackendMgr
-    
+
     %% Database / Disk
     AppMgr <-->|Read/Write HTML, CSS, JS| DiskApps
     Main <-->|SQLModel ORM| SQLiteDB

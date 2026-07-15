@@ -2,36 +2,34 @@
 
 本项目为了保障开发环境完全一致并防范本地依赖冲突，全量支持**容器化开发和运行**。本地只需要安装 Docker 即可开始。
 
----
-
 ## 📦 环境要求
 
-*   **Docker Desktop** (保证容器运行环境)
-*   **VS Code** 并安装 **Dev Containers** 插件 (推荐的 IDE 容器开发模式)
-
----
+- **Docker Desktop** (保证容器运行环境)
+- **VS Code** 并安装 **Dev Containers** 插件 (推荐的 IDE 容器开发模式)
 
 ## 🚀 步骤 1：克隆项目与环境变量配置
 
 首先克隆本项目至本地目录：
+
 ```bash
 git clone <repository-url>
 cd ambient-agent
 ```
 
 将根目录下的 `.env.example` 复制为 `.env`：
+
 ```bash
 cp .env.example .env
 ```
+
 打开 `.env` 文件，根据您的需要填入大模型（LLM）配置（如 Ollama 端口、MiniMax API Key 等）：
+
 ```ini
 # LLM Providers Config
 OLLAMA_API_BASE=http://localhost:11434
 # MiniMax or OpenAI-compatible settings
 MINIMAX_API_KEY=your-api-key
 ```
-
----
 
 ## 🛠️ 步骤 2：使用 VS Code Dev Containers 开发 (推荐)
 
@@ -54,8 +52,6 @@ MINIMAX_API_KEY=your-api-key
     如果 IDE 没有自动转发 8000 端口，请点击 VS Code 底部的 **Ports** 标签页，点击 **Add Port** 手动添加 `8000` 端口转发。
 8.  在浏览器中访问 `http://localhost:5173/` 即可开始体验。
 
----
-
 ## 🐳 步骤 3：使用 Docker Compose 一键运行
 
 如果您不需要修改代码，仅想在本地一键拉起整个应用进行运行、演示或集成测试：
@@ -65,17 +61,16 @@ MINIMAX_API_KEY=your-api-key
     docker compose up --build
     ```
 2.  服务启动后：
-    *   后端服务运行在：`http://localhost:8000`
-    *   前端服务运行在：`http://localhost:5173`
-    *   本地代码修改会自动挂载并同步热重载至容器内。
-
----
+    - 后端服务运行在：`http://localhost:8000`
+    - 前端服务运行在：`http://localhost:5173`
+    - 本地代码修改会自动挂载并同步热重载至容器内。
 
 ## 🧪 单元测试与代码校验
 
 开发过程中，所有代码的规范和功能校验必须在容器内部终端运行并通过：
 
 ### 后端代码校验与测试
+
 ```bash
 # 运行风格检查与自动修复 (Ruff)
 uv run ruff check . --fix
@@ -89,6 +84,7 @@ uv run python scripts/verify_uml.py
 ```
 
 ### 前端代码校验与测试
+
 ```bash
 cd frontend
 # 运行代码风格检查

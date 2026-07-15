@@ -2,30 +2,27 @@
 
 To keep development setups fully consistent and avoid package version conflicts, this project is fully containerized. You only need Docker installed to begin.
 
----
-
 ## 📦 Prerequisites
 
-*   **Docker Desktop** (to run containers)
-*   **VS Code** with the **Dev Containers** extension (recommended)
-
----
+- **Docker Desktop** (to run containers)
+- **VS Code** with the **Dev Containers** extension (recommended)
 
 ## 🚀 Step 1: Clone & Configure `.env`
 
 Clone the repository to your local path:
+
 ```bash
 git clone <repository-url>
 cd ambient-agent
 ```
 
 Copy `.env.example` to `.env`:
+
 ```bash
 cp .env.example .env
 ```
-Fill in your API configurations for Ollama, MiniMax, or OpenAI.
 
----
+Fill in your API configurations for Ollama, MiniMax, or OpenAI.
 
 ## 🛠️ Step 2: Develop using VS Code Dev Containers (Recommended)
 
@@ -46,24 +43,23 @@ This connects your IDE directly inside the container namespace:
 6.  **Port Forwarding**: Ensure port `8000` is forwarded in VS Code.
 7.  Browse `http://localhost:5173/` to start using the app.
 
----
-
 ## 🐳 Step 3: Run with Docker Compose
 
 To launch the system instantly:
+
 ```bash
 docker compose up --build
 ```
-*   Backend: `http://localhost:8000`
-*   Frontend: `http://localhost:5173`
 
----
+- Backend: `http://localhost:8000`
+- Frontend: `http://localhost:5173`
 
 ## 🧪 Tests Verification
 
 Run tests inside the container terminal:
 
 ### Backend Checks
+
 ```bash
 # Style check & auto-fix (Ruff)
 uv run ruff check . --fix
@@ -77,6 +73,7 @@ uv run python scripts/verify_uml.py
 ```
 
 ### Frontend Checks
+
 ```bash
 cd frontend
 npm run lint

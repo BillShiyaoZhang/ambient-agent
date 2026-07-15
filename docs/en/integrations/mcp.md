@@ -2,8 +2,6 @@
 
 Model Context Protocol (MCP) connects the LLM with local command-line tools. The backend executes a stdio-based JSON-RPC client to delegate executions safely.
 
----
-
 ## 1. Running Architecture
 
 The FastAPI backend manages external CLI processes through `StdioJsonRpcClient`:
@@ -24,14 +22,13 @@ sequenceDiagram
     FE-->>Widget: Promise.resolve(result)
 ```
 
----
-
 ## 2. API Usage
 
 Inside the widget's `<js-script>` scope:
 
 ```javascript
-ambient.mcp.callTool("git_status", { repo_path: "/workspace" })
+ambient.mcp
+  .callTool("git_status", { repo_path: "/workspace" })
   .then((result) => {
     console.log("Git details:", result);
   });

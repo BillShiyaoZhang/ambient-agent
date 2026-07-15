@@ -2,13 +2,12 @@
 
 When the LLM intends to output an interactive widget, it embeds code blocks inside special `<ambient-widget>` XML containers in the streaming response. The backend parser extracts and compiles these blocks, removing the raw XML text from chat bubbles.
 
----
-
 ## 1. Protocol Definition
 
 Writers can output widgets in two modes:
 
 ### A. HTML / CSS / JS Mode (Default)
+
 Inlines direct browser-standard markups:
 
 ```xml
@@ -33,6 +32,7 @@ Inlines direct browser-standard markups:
 ```
 
 ### B. A2UI JSON Mode
+
 Maintains structured declarative layout configurations:
 
 ```xml
