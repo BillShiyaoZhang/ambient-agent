@@ -167,6 +167,7 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
 
     # Create a mock app in app_manager
     from backend.app_manifest import AppManifest
+
     manifest = AppManifest(
         manifest_version=1,
         id="mcp-app",
@@ -176,18 +177,15 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
         intents=(),
         schema_refs=(),
         backend_type="mcp",
-        mcp_server={
-            "command": ["python"],
-            "args": ["-m", "echo"]
-        }
+        mcp_server={"command": ["python"], "args": ["-m", "echo"]},
     )
-    
+
     # Mock get_manifest call
     def mock_get_manifest(app_id):
         if app_id == "mcp-app":
             return manifest
         return None
-    
+
     monkeypatch.setattr(app_manager, "get_manifest", mock_get_manifest)
 
     # Mock the StdioJsonRpcClient to prevent spawning actual python command
@@ -201,7 +199,10 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
     async def mock_get_or_start_mcp_client(app_id, manifest, send_ws_message_func):
         # Trigger permission request to verify that flow works
         approved = await backend_manager.request_permission(
-            app_id, "mcp_spawn", {"command": manifest.mcp_server["command"], "args": manifest.mcp_server["args"]}, send_ws_message_func
+            app_id,
+            "mcp_spawn",
+            {"command": manifest.mcp_server["command"], "args": manifest.mcp_server["args"]},
+            send_ws_message_func,
         )
         if not approved:
             raise Exception("Denied")
@@ -215,13 +216,15 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
         assert active_list["type"] == "active_sessions_list"
 
         # Send mcp_call_tool message
-        websocket.send_json({
-            "type": "mcp_call_tool",
-            "app_id": "mcp-app",
-            "name": "test_tool",
-            "arguments": {"x": 1},
-            "call_id": "call-123"
-        })
+        websocket.send_json(
+            {
+                "type": "mcp_call_tool",
+                "app_id": "mcp-app",
+                "name": "test_tool",
+                "arguments": {"x": 1},
+                "call_id": "call-123",
+            }
+        )
 
         # Expect permission request message
         perm_req = websocket.receive_json()
@@ -230,11 +233,7 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
         request_id = perm_req["request_id"]
 
         # Respond to permission request
-        websocket.send_json({
-            "type": "backend_permission_response",
-            "request_id": request_id,
-            "approved": True
-        })
+        websocket.send_json({"type": "backend_permission_response", "request_id": request_id, "approved": True})
 
         # Expect mcp_call_response message
         call_res = websocket.receive_json()
@@ -243,4 +242,3 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
         assert call_res["result"] == {"echo": {"name": "test_tool", "arguments": {"x": 1}}}
 
     app.dependency_overrides.clear()
-

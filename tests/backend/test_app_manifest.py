@@ -145,20 +145,12 @@ def test_new_fields_validation_and_roundtrip():
     # Test valid manifest with new fields
     data = valid_manifest(
         backend_type="mcp",
-        mcp_server={
-            "command": ["python"],
-            "args": ["-m", "my_server"],
-            "env": {"DEBUG": "true"}
-        },
-        agent_url="http://localhost:8000/api/agent"
+        mcp_server={"command": ["python"], "args": ["-m", "my_server"], "env": {"DEBUG": "true"}},
+        agent_url="http://localhost:8000/api/agent",
     )
     manifest = AppManifest.from_dict(data, expected_app_id="morning-planner")
     assert manifest.backend_type == "mcp"
-    assert manifest.mcp_server == {
-        "command": ["python"],
-        "args": ["-m", "my_server"],
-        "env": {"DEBUG": "true"}
-    }
+    assert manifest.mcp_server == {"command": ["python"], "args": ["-m", "my_server"], "env": {"DEBUG": "true"}}
     assert manifest.agent_url == "http://localhost:8000/api/agent"
     assert manifest.to_dict() == data
 
@@ -177,4 +169,3 @@ def test_new_fields_validation_and_roundtrip():
     # Test invalid command items
     with pytest.raises(ManifestValidationError, match="mcp_server command items must be non-empty strings"):
         AppManifest.from_dict(valid_manifest(mcp_server={"command": [""]}), expected_app_id="morning-planner")
-

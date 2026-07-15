@@ -28,7 +28,7 @@ class StdioJsonRpcClient:
         env = os.environ.copy()
         if self.env:
             env.update(self.env)
-        
+
         self.process = await asyncio.create_subprocess_exec(
             self.command[0],
             *self.command[1:],
@@ -36,7 +36,7 @@ class StdioJsonRpcClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            env=env
+            env=env,
         )
         self.read_task = asyncio.create_task(self._read_loop())
 
@@ -66,7 +66,7 @@ class StdioJsonRpcClient:
     async def call(self, method: str, params: dict) -> Any:
         if not self.process or self.process.returncode is not None:
             raise Exception("MCP server is not running")
-        
+
         async with self.lock:
             req_id = self.next_id
             self.next_id += 1
@@ -74,13 +74,8 @@ class StdioJsonRpcClient:
         fut = asyncio.get_running_loop().create_future()
         self.pending_requests[req_id] = fut
 
-        req = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params
-        }
-        
+        req = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+
         payload = json.dumps(req) + "\n"
         assert self.process.stdin is not None
         self.process.stdin.write(payload.encode("utf-8"))
@@ -166,13 +161,10 @@ class BackendManager:
             fut.set_result(approved)
 
     async def request_permission(
-        self,
-        app_id: str,
-        permission_type: str,
-        value: dict | str,
-        send_ws_message_func: Callable
+        self, app_id: str, permission_type: str, value: dict | str, send_ws_message_func: Callable
     ) -> bool:
         import uuid
+
         request_id = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending_permissions[request_id] = fut
@@ -182,7 +174,7 @@ class BackendManager:
             "request_id": request_id,
             "app_id": app_id,
             "permission_type": permission_type,
-            "value": value
+            "value": value,
         }
         try:
             await send_ws_message_func(req_msg)
@@ -192,10 +184,7 @@ class BackendManager:
             self.pending_permissions.pop(request_id, None)
 
     async def get_or_start_mcp_client(
-        self,
-        app_id: str,
-        manifest: AppManifest,
-        send_ws_message_func: Callable
+        self, app_id: str, manifest: AppManifest, send_ws_message_func: Callable
     ) -> StdioJsonRpcClient | None:
         if not manifest.mcp_server:
             return None
@@ -211,10 +200,7 @@ class BackendManager:
 
         if not self.is_mcp_approved(app_id, command, args):
             approved = await self.request_permission(
-                app_id,
-                "mcp_spawn",
-                {"command": command, "args": args},
-                send_ws_message_func
+                app_id, "mcp_spawn", {"command": command, "args": args}, send_ws_message_func
             )
             if not approved:
                 raise Exception("Permission denied to launch MCP server")
@@ -226,11 +212,7 @@ class BackendManager:
         return client
 
     async def handle_agent_message(
-        self,
-        app_id: str,
-        manifest: AppManifest,
-        message: dict,
-        send_ws_message_func: Callable
+        self, app_id: str, manifest: AppManifest, message: dict, send_ws_message_func: Callable
     ):
         agent_url = manifest.agent_url
         if not agent_url:
@@ -238,10 +220,7 @@ class BackendManager:
 
         if not self.is_agent_approved(app_id, agent_url):
             approved = await self.request_permission(
-                app_id,
-                "agent_connect",
-                {"agent_url": agent_url},
-                send_ws_message_func
+                app_id, "agent_connect", {"agent_url": agent_url}, send_ws_message_func
             )
             if not approved:
                 raise Exception("Permission denied to connect to Agent")
@@ -252,16 +231,12 @@ class BackendManager:
                 if response.status_code != 200:
                     logger.error(f"Agent URL returned status {response.status_code}")
                     return
-                
+
                 async for line in response.aiter_lines():
                     if line.startswith("data:"):
                         try:
                             event_data = json.loads(line[5:].strip())
-                            await send_ws_message_func({
-                                "type": "ag_ui_event",
-                                "app_id": app_id,
-                                "event": event_data
-                            })
+                            await send_ws_message_func({"type": "ag_ui_event", "app_id": app_id, "event": event_data})
                         except Exception as e:
                             logger.error(f"Error parsing agent SSE event: {e}")
 

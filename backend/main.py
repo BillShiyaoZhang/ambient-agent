@@ -79,7 +79,6 @@ async def lifespan(app: FastAPI):
     await backend_manager.shutdown()
 
 
-
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
 
 # Allow CORS for local dev
@@ -377,23 +376,19 @@ async def websocket_chat(
 
     async def run_agent_msg(app_id, manifest, agent_msg_content):
         try:
+
             async def send_ws_payload(payload):
                 await websocket.send_json(payload)
+
             await backend_manager.handle_agent_message(
-                app_id=app_id,
-                manifest=manifest,
-                message=agent_msg_content,
-                send_ws_message_func=send_ws_payload
+                app_id=app_id, manifest=manifest, message=agent_msg_content, send_ws_message_func=send_ws_payload
             )
         except Exception as e:
-            await websocket.send_json({
-                "type": "error",
-                "app_id": app_id,
-                "message": str(e)
-            })
+            await websocket.send_json({"type": "error", "app_id": app_id, "message": str(e)})
 
     async def run_mcp_call(app_id, manifest, tool_name, arguments, call_id):
         try:
+
             async def send_ws_payload(payload):
                 if payload.get("type") == "backend_permission_request":
                     req_id = payload.get("request_id")
@@ -402,29 +397,23 @@ async def websocket_chat(
                             pending_requests[session_id] = {}
                         pending_requests[session_id][req_id] = payload
                 await websocket.send_json(payload)
+
             client = await backend_manager.get_or_start_mcp_client(
-                app_id=app_id,
-                manifest=manifest,
-                send_ws_message_func=send_ws_payload
+                app_id=app_id, manifest=manifest, send_ws_message_func=send_ws_payload
             )
             if client:
                 result = await client.call("tools/call", {"name": tool_name, "arguments": arguments})
-                await websocket.send_json({
-                    "type": "mcp_call_response",
-                    "app_id": app_id,
-                    "call_id": call_id,
-                    "result": result
-                })
+                await websocket.send_json(
+                    {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "result": result}
+                )
         except Exception as e:
-            await websocket.send_json({
-                "type": "mcp_call_response",
-                "app_id": app_id,
-                "call_id": call_id,
-                "error": str(e)
-            })
+            await websocket.send_json(
+                {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
+            )
 
     async def run_mcp_read(app_id, manifest, uri, call_id):
         try:
+
             async def send_ws_payload(payload):
                 if payload.get("type") == "backend_permission_request":
                     req_id = payload.get("request_id")
@@ -433,26 +422,19 @@ async def websocket_chat(
                             pending_requests[session_id] = {}
                         pending_requests[session_id][req_id] = payload
                 await websocket.send_json(payload)
+
             client = await backend_manager.get_or_start_mcp_client(
-                app_id=app_id,
-                manifest=manifest,
-                send_ws_message_func=send_ws_payload
+                app_id=app_id, manifest=manifest, send_ws_message_func=send_ws_payload
             )
             if client:
                 result = await client.call("resources/read", {"uri": uri})
-                await websocket.send_json({
-                    "type": "mcp_read_response",
-                    "app_id": app_id,
-                    "call_id": call_id,
-                    "result": result
-                })
+                await websocket.send_json(
+                    {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "result": result}
+                )
         except Exception as e:
-            await websocket.send_json({
-                "type": "mcp_read_response",
-                "app_id": app_id,
-                "call_id": call_id,
-                "error": str(e)
-            })
+            await websocket.send_json(
+                {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
+            )
 
     try:
         while True:

@@ -58,7 +58,6 @@ _OPTIONAL_FIELDS = {
 _FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
 
 
-
 class ManifestValidationError(ValueError):
     """Raised when an App Manifest does not satisfy the V1 contract."""
 
@@ -117,25 +116,25 @@ def _validate_mcp_server(value: Any) -> dict[str, Any] | None:
     for item in command:
         if not isinstance(item, str) or not item.strip():
             raise ManifestValidationError("mcp_server command items must be non-empty strings")
-    
+
     args = value.get("args", [])
     if not isinstance(args, list):
         raise ManifestValidationError("mcp_server args must be an array of strings")
     for item in args:
         if not isinstance(item, str):
             raise ManifestValidationError("mcp_server args items must be strings")
-            
+
     env = value.get("env", {})
     if not isinstance(env, dict):
         raise ManifestValidationError("mcp_server env must be a JSON object")
     for k, v in env.items():
         if not isinstance(k, str) or not isinstance(v, str):
             raise ManifestValidationError("mcp_server env keys and values must be strings")
-            
+
     return {
         "command": [str(c).strip() for c in command],
         "args": [str(a) for a in args],
-        "env": {str(k): str(v) for k, v in env.items()}
+        "env": {str(k): str(v) for k, v in env.items()},
     }
 
 
@@ -151,7 +150,6 @@ class AppManifest:
     backend_type: str = "code"
     mcp_server: dict[str, Any] | None = None
     agent_url: str | None = None
-
 
     @classmethod
     def from_dict(cls, data: Any, *, expected_app_id: str) -> "AppManifest":

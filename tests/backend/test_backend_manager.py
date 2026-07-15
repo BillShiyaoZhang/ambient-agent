@@ -2,12 +2,14 @@ import asyncio
 import pytest
 from backend.backend_manager import BackendManager, StdioJsonRpcClient
 
+
 @pytest.fixture
 def tmp_workspace(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("WORKSPACE_DIR", str(workspace))
     return workspace
+
 
 @pytest.mark.asyncio
 async def test_permission_management(tmp_workspace):
@@ -36,6 +38,7 @@ async def test_permission_management(tmp_workspace):
     manager3 = BackendManager()
     assert manager3.is_agent_approved(app_id, url)
 
+
 @pytest.mark.asyncio
 async def test_permission_resolution(tmp_workspace):
     manager = BackendManager()
@@ -56,11 +59,13 @@ async def test_permission_resolution(tmp_workspace):
     assert sent_msgs[0]["permission_type"] == "mcp_spawn"
     assert sent_msgs[0]["value"] == "some-cmd"
 
+
 @pytest.mark.asyncio
 async def test_stdio_jsonrpc_client(tmp_path):
     # Create a simple mock MCP server python script that replies to JSON-RPC over stdin/stdout
     server_script = tmp_path / "mock_mcp.py"
-    server_script.write_text("""
+    server_script.write_text(
+        """
 import sys
 import json
 
@@ -77,7 +82,9 @@ for line in sys.stdin:
     except Exception as e:
         print(json.dumps({"error": {"message": str(e)}}))
         sys.stdout.flush()
-""", encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
 
     client = StdioJsonRpcClient(["python", str(server_script)], [])
     await client.start()

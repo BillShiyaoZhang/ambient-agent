@@ -72,4 +72,3 @@ def test_parse_a2ui_widget():
     assert "layout" in widget
     assert "Column" in widget["layout"]
     assert "ambient.state.set" in widget["js"]
-
