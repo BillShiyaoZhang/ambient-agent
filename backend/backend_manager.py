@@ -3,7 +3,8 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import httpx
 from backend.app_manifest import AppManifest

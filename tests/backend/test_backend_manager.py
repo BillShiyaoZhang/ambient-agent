@@ -1,10 +1,6 @@
 import asyncio
-import json
 import pytest
-import os
-from pathlib import Path
 from backend.backend_manager import BackendManager, StdioJsonRpcClient
-from backend.app_manifest import AppManifest
 
 @pytest.fixture
 def tmp_workspace(tmp_path, monkeypatch):
