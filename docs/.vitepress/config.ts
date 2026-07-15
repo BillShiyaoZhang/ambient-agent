@@ -27,6 +27,7 @@ export default withMermaid({
             collapsed: false,
             items: [
               { text: '系统概述', link: '/architecture/overview' },
+              { text: 'Widget 应用架构', link: '/architecture/apps' },
               { text: '类图设计', link: '/architecture/uml' },
               { text: '图数据库', link: '/architecture/graph-db' }
             ]
@@ -82,6 +83,7 @@ export default withMermaid({
             collapsed: false,
             items: [
               { text: 'System Overview', link: '/en/architecture/overview' },
+              { text: 'Widget Apps Architecture', link: '/en/architecture/apps' },
               { text: 'Class Diagrams', link: '/en/architecture/uml' },
               { text: 'Graph Database (GraphDB)', link: '/en/architecture/graph-db' }
             ]

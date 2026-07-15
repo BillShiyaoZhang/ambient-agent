@@ -4,6 +4,54 @@ The backend of Ambient Agent is built on FastAPI + SQLModel (SQLite), supporting
 
 ## 1. Class Diagram
 
+## 1. Backend Class Diagrams (Summary-Detail Structure)
+
+To improve readability on web views, the comprehensive class diagram has been split into a high-level system relationship diagram and 5 focused modular class diagrams.
+
+### 1.1 Macro Class Diagram (Summary)
+
+Shows the macro dependencies and relationships between all core backend services and managers:
+
+```mermaid
+classDiagram
+    class AgentOrchestrator {
+        +db: WorkspaceStorage
+        +app_manager: AppManager
+        +context_manager: ContextManager
+        +handle_message() tuple
+    }
+    class WorkspaceStorage {
+        +workspace_dir: str
+    }
+    class AppManager {
+        +apps_dir: str
+    }
+    class IntentRouter {
+        +route() IntentPlan
+        +refine_sub_intents() IntentPlan
+    }
+    class PlanExecutor {
+        +run_plan() PlanPhaseResult
+    }
+    class WidgetDAG {
+        +step() TaskResult
+    }
+    class BackendManager {
+        +workspace_dir: str
+    }
+
+    AgentOrchestrator --> WorkspaceStorage : references
+    AgentOrchestrator --> AppManager : references
+    AgentOrchestrator --> IntentRouter : references
+    AgentOrchestrator --> PlanExecutor : references
+    AgentOrchestrator --> WidgetDAG : references
+    AgentOrchestrator --> BackendManager : references
+```
+
+### 1.2 Storage & Session Module (Detail - Storage & Session)
+
+Manages multi-client chat sessions, persistent Widget App source code storage, and SQLite graph CRUD operations:
+
 ```mermaid
 classDiagram
     class ChatSession {
@@ -64,6 +112,16 @@ classDiagram
         +save_canvas_config(config) void
     }
 
+    ChatSession "1" --* "0..*" ChatMessage : contains
+    AppManager --> AppRecordStore : persists lifecycle timestamps
+```
+
+### 1.3 Intent Routing & Context Module (Detail - Intent Routing & Context)
+
+Handles LLM prompt compilation/pruning, user message intent classification, and function routing:
+
+```mermaid
+classDiagram
     class ContextManager {
         -db: WorkspaceStorage
         -app_manager: AppManager
@@ -71,13 +129,33 @@ classDiagram
         -_prune_message_content(content: str) str
     }
 
-    class AgentParser {
-        +parse_widgets(text: str) List~dict~
+    class PromptManager {
+        +prompts_dir: Path
+        +env: Environment
+        +get_prompt(template_name, kwargs) str
     }
 
-    class LLMService {
-        +generate_agent_response(messages: List~dict~) str
-        +call_llm_api(provider: str, model: str, messages: List~dict~, tools: List~dict~|None) dict
+    class IntentRouter {
+        +route(content, context) IntentPlan
+        +route_legacy(content, existing_apps) IntentPlan
+        +refine_sub_intents(plan, context) IntentPlan
+    }
+
+    class RouterContext {
+        +app_manifests: List~dict~
+        +graph_snapshot: GraphSnapshot
+        +session_recent: List~dict~
+        +build(app_manager, graph_db, session_messages) RouterContext
+        +render_for_prompt() str
+    }
+
+    class GraphSnapshot {
+        +type_counts: Dict
+        +recent_nodes_by_type: Dict
+        +schema_manifest: List~dict~
+        +node_count: int
+        +edge_count: int
+        +from_db(db, recent_per_type) GraphSnapshot
     }
 
     class IntentPlan {
@@ -133,29 +211,20 @@ classDiagram
         +WIDGET_REWRITE
     }
 
-    class RouterContext {
-        +app_manifests: List~dict~
-        +graph_snapshot: GraphSnapshot
-        +session_recent: List~dict~
-        +build(app_manager, graph_db, session_messages) RouterContext
-        +render_for_prompt() str
-    }
+    IntentRouter --> IntentPlan : returns structured plan
+    IntentRouter --> RouterContext : consumed
+    RouterContext --> GraphSnapshot : embeds snapshot
+    IntentPlan --> IntentKind : kind is an enum value
+    IntentPlan --> SubIntent : 0..* sub_intents
+    SubIntent --> SubIntentKind : kind is an enum value
+```
 
-    class GraphSnapshot {
-        +type_counts: Dict
-        +recent_nodes_by_type: Dict
-        +schema_manifest: List~dict~
-        +node_count: int
-        +edge_count: int
-        +from_db(db, recent_per_type) GraphSnapshot
-    }
+### 1.4 Widget DAG & Schema Verification Module (Detail - Widget DAG & Verification)
 
-    class IntentRouter {
-        +route(content, context) IntentPlan
-        +route_legacy(content, existing_apps) IntentPlan
-        +refine_sub_intents(plan, context) IntentPlan
-    }
+Drives the Widget lifecycle compilation process using a Directed Acyclic Graph (DAG) runtime, and verifies code data schemas:
 
+```mermaid
+classDiagram
     class WidgetDAG {
         +_nodes: Dict
         +_order: List
@@ -196,11 +265,29 @@ classDiagram
         +verify(app_id, widget_code, schemas) str
     }
 
-    class MutationTicketManager {
-        +record(session_id, forward_actions, snapshot_before) MutationTicket
-        +pin(session_id, ticket_id) bool
-        +rollback(session_id, ticket_id) List~dict~
-        +get(session_id, ticket_id) MutationTicket
+    WidgetDAG --> TaskNode : 0..* registered tasks
+    TaskNode --> TaskResult : runs produce results
+    SchemaVerificationService --> VerificationDiff : returns structured diff
+```
+
+### 1.5 Execution & Orchestration Module (Detail - Execution & Orchestration)
+
+Coordinates overall orchestration, schedules plan execution, registers database mutation rollback tickets, and integrates LLM clients:
+
+```mermaid
+classDiagram
+    class AgentOrchestrator {
+        +db: WorkspaceStorage
+        +app_manager: AppManager
+        +context_manager: ContextManager
+        +run_opencode_agent_acp_fn: function
+        +handle_message(session_id: str, content: str, on_update: Callable) tuple
+        -_run_callback(callback: Callable, data: Any) void
+        -_handle_graph_mutation(plan, session_id, on_update) tuple
+        -_handle_graph_query(plan, session_id, on_update) tuple
+        -_handle_plan_and_act(plan, session_id, on_update) tuple
+        -_handle_multi_intent(plan, session_id, on_update) tuple
+        -_handle_widget_build(plan, session_id, on_update) tuple
     }
 
     class PlanExecutor {
@@ -223,26 +310,29 @@ classDiagram
         +extra: dict
     }
 
-    class AgentOrchestrator {
-        +db: WorkspaceStorage
-        +app_manager: AppManager
-        +context_manager: ContextManager
-        +run_opencode_agent_acp_fn: function
-        +handle_message(session_id: str, content: str, on_update: Callable) tuple
-        -_run_callback(callback: Callable, data: Any) void
-        -_handle_graph_mutation(plan, session_id, on_update) tuple
-        -_handle_graph_query(plan, session_id, on_update) tuple
-        -_handle_plan_and_act(plan, session_id, on_update) tuple
-        -_handle_multi_intent(plan, session_id, on_update) tuple
-        -_handle_widget_build(plan, session_id, on_update) tuple
+    class MutationTicketManager {
+        +record(session_id, forward_actions, snapshot_before) MutationTicket
+        +pin(session_id, ticket_id) bool
+        +rollback(session_id, ticket_id) List~dict~
+        +get(session_id, ticket_id) MutationTicket
     }
 
-    class PromptManager {
-        +prompts_dir: Path
-        +env: Environment
-        +get_prompt(template_name, kwargs) str
+    class LLMService {
+        +generate_agent_response(messages: List~dict~) str
+        +call_llm_api(provider: str, model: str, messages: List~dict~, tools: List~dict~|None) dict
     }
 
+    PlanExecutor <|-- CodingPlanExecutor
+    PlanExecutor <|-- MutationPlanExecutor
+    MutationPlanExecutor --> MutationTicketManager : records rollback tickets
+```
+
+### 1.6 External Integration & MCP Module (Detail - MCP & Integration)
+
+Launches, caches, and routes JSON-RPC 2.0 requests to local Model Context Protocol (MCP) CLI processes:
+
+```mermaid
+classDiagram
     class StdioJsonRpcClient {
         +command: list~str~
         +args: list~str~
@@ -277,35 +367,7 @@ classDiagram
         +shutdown() void
     }
 
-    ChatSession "1" --* "0..*" ChatMessage : contains
-    ContextManager --> AppManager : references
-    AppManager --> AppRecordStore : persists lifecycle timestamps
-    ContextManager --> ChatMessage : queries database
-    AgentOrchestrator --> ContextManager : constructs message history
-    AgentOrchestrator --> AppManager : references
-    AgentOrchestrator --> AgentParser : extracts XML widgets
-    AgentOrchestrator --> PromptManager : loads system prompt
-    AgentOrchestrator --> IntentRouter : classifies user intent (LLM #1)
-    AgentOrchestrator --> IntentRouter : refines sub_intents (LLM #2)
-    AgentOrchestrator --> PlanExecutor : dispatches to coding/mutation
-    AgentOrchestrator --> WidgetDAG : widget build pipeline
-    AgentOrchestrator --> SchemaVerificationService : structured schema diff
-    IntentRouter --> IntentPlan : returns structured plan
-    IntentRouter --> RouterContext : consumed
-    RouterContext --> GraphSnapshot : embeds snapshot
-    IntentPlan --> IntentKind : kind is an enum value
-    IntentPlan --> SubIntent : 0..* sub_intents
-    SubIntent --> SubIntentKind : kind is an enum value
-    WidgetDAG --> TaskNode : 0..* registered tasks
-    TaskNode --> TaskResult : runs produce results
-    SchemaVerificationService --> VerificationDiff : returns structured diff
-    PlanExecutor <|-- CodingPlanExecutor
-    PlanExecutor <|-- MutationPlanExecutor
-    MutationPlanExecutor --> MutationTicketManager : records rollback tickets
-    MutationTicketManager --> AgentOrchestrator : consumed in graph mutation paths
-    LLMService --> LLMAuditLog : writes prompt audit logs
     BackendManager --> StdioJsonRpcClient : manages MCP processes
-    BackendManager --> AppManifest : reads configuration
 ```
 
 ## 2. Core Modules Description
