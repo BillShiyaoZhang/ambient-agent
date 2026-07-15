@@ -225,7 +225,12 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
 
 
 def main():
-    uml_files = ["docs/architecture/uml.md", "docs/agent/harness.md"]
+    uml_files = [
+        "docs/architecture/uml.md",
+        "docs/agent/harness.md",
+        "docs/en/architecture/uml.md",
+        "docs/en/agent/harness.md"
+    ]
     mismatches = []
 
     print("Starting UML-Code contract verification...")

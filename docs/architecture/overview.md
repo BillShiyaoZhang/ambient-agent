@@ -1,186 +1,153 @@
-# Ambient Agent: Apps & Widgets System Architecture
+# 系统架构概述
 
-Ambient Agent is designed around a dynamic **GUI Widget (Canvas Workspace)** architecture. In this system, "Apps" refer to the dynamically-generated React-compatible **Mini App Cards (Widgets)**. This document outlines the architecture of these widgets, how the frontend and backend communicate, and the libraries/frameworks involved.
+Ambient Agent 围绕动态的 **GUI 卡片工作区 (Canvas Workspace)** 架构进行设计。系统中的“Apps”是指大模型动态生成的、兼容 React 的**微型交互卡片（Widgets）**。本页面概述了这些卡片小程序的总体架构、前后端连接方式以及所涉及的技术框架。
 
 ---
 
-## 1. System Overview Architecture
+## 1. 架构模块图
 
-This diagram shows how the frontend, backend, database layers, and external APIs are structured to support dynamic widgets.
+本图展示了前端、后端、数据库层以及外部 API 是如何协同工作的：
 
 ```mermaid
 graph TB
-    subgraph Frontend["Frontend (React 19 + TypeScript + Vite)"]
+    subgraph Frontend["前端 (React 19 + TypeScript + Vite)"]
         direction TB
-        App["App.tsx<br/>(Main Coordinator / State)"]
-        Canvas["DashboardCanvas.tsx<br/>(Grid Layout Canvas)"]
-        Sandbox["SandboxWidget.tsx<br/>(Sandboxed App Container)"]
-        WSClient["websocket.ts<br/>(Native WebSockets)"]
+        App["App.tsx<br/>(主控协调 / 状态管理)"]
+        Canvas["DashboardCanvas.tsx<br/>(网格画布工作区)"]
+        Sandbox["SandboxWidget.tsx<br/>(沙箱渲染容器)"]
+        WSClient["websocket.ts<br/>(原生 WebSocket 客户端)"]
     end
 
-    subgraph Backend["Backend (FastAPI + Uvicorn)"]
+    subgraph Backend["后端 (FastAPI + Uvicorn)"]
         direction TB
-        Main["main.py<br/>(ASGI Web & WS Server)"]
-        Orchestrator["AgentOrchestrator<br/>(Workspace & LLM Router)"]
-        Parser["AgentParser<br/>(XML XML-to-Widget Compiler)"]
-        AppMgr["AppManager<br/>(Widget Disk & Records Storage)"]
-        BackendMgr["BackendManager<br/>(MCP Daemon & SSE Proxy)"]
+        Main["main.py<br/>(ASGI Web 与 WebSocket 服务入口)"]
+        Orchestrator["AgentOrchestrator<br/>(智能体生命周期调度)"]
+        Parser["AgentParser<br/>(XML 动态代码解析器)"]
+        AppMgr["AppManager<br/>(卡片磁盘读写与元数据存储)"]
+        BackendMgr["BackendManager<br/>(MCP 守护进程与授权管理)"]
     end
 
-    subgraph Data["Data & Storage Layer"]
-        SQLiteDB[("SQLite graph.db<br/>(SQLModel Graph Storage)")]
-        DiskApps[("Local Filesystem<br/>(workspace/apps/{app_id}/*)")]
+    subgraph Data["数据与存储层"]
+        SQLiteDB[("SQLite graph.db<br/>(SQLModel 图数据库存储)")]
+        DiskApps[("本地磁盘目录<br/>(workspace/apps/{app_id}/*)")]
     end
 
-    subgraph External["External Integration"]
-        LLM["LLM Service<br/>(Ollama / MiniMax / OpenAI)"]
-        MCPServer["MCP Servers<br/>(Stdio CLI subprocesses)"]
+    subgraph External["外部集成服务"]
+        LLM["大模型 API 服务<br/>(Ollama / MiniMax / OpenAI)"]
+        MCPServer["MCP 服务端<br/>(命令行 stdio 子进程)"]
     end
 
-    %% Connections
+    %% 连接关系
     App --> Canvas
     Canvas --> Sandbox
     App <--> WSClient
     WSClient <-->|WebSocket: /ws/chat| Main
     
-    %% API Calls
-    Sandbox -->|HTTP POST: /api/graph/mutate| Main
-    Sandbox -->|HTTP GET: /api/apps/{app_id}| Main
+    %% API 调用
+    Sandbox -->|"HTTP POST: /api/graph/mutate"| Main
+    Sandbox -->|"HTTP GET: /api/apps/{app_id}"| Main
     
-    %% Backend Flow
+    %% 后端调用流
     Main <--> Orchestrator
     Orchestrator --> Parser
     Orchestrator --> AppMgr
     Main <--> BackendMgr
     
-    %% Database / Disk
-    AppMgr <-->|Read/Write HTML, CSS, JS| DiskApps
-    Main <-->|SQLModel ORM| SQLiteDB
-    BackendMgr <-->|JSON-RPC 2.0 via Stdio| MCPServer
-    Orchestrator <-->|HTTPS Client (httpx)| LLM
+    %% 数据库/磁盘交互
+    AppMgr <-->|读写卡片源码| DiskApps
+    Main <-->|SQLModel ORM 映射| SQLiteDB
+    BackendMgr <-->|"JSON-RPC 2.0 (stdio)"| MCPServer
+    Orchestrator <-->|"HTTPS 客户端 (httpx)"| LLM
 ```
 
 ---
 
-## 2. Dynamic Widget Lifecycle Flow
+## 2. 动态卡片生命周期序列
 
-This sequence diagram illustrates the lifecycle of a Widget, from user prompt, backend parsing, disk serialization, websocket distribution, frontend rendering, and user-initiated data mutation.
+本序列图描绘了 Widget 卡片的完整生命周期，包括用户输入、后端解析落盘、WebSocket 广播、前端沙箱挂载及后续的数据交互：
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User
-    participant FE as Frontend (React / SandboxWidget)
-    participant BE as Backend (FastAPI / AgentOrchestrator)
-    participant LLM as LLM Provider
-    participant DB as SQLite / Disk
+    actor User as 用户
+    participant FE as 前端 (React / SandboxWidget)
+    participant BE as 后端 (FastAPI / AgentOrchestrator)
+    participant LLM as 大语言模型
+    participant DB as SQLite 数据库 / 磁盘
 
-    %% Phase 1: Widget Creation
-    User->>FE: Inputs prompt: "Create a todo widget"
-    FE->>BE: Send chat message via WebSocket (/ws/chat)
-    BE->>LLM: Formulates context & calls Chat Completion API
-    LLM-->>BE: Returns response containing <ambient-widget> XML
-    BE->>BE: AgentParser extracts index.html, style.css, controller.js
-    BE->>DB: AppManager writes files to workspace/apps/{id}/
-    BE-->>FE: Broadcasts new widget metadata & updated canvas layout via WebSocket
+    %% 阶段 1：卡片生成
+    User->>FE: 输入：“创建一个待办列表卡片”
+    FE->>BE: 通过 WebSocket (/ws/chat) 发送对话消息
+    BE->>LLM: 组装上下文并调用 Chat Completion 接口
+    LLM-->>BE: 返回携带 <ambient-widget> XML 语法的流
+    BE->>BE: AgentParser 自动解析 HTML、CSS 和 JS 代码段
+    BE->>DB: AppManager 将源码文件写入本地磁盘目录
+    BE-->>FE: 通过 WebSocket 广播新卡片元数据并更新画布布局
     
-    %% Phase 2: Widget Rendering
-    FE->>FE: DashboardCanvas mounts SandboxWidget(id)
-    FE->>BE: GET /api/apps/{app_id} (retrieves HTML/CSS/JS)
-    BE-->>FE: Returns HTML, CSS, and JS contents
-    FE->>FE: scopes CSS to avoid style pollution
-    FE->>FE: mounts HTML elements into container
-    FE->>FE: executes JS using 'new Function("root", "ambient", ...)'
+    %% 阶段 2：卡片挂载渲染
+    FE->>FE: DashboardCanvas 挂载 SandboxWidget(id)
+    FE->>BE: 发起 GET /api/apps/{app_id} 获取源码文件
+    BE-->>FE: 返回文件源码内容
+    FE->>FE: 执行 CSS Scoping 隔离样式
+    FE->>FE: 将 HTML 挂载入独立的卡片 DOM 节点
+    FE->>FE: 通过 'new Function("root", "ambient", ...)' 安全沙箱执行 JS
     
-    %% Phase 3: Data Interaction & Subscriptions
-    FE->>BE: WS: graph_subscribe (queries todo nodes)
-    BE->>DB: SQLite: registers query subscription
-    DB-->>BE: Initial query result
-    BE-->>FE: Pushes query result over WS
-    FE->>FE: Renders tasks in widget
+    %% 阶段 3：数据交互与查询订阅
+    FE->>BE: WS: graph_subscribe (订阅 Task 类别数据)
+    BE->>DB: SQLite: 注册实时图查询订阅句柄
+    DB-->>BE: 返回首屏查询数据
+    BE-->>FE: 通过 WebSocket 推送查询数据
+    FE->>FE: 渲染卡片界面并展示待办数据
     
-    %% Phase 4: Mutation
-    User->>FE: Clicks "Complete" on widget task
-    FE->>BE: POST /api/graph/mutate (updates todo property)
-    BE->>DB: SQLite: updates node property
-    BE->>BE: Triggers update broadcast to all query subscribers
-    BE-->>FE: Pushes updated query result over WS
-    FE->>FE: Re-renders widget with completed status
+    %% 阶段 4：数据变更
+    User->>FE: 点击“完成待办”按钮
+    FE->>BE: 发送 POST /api/graph/mutate 变更请求
+    BE->>DB: SQLite: 事务修改节点属性 (completed=true)
+    BE->>BE: 检测到变更，触发关联订阅重跑与广播
+    BE-->>FE: 推送最新的查询结果数据
+    FE->>FE: 重新渲染局部视图，任务显示已完成
 ```
 
 ---
 
-## 3. Communication Channels
+## 3. 通信链路划分
 
-The connection between the Frontend and Backend relies on two main protocols:
+前后端在处理 Widget 卡片时使用两种通信协议协同：
 
-### A. WebSockets (URL: `ws://localhost:8000/ws/chat?session_id=...`)
-Designed for real-time bidirectional synchronization:
-*   **Chat stream**: Sends user inputs, broadcasts system and agent text streams to all clients in the session.
-*   **Canvas Sync**: Updates layout grids, widget additions, positions, and removal.
-*   **Graph Subscriptions**: Enables reactive UI updating. Widgets subscribe to SQL-like graph patterns (`ambient.graph.subscribe(query, callback)`), and updates are broadcast automatically when mutations occur.
-*   **MCP Operations**: Routes `mcp_call_tool` and `mcp_read_resource` messages. The backend acts as a coordinator, running local tools and sending the results back.
-*   **Agent Interaction**: Orchestrates inter-agent protocol messages through the socket (`ag_ui_message`).
+### A. 双向长连接 WebSockets (接口: `/ws/chat`)
+负责高实时、双向的数据流同步：
+*   **对话与布局同步**：广播用户的聊天消息、卡片在 Canvas 上被拖拽/缩放/固定后的网格布局设置。
+*   **响应式查询订阅**：卡片 JS 通过 `ambient.graph.subscribe()` 订阅的数据流均走此通道推送。
+*   **MCP 命令行回调**：当 Widget 通过 SDK 触发 MCP 调用时，后台在执行完子进程后通过 WS 发回响应。
 
-### B. REST HTTP APIs
-Used for transactional, file-based, or bulk data exchanges:
-*   `GET /api/apps`: Lists all registered Widgets in the workspace database.
-*   `GET /api/apps/{app_id}`: Retrieves the source assets (`index.html`, `style.css`, `controller.js`) for the sandboxed renderer.
-*   `DELETE /api/apps/{app_id}`: Uninstalls a widget and clears its assets from disk.
-*   `POST /api/graph/mutate`: Dispatches batches of graph transformations (nodes/edges creation, updates, and deletion).
+### B. 事务型 REST HTTP APIs
+处理结构化文件读取或非实时突发请求：
+*   `GET /api/apps` 与 `GET /api/apps/{app_id}`：拉取卡片列表或用于前端沙箱挂载读取的代码文件。
+*   `DELETE /api/apps/{app_id}`：卸载特定卡片并清理磁盘空间。
+*   `POST /api/graph/mutate`：原子事务型修改图数据库中的节点或关系边。
 
 ---
 
-## 4. Sandboxing & The `ambient` SDK
+## 4. 沙箱与 `ambient` 开发包
 
-To guarantee security, style isolation, and a clean local development experience, widgets run inside a **Custom JavaScript Sandboxed Environment** (`SandboxWidget.tsx`).
-
-### Scoping & Isolation
-*   **HTML Scope**: Widget HTML is rendered inside an isolated `div` container.
-*   **CSS Scope**: Scoped to the specific widget wrapper using a scoped container class (supported by Tailwind v4 utilities) to prevent styling from leaking to other components.
-*   **JS Scope**: Executed inside an isolated wrapper:
-    ```javascript
-    const runScript = new Function("root", "ambient", "fetch", widget.js);
-    runScript(contentEl, ambient, customFetch);
-    ```
-    *   `root`: Refers *only* to the widget's root container. Widgets are required to use `root.querySelector` to find elements.
-    *   `fetch`: A custom fetch proxy that intercepts external REST requests, caching them for 5 minutes (`CACHE_TTL = 300000ms`) to eliminate duplicated traffic across widget lifecycles.
-
-### SDK Capabilities (`ambient`)
-The sandbox passes the following `ambient` SDK methods to the widget's JavaScript scope:
-
-| API | Method / Namespace | Description | Communication Method |
-| :--- | :--- | :--- | :--- |
-| **Messaging** | `ambient.sendMessage(text)` | Sends a text chat query as the user | WebSocket (`type: "chat"`) |
-| **Layout** | `ambient.fullscreen()` | Expands the widget card into fullscreen layout | Local callback to Canvas |
-| | `ambient.minimize()` | Restores the widget card size | Local callback to Canvas |
-| **State** | `ambient.state.get(pointer)` | Fetches a value from local sandboxed state | Local state memory |
-| | `ambient.state.set(pointer, val)` | Updates sandboxed state and syncs with backend | WebSocket (`type: "ag_ui_message"`) |
-| | `ambient.state.onChange(p, cb)` | Subscribes to changes on a state key | Local event emitter |
-| **Graph DB** | `ambient.graph.subscribe(q, cb)` | Real-time reactive query subscription | WebSocket (`type: "graph_subscribe"`) |
-| | `ambient.graph.mutate(actions)` | Applies transactional changes to SQLite Graph DB | REST HTTP (`POST /api/graph/mutate`) |
-| **MCP** | `ambient.mcp.callTool(name, args)` | Invokes backend CLI tool capabilities | WebSocket (`type: "mcp_call_tool"`) |
-| | `ambient.mcp.readResource(uri)` | Reads backend data sources | WebSocket (`type: "mcp_read_resource"`) |
-| **Agent** | `ambient.agent.connect()` | Registers listeners for agent communication | WebSocket (`type: "ag_ui_message"`) |
-| | `ambient.agent.send(msg)` | Sends message payload to backend agent | WebSocket (`type: "ag_ui_message"`) |
+为保障系统安全与组件样式绝对隔离，所有 Widget 的交互逻辑均在前端 `SandboxWidget` 内部的容器沙箱中执行。有关沙箱编译机制与 `ambient` 提供的多维度数据交互 API，请参阅[沙箱隔离机制](/widgets/sandbox)及[ambient SDK 参考手册](/widgets/sdk)。
 
 ---
 
-## 5. Technology Stack & Frameworks
+## 5. 技术栈与所用框架
 
-The system relies on several modern frameworks and libraries:
+本系统基于以下现代开源技术栈构建：
 
-### Frontend Technologies
-1.  **React 19**: Modern core framework with component lifecycles, hooks, and Concurrent rendering.
-2.  **TypeScript**: Static typing for interface stability and robust client-side validation.
-3.  **Vite**: Fast bundling, Dev server, and hot module replacement.
-4.  **Tailwind CSS v4** (via `@tailwindcss/vite`): Styles utilities. Its custom `@utility` and component-scoped systems are leveraged for scoped widget aesthetics.
-5.  **Native WebSockets API**: Standard browser interface for real-time duplex data flow (no socket.io overhead).
+### 前端技术栈
+1.  **React 19**：现代核心前端框架，支持并发渲染与灵活的 Hooks 挂载。
+2.  **TypeScript**：强类型保障静态接口安全与逻辑推导。
+3.  **Vite**：闪电般快速的模块打包器与本地热重载开发服务器。
+4.  **Tailwind CSS v4**：样式实用类，通过 `@tailwindcss/vite` 在构建时自动编译出 scoped 卡片样式。
+5.  **原生 WebSockets API**：浏览器标准双向通信接口，避免了 socket.io 的冗余开销。
 
-### Backend Technologies
-1.  **FastAPI**: Highly performant, async Python framework serving both HTTP endpoints and WebSocket protocol handlers.
-2.  **Uvicorn**: Lightning-fast ASGI web server implementation.
-3.  **SQLModel (SQLAlchemy + Pydantic)**: Modern SQL mapper for Python. Facilitates SQLite interaction for both Chat Session logs and Graph DB entities while providing native Pydantic data validation.
-4.  **Jinja2**: Backend prompt formatting and contextual template assembly.
-5.  **HTTPX**: Asynchronous client used to interact with LLM providers (e.g. Ollama, MiniMax, OpenAI).
-6.  **Agent Client Protocol (ACP)**: Defines structured payloads for agent-to-agent and client-to-agent notifications.
+### 后端技术栈
+1.  **FastAPI**：超高性能的 Python 异步 Web/WebSocket 框架。
+2.  **Uvicorn**：轻量级 ASGI 服务器。
+3.  **SQLModel (SQLAlchemy + Pydantic)**：用于 SQLite 的 ORM 框架，完美兼容 Pydantic 的类型验证与对象关系映射。
+4.  **HTTPX**：用于与云端大模型或 Ollama 之间执行高效的异步 HTTP 请求通信。
+5.  **Agent Client Protocol (ACP)**：规范智能体协作与工具委派的数据契约。

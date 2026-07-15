@@ -52,7 +52,7 @@ MINIMAX_API_KEY=your-api-key
     ```
 7.  **进行端口转发（重要）**：
     如果 IDE 没有自动转发 8000 端口，请点击 VS Code 底部的 **Ports** 标签页，点击 **Add Port** 手动添加 `8000` 端口转发。
-8.  在浏览器中访问 [http://localhost:5173/](http://localhost:5173/) 即可开始体验。
+8.  在浏览器中访问 `http://localhost:5173/` 即可开始体验。
 
 ---
 
