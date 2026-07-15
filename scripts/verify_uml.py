@@ -39,6 +39,8 @@ CLASS_TO_FILE = {
     "WidgetDAG": "backend/agent/dag.py",
     "TaskNode": "backend/agent/dag.py",
     "TaskResult": "backend/agent/dag.py",
+    "BackendManager": "backend/backend_manager.py",
+    "StdioJsonRpcClient": "backend/backend_manager.py",
 }
 
 
@@ -223,7 +225,12 @@ def verify_flowchart_symbols(md_path: str) -> list[str]:
 
 
 def main():
-    uml_files = ["backend/UML.md", "backend/agent/harness.md"]
+    uml_files = [
+        "docs/architecture/uml.md",
+        "docs/agent/harness.md",
+        "docs/en/architecture/uml.md",
+        "docs/en/agent/harness.md",
+    ]
     mismatches = []
 
     print("Starting UML-Code contract verification...")

@@ -1,0 +1,80 @@
+/* Prevent languages, theme toggle, and social icons from collapsing into the "..." submenu */
+@media (min-width: 768px) {
+  /* Force language selector to stay in the navbar */
+  .VPNavBar .VPNavBarTranslations {
+    display: flex !important;
+  }
+  
+  /* Force theme switch (dark/light mode toggle) to stay in the navbar */
+  .VPNavBar .VPNavBarAppearance {
+    display: flex !important;
+  }
+  
+  /* Force social links (GitHub icon) to stay in the navbar */
+  .VPNavBar .VPNavBarSocialLinks {
+    display: flex !important;
+  }
+  
+  /* Completely hide the "..." (more dropdown) button */
+  .VPNavBar .VPNavBarExtra {
+    display: none !important;
+  }
+
+  /* Remove vertical divider lines in the navbar */
+  .translations::before,
+  .appearance::before,
+  .social-links::before,
+  .VPNavBarTranslations::before,
+  .VPNavBarAppearance::before,
+  .VPNavBarSocialLinks::before {
+    display: none !important;
+    content: none !important;
+    background-color: transparent !important;
+    width: 0 !important;
+  }
+}
+
+/* Sidebar Toggle Mechanics (Desktop Collapse/Expand) */
+@media (min-width: 960px) {
+  html.sidebar-collapsed .VPSidebar {
+    display: none !important;
+  }
+  html.sidebar-collapsed .VPContent {
+    --vp-sidebar-width: 0px !important;
+  }
+  html.sidebar-collapsed .VPLocalNav {
+    --vp-sidebar-width: 0px !important;
+  }
+}
+
+/* Swap "文档首页" (Nav Menu) and "搜索文档" (Search Box) positions */
+@media (min-width: 960px) {
+  .VPNavBar .content-body {
+    display: flex !important;
+  }
+  
+  /* Position Nav Menu on the left-center (immediately following the title and toggle button) */
+  .VPNavBarMenu {
+    order: 1 !important;
+    margin-right: auto !important; /* Push all subsequent items (Search + Tools) to the right side */
+  }
+  
+  /* Position Search Box on the right-center (left of the Language/Appearance switchers) */
+  .VPNavBarSearch {
+    order: 2 !important;
+    margin-left: 0 !important;
+    margin-right: 16px !important;
+  }
+  
+  .VPNavBarTranslations {
+    order: 3 !important;
+  }
+  
+  .VPNavBarAppearance {
+    order: 4 !important;
+  }
+  
+  .VPNavBarSocialLinks {
+    order: 5 !important;
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "ambient-agent-docs",
+  "version": "1.0.0",
+  "description": "Ambient Agent Documentation Site",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev --host 0.0.0.0 --port 5174",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "mermaid": "^10.9.0",
+    "vitepress": "^1.0.0",
+    "vitepress-mermaid": "^2.0.1"
+  }
+}
