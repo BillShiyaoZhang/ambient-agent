@@ -12,7 +12,7 @@ Shows the macro communication paths between the Frontend Canvas workspace, Backe
 graph TB
     Frontend["Frontend Canvas & Sandbox"] <-->|WebSocket: /ws/chat| Backend["Backend FastAPI Orchestrator"]
     Frontend -->|HTTP POST: /api/graph/mutate| Backend
-    Frontend -->|HTTP GET: /api/apps/{id}| Backend
+    Frontend -->|"HTTP GET: /api/apps/{id}"| Backend
     Backend <-->|SQLModel ORM| Data["Data & Storage (SQLite graph.db & Disk)"]
     Backend <-->|JSON-RPC / HTTPS| External["External Integration (MCP / LLM)"]
 ```
@@ -30,7 +30,7 @@ graph TB
     end
     WSClient <-->|/ws/chat| BE["Backend Server"]
     Sandbox -->|/api/graph/mutate| BE
-    Sandbox -->|/api/apps/{id}| BE
+    Sandbox -->|"/api/apps/{id}"| BE
 ```
 
 ### 3. Backend Subsystem Details (Detail - Backend)
