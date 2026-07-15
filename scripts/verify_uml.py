@@ -58,45 +58,53 @@ def parse_uml_classes(uml_path: str) -> dict[str, dict[str, any]]:
         print(f"Error: No mermaid blocks found in UML file: {uml_path}")
         sys.exit(1)
 
-    diagram = mermaid_blocks[0]
-
-    # Extract class ClassName { ... } blocks
-    class_blocks = re.findall(r"class\s+(\w+)\s*\{(.*?)\}", diagram, re.DOTALL)
-
     classes = {}
-    for class_name, block_content in class_blocks:
-        fields = set()
-        methods = set()
+    for diagram in mermaid_blocks:
+        # Check if it is a class diagram
+        if not re.search(r"^\s*classDiagram\b", diagram):
+            continue
 
-        # Parse members line-by-line
-        for line in block_content.splitlines():
-            line = line.strip()
-            if not line or line.startswith("<<"):
-                continue
-            # A line looks like: +id: str (PK) or +list_apps() List~dict~
-            # or #_log_to_db(...) void
-            is_public = True
-            member_str = line
-            if line.startswith("+"):
+        # Extract class ClassName { ... } blocks
+        class_blocks = re.findall(r"class\s+(\w+)\s*\{(.*?)\}", diagram, re.DOTALL)
+
+        for class_name, block_content in class_blocks:
+            fields = set()
+            methods = set()
+
+            # Parse members line-by-line
+            for line in block_content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("<<"):
+                    continue
+                # A line looks like: +id: str (PK) or +list_apps() List~dict~
+                # or #_log_to_db(...) void
                 is_public = True
-                member_str = line[1:].strip()
-            elif line.startswith("-") or line.startswith("#"):
-                is_public = False
-                member_str = line[1:].strip()
+                member_str = line
+                if line.startswith("+"):
+                    is_public = True
+                    member_str = line[1:].strip()
+                elif line.startswith("-") or line.startswith("#"):
+                    is_public = False
+                    member_str = line[1:].strip()
 
-            # Check if it is a method
-            if "(" in member_str:
-                name_match = re.match(r"^([a-zA-Z0-9_]+)\(", member_str)
-                if name_match:
-                    method_name = name_match.group(1)
-                    methods.add((method_name, is_public))
+                # Check if it is a method
+                if "(" in member_str:
+                    name_match = re.match(r"^([a-zA-Z0-9_]+)\(", member_str)
+                    if name_match:
+                        method_name = name_match.group(1)
+                        methods.add((method_name, is_public))
+                else:
+                    name_match = re.match(r"^([a-zA-Z0-9_]+)", member_str)
+                    if name_match:
+                        field_name = name_match.group(1)
+                        fields.add((field_name, is_public))
+
+            if class_name not in classes:
+                classes[class_name] = {"fields": fields, "methods": methods}
             else:
-                name_match = re.match(r"^([a-zA-Z0-9_]+)", member_str)
-                if name_match:
-                    field_name = name_match.group(1)
-                    fields.add((field_name, is_public))
+                classes[class_name]["fields"].update(fields)
+                classes[class_name]["methods"].update(methods)
 
-        classes[class_name] = {"fields": fields, "methods": methods}
     return classes
 
 

@@ -3,7 +3,7 @@ name: Deploy VitePress site to Pages
 on:
   push:
     branches:
-      - main
+      - docs/update-structure
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages

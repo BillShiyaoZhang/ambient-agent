@@ -2,60 +2,80 @@
 
 Ambient Agent 围绕动态的 **GUI 卡片工作区 (Canvas Workspace)** 架构进行设计。系统中的“Apps”是指大模型动态生成的、兼容 React 的**微型交互卡片（Widgets）**。本页面概述了这些卡片小程序的总体架构、前后端连接方式以及所涉及的技术框架。
 
-## 1. 架构模块图
+## 1. 架构模块图 (总-分结构)
 
-本图展示了前端、后端、数据库层以及外部 API 是如何协同工作的：
+为了更清晰地展示系统各模块的权责，我们将整体架构图拆分为系统宏观总览与各个子系统的细节视图。
+
+### 1.1 系统宏观架构总览 (总)
+
+展示了前端工作区、后端编排器、存储层与外部集成服务之间的宏观通信链路：
+
+```mermaid
+graph TB
+    Frontend["前端 Canvas & Sandbox"] <-->|WebSocket: /ws/chat| Backend["后端 FastAPI Orchestrator"]
+    Frontend -->|HTTP POST: /api/graph/mutate| Backend
+    Frontend -->|HTTP GET: /api/apps/{id}| Backend
+    Backend <-->|SQLModel ORM| Data["数据与存储层 (SQLite graph.db & 本地磁盘)"]
+    Backend <-->|JSON-RPC / HTTPS| External["外部集成 (MCP / LLM)"]
+```
+
+### 1.2 前端工作区与沙箱架构 (分 - 前端细节)
+
+展示前端主控制、画布网格以及隔离沙箱在渲染卡片时的层级与通信关系：
 
 ```mermaid
 graph TB
     subgraph Frontend["前端 (React 19 + TypeScript + Vite)"]
-        direction TB
-        App["App.tsx<br/>(主控协调 / 状态管理)"]
-        Canvas["DashboardCanvas.tsx<br/>(网格画布工作区)"]
-        Sandbox["SandboxWidget.tsx<br/>(沙箱渲染容器)"]
-        WSClient["websocket.ts<br/>(原生 WebSocket 客户端)"]
+        App["App.tsx<br/>(主控协调)"] --> Canvas["DashboardCanvas.tsx<br/>(画布工作区)"]
+        Canvas --> Sandbox["SandboxWidget.tsx<br/>(安全沙箱容器)"]
+        App <--> WSClient["websocket.ts<br/>(WebSocket 客户端)"]
     end
+    WSClient <-->|/ws/chat| BE["后端接口"]
+    Sandbox -->|/api/graph/mutate| BE
+    Sandbox -->|/api/apps/{id}| BE
+```
 
-    subgraph Backend["后端 (FastAPI + Uvicorn)"]
-        direction TB
-        Main["main.py<br/>(ASGI Web 与 WebSocket 服务入口)"]
-        Orchestrator["AgentOrchestrator<br/>(智能体生命周期调度)"]
-        Parser["AgentParser<br/>(XML 动态代码解析器)"]
-        AppMgr["AppManager<br/>(卡片磁盘读写与元数据存储)"]
-        BackendMgr["BackendManager<br/>(MCP 守护进程与授权管理)"]
+### 1.3 后端核心编排与执行流 (分 - 后端细节)
+
+展示后端 WebSocket 连接分发、生命周期编排器以及动态解析编译的层级关系：
+
+```mermaid
+graph TB
+    subgraph Backend["后端 (FastAPI)"]
+        Main["main.py<br/>(Web & WS 入口)"] <--> Orchestrator["AgentOrchestrator<br/>(编排调度)"]
+        Orchestrator --> Parser["AgentParser<br/>(XML 动态代码解析)"]
+        Orchestrator --> AppMgr["AppManager<br/>(卡片磁盘读写)"]
+        Main <--> BackendMgr["BackendManager<br/>(MCP 守护进程与授权)"]
     end
+    FE["前端 WebSocket"] <-->|/ws/chat| Main
+    Orchestrator <-->|HTTPS| LLM["外部 LLM 服务"]
+    BackendMgr <-->|stdio| MCP["MCP 服务端"]
+```
 
+### 1.4 数据存储与外部集成 (分 - 存储与外设集成细节)
+
+展示后端服务如何读写磁盘/数据库，以及如何集成外部大语言模型与 MCP 工具服务：
+
+```mermaid
+graph TB
+    subgraph Backend["后端核心服务"]
+        AppMgr["AppManager"]
+        Main["main.py / WS"]
+        BackendMgr["BackendManager"]
+        Orchestrator["AgentOrchestrator"]
+    end
     subgraph Data["数据与存储层"]
-        SQLiteDB[("SQLite graph.db<br/>(SQLModel 图数据库存储)")]
+        SQLiteDB[("SQLite graph.db<br/>(图数据库存储)")]
         DiskApps[("本地磁盘目录<br/>(workspace/apps/{app_id}/*)")]
     end
-
     subgraph External["外部集成服务"]
         LLM["大模型 API 服务<br/>(Ollama / MiniMax / OpenAI)"]
         MCPServer["MCP 服务端<br/>(命令行 stdio 子进程)"]
     end
-
-    %% 连接关系
-    App --> Canvas
-    Canvas --> Sandbox
-    App <--> WSClient
-    WSClient <-->|WebSocket: /ws/chat| Main
-
-    %% API 调用
-    Sandbox -->|"HTTP POST: /api/graph/mutate"| Main
-    Sandbox -->|"HTTP GET: /api/apps/{app_id}"| Main
-
-    %% 后端调用流
-    Main <--> Orchestrator
-    Orchestrator --> Parser
-    Orchestrator --> AppMgr
-    Main <--> BackendMgr
-
-    %% 数据库/磁盘交互
     AppMgr <-->|读写卡片源码| DiskApps
     Main <-->|SQLModel ORM 映射| SQLiteDB
-    BackendMgr <-->|"JSON-RPC 2.0 (stdio)"| MCPServer
-    Orchestrator <-->|"HTTPS 客户端 (httpx)"| LLM
+    BackendMgr <-->|JSON-RPC 2.0 stdio| MCPServer
+    Orchestrator <-->|HTTPS 客户端 httpx| LLM
 ```
 
 ## 2. 动态卡片生命周期序列
@@ -126,7 +146,7 @@ sequenceDiagram
 
 ## 4. 沙箱与 `ambient` 开发包
 
-为保障系统安全与组件样式绝对隔离，所有 Widget 的交互逻辑均在前端 `SandboxWidget` 内部的容器沙箱中执行。有关沙箱编译机制与 `ambient` 提供的多维度数据交互 API，请参阅[沙箱隔离机制](/widgets/sandbox)及[ambient SDK 参考手册](/widgets/sdk)。
+为保障系统安全与组件样式绝对隔离，所有 Widget 的交互逻辑均在前端 `SandboxWidget` 内部的容器沙箱中执行。有关 Widget (Apps) 的 UI/Controller/Data 架构设计，请参见[Widget 应用架构设计](/architecture/apps.md)。有关沙箱编译机制与 `ambient` 提供的多维度数据交互 API，请参阅[沙箱隔离机制](/widgets/sandbox)及[ambient SDK 参考手册](/widgets/sdk)。
 
 ## 5. 技术栈与所用框架
 
