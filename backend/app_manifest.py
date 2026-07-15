@@ -41,7 +41,7 @@ _WINDOWS_RESERVED_NAMES = {
     "nul",
     "prn",
 }
-_FIELDS = {
+_REQUIRED_FIELDS = {
     "manifest_version",
     "id",
     "title",
@@ -50,6 +50,13 @@ _FIELDS = {
     "intents",
     "schema_refs",
 }
+_OPTIONAL_FIELDS = {
+    "backend_type",
+    "mcp_server",
+    "agent_url",
+}
+_FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
+
 
 
 class ManifestValidationError(ValueError):
@@ -89,6 +96,49 @@ def _validate_string_list(field: str, value: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _validate_backend_type(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ManifestValidationError("backend_type must be a string")
+    if value not in ("code", "agent", "mcp"):
+        raise ManifestValidationError("backend_type must be one of 'code', 'agent', 'mcp'")
+    return value
+
+
+def _validate_mcp_server(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("mcp_server must be a JSON object")
+    if "command" not in value:
+        raise ManifestValidationError("mcp_server must contain a 'command' field")
+    command = value["command"]
+    if not isinstance(command, list) or not command:
+        raise ManifestValidationError("mcp_server command must be a non-empty array of strings")
+    for item in command:
+        if not isinstance(item, str) or not item.strip():
+            raise ManifestValidationError("mcp_server command items must be non-empty strings")
+    
+    args = value.get("args", [])
+    if not isinstance(args, list):
+        raise ManifestValidationError("mcp_server args must be an array of strings")
+    for item in args:
+        if not isinstance(item, str):
+            raise ManifestValidationError("mcp_server args items must be strings")
+            
+    env = value.get("env", {})
+    if not isinstance(env, dict):
+        raise ManifestValidationError("mcp_server env must be a JSON object")
+    for k, v in env.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise ManifestValidationError("mcp_server env keys and values must be strings")
+            
+    return {
+        "command": [str(c).strip() for c in command],
+        "args": [str(a) for a in args],
+        "env": {str(k): str(v) for k, v in env.items()}
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class AppManifest:
     manifest_version: int
@@ -98,13 +148,17 @@ class AppManifest:
     app_version: str
     intents: tuple[str, ...]
     schema_refs: tuple[str, ...]
+    backend_type: str = "code"
+    mcp_server: dict[str, Any] | None = None
+    agent_url: str | None = None
+
 
     @classmethod
     def from_dict(cls, data: Any, *, expected_app_id: str) -> "AppManifest":
         if not isinstance(data, dict):
             raise ManifestValidationError("manifest must be a JSON object")
         unknown = set(data) - _FIELDS
-        missing = _FIELDS - set(data)
+        missing = _REQUIRED_FIELDS - set(data)
         if unknown:
             raise ManifestValidationError(f"manifest contains unknown fields: {', '.join(sorted(unknown))}")
         if missing:
@@ -115,6 +169,12 @@ class AppManifest:
         app_id = validate_app_id(data["id"])
         if app_id != expected_app_id:
             raise ManifestValidationError("manifest id must match its App directory name")
+
+        backend_type = _validate_backend_type(data.get("backend_type", "code"))
+        mcp_server = _validate_mcp_server(data.get("mcp_server"))
+        agent_url = data.get("agent_url")
+        if agent_url is not None:
+            agent_url = _validate_text("agent_url", agent_url, allow_empty=False, max_length=1000)
 
         return cls(
             manifest_version=APP_MANIFEST_VERSION,
@@ -128,6 +188,9 @@ class AppManifest:
             ),
             intents=_validate_string_list("intents", data["intents"]),
             schema_refs=_validate_string_list("schema_refs", data["schema_refs"]),
+            backend_type=backend_type,
+            mcp_server=mcp_server,
+            agent_url=agent_url,
         )
 
     @classmethod
@@ -144,7 +207,7 @@ class AppManifest:
         return cls.from_dict(data, expected_app_id=expected_app_id)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "manifest_version": self.manifest_version,
             "id": self.id,
             "title": self.title,
@@ -153,6 +216,13 @@ class AppManifest:
             "intents": list(self.intents),
             "schema_refs": list(self.schema_refs),
         }
+        if self.backend_type != "code":
+            result["backend_type"] = self.backend_type
+        if self.mcp_server is not None:
+            result["mcp_server"] = self.mcp_server
+        if self.agent_url is not None:
+            result["agent_url"] = self.agent_url
+        return result
 
     def write_atomic(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

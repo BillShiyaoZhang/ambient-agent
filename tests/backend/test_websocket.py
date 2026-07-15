@@ -156,3 +156,91 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         assert status_idle["status"] == "idle"
 
     app.dependency_overrides.clear()
+
+
+def test_websocket_mcp_call_flow(test_session, monkeypatch):
+    # Override get_db dependency
+    def override_get_db():
+        yield test_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    # Create a mock app in app_manager
+    from backend.app_manifest import AppManifest
+    manifest = AppManifest(
+        manifest_version=1,
+        id="mcp-app",
+        title="MCP App",
+        description="",
+        app_version="0.1.0",
+        intents=(),
+        schema_refs=(),
+        backend_type="mcp",
+        mcp_server={
+            "command": ["python"],
+            "args": ["-m", "echo"]
+        }
+    )
+    
+    # Mock get_manifest call
+    def mock_get_manifest(app_id):
+        if app_id == "mcp-app":
+            return manifest
+        return None
+    
+    monkeypatch.setattr(app_manager, "get_manifest", mock_get_manifest)
+
+    # Mock the StdioJsonRpcClient to prevent spawning actual python command
+    class MockClient:
+        async def call(self, method, params):
+            return {"echo": params}
+
+    # Retrieve backend_manager instance
+    from backend.main import backend_manager
+
+    async def mock_get_or_start_mcp_client(app_id, manifest, send_ws_message_func):
+        # Trigger permission request to verify that flow works
+        approved = await backend_manager.request_permission(
+            app_id, "mcp_spawn", {"command": manifest.mcp_server["command"], "args": manifest.mcp_server["args"]}, send_ws_message_func
+        )
+        if not approved:
+            raise Exception("Denied")
+        return MockClient()
+
+    monkeypatch.setattr(backend_manager, "get_or_start_mcp_client", mock_get_or_start_mcp_client)
+
+    client = TestClient(app)
+    with client.websocket_connect("/ws/chat") as websocket:
+        active_list = websocket.receive_json()
+        assert active_list["type"] == "active_sessions_list"
+
+        # Send mcp_call_tool message
+        websocket.send_json({
+            "type": "mcp_call_tool",
+            "app_id": "mcp-app",
+            "name": "test_tool",
+            "arguments": {"x": 1},
+            "call_id": "call-123"
+        })
+
+        # Expect permission request message
+        perm_req = websocket.receive_json()
+        assert perm_req["type"] == "backend_permission_request"
+        assert perm_req["permission_type"] == "mcp_spawn"
+        request_id = perm_req["request_id"]
+
+        # Respond to permission request
+        websocket.send_json({
+            "type": "backend_permission_response",
+            "request_id": request_id,
+            "approved": True
+        })
+
+        # Expect mcp_call_response message
+        call_res = websocket.receive_json()
+        assert call_res["type"] == "mcp_call_response"
+        assert call_res["call_id"] == "call-123"
+        assert call_res["result"] == {"echo": {"name": "test_tool", "arguments": {"x": 1}}}
+
+    app.dependency_overrides.clear()
+

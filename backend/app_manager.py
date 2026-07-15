@@ -338,6 +338,22 @@ class AppManager:
             metadata_path = app_path / "metadata.json"
             self._schedule_metadata_cleanup(transaction, metadata_path)
 
+    def get_manifest(self, app_id: str) -> AppManifest | None:
+        self._reconcile_pending_deletions()
+        try:
+            app_path = self._get_app_path(app_id)
+        except ValueError:
+            return None
+        with self._record_store.serialized() as transaction:
+            try:
+                result = self._read_or_migrate_manifest(transaction, app_id, app_path)
+                if result is None:
+                    return None
+                manifest, _ = result
+                return manifest
+            except (OSError, UnicodeError, ManifestValidationError):
+                return None
+
     def get_app_files(self, app_id: str) -> dict[str, Any] | None:
         self._reconcile_pending_deletions()
         app_path = self._get_app_path(app_id)

@@ -131,6 +131,9 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
 
     const API_BASE = `http://${window.location.hostname}:8000`;
 
+    const agentListeners: { [eventType: string]: Function[] } = {};
+    const legacyState: any = {};
+
     // 4. Construct ambient SDK (excluding deprecated standard UI components)
     const ambient = {
       sendMessage: (text: string) => {
@@ -184,6 +187,129 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           });
           if (!res.ok) throw new Error("Failed to mutate graph");
           return res.json();
+        }
+      },
+      agent: {
+        connect: () => {
+          const eventName = `ag_ui_event:${widget.id}`;
+          const handler = (e: Event) => {
+            const ev = (e as CustomEvent).detail;
+            const type = ev.type;
+            if (type === "STATE_SNAPSHOT") {
+              Object.assign(legacyState, ev.state || {});
+            } else if (type === "STATE_DELTA") {
+              if (ev.state) {
+                Object.assign(legacyState, ev.state);
+              }
+            }
+            if (agentListeners[type]) {
+              agentListeners[type].forEach((cb) => cb(ev));
+            }
+            if (agentListeners["*"]) {
+              agentListeners["*"].forEach((cb) => cb(ev));
+            }
+          };
+          window.addEventListener(eventName, handler);
+          customListeners.push({ event: eventName, handler });
+
+          wsService.sendMessage({
+            type: "ag_ui_message",
+            app_id: widget.id,
+            message: { type: "connect" }
+          });
+
+          return () => {
+            window.removeEventListener(eventName, handler);
+            const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+            if (idx !== -1) customListeners.splice(idx, 1);
+          };
+        },
+        send: (msg: any) => {
+          wsService.sendMessage({
+            type: "ag_ui_message",
+            app_id: widget.id,
+            message: msg
+          });
+        },
+        on: (eventType: string, callback: Function) => {
+          if (!agentListeners[eventType]) {
+            agentListeners[eventType] = [];
+          }
+          agentListeners[eventType].push(callback);
+          return () => {
+            agentListeners[eventType] = agentListeners[eventType].filter((cb) => cb !== callback);
+          };
+        },
+        state: {
+          get: (pointer: string) => getValueByPointer(legacyState, pointer),
+          set: (pointer: string, val: any) => {
+            setValueByPointer(legacyState, pointer, val);
+            wsService.sendMessage({
+              type: "ag_ui_message",
+              app_id: widget.id,
+              message: {
+                type: "STATE_DELTA",
+                delta: { [pointer]: val }
+              }
+            });
+          }
+        }
+      },
+      mcp: {
+        callTool: (name: string, args: any) => {
+          return new Promise((resolve, reject) => {
+            const callId = `call-${Math.random().toString(36).substring(2, 11)}`;
+            const eventName = `mcp_call_response:${widget.id}:${callId}`;
+            const handler = (e: Event) => {
+              window.removeEventListener(eventName, handler);
+              const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+              if (idx !== -1) customListeners.splice(idx, 1);
+              
+              const resData = (e as CustomEvent).detail;
+              if (resData.error) {
+                reject(new Error(resData.error));
+              } else {
+                resolve(resData.result);
+              }
+            };
+            window.addEventListener(eventName, handler);
+            customListeners.push({ event: eventName, handler });
+
+            wsService.sendMessage({
+              type: "mcp_call_tool",
+              app_id: widget.id,
+              call_id: callId,
+              name: name,
+              arguments: args
+            });
+          });
+        },
+        readResource: (uri: string) => {
+          return new Promise((resolve, reject) => {
+            const callId = `call-${Math.random().toString(36).substring(2, 11)}`;
+            const eventName = `mcp_read_response:${widget.id}:${callId}`;
+            const handler = (e: Event) => {
+              window.removeEventListener(eventName, handler);
+              const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+              if (idx !== -1) customListeners.splice(idx, 1);
+              
+              const resData = (e as CustomEvent).detail;
+              if (resData.error) {
+                reject(new Error(resData.error));
+              } else {
+                resolve(resData.result);
+              }
+            };
+            window.addEventListener(eventName, handler);
+            customListeners.push({ event: eventName, handler });
+
+            wsService.sendMessage({
+              type: "mcp_read_resource",
+              app_id: widget.id,
+              call_id: callId,
+              uri: uri
+            });
+          });
         }
       }
     };
@@ -285,6 +411,8 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
       }
     };
 
+    const agentListeners: { [eventType: string]: Function[] } = {};
+
     // 3. Build SDK Context
     const ambient = {
       sendMessage: (text: string) => {
@@ -340,6 +468,129 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           });
           if (!res.ok) throw new Error("Failed to mutate graph");
           return res.json();
+        }
+      },
+      agent: {
+        connect: () => {
+          const eventName = `ag_ui_event:${widget.id}`;
+          const handler = (e: Event) => {
+            const ev = (e as CustomEvent).detail;
+            const type = ev.type;
+            if (type === "STATE_SNAPSHOT") {
+              setLocalState(ev.state || {});
+            } else if (type === "STATE_DELTA") {
+              if (ev.state) {
+                setLocalState((prev: any) => ({ ...prev, ...ev.state }));
+              }
+            }
+            if (agentListeners[type]) {
+              agentListeners[type].forEach((cb) => cb(ev));
+            }
+            if (agentListeners["*"]) {
+              agentListeners["*"].forEach((cb) => cb(ev));
+            }
+          };
+          window.addEventListener(eventName, handler);
+          customListeners.push({ event: eventName, handler });
+
+          wsService.sendMessage({
+            type: "ag_ui_message",
+            app_id: widget.id,
+            message: { type: "connect" }
+          });
+
+          return () => {
+            window.removeEventListener(eventName, handler);
+            const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+            if (idx !== -1) customListeners.splice(idx, 1);
+          };
+        },
+        send: (msg: any) => {
+          wsService.sendMessage({
+            type: "ag_ui_message",
+            app_id: widget.id,
+            message: msg
+          });
+        },
+        on: (eventType: string, callback: Function) => {
+          if (!agentListeners[eventType]) {
+            agentListeners[eventType] = [];
+          }
+          agentListeners[eventType].push(callback);
+          return () => {
+            agentListeners[eventType] = agentListeners[eventType].filter((cb) => cb !== callback);
+          };
+        },
+        state: {
+          get: (pointer: string) => stateSDK.get(pointer),
+          set: (pointer: string, val: any) => {
+            stateSDK.set(pointer, val);
+            wsService.sendMessage({
+              type: "ag_ui_message",
+              app_id: widget.id,
+              message: {
+                type: "STATE_DELTA",
+                delta: { [pointer]: val }
+              }
+            });
+          }
+        }
+      },
+      mcp: {
+        callTool: (name: string, args: any) => {
+          return new Promise((resolve, reject) => {
+            const callId = `call-${Math.random().toString(36).substring(2, 11)}`;
+            const eventName = `mcp_call_response:${widget.id}:${callId}`;
+            const handler = (e: Event) => {
+              window.removeEventListener(eventName, handler);
+              const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+              if (idx !== -1) customListeners.splice(idx, 1);
+              
+              const resData = (e as CustomEvent).detail;
+              if (resData.error) {
+                reject(new Error(resData.error));
+              } else {
+                resolve(resData.result);
+              }
+            };
+            window.addEventListener(eventName, handler);
+            customListeners.push({ event: eventName, handler });
+
+            wsService.sendMessage({
+              type: "mcp_call_tool",
+              app_id: widget.id,
+              call_id: callId,
+              name: name,
+              arguments: args
+            });
+          });
+        },
+        readResource: (uri: string) => {
+          return new Promise((resolve, reject) => {
+            const callId = `call-${Math.random().toString(36).substring(2, 11)}`;
+            const eventName = `mcp_read_response:${widget.id}:${callId}`;
+            const handler = (e: Event) => {
+              window.removeEventListener(eventName, handler);
+              const idx = customListeners.findIndex(l => l.event === eventName && l.handler === handler);
+              if (idx !== -1) customListeners.splice(idx, 1);
+              
+              const resData = (e as CustomEvent).detail;
+              if (resData.error) {
+                reject(new Error(resData.error));
+              } else {
+                resolve(resData.result);
+              }
+            };
+            window.addEventListener(eventName, handler);
+            customListeners.push({ event: eventName, handler });
+
+            wsService.sendMessage({
+              type: "mcp_read_resource",
+              app_id: widget.id,
+              call_id: callId,
+              uri: uri
+            });
+          });
         }
       }
     };

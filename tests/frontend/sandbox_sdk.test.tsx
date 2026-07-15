@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, act } from "@testing-library/react";
 import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
 import { Widget } from "../../frontend/src/components/DashboardCanvas";
 import wsService from "../../frontend/src/services/websocket";
@@ -142,6 +142,94 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
           body: JSON.stringify({ actions }),
         })
       );
+    });
+  });
+
+  it("should support ambient.mcp.callTool and resolve promise on WebSocket response", async () => {
+    const mockWidget: Widget = {
+      id: "mcp-widget-test",
+      title: "MCP Widget Test",
+      html: '<div id="output" data-testid="output">No Data</div>',
+      css: "",
+      js: `
+        ambient.mcp.callTool("calc", { x: 5, y: 10 }).then((res) => {
+          root.querySelector("#output").textContent = JSON.stringify(res);
+        });
+      `,
+    };
+
+    render(<SandboxWidget widget={mockWidget} />);
+
+    // Intercept WebSocket message to get the auto-generated callId
+    expect(wsService.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "mcp_call_tool",
+        name: "calc",
+        arguments: { x: 5, y: 10 },
+      })
+    );
+
+    // Retrieve the callId from the mock implementation call history
+    const calls = (wsService.sendMessage as any).mock.calls;
+    const mcpCall = calls.find((c: any) => c[0].type === "mcp_call_tool");
+    expect(mcpCall).toBeDefined();
+    const callIdCaptured = mcpCall[0].call_id;
+
+    // Simulate WS response
+    const eventName = `mcp_call_response:mcp-widget-test:${callIdCaptured}`;
+    window.dispatchEvent(
+      new CustomEvent(eventName, {
+        detail: { result: { sum: 15 } },
+      })
+    );
+
+    await waitFor(() => {
+      const output = screen.getByTestId("output");
+      expect(output.textContent).toBe(JSON.stringify({ sum: 15 }));
+    });
+  });
+
+  it("should support ambient.agent.connect and receive state snapshots", async () => {
+    const mockWidget: Widget = {
+      id: "agent-widget-test",
+      title: "Agent Widget Test",
+      layout: JSON.stringify([
+        {
+          id: "root",
+          type: "Text",
+          props: { text: { binding: "/agent_status" } }
+        }
+      ]),
+      js: `
+        const unsubscribe = ambient.agent.connect();
+      `,
+    };
+
+    render(<SandboxWidget widget={mockWidget} />);
+
+    expect(wsService.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "ag_ui_message",
+        app_id: "agent-widget-test",
+        message: { type: "connect" },
+      })
+    );
+
+    // Simulate ag_ui_event representing STATE_SNAPSHOT
+    const eventName = `ag_ui_event:agent-widget-test`;
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(eventName, {
+          detail: {
+            type: "STATE_SNAPSHOT",
+            state: { agent_status: "Agent is thinking..." }
+          },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Agent is thinking...")).toBeDefined();
     });
   });
 });
