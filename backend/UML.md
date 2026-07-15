@@ -37,6 +37,7 @@ classDiagram
         +get_app_files(app_id: str) dict
         +list_apps() List~dict~
         +delete_app(app_id: str) bool
+        +get_manifest(app_id: str) AppManifest|None
     }
 
     class AppRecordStore {
@@ -242,6 +243,40 @@ classDiagram
         +get_prompt(template_name, kwargs) str
     }
 
+    class StdioJsonRpcClient {
+        +command: list~str~
+        +args: list~str~
+        +env: dict~str, str~|None
+        +process: Process|None
+        +read_task: Task|None
+        +pending_requests: dict
+        +next_id: int
+        +lock: Lock
+        +start() void
+        -read_loop() void
+        +call(method: str, params: dict) Any
+        +stop() void
+    }
+
+    class BackendManager {
+        +workspace_dir: str
+        +permissions_file: Path
+        +mcp_clients: dict~str, StdioJsonRpcClient~
+        +pending_permissions: dict
+        +permissions: dict
+        -load_permissions() void
+        -save_permissions() void
+        +is_mcp_approved(app_id: str, command: list~str~, args: list~str~) bool
+        +approve_mcp(app_id: str, command: list~str~, args: list~str~) void
+        +is_agent_approved(app_id: str, agent_url: str) bool
+        +approve_agent(app_id: str, agent_url: str) void
+        +resolve_permission(request_id: str, approved: bool) void
+        +request_permission(app_id: str, permission_type: str, value: dict|str, send_ws_message_func: Callable) bool
+        +get_or_start_mcp_client(app_id: str, manifest: AppManifest, send_ws_message_func: Callable) StdioJsonRpcClient|None
+        +handle_agent_message(app_id: str, manifest: AppManifest, message: dict, send_ws_message_func: Callable) void
+        +shutdown() void
+    }
+
     ChatSession "1" --* "0..*" ChatMessage : contains
     ContextManager --> AppManager : references
     AppManager --> AppRecordStore : persists lifecycle timestamps
@@ -269,6 +304,8 @@ classDiagram
     MutationPlanExecutor --> MutationTicketManager : records rollback tickets
     MutationTicketManager --> AgentOrchestrator : consumed in graph mutation paths
     LLMService --> LLMAuditLog : writes prompt audit logs
+    BackendManager --> StdioJsonRpcClient : manages MCP processes
+    BackendManager --> AppManifest : reads configuration
 ```
 
 ## 2. 核心模块说明
@@ -298,3 +335,8 @@ classDiagram
 ### 2.3 实时多端同步层 (`main.py` WebSocket)
 *   通过长连接管理不同的 Session 连接。
 *   一端发送消息时，服务端接收并广播给同一 `session_id` 的所有客户端，实现多端画布、对话气泡的强实时一致性同步。
+
+### 2.4 后端服务代理层 (`backend_manager.py`)
+*   **StdioJsonRpcClient**: 负责通过 stdio 与外部启动的 MCP 命令行子进程进行 JSON-RPC 2.0 通信，提供异步的工具调用及资源读取接口。
+*   **BackendManager**: 统筹协调外部服务连接。负责按需启动并缓存 MCP 子进程、与外部 Agent URL 执行 SSE 事件流式代理、管理以及持久化用户针对敏感后端操作（启动 MCP 命令或连接 Agent URL）的授权配置（存储在 `workspace/backend_permissions.json`）。
+

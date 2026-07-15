@@ -39,6 +39,8 @@ CLASS_TO_FILE = {
     "WidgetDAG": "backend/agent/dag.py",
     "TaskNode": "backend/agent/dag.py",
     "TaskResult": "backend/agent/dag.py",
+    "BackendManager": "backend/backend_manager.py",
+    "StdioJsonRpcClient": "backend/backend_manager.py",
 }
 
 

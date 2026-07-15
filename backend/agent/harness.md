@@ -199,6 +199,7 @@ classDiagram
         +list_apps() List
         +get_app_files(app_id) Dict
         +create_or_update_app(app_id, title, html, css, js, kwargs) void
+        +get_manifest(app_id) AppManifest|None
     }
 
     class PromptManager {
