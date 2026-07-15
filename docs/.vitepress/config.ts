@@ -1,6 +1,6 @@
-import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-mermaid'
 
-export default defineConfig({
+export default withMermaid({
   title: "Ambient Agent",
   description: "An open-source, self-hostable personal AI assistant framework with Widget GUI workspace.",
   base: process.env.GITHUB_ACTIONS ? '/ambient-agent/' : '/', // Auto-fallback for GitHub Actions deployment

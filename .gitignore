@@ -163,3 +163,7 @@ backend/apps/
 # Local Workspace and Backups
 workspace/
 *.backup
+
+# VitePress
+docs/.vitepress/dist/
+docs/.vitepress/cache/
