@@ -229,7 +229,7 @@ def main():
         "docs/architecture/uml.md",
         "docs/agent/harness.md",
         "docs/en/architecture/uml.md",
-        "docs/en/agent/harness.md"
+        "docs/en/agent/harness.md",
     ]
     mismatches = []
 
