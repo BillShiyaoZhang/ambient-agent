@@ -78,17 +78,30 @@ class ContextManager:
         for app_id in app_ids:
             app_files = self.app_manager.get_app_files(app_id)
             if app_files:
-                active_apps_context.append(
-                    f"[Active App: {app_id}]\n"
-                    f"Title: {app_files['title']}\n"
-                    f"--- index.html (View) ---\n"
-                    f"{app_files['html']}\n"
-                    f"--- style.css (Style) ---\n"
-                    f"{app_files['css']}\n"
-                    f"--- controller.js (Controller - using 'ambient' SDK) ---\n"
-                    f"{app_files['js']}\n"
-                    f"-------------------------"
-                )
+                if "layout" in app_files:
+                    active_apps_context.append(
+                        f"[Active App: {app_id}]\n"
+                        f"Format: A2UI Layout\n"
+                        f"Title: {app_files['title']}\n"
+                        f"--- layout.json (A2UI Declarative View) ---\n"
+                        f"{app_files['layout']}\n"
+                        f"--- controller.js (Controller - using 'ambient' SDK) ---\n"
+                        f"{app_files['js']}\n"
+                        f"-------------------------"
+                    )
+                else:
+                    active_apps_context.append(
+                        f"[Active App: {app_id}]\n"
+                        f"Format: Legacy HTML\n"
+                        f"Title: {app_files['title']}\n"
+                        f"--- index.html (View) ---\n"
+                        f"{app_files['html']}\n"
+                        f"--- style.css (Style) ---\n"
+                        f"{app_files['css']}\n"
+                        f"--- controller.js (Controller - using 'ambient' SDK) ---\n"
+                        f"{app_files['js']}\n"
+                        f"-------------------------"
+                    )
 
         # 4. Map DB messages to LLM chat message payload, pruning code blocks
         llm_messages = []

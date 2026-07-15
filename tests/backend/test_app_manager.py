@@ -60,6 +60,34 @@ def test_create_and_get_app(temp_apps_dir):
     assert app_files["schema_refs"] == []
 
 
+def test_create_and_get_a2ui_app(temp_apps_dir):
+    manager = AppManager()
+
+    app_id = "test-a2ui-todo"
+    title = "Test A2UI Todo App"
+    layout = '[{"id": "root", "type": "Column"}]'
+    js = "ambient.state.set('/title', 'Tasks');"
+
+    # 1. Create app
+    manager.create_or_update_app(app_id, title, js=js, layout=layout)
+
+    # Verify directory and files exist
+    app_dir = temp_apps_dir / app_id
+    assert app_dir.exists()
+    assert (app_dir / "layout.json").read_text() == layout
+    assert (app_dir / "controller.js").read_text() == js
+    assert not (app_dir / "index.html").exists()
+    assert not (app_dir / "style.css").exists()
+
+    # 2. Get app files
+    app_files = manager.get_app_files(app_id)
+    assert app_files is not None
+    assert app_files["id"] == app_id
+    assert app_files["title"] == title
+    assert app_files["layout"] == layout
+    assert app_files["js"] == js
+
+
 def test_list_apps(temp_apps_dir):
     manager = AppManager()
 

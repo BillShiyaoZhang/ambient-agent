@@ -195,7 +195,7 @@ class AppManager:
                     record = self._record_store.put(transaction, app_id, created_at=now, updated_at=now)
             self._schedule_metadata_cleanup(transaction, metadata_path)
             return manifest, record
-        if not (app_path / "index.html").is_file():
+        if not (app_path / "index.html").is_file() and not (app_path / "layout.json").is_file():
             return None
 
         title = self._default_title(app_id, app_path)
@@ -238,10 +238,11 @@ class AppManager:
         self,
         app_id: str,
         title: str,
-        html: str,
-        css: str,
-        js: str,
+        html: str = "",
+        css: str = "",
+        js: str = "",
         *,
+        layout: Any = _UNSET,
         description: Any = _UNSET,
         app_version: Any = _UNSET,
         intents: Any = _UNSET,
@@ -256,7 +257,7 @@ class AppManager:
             app_path.mkdir(parents=True, exist_ok=True)
             originals = {
                 filename: (app_path / filename).read_bytes() if (app_path / filename).exists() else None
-                for filename in (*_SOURCE_FILES, "manifest.json", "metadata.json")
+                for filename in (*_SOURCE_FILES, "layout.json", "manifest.json", "metadata.json")
             }
 
             def restore_app_files() -> None:
@@ -311,8 +312,19 @@ class AppManager:
                     manifest_data[field] = value
             manifest = AppManifest.from_dict(manifest_data, expected_app_id=app_id)
 
-            for filename, content in zip(_SOURCE_FILES, (html, css, js), strict=True):
-                (app_path / filename).write_text(content, encoding="utf-8")
+            if layout is not _UNSET:
+                (app_path / "layout.json").write_text(layout, encoding="utf-8")
+                # For A2UI, remove legacy HTML/CSS files to avoid confusion
+                (app_path / "index.html").unlink(missing_ok=True)
+                (app_path / "style.css").unlink(missing_ok=True)
+                # Still save controller.js
+                (app_path / "controller.js").write_text(js, encoding="utf-8")
+            else:
+                # If creating legacy app, make sure layout.json is deleted
+                (app_path / "layout.json").unlink(missing_ok=True)
+                for filename, content in zip(_SOURCE_FILES, (html, css, js), strict=True):
+                    (app_path / filename).write_text(content, encoding="utf-8")
+
             manifest.write_atomic(manifest_path)
             AppManifest.read(manifest_path, expected_app_id=app_id)
             if legacy_created_at is None:
@@ -339,6 +351,9 @@ class AppManager:
                     key: (app_path / filename).read_text(encoding="utf-8") if (app_path / filename).exists() else ""
                     for key, filename in zip(("html", "css", "js"), _SOURCE_FILES, strict=True)
                 }
+                layout_path = app_path / "layout.json"
+                if layout_path.exists():
+                    source["layout"] = layout_path.read_text(encoding="utf-8")
                 return {**self._manifest_record(manifest, record), **source}
             except (OSError, UnicodeError, ManifestValidationError):
                 logger.warning("Unable to load App %s", app_id, exc_info=True)
