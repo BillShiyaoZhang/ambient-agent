@@ -6,6 +6,7 @@ export interface Widget {
   html: string;
   css: string;
   js: string;
+  layout?: string;
 }
 
 interface DashboardCanvasProps {

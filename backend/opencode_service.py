@@ -469,11 +469,15 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
 
     os.makedirs(target_dir, exist_ok=True)
 
+    target_path = Path(target_dir)
+    is_a2ui = (target_path / "layout.json").exists() or not (target_path / "index.html").exists()
+
     clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
     from backend.agent.prompts.manager import PromptManager
 
     pm = PromptManager()
-    prompt = pm.get_prompt("opencode_system.md", app_id=app_id, target_dir=target_dir, instruction=clean_instruction)
+    prompt_file = "opencode_a2ui_system.md" if is_a2ui else "opencode_system.md"
+    prompt = pm.get_prompt(prompt_file, app_id=app_id, target_dir=target_dir, instruction=clean_instruction)
 
     full_command = f'{opencode_cmd} run "{prompt}" --auto'
 
@@ -547,8 +551,10 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
             from backend.agent.prompts.manager import PromptManager
 
             pm = PromptManager()
+            is_a2ui = (target_dir / "layout.json").exists() or not (target_dir / "index.html").exists()
+            prompt_file = "opencode_a2ui_system.md" if is_a2ui else "opencode_system.md"
             prompt_text = pm.get_prompt(
-                "opencode_system.md", app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction
+                prompt_file, app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction
             )
 
             opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))

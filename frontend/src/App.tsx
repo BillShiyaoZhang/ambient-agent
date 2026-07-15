@@ -6,6 +6,7 @@ import { SandboxWidget } from "./components/SandboxWidget";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { SessionSidebar, type Session } from "./components/SessionSidebar";
 import { AppStoreModal } from "./components/AppStoreModal";
+import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
 
 
@@ -41,6 +42,7 @@ function App() {
     details: string;
   }
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
+  const [pendingBackendPermission, setPendingBackendPermission] = useState<any | null>(null);
 
   const handleResolvePermission = (approved: boolean) => {
     if (!pendingPermission) return;
@@ -50,6 +52,16 @@ function App() {
       approved: approved
     });
     setPendingPermission(null);
+  };
+
+  const handleResolveBackendPermission = (approved: boolean) => {
+    if (!pendingBackendPermission) return;
+    wsService.sendMessage({
+      type: "backend_permission_response",
+      request_id: pendingBackendPermission.request_id,
+      approved: approved
+    });
+    setPendingBackendPermission(null);
   };
 
   interface SchemaProposal {
@@ -457,8 +469,28 @@ function App() {
             detail: data.data,
           })
         );
+      } else if (data.type === "ag_ui_event") {
+        window.dispatchEvent(
+          new CustomEvent(`ag_ui_event:${data.app_id}`, {
+            detail: data.event,
+          })
+        );
+      } else if (data.type === "mcp_call_response") {
+        window.dispatchEvent(
+          new CustomEvent(`mcp_call_response:${data.app_id}:${data.call_id}`, {
+            detail: data,
+          })
+        );
+      } else if (data.type === "mcp_read_response") {
+        window.dispatchEvent(
+          new CustomEvent(`mcp_read_response:${data.app_id}:${data.call_id}`, {
+            detail: data,
+          })
+        );
       } else if (data.type === "permission_request") {
         setPendingPermission(data);
+      } else if (data.type === "backend_permission_request") {
+        setPendingBackendPermission(data);
       } else if (data.type === "schema_approval_request") {
         setPendingSchemaRequest(data);
       } else if (data.type === "plan_approval_request") {
@@ -708,6 +740,13 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* 🛡️ Backend Agent/MCP Permission Request Modal */}
+      <AppPermissionModal
+        pendingRequest={pendingBackendPermission}
+        onResolve={handleResolveBackendPermission}
+      />
+
 
       {/* 🧠 App 数据 Schema 智能对齐 Modal */}
       {pendingSchemaRequest && editedProposal && (

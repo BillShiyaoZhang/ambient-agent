@@ -139,3 +139,33 @@ def test_atomic_write_does_not_replace_existing_manifest_when_serialization_fail
 
     assert json.loads(path.read_text(encoding="utf-8"))["title"] == "Morning Planner"
     assert not list(tmp_path.glob(".manifest.json.*.tmp"))
+
+
+def test_new_fields_validation_and_roundtrip():
+    # Test valid manifest with new fields
+    data = valid_manifest(
+        backend_type="mcp",
+        mcp_server={"command": ["python"], "args": ["-m", "my_server"], "env": {"DEBUG": "true"}},
+        agent_url="http://localhost:8000/api/agent",
+    )
+    manifest = AppManifest.from_dict(data, expected_app_id="morning-planner")
+    assert manifest.backend_type == "mcp"
+    assert manifest.mcp_server == {"command": ["python"], "args": ["-m", "my_server"], "env": {"DEBUG": "true"}}
+    assert manifest.agent_url == "http://localhost:8000/api/agent"
+    assert manifest.to_dict() == data
+
+    # Test invalid backend_type
+    with pytest.raises(ManifestValidationError, match="backend_type"):
+        AppManifest.from_dict(valid_manifest(backend_type="invalid"), expected_app_id="morning-planner")
+
+    # Test invalid mcp_server type
+    with pytest.raises(ManifestValidationError, match="mcp_server must be a JSON object"):
+        AppManifest.from_dict(valid_manifest(mcp_server="invalid"), expected_app_id="morning-planner")
+
+    # Test missing command in mcp_server
+    with pytest.raises(ManifestValidationError, match="mcp_server must contain a 'command' field"):
+        AppManifest.from_dict(valid_manifest(mcp_server={"args": []}), expected_app_id="morning-planner")
+
+    # Test invalid command items
+    with pytest.raises(ManifestValidationError, match="mcp_server command items must be non-empty strings"):
+        AppManifest.from_dict(valid_manifest(mcp_server={"command": [""]}), expected_app_id="morning-planner")
