@@ -48,3 +48,27 @@ def test_parse_partial_widget():
     assert widget["html"] == "<h1>Hi</h1>"
     assert widget["css"] == "h1 { color: red; }"
     assert widget["js"] == ""
+
+
+def test_parse_a2ui_widget():
+    sample_text = """
+    Here is the task board using the declarative A2UI format:
+    <ambient-widget id="task-board" title="My Tasks" layout-type="a2ui">
+    <layout-json>
+      [
+        {"id": "root", "type": "Column", "children": ["title"]}
+      ]
+    </layout-json>
+    <js-script>
+      ambient.state.set('/title', 'Tasks');
+    </js-script>
+    </ambient-widget>
+    """
+
+    widget = parse_widget_from_text(sample_text)
+    assert widget is not None
+    assert widget["id"] == "task-board"
+    assert widget["title"] == "My Tasks"
+    assert "layout" in widget
+    assert "Column" in widget["layout"]
+    assert "ambient.state.set" in widget["js"]

@@ -66,11 +66,17 @@ def get_db():
     yield db_storage
 
 
+from backend.backend_manager import BackendManager
+
+backend_manager = BackendManager()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Perform automated migration from db.sqlite3 and backend/apps to workspace
     migrate_old_data(WORKSPACE_DIR)
     yield
+    await backend_manager.shutdown()
 
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
@@ -368,13 +374,108 @@ async def websocket_chat(
     except Exception:
         pass
 
+    async def run_agent_msg(app_id, manifest, agent_msg_content):
+        try:
+
+            async def send_ws_payload(payload):
+                await websocket.send_json(payload)
+
+            await backend_manager.handle_agent_message(
+                app_id=app_id, manifest=manifest, message=agent_msg_content, send_ws_message_func=send_ws_payload
+            )
+        except Exception as e:
+            await websocket.send_json({"type": "error", "app_id": app_id, "message": str(e)})
+
+    async def run_mcp_call(app_id, manifest, tool_name, arguments, call_id):
+        try:
+
+            async def send_ws_payload(payload):
+                if payload.get("type") == "backend_permission_request":
+                    req_id = payload.get("request_id")
+                    if req_id:
+                        if session_id not in pending_requests:
+                            pending_requests[session_id] = {}
+                        pending_requests[session_id][req_id] = payload
+                await websocket.send_json(payload)
+
+            client = await backend_manager.get_or_start_mcp_client(
+                app_id=app_id, manifest=manifest, send_ws_message_func=send_ws_payload
+            )
+            if client:
+                result = await client.call("tools/call", {"name": tool_name, "arguments": arguments})
+                await websocket.send_json(
+                    {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "result": result}
+                )
+        except Exception as e:
+            await websocket.send_json(
+                {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
+            )
+
+    async def run_mcp_read(app_id, manifest, uri, call_id):
+        try:
+
+            async def send_ws_payload(payload):
+                if payload.get("type") == "backend_permission_request":
+                    req_id = payload.get("request_id")
+                    if req_id:
+                        if session_id not in pending_requests:
+                            pending_requests[session_id] = {}
+                        pending_requests[session_id][req_id] = payload
+                await websocket.send_json(payload)
+
+            client = await backend_manager.get_or_start_mcp_client(
+                app_id=app_id, manifest=manifest, send_ws_message_func=send_ws_payload
+            )
+            if client:
+                result = await client.call("resources/read", {"uri": uri})
+                await websocket.send_json(
+                    {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "result": result}
+                )
+        except Exception as e:
+            await websocket.send_json(
+                {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
+            )
+
     try:
         while True:
             # Receive message from user client
             data = await websocket.receive_json()
             msg_type = data.get("type")
 
-            if msg_type == "permission_response":
+            if msg_type == "backend_permission_response":
+                request_id = data.get("request_id")
+                approved = data.get("approved", False)
+
+                # Remove from pending_requests
+                for sess_id, reqs in list(pending_requests.items()):
+                    if request_id in reqs:
+                        reqs.pop(request_id)
+                        if not reqs:
+                            pending_requests.pop(sess_id, None)
+
+                backend_manager.resolve_permission(request_id, approved)
+            elif msg_type == "ag_ui_message":
+                app_id = data.get("app_id")
+                agent_msg_content = data.get("message", {})
+                manifest = app_manager.get_manifest(app_id)
+                if manifest:
+                    asyncio.create_task(run_agent_msg(app_id, manifest, agent_msg_content))
+            elif msg_type == "mcp_call_tool":
+                app_id = data.get("app_id")
+                tool_name = data.get("name")
+                arguments = data.get("arguments", {})
+                call_id = data.get("call_id")
+                manifest = app_manager.get_manifest(app_id)
+                if manifest:
+                    asyncio.create_task(run_mcp_call(app_id, manifest, tool_name, arguments, call_id))
+            elif msg_type == "mcp_read_resource":
+                app_id = data.get("app_id")
+                uri = data.get("uri")
+                call_id = data.get("call_id")
+                manifest = app_manager.get_manifest(app_id)
+                if manifest:
+                    asyncio.create_task(run_mcp_read(app_id, manifest, uri, call_id))
+            elif msg_type == "permission_response":
                 request_id = data.get("request_id")
                 approved = data.get("approved", False)
 
