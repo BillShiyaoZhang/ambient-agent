@@ -1,4 +1,4 @@
-# 沙箱隔离机制 (Sandbox Isolation)
+# 沙箱隔离机制
 
 由于 Ambient Agent 的 Widget 是由大模型动态生成的，为了防止恶意的或编写错误的卡片破坏主系统的布局、窃取全局变量或造成全局样式污染，前端在 `frontend/src/components/SandboxWidget.tsx` 中实现了一套极其严格的**双重沙箱隔离**。
 

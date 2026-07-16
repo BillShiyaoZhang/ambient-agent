@@ -1,8 +1,8 @@
-# ambient SDK 参考手册
+# ambient SDK
 
 在 Widget 的 `<js-script>` 逻辑中，您可以通过全局注入的 `ambient` 对象直接调用系统的全部核心服务。下表是 `ambient` 提供的接口列表。
 
-## 1. 对话与窗口管理 (Chat & Layout)
+## 1. 对话与窗口管理
 
 ### `ambient.sendMessage(text)`
 
@@ -22,7 +22,7 @@
 
 将当前全屏状态的 Widget 卡片恢复至其原本的网格大小。
 
-## 2. 局部状态管理 (State)
+## 2. 局部状态管理
 
 用于在 A2UI 声明式模式或复杂数据交互中，读写卡片特定的临时数据。
 
@@ -50,7 +50,7 @@
   - `callback` (Function) - 回调函数，传入新值：`(newVal) => void`。
 - **返回**: `unsubscribe` (Function) - 取消监听的函数。
 
-## 3. 图数据库操作 (Graph Database)
+## 3. 图数据库操作
 
 这是最核心的部分，允许卡片与系统的 SQLite 图数据库实时读写。所有数据必须对齐注册的 Schema 契约（如 `Task`, `Event`, `Note`）。
 
@@ -93,7 +93,7 @@
   ]);
   ```
 
-## 4. 模型上下文协议 (MCP)
+## 4. 模型上下文协议
 
 允许 Widget 卡片调用宿主机上注册的 Model Context Protocol 外部命令行服务或读取外部资源。
 
@@ -113,7 +113,7 @@
 - **参数**: `uri` (String) - 资源的 URI（例如 `"file:///logs/today.txt"`）。
 - **返回**: Promise - 资源解析的文本或数据。
 
-## 5. 多智能体协作 (Agent Link)
+## 5. 多智能体协作
 
 允许 Widget 卡片和后台运行的高级智能体、外部 Webhook 进行直接的事件收发交互。
 
