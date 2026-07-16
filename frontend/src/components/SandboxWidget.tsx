@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import type { Widget } from "./DashboardCanvas";
 import wsService from "../services/websocket";
+import * as Babel from "@babel/standalone";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 // --- SandboxWidget Prop Interface ---
 
@@ -99,6 +101,138 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   useEffect(() => {
     stateRef.current = localState;
   }, [localState]);
+
+  // --- Tailwind Play CDN Dynamic Injection ---
+  useEffect(() => {
+    if (!widget.jsx) return;
+    if (!document.getElementById("tailwind-cdn")) {
+      const script = document.createElement("script");
+      script.id = "tailwind-cdn";
+      script.src = "https://cdn.tailwindcss.com";
+      document.head.appendChild(script);
+    }
+  }, [widget.jsx]);
+
+  // --- React + Tailwind Dynamic Compilation ---
+  const DynamicReactComponent = useMemo(() => {
+    if (!widget.jsx) return null;
+
+    try {
+      // 1. Transpile controller hook
+      const controllerJs = widget.js || "";
+      const transpileController = Babel.transform(controllerJs, {
+        presets: ["react"],
+        filename: "controller.js"
+      }).code;
+
+      // 2. Transpile index.jsx component
+      const jsxCode = widget.jsx || "";
+      // Strip import useController from controller.js statement to avoid eval module errors
+      const cleanJsxCode = jsxCode.replace(/import\s+\{\s*useController\s*\}\s+from\s+["']\.\/controller(?:\.js)?["'];?/g, "");
+      const transpileJsx = Babel.transform(cleanJsxCode, {
+        presets: ["react"],
+        filename: "index.jsx"
+      }).code;
+
+      // 3. Compile in isolated mock CommonJS scope
+      const controllerExports: any = {};
+      const controllerFn = new Function("exports", "React", transpileController || "");
+      controllerFn(controllerExports, React);
+      
+      const useController = controllerExports.useController;
+      if (!useController) {
+        throw new Error("controller.js does not export useController");
+      }
+
+      const componentExports: any = {};
+      const jsxFn = new Function("exports", "React", "useController", transpileJsx || "");
+      jsxFn(componentExports, React, useController);
+
+      const WidgetComponent = componentExports.default || Object.values(componentExports)[0];
+      if (!WidgetComponent) {
+        throw new Error("index.jsx does not export a default component");
+      }
+
+      return WidgetComponent as React.ComponentType<{ ambient: any }>;
+    } catch (err: any) {
+      console.error("Compilation error in React widget:", err);
+      return () => (
+        <div className="p-4 bg-red-950/40 border border-red-500/20 text-red-400 rounded-xl text-xs font-mono">
+          <strong className="block mb-1">React Compiling Error:</strong>
+          {err.message}
+        </div>
+      );
+    }
+  }, [widget.jsx, widget.js]);
+
+  const API_BASE = `http://${window.location.hostname}:8000`;
+  const customListenersRef = useRef<{ event: string; handler: EventListener }[]>([]);
+
+  const ambientProps = useMemo(() => {
+    return {
+      sendMessage: (text: string) => {
+        wsService.sendMessage({
+          sender: "user",
+          content: text,
+        });
+      },
+      fullscreen: () => {
+        if (onFullscreenRef.current) {
+          onFullscreenRef.current(widget.id);
+        }
+      },
+      minimize: () => {
+        if (onMinimizeRef.current) {
+          onMinimizeRef.current(widget.id);
+        }
+      },
+      graph: {
+        subscribe: (query: any, callback: (data: any) => void) => {
+          const subId = `sub-${Math.random().toString(36).substring(2, 11)}`;
+          const handler = (e: Event) => {
+            callback((e as CustomEvent).detail);
+          };
+          const eventName = `graph_query_update:${subId}`;
+          window.addEventListener(eventName, handler);
+          customListenersRef.current.push({ event: eventName, handler });
+
+          wsService.sendMessage({
+            type: "graph_subscribe",
+            subscription_id: subId,
+            query: query
+          });
+
+          return () => {
+            window.removeEventListener(eventName, handler);
+            const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
+            if (idx !== -1) customListenersRef.current.splice(idx, 1);
+
+            wsService.sendMessage({
+              type: "graph_unsubscribe",
+              subscription_id: subId
+            });
+          };
+        },
+        mutate: async (actions: any[]) => {
+          const res = await fetch(`${API_BASE}/api/graph/mutate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ actions })
+          });
+          if (!res.ok) throw new Error("Failed to mutate graph");
+          return res.json();
+        }
+      }
+    };
+  }, [widget.id]);
+
+  useEffect(() => {
+    return () => {
+      customListenersRef.current.forEach(({ event, handler }) => {
+        window.removeEventListener(event, handler);
+      });
+    };
+  }, []);
 
   // --- Legacy Script Execution & Scope Setup ---
   useEffect(() => {
@@ -903,6 +1037,25 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
         return null;
     }
   };
+
+  if (widget.jsx) {
+    const Component = DynamicReactComponent;
+    return (
+      <div
+        id={widget.id}
+        data-testid={`sandbox-${widget.id}`}
+        className="w-full h-full text-white/90 overflow-auto"
+      >
+        {Component ? (
+          <ErrorBoundary>
+            <Component ambient={ambientProps} />
+          </ErrorBoundary>
+        ) : (
+          <div className="p-4 text-slate-400 text-xs italic">Compiling React widget...</div>
+        )}
+      </div>
+    );
+  }
 
   if (widget.layout) {
     return (

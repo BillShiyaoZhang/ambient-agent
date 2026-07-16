@@ -242,6 +242,7 @@ class AppManager:
         css: str = "",
         js: str = "",
         *,
+        jsx: Any = _UNSET,
         layout: Any = _UNSET,
         description: Any = _UNSET,
         app_version: Any = _UNSET,
@@ -257,7 +258,7 @@ class AppManager:
             app_path.mkdir(parents=True, exist_ok=True)
             originals = {
                 filename: (app_path / filename).read_bytes() if (app_path / filename).exists() else None
-                for filename in (*_SOURCE_FILES, "layout.json", "manifest.json", "metadata.json")
+                for filename in (*_SOURCE_FILES, "layout.json", "manifest.json", "metadata.json", "index.jsx")
             }
 
             def restore_app_files() -> None:
@@ -312,16 +313,25 @@ class AppManager:
                     manifest_data[field] = value
             manifest = AppManifest.from_dict(manifest_data, expected_app_id=app_id)
 
-            if layout is not _UNSET:
+            if jsx is not _UNSET and jsx:
+                (app_path / "index.jsx").write_text(jsx, encoding="utf-8")
+                (app_path / "controller.js").write_text(js, encoding="utf-8")
+                # Remove files of other modes to avoid confusion
+                (app_path / "layout.json").unlink(missing_ok=True)
+                (app_path / "index.html").unlink(missing_ok=True)
+                (app_path / "style.css").unlink(missing_ok=True)
+            elif layout is not _UNSET:
                 (app_path / "layout.json").write_text(layout, encoding="utf-8")
                 # For A2UI, remove legacy HTML/CSS files to avoid confusion
                 (app_path / "index.html").unlink(missing_ok=True)
                 (app_path / "style.css").unlink(missing_ok=True)
+                (app_path / "index.jsx").unlink(missing_ok=True)
                 # Still save controller.js
                 (app_path / "controller.js").write_text(js, encoding="utf-8")
             else:
-                # If creating legacy app, make sure layout.json is deleted
+                # If creating legacy app, make sure layout.json and index.jsx are deleted
                 (app_path / "layout.json").unlink(missing_ok=True)
+                (app_path / "index.jsx").unlink(missing_ok=True)
                 for filename, content in zip(_SOURCE_FILES, (html, css, js), strict=True):
                     (app_path / filename).write_text(content, encoding="utf-8")
 
@@ -370,6 +380,9 @@ class AppManager:
                 layout_path = app_path / "layout.json"
                 if layout_path.exists():
                     source["layout"] = layout_path.read_text(encoding="utf-8")
+                jsx_path = app_path / "index.jsx"
+                if jsx_path.exists():
+                    source["jsx"] = jsx_path.read_text(encoding="utf-8")
                 return {**self._manifest_record(manifest, record), **source}
             except (OSError, UnicodeError, ManifestValidationError):
                 logger.warning("Unable to load App %s", app_id, exc_info=True)

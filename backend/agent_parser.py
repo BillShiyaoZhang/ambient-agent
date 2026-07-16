@@ -41,6 +41,16 @@ def parse_widget_from_text(text: str) -> dict[str, str] | None:
             "js": js_match.group(1).strip() if js_match else "",
         }
 
+    jsx_match = re.search(r"<react-jsx>(.*?)</react-jsx>", content, re.DOTALL)
+    if jsx_match:
+        js_match = re.search(r"<js-script>(.*?)</js-script>", content, re.DOTALL)
+        return {
+            "id": widget_id,
+            "title": title,
+            "jsx": jsx_match.group(1).strip(),
+            "js": js_match.group(1).strip() if js_match else "",
+        }
+
     html_match = re.search(r"<html-content>(.*?)</html-content>", content, re.DOTALL)
     css_match = re.search(r"<css-styles>(.*?)</css-styles>", content, re.DOTALL)
     js_match = re.search(r"<js-script>(.*?)</js-script>", content, re.DOTALL)
