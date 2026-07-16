@@ -6,23 +6,22 @@
 
 Widget 的代码与状态在结构上被拆分为独立的三个层次，互不干扰，通过标准接口进行数据通信：
 
-```
-┌────────────────────────────────────────────────────────┐
-│                      SandboxWidget                     │
-│                                                        │
-│   ┌────────────────┐   ┌──────────────┐   ┌────────┐   │
-│   │    UI (View)   │   │  Controller  │   │  Data  │   │
-│   │  HTML + Scoped │◀──│  JS Closure  │──▶│  SDK   │   │
-│   │      CSS       │   │(new Function)│   │ State  │   │
-│   └────────────────┘   └──────────────┘   └────────┘   │
-└───────────────────────────────▲────────────────▲───────┘
-                                │                │       
-                                HTTP POST        WebSocket
-                                (Mutate)         (Subscribe)
-                                │                │       
-┌───────────────────────────────▼────────────────▼───────┐
-│                      Backend Server                    │
-└────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph SandboxWidget ["SandboxWidget"]
+        direction LR
+        UI["UI (View)<br/>HTML + Scoped CSS"]
+        Ctrl["Controller<br/>JS Closure (new Function)"]
+        Data["Data<br/>SDK State"]
+
+        Ctrl --> UI
+        Ctrl --> Data
+    end
+
+    BE["Backend Server"]
+
+    Ctrl -- "HTTP POST (Mutate)" --> BE
+    BE -- "WebSocket (Subscribe)" --> Data
 ```
 
 ### A. UI 层
