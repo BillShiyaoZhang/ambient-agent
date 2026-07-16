@@ -2,57 +2,56 @@
 
 Ambient Agent 围绕动态的 **GUI 卡片工作区 (Canvas Workspace)** 架构进行设计。系统中的“Apps”是指大模型动态生成的、兼容 React 的**微型交互卡片（Widgets）**。本页面概述了这些卡片小程序的总体架构、前后端连接方式以及所涉及的技术框架。
 
-## 1. 架构模块图 (总-分结构)
+## 1. 架构模块图
 
 为了更清晰地展示系统各模块的权责，我们将整体架构图拆分为系统宏观总览与各个子系统的细节视图。
 
-### 1.1 系统宏观架构总览 (总)
+### 1.1 系统宏观架构总览
 
 展示了前端工作区、后端编排器、存储层与外部集成服务之间的宏观通信链路：
 
 ```mermaid
 graph TB
-    Frontend["前端 Canvas & Sandbox"] <-->|WebSocket: /ws/chat| Backend["后端 FastAPI Orchestrator"]
-    Frontend -->|HTTP POST: /api/graph/mutate| Backend
-    Frontend -->|"HTTP GET: /api/apps/{id}"| Backend
-    Backend <-->|SQLModel ORM| Data["数据与存储层 (SQLite graph.db & 本地磁盘)"]
+    Frontend["前端"] <-->|WebSocket| Backend["后端"]
+    Frontend -->|HTTP| Backend
+    Backend <-->|SQLModel ORM| Data["数据与存储层"]
     Backend <-->|JSON-RPC / HTTPS| External["外部集成 (MCP / LLM)"]
 ```
 
-### 1.2 前端工作区与沙箱架构 (分 - 前端细节)
+### 1.2 前端工作区与沙箱架构
 
 展示前端主控制、画布网格以及隔离沙箱在渲染卡片时的层级与通信关系：
 
 ```mermaid
 graph TB
-    subgraph Frontend["前端 (React 19 + TypeScript + Vite)"]
-        App["App.tsx<br/>(主控协调)"] --> Canvas["DashboardCanvas.tsx<br/>(画布工作区)"]
-        Canvas --> Sandbox["SandboxWidget.tsx<br/>(安全沙箱容器)"]
-        App <--> WSClient["websocket.ts<br/>(WebSocket 客户端)"]
+    subgraph Frontend["前端"]
+        App["主控协调"] --> Canvas["画布工作区"]
+        Canvas --> Sandbox["安全沙箱容器"]
+        App <--> WSClient["WebSocket 客户端"]
     end
     WSClient <-->|/ws/chat| BE["后端接口"]
     Sandbox -->|/api/graph/mutate| BE
     Sandbox -->|"/api/apps/{id}"| BE
 ```
 
-### 1.3 后端核心编排与执行流 (分 - 后端细节)
+### 1.3 后端核心编排与执行流
 
 展示后端 WebSocket 连接分发、生命周期编排器以及动态解析编译的层级关系：
 
 ```mermaid
 graph TB
-    subgraph Backend["后端 (FastAPI)"]
-        Main["main.py<br/>(Web & WS 入口)"] <--> Orchestrator["AgentOrchestrator<br/>(编排调度)"]
-        Orchestrator --> Parser["AgentParser<br/>(XML 动态代码解析)"]
-        Orchestrator --> AppMgr["AppManager<br/>(卡片磁盘读写)"]
-        Main <--> BackendMgr["BackendManager<br/>(MCP 守护进程与授权)"]
+    subgraph Backend["后端"]
+        Main["Web & WS 入口"] <--> Orchestrator["编排调度"]
+        Orchestrator --> Parser["XML 动态代码解析"]
+        Orchestrator --> AppMgr["卡片磁盘读写"]
+        Main <--> BackendMgr["MCP 守护进程与授权"]
     end
     FE["前端 WebSocket"] <-->|/ws/chat| Main
     Orchestrator <-->|HTTPS| LLM["外部 LLM 服务"]
     BackendMgr <-->|stdio| MCP["MCP 服务端"]
 ```
 
-### 1.4 数据存储与外部集成 (分 - 存储与外设集成细节)
+### 1.4 数据存储与外部集成
 
 展示后端服务如何读写磁盘/数据库，以及如何集成外部大语言模型与 MCP 工具服务：
 
@@ -65,12 +64,12 @@ graph TB
         Orchestrator["AgentOrchestrator"]
     end
     subgraph Data["数据与存储层"]
-        SQLiteDB[("SQLite graph.db<br/>(图数据库存储)")]
-        DiskApps[("本地磁盘目录<br/>(workspace/apps/{app_id}/*)")]
+        SQLiteDB[("图数据库存储")]
+        DiskApps[("本地磁盘目录")]
     end
     subgraph External["外部集成服务"]
-        LLM["大模型 API 服务<br/>(Ollama / MiniMax / OpenAI)"]
-        MCPServer["MCP 服务端<br/>(命令行 stdio 子进程)"]
+        LLM["大模型 API 服务"]
+        MCPServer["MCP 服务端"]
     end
     AppMgr <-->|读写卡片源码| DiskApps
     Main <-->|SQLModel ORM 映射| SQLiteDB
@@ -86,14 +85,14 @@ graph TB
 sequenceDiagram
     autonumber
     actor User as 用户
-    participant FE as 前端 (React / SandboxWidget)
-    participant BE as 后端 (FastAPI / AgentOrchestrator)
+    participant FE as 前端
+    participant BE as 后端
     participant LLM as 大语言模型
     participant DB as SQLite 数据库 / 磁盘
 
     %% 阶段 1：卡片生成
     User->>FE: 输入：“创建一个待办列表卡片”
-    FE->>BE: 通过 WebSocket (/ws/chat) 发送对话消息
+    FE->>BE: 通过 WebSocket 发送对话消息
     BE->>LLM: 组装上下文并调用 Chat Completion 接口
     LLM-->>BE: 返回携带 <ambient-widget> XML 语法的流
     BE->>BE: AgentParser 自动解析 HTML、CSS 和 JS 代码段

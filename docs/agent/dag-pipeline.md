@@ -1,20 +1,20 @@
-# DAG 任务流水线 (WidgetDAG)
+# DAG 任务流水线
 
 在老版本中，卡片生成和变更的整个流程是通过在 `AgentOrchestrator.handle_message` 中使用一个冗长复杂的 `while current_state` 状态机来驱动的。
 
 新版架构中，该状态机被重构为更具扩展性与声明式的 **WidgetDAG（有向无环图任务流水线）** 运行环境。它的执行链条更加清晰，并原生支持基于依赖关系的“回溯污染（Invalidation）”重新执行。
 
-## 1. 任务流依赖与节点设计 (DAG Architecture)
+## 1. 任务流依赖与节点设计
 
-WidgetDAG 默认包含以下 6 个核心任务节点，执行顺序（拓扑排序）如下：
+WidgetDAG 默认包含以下 6 个核心任务节点，执行顺序如下：
 
 ```mermaid
 graph TD
-    decode["解析用户操作 (decode_user_intent)"] --> apply["应用变更 (apply_user_actions)"]
-    apply --> plan["制定计划 (plan)"]
-    plan --> align["对齐数据库模型 (align_schemas)"]
-    align --> regen["生成/更新代码 (regen_code)"]
-    regen --> verify["校验与测试 (verify)"]
+    decode["解析用户操作"] --> apply["应用变更"]
+    apply --> plan["制定计划"]
+    plan --> align["对齐数据库模型"]
+    align --> regen["生成/更新代码"]
+    regen --> verify["校验与测试"]
 
     %% Invalidation paths
     verify -.->|校验失败/需要返工| decode
@@ -35,7 +35,7 @@ graph TD
 | **regen_code**         | 核心编译节点。负责生成、修改 Widget 源码，并写入到磁盘文件（`index.html`, `style.css`, `controller.js`）。 |
 | **verify**             | 合规与安全校验。检查生成的 HTML 是否有脚本注入、JS 语法是否合法、以及字段是否与数据库对齐。                |
 
-## 3. 异常回溯与用户交互（Interrupt / Ask User）
+## 3. 异常回溯与用户交互
 
 当一个节点运行失败或需要用户做二次审批时：
 

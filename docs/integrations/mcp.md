@@ -1,4 +1,4 @@
-# MCP 工具集成 (Model Context Protocol)
+# MCP 工具集成
 
 Model Context Protocol (MCP) 是用于大模型连接外部数据源与本地命令行工具的开放协议。Ambient Agent 的后台集成了 MCP 客户端，允许特定的 Widget 卡片通过安全通信，调用宿主机上的各种命令和读取本地资源。
 

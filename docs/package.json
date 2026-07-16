@@ -4,13 +4,9 @@
   "description": "Ambient Agent Documentation Site",
   "type": "module",
   "scripts": {
-    "dev": "vitepress dev --host 0.0.0.0 --port 5174",
-    "build": "vitepress build",
-    "preview": "vitepress preview"
+    "dev": "docsify serve . --port 5174"
   },
   "devDependencies": {
-    "mermaid": "^10.9.0",
-    "vitepress": "^1.0.0",
-    "vitepress-mermaid": "^2.0.1"
+    "docsify-cli": "^4.4.4"
   }
 }

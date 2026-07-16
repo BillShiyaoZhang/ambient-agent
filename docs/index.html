@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Ambient Agent Docs</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+  <meta name="description" content="Ambient Agent - Open-source, self-hostable personal AI assistant framework">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  
+  <!-- Light & Dark Themes -->
+  <link rel="stylesheet" id="theme-style" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
+  
+  <!-- Add some custom styles for premium look & feel -->
+  <style>
+    :root {
+      --theme-color: #42b983;
+    }
+    
+    /* Elegant theme switch button styling */
+    #theme-toggle {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 1000;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 30px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+    }
+    
+    #theme-toggle:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+    }
+
+    /* Fixed navbar and theme switch at the top right on desktop */
+    @media screen and (min-width: 768px) {
+      .app-nav {
+        position: fixed !important;
+        top: 15px;
+        right: 180px;
+        margin: 0 !important;
+        z-index: 1000 !important;
+      }
+      
+      #theme-toggle {
+        top: 15px;
+        bottom: auto;
+        right: 80px;
+        padding: 8px 14px;
+        border-radius: 20px;
+      }
+    }
+    
+    /* Cover page styling tweaks */
+    section.cover {
+      background: linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%) !important;
+      color: #1f2937 !important;
+    }
+    
+    section.cover h1, section.cover h2, section.cover h3, section.cover blockquote {
+      color: #1f2937 !important;
+    }
+    
+    section.cover.show {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }
+    
+    section.cover a {
+      border: 1px solid #42b983 !important;
+      border-radius: 2rem !important;
+      padding: 0.75rem 1.5rem !important;
+      transition: all 0.3s ease !important;
+      margin: 0.5rem !important;
+      display: inline-block;
+    }
+
+    section.cover a:first-of-type {
+      background-color: #42b983 !important;
+      color: #fff !important;
+    }
+
+    section.cover a:first-of-type:hover {
+      background-color: #3aa373 !important;
+      border-color: #3aa373 !important;
+      color: #fff !important;
+    }
+
+    section.cover a:last-of-type {
+      background-color: transparent !important;
+      color: #42b983 !important;
+      border: 1px solid #42b983 !important;
+    }
+
+    section.cover a:last-of-type:hover {
+      background-color: #42b983 !important;
+      color: #fff !important;
+    }
+    
+    /* Cover page dark mode styling */
+    body.dark-mode-active section.cover {
+      background: linear-gradient(135deg, #1f2937 0%, #111827 100%) !important;
+      color: #ffffff !important;
+    }
+
+    body.dark-mode-active section.cover h1, 
+    body.dark-mode-active section.cover h2, 
+    body.dark-mode-active section.cover h3, 
+    body.dark-mode-active section.cover blockquote {
+      color: #ffffff !important;
+    }
+
+    body.dark-mode-active section.cover a:last-of-type {
+      color: #42b983 !important;
+      border-color: #42b983 !important;
+    }
+
+    body.dark-mode-active section.cover a:last-of-type:hover {
+      background-color: #42b983 !important;
+      color: #fff !important;
+    }
+    
+    section.cover a:hover {
+      background-color: #42b983 !important;
+      color: #fff !important;
+    }
+
+    /* Mermaid diagrams container styling */
+    .mermaid {
+      background: transparent;
+      display: flex;
+      justify-content: center;
+      padding: 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 8px;
+      border: 1px solid rgba(0, 0, 0, 0.06);
+    }
+    
+    body.dark-mode-active .mermaid {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+  </style>
+  
+  <script>
+    // Apply saved theme immediately in head to avoid styling flash
+    const savedTheme = localStorage.getItem('docsify-theme') || 'vue';
+    document.getElementById('theme-style').href = `//cdn.jsdelivr.net/npm/docsify@4/lib/themes/${savedTheme}.css`;
+  </script>
+</head>
+<body>
+  <!-- Elegant Theme Switch Button -->
+  <button id="theme-toggle" onclick="toggleTheme()">
+    <span id="theme-icon">☀️</span>
+    <span id="theme-text" style="font-weight: 600;">Light</span>
+  </button>
+
+  <div id="app">加载中...</div>
+
+  <script>
+    window.$docsify = {
+      name: 'Ambient Agent',
+      repo: 'https://github.com/BillShiyaoZhang/ambient-agent',
+      loadSidebar: true,
+      loadNavbar: true,
+      subMaxLevel: 3,
+      coverpage: {
+        '/': '_coverpage.md',
+        '/en/': 'en/_coverpage.md'
+      },
+      alias: {
+        '/en/.*/_sidebar.md': '/en/_sidebar.md',
+        '/.*/_sidebar.md': '/_sidebar.md',
+        '/en/.*/_navbar.md': '/en/_navbar.md',
+        '/.*/_navbar.md': '/_navbar.md',
+        '/en/': '/en/guide/introduction.md',
+        '/': '/guide/introduction.md',
+        '/en/README.md': '/en/guide/introduction.md',
+        '/README.md': '/guide/introduction.md'
+      },
+      search: {
+        maxAge: 86400000, // 1 day
+        paths: 'auto',
+        placeholder: {
+          '/en/': 'Type to search...',
+          '/': '搜索文档...'
+        },
+        noData: {
+          '/en/': 'No Results',
+          '/': '无法找到相关结果'
+        },
+        depth: 6
+      },
+      // Mermaid configuration
+      mermaidConfig: {
+        querySelector: ".mermaid"
+      },
+      // Plugins
+      plugins: [
+        function(hook, vm) {
+          // Dynamic Link Rewriter for internal absolute/root-relative links
+          hook.beforeEach(function(markdown) {
+            // Exclude image links (starts with !) and external links
+            // Matches [text](/path/to/page) or [text](/path/to/page.md)
+            return markdown.replace(/(^|[^!])\[([^\]]+)\]\(([^)]+)\)/g, function(match, prefix, text, link) {
+              if (link.startsWith('/') && !link.startsWith('//')) {
+                let parts = link.split('#');
+                let path = parts[0].replace(/\.md$/, '');
+                let hash = parts[1] ? '?id=' + parts[1] : '';
+                return prefix + '[' + text + '](#' + path + hash + ')';
+              }
+              return match;
+            });
+          });
+        }
+      ]
+    };
+
+    // Script to control theme switching dynamically
+    function setTheme(theme) {
+      const themeLink = document.getElementById('theme-style');
+      themeLink.href = `//cdn.jsdelivr.net/npm/docsify@4/lib/themes/${theme}.css`;
+      
+      const toggleBtn = document.getElementById('theme-toggle');
+      const themeIcon = document.getElementById('theme-icon');
+      const themeText = document.getElementById('theme-text');
+      
+      if (theme === 'dark') {
+        themeIcon.innerText = '🌙';
+        themeText.innerText = 'Dark';
+        toggleBtn.style.background = 'rgba(31, 41, 55, 0.85)';
+        toggleBtn.style.color = '#fff';
+        toggleBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+        document.body.classList.add('dark-mode-active');
+      } else {
+        themeIcon.innerText = '☀️';
+        themeText.innerText = 'Light';
+        toggleBtn.style.background = 'rgba(255, 255, 255, 0.85)';
+        toggleBtn.style.color = '#374151';
+        toggleBtn.style.borderColor = 'rgba(0, 0, 0, 0.08)';
+        document.body.classList.remove('dark-mode-active');
+      }
+      localStorage.setItem('docsify-theme', theme);
+    }
+
+    function toggleTheme() {
+      const currentTheme = localStorage.getItem('docsify-theme') || 'vue';
+      const nextTheme = currentTheme === 'vue' ? 'dark' : 'vue';
+      setTheme(nextTheme);
+    }
+
+    // Set button state once DOM is fully loaded
+    window.addEventListener('DOMContentLoaded', () => {
+      setTheme(localStorage.getItem('docsify-theme') || 'vue');
+    });
+  </script>
+
+  <!-- Docsify Core -->
+  <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
+  
+  <!-- Docsify Plugins -->
+  <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/zoom-image.min.js"></script>
+  
+  <!-- Mermaid & Docsify Mermaid Integration -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-mermaid@2.0.1/dist/docsify-mermaid.js"></script>
+</body>
+</html>
