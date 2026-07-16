@@ -1,2 +1,2 @@
-- [文档首页](/guide/introduction.md)
+- [首页](/)
 - [English](/en/)

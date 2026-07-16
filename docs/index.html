@@ -19,8 +19,8 @@
     /* Elegant theme switch button styling */
     #theme-toggle {
       position: fixed;
-      bottom: 30px;
-      right: 30px;
+      bottom: 20px;
+      right: 20px;
       z-index: 1000;
       border: none;
       padding: 10px 16px;
@@ -39,6 +39,25 @@
     #theme-toggle:hover {
       transform: translateY(-1px);
       box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+    }
+
+    /* Fixed navbar and theme switch at the top right on desktop */
+    @media screen and (min-width: 768px) {
+      .app-nav {
+        position: fixed !important;
+        top: 15px;
+        right: 180px;
+        margin: 0 !important;
+        z-index: 1000 !important;
+      }
+      
+      #theme-toggle {
+        top: 15px;
+        bottom: auto;
+        right: 80px;
+        padding: 8px 14px;
+        border-radius: 20px;
+      }
     }
     
     /* Cover page styling tweaks */
