@@ -195,7 +195,11 @@ class AppManager:
                     record = self._record_store.put(transaction, app_id, created_at=now, updated_at=now)
             self._schedule_metadata_cleanup(transaction, metadata_path)
             return manifest, record
-        if not (app_path / "index.html").is_file() and not (app_path / "layout.json").is_file():
+        if (
+            not (app_path / "index.html").is_file()
+            and not (app_path / "layout.json").is_file()
+            and not (app_path / "index.jsx").is_file()
+        ):
             return None
 
         title = self._default_title(app_id, app_path)

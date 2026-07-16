@@ -121,16 +121,16 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
       // 1. Transpile controller hook
       const controllerJs = widget.js || "";
       const transpileController = Babel.transform(controllerJs, {
-        presets: ["react"],
+        presets: [["react", { runtime: "classic" }]],
+        plugins: ["transform-modules-commonjs"],
         filename: "controller.js"
       }).code;
 
       // 2. Transpile index.jsx component
       const jsxCode = widget.jsx || "";
-      // Strip import useController from controller.js statement to avoid eval module errors
-      const cleanJsxCode = jsxCode.replace(/import\s+\{\s*useController\s*\}\s+from\s+["']\.\/controller(?:\.js)?["'];?/g, "");
-      const transpileJsx = Babel.transform(cleanJsxCode, {
-        presets: ["react"],
+      const transpileJsx = Babel.transform(jsxCode, {
+        presets: [["react", { runtime: "classic" }]],
+        plugins: ["transform-modules-commonjs"],
         filename: "index.jsx"
       }).code;
 
@@ -139,14 +139,23 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
       const controllerFn = new Function("exports", "React", transpileController || "");
       controllerFn(controllerExports, React);
       
-      const useController = controllerExports.useController;
-      if (!useController) {
+      if (!controllerExports.useController) {
         throw new Error("controller.js does not export useController");
       }
 
       const componentExports: any = {};
-      const jsxFn = new Function("exports", "React", "useController", transpileJsx || "");
-      jsxFn(componentExports, React, useController);
+      const customRequire = (moduleName: string) => {
+        if (moduleName.includes("controller")) {
+          return controllerExports;
+        }
+        if (moduleName === "react") {
+          return React;
+        }
+        throw new Error(`Module not found: ${moduleName}`);
+      };
+
+      const jsxFn = new Function("exports", "require", "React", transpileJsx || "");
+      jsxFn(componentExports, customRequire, React);
 
       const WidgetComponent = componentExports.default || Object.values(componentExports)[0];
       if (!WidgetComponent) {
@@ -236,7 +245,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
 
   // --- Legacy Script Execution & Scope Setup ---
   useEffect(() => {
-    if (widget.layout) return; // Skip DOM mounting logic for A2UI widgets
+    if (widget.layout || widget.jsx) return; // Skip DOM mounting logic for A2UI and React widgets
 
     if (!containerRef.current) return;
 
@@ -499,7 +508,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
         window.removeEventListener(event, handler);
       });
     };
-  }, [widget.id, widget.layout, widget.html, widget.css, widget.js]);
+  }, [widget.id, widget.layout, widget.jsx, widget.html, widget.css, widget.js]);
 
   // --- A2UI Sandbox Controller Lifecycle ---
   useEffect(() => {

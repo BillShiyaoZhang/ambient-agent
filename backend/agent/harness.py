@@ -944,7 +944,14 @@ class AgentOrchestrator:
             )
             self.db.add(code_msg)
 
-            if "layout" in widget_to_send:
+            if "jsx" in widget_to_send:
+                self.app_manager.create_or_update_app(
+                    app_id=widget_to_send["id"],
+                    title=widget_to_send["title"],
+                    js=widget_to_send["js"],
+                    jsx=widget_to_send["jsx"],
+                )
+            elif "layout" in widget_to_send:
                 self.app_manager.create_or_update_app(
                     app_id=widget_to_send["id"],
                     title=widget_to_send["title"],
@@ -1328,7 +1335,14 @@ class AgentOrchestrator:
             )
             self.db.add(code_msg)
 
-            if "layout" in widget_to_send:
+            if "jsx" in widget_to_send:
+                self.app_manager.create_or_update_app(
+                    app_id=widget_to_send["id"],
+                    title=widget_to_send["title"],
+                    js=widget_to_send["js"],
+                    jsx=widget_to_send["jsx"],
+                )
+            elif "layout" in widget_to_send:
                 self.app_manager.create_or_update_app(
                     app_id=widget_to_send["id"],
                     title=widget_to_send["title"],
