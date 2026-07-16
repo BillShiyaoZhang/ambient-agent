@@ -684,13 +684,13 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
         return (
           <div
             key={id}
-            onClick={cardActionId ? () => listenersRef.current[cardActionId]?.() : undefined}
+            onClick={actionId ? () => listenersRef.current[actionId]?.() : undefined}
             style={{
               border: "1px solid rgba(255,255,255,0.08)",
               borderRadius: "8px",
               padding: "16px",
               backgroundColor: "rgba(30,41,59,0.3)",
-              cursor: cardActionId ? "pointer" : undefined,
+              cursor: actionId ? "pointer" : undefined,
               ...resolvedStyle
             }}
           >

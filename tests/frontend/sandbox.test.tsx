@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { DashboardCanvas, Widget } from "../../frontend/src/components/DashboardCanvas";
 import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
+import { ErrorBoundary } from "../../frontend/src/components/ErrorBoundary";
 import React from "react";
 
 describe("SandboxWidget Rendering & Containment", () => {
@@ -345,5 +346,24 @@ describe("SandboxWidget Rendering & Containment", () => {
     expect(screen.getByText("checkedTrue")).toBeDefined();
     expect(screen.getByText("Item B-1")).toBeDefined();
     expect(screen.getByText("Bob-1")).toBeDefined();
+  });
+
+  it("should catch rendering errors and render widget fallback UI", () => {
+    const CrashingComponent = () => {
+      throw new Error("Test Crash");
+    };
+
+    const spyConsole = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <ErrorBoundary>
+        <CrashingComponent />
+      </ErrorBoundary>
+    );
+
+    expect(screen.getByText("Widget Crashed")).toBeDefined();
+    expect(screen.getByText("Test Crash")).toBeDefined();
+
+    spyConsole.mockRestore();
   });
 });

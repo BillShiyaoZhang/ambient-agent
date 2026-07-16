@@ -178,12 +178,13 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
             style={{ gridAutoRows: "80px" }}
             className="grid grid-cols-1 md:grid-cols-6 xl:grid-cols-12 gap-3"
           >
-            {widgets.map((widget) => {
+            {widgets.map((widget, index) => {
               const isFullscreen = widget.id === fullscreenAppId;
               const span = widgetSpans[widget.id] || { cols: 4, rows: 4 };
+              const keyVal = widget.id ? `${widget.id}-${index}` : `widget-idx-${index}`;
               return (
                 <div
-                  key={widget.id}
+                  key={keyVal}
                   style={
                     isFullscreen
                       ? {}

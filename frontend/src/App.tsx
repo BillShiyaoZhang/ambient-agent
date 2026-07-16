@@ -3,6 +3,7 @@ import wsService from "./services/websocket";
 import { ChatPanel, type Message } from "./components/ChatPanel";
 import { DashboardCanvas, type Widget } from "./components/DashboardCanvas";
 import { SandboxWidget } from "./components/SandboxWidget";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { SessionSidebar, type Session } from "./components/SessionSidebar";
 import { AppStoreModal } from "./components/AppStoreModal";
@@ -386,7 +387,7 @@ function App() {
         const res = await fetch(`${API_BASE}/api/canvas`);
         if (res.ok) {
           const config = await res.json();
-          const ids = config.pinned_ids || [];
+          const ids = Array.from(new Set<string>(config.pinned_ids || []));
           let spans = config.widget_spans || {};
           const version = config.version || 1;
 
@@ -661,13 +662,15 @@ function App() {
       {/* Workspace Canvas */}
       <DashboardCanvas
         activeSessionId={activeSessionId}
-        widgets={widgets}
+        widgets={widgets.filter((w, idx, self) => self.findIndex(x => x.id === w.id) === idx)}
         onRemoveWidget={handleRemoveWidget}
         renderWidgetContent={(widget) => (
-          <SandboxWidget
-            widget={widget}
-            onFullscreen={(id) => setFullscreenAppId(id)}
-          />
+          <ErrorBoundary key={widget.id}>
+            <SandboxWidget
+              widget={widget}
+              onFullscreen={(id) => setFullscreenAppId(id)}
+            />
+          </ErrorBoundary>
         )}
         onOpenAudit={() => setIsAuditOpen(true)}
         onOpenAppStore={() => setIsAppStoreOpen(true)}
