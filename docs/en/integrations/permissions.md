@@ -42,8 +42,8 @@ Beyond widget runtime API permissions, the platform integrates the OpenCode deve
 {
   "policy_mode": "interactive",
   "files": {
-    "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
-    "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"]
+    "allowed_extensions": [".js", ".json", ".md"],
+    "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
   },
   "commands": {
     "allowed_commands": ["npm test", "npm run build", "npm install"],

@@ -379,7 +379,7 @@ classDiagram
 *   **LLMAuditLog**: Records raw payloads and responses exchanged with LLM providers for the audit log dashboard.
 
 ### 2.2 Service & Control Logic
-*   **AppManager**: Coordinates dynamically compiled widget files (index.html, style.css, controller.js) in the local filesystem.
+*   **AppManager**: Coordinates dynamically compiled widget files (controller.js) in the local filesystem.
 *   **ContextManager**: Prunes redundant message content and injects active widget source codes as prompts.
 *   **AgentParser**: Extracts `<ambient-widget>` XML blocks from LLM stream responses using regex.
 *   **IntentRouter**: Evaluates user prompts to output a structured `IntentPlan` indicating intended system actions.

@@ -32,8 +32,8 @@ graph TD
 | **apply_user_actions** | 将用户明确的选择（如在 Schema 对齐界面勾选的新增字段）合并到当前的任务上下文状态中。                       |
 | **plan**               | 调大模型生成 Widget 的修改/新建顶层策略方案（例如确定要关联哪些图数据库类型）。                            |
 | **align_schemas**      | 对齐底层的 SQLite Schema 约束。如果涉及新的自定义属性类型，会在 `graph_schemas` 中做对应修改。             |
-| **regen_code**         | 核心编译节点。负责生成、修改 Widget 源码，并写入到磁盘文件（`index.html`, `style.css`, `controller.js`）。 |
-| **verify**             | 合规与安全校验。检查生成的 HTML 是否有脚本注入、JS 语法是否合法、以及字段是否与数据库对齐。                |
+| **regen_code**         | 核心编译节点。负责生成、修改 Widget 源码，并写入到磁盘文件（`controller.js`）。 |
+| **verify**             | 合规与安全校验。检查生成的组件代码语法是否合法、是否有脚本注入、以及字段是否与数据库对齐。                |
 
 ## 3. 异常回溯与用户交互
 

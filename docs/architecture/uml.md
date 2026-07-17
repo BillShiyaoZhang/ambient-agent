@@ -357,7 +357,7 @@ classDiagram
 
 - **AppManager (`app_manager.py`)**: 管理动态生成的小程序（Widget）。负责 Widget 代码文件在磁盘的读写、数据状态存储及文件路径寻址。
 - **ContextManager (`context_manager.py`)**: 负责将数据库中的对话上下文整合为 LLM 兼容的 Prompt。此层会自动剔除冗余代码段并动态注入当前运行中应用的最新源码，在控制 Token 大小的同时给 LLM 提供充分的运行环境上下文。
-- **AgentParser (`agent_parser.py`)**: 负责用正则表达式和 XML 解析器解析 LLM 返回文本流中携带的 `<ambient-widget>` 语法块，提取 HTML、CSS 和 JS 内容。
+- **AgentParser (`agent_parser.py`)**: 负责用正则表达式和 XML 解析器解析 LLM 返回文本流中携带的 `<ambient-widget>` 语法块，提取组件的 JS 逻辑代码。
 - **LLMService (`llm_service.py`)**: 提供统一的大模型请求接口（支持本地 Ollama 与 OpenAI/MiniMax 兼容接口），并自动将请求原始数据记录至 `LLMAuditLog` 审计数据库。
 - **RouterContext (`router_context.py`)**: 收集路由所需的轻量级上下文：已存在的 widgets、Graph 类型与节点摘要、近期对话。供 IntentRouter 在调用 LLM 时一并注入。
 - **GraphSnapshot**: RouterContext 嵌入的图状态摘要，用于让 LLM 意识到现有数据，避免重复创建。

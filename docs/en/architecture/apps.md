@@ -47,8 +47,8 @@ graph TB
     subgraph SandboxWidget ["SandboxWidget (Frontend)"]
         direction LR
         UI["UI (View)<br/>ambient.html Template"]
-        Ctrl["Controller (Logic)<br/>Dynamic React Hook / State"]
-        Data["Data (Model)<br/>ambient SDK Reactive State"]
+        Ctrl["Controller (Logic)<br/>Dynamic React Component"]
+        Data["Data (Model)<br/>React State & Graph Data"]
 
         Ctrl --> UI
         Ctrl --> Data

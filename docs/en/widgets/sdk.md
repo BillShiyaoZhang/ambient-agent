@@ -8,13 +8,7 @@ The `ambient` object injected in the widget's JS environment exposes API namespa
 - `ambient.fullscreen()`: Stretches the card layout to cover the full canvas.
 - `ambient.minimize()`: Restores the card to grid layout.
 
-## 2. Sandboxed State (`ambient.state`)
-
-- `ambient.state.get(pointer: string)`: Resolves target value using RFC 6901 JSON pointer syntax.
-- `ambient.state.set(pointer: string, value: any)`: Mutates local state and broadcasts `STATE_DELTA` updates.
-- `ambient.state.onChange(pointer: string, callback: Function)`: Subscribes to value changes. Returns `unsubscribe()` function.
-
-## 3. Database Operations (`ambient.graph`)
+## 2. Database Operations (`ambient.graph`)
 
 - `ambient.graph.subscribe(query: object, callback: Function)`: Subscribes to real-time database queries. Fires updates over WS when mutations occur.
 - `ambient.graph.mutate(actions: array)`: Submits Graph Database mutations (`POST /api/graph/mutate`).
@@ -23,32 +17,30 @@ The `ambient` object injected in the widget's JS environment exposes API namespa
     {
       action: "create_node",
       type: "Task",
-      properties: { title: "Buy milk", completed: false },
+      properties: { title: "Buy milk", status: "pending" },
     },
   ]);
   ```
 
-## 4. MCP Tools (`ambient.mcp`)
+## 3. MCP Tools (`ambient.mcp`)
 
 - `ambient.mcp.callTool(name: string, args: object)`: Resolves an asynchronous MCP tool call.
-- `ambient.mcp.readResource(uri: string)`: Fetches static text from target MCP source URIs.
+  ```javascript
+  const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
+  ```
 
-## 5. Multi-Agent Cooperation (`ambient.agent`)
+## 4. Built-in React & UI Support
 
-Allows the widget to communicate directly with background agents and external webhooks.
+The `ambient` object exposes the React environment itself as well as a pre-built styled component library powered by Tailwind CSS:
 
-### `ambient.agent.connect()`
-
-Establishes a connection handshake with the background agent.
-
-### `ambient.agent.send(msg: object)`
-
-Sends a custom JSON message payload to the connected background agent.
-
-### `ambient.agent.on(eventType: string, callback: Function)`
-
-Listens for incoming events dispatched by the background agent.
-- **Parameters**:
-  - `eventType`: Event type to filter (e.g. `"STATE_SNAPSHOT"`, `"STATE_DELTA"`, or `"*"` to listen to all events).
-  - `callback`: Invoked with the event data payload: `(eventData) => void`.
-- **Returns**: `unsubscribe()` function.
+- **`ambient.react`**: Exposes standard React Hooks (`useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`).
+- **`ambient.components`**: Exposes pre-designed React components. Includes:
+  - `Card` (card container)
+  - `Button` (interactive button)
+  - `TextField` (input field)
+  - `Checkbox` (checkbox control)
+  - `List` (list wrapper)
+  - `Table` (data table)
+  - `Column` / `Row` (flex layout containers)
+  - `Text` (typography text wrapper)
+- **`ambient.html`**: A declarative template markup rendering utility using `htm`.
