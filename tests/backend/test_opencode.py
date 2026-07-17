@@ -29,9 +29,7 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         app_manager.create_or_update_app(
             app_id=app_id,
             title="Test Timer App",
-            html="<title>Test Timer App</title><div class='timer'>12:34</div>",
-            css=".timer { color: green; }",
-            js="// Timer controller",
+            js="export default function App() { return ambient.html`<div class='timer'>12:34</div>`; }",
         )
         return "Mocked OpenCode success: stopwatch files updated on disk."
 
@@ -81,7 +79,7 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         assert widget_msg["type"] == "widget"
         assert widget_msg["widget"]["id"] == "test-timer"
         assert widget_msg["widget"]["title"] == "Test Timer App"
-        assert "12:34" in widget_msg["widget"]["html"]
+        assert "12:34" in widget_msg["widget"]["js"]
 
         # Expect session status idle update
         status_idle = websocket.receive_json()

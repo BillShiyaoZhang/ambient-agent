@@ -1,21 +1,15 @@
 import re
+from typing import Any
 
 
 def parse_widget_from_text(text: str) -> dict[str, str] | None:
     """
     Parses a widget structured as:
     <ambient-widget id="widget-id" title="Widget Title">
-      <layout-json>...</layout-json>  (For A2UI)
-      <js-script>...</js-script>
-    </ambient-widget>
-    OR:
-    <ambient-widget id="widget-id" title="Widget Title">
-      <html-content>...</html-content> (For Legacy)
-      <css-styles>...</css-styles>
       <js-script>...</js-script>
     </ambient-widget>
 
-    Returns a dict with keys: id, title, layout (if A2UI), html, css (if legacy), js or None if no match found.
+    Returns a dict with keys: id, title, js, html, css or None if no match found.
     """
     # Robust matching of ambient-widget tag and its attributes in any order
     tag_match = re.search(r"(<ambient-widget\s+[^>]*?>)(.*?)</ambient-widget>", text, re.DOTALL)
@@ -31,26 +25,13 @@ def parse_widget_from_text(text: str) -> dict[str, str] | None:
     widget_id = id_match.group(1).strip()
     title = title_match.group(1).strip()
 
-    layout_match = re.search(r"<layout-json>(.*?)</layout-json>", content, re.DOTALL)
-    if layout_match:
-        js_match = re.search(r"<js-script>(.*?)</js-script>", content, re.DOTALL)
-        return {
-            "id": widget_id,
-            "title": title,
-            "layout": layout_match.group(1).strip(),
-            "js": js_match.group(1).strip() if js_match else "",
-        }
-
-    html_match = re.search(r"<html-content>(.*?)</html-content>", content, re.DOTALL)
-    css_match = re.search(r"<css-styles>(.*?)</css-styles>", content, re.DOTALL)
     js_match = re.search(r"<js-script>(.*?)</js-script>", content, re.DOTALL)
-
     return {
         "id": widget_id,
         "title": title,
-        "html": html_match.group(1).strip() if html_match else "",
-        "css": css_match.group(1).strip() if css_match else "",
         "js": js_match.group(1).strip() if js_match else "",
+        "html": "",
+        "css": "",
     }
 
 
@@ -63,3 +44,14 @@ class AgentParser:
         """
         widget = parse_widget_from_text(text)
         return [widget] if widget else []
+
+
+def serialize_widget_to_text(widget: dict[str, Any]) -> str:
+    """
+    Serializes a widget dictionary back into its XML representation.
+    """
+    widget_id = widget.get("id", "")
+    title = widget.get("title", "")
+    js = widget.get("js", "")
+
+    return f'<ambient-widget id="{widget_id}" title="{title}">\n<js-script>\n{js}\n</js-script>\n</ambient-widget>'

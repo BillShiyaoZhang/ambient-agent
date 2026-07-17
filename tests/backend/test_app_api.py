@@ -16,9 +16,7 @@ def test_app_api_preserves_existing_shape_and_adds_manifest_fields():
     app_manager.create_or_update_app(
         "planner",
         "Planner",
-        "<main>Plan</main>",
-        "main {}",
-        "console.log('plan')",
+        js="console.log('plan')",
         description="Plans a day.",
         intents=["plan my day"],
         schema_refs=["Task"],
@@ -41,8 +39,6 @@ def test_app_api_preserves_existing_shape_and_adds_manifest_fields():
 
     assert detail_response.status_code == 200
     detail = detail_response.json()
-    assert detail["html"] == "<main>Plan</main>"
-    assert detail["css"] == "main {}"
     assert detail["js"] == "console.log('plan')"
     assert detail["description"] == "Plans a day."
     assert detail["intents"] == ["plan my day"]
@@ -65,5 +61,6 @@ def test_invalid_manifest_is_not_exposed_or_hidden_by_metadata(isolate_apps_dir)
         detail_response = client.get("/api/apps/broken")
 
     assert list_response.json() == []
-    assert detail_response.json() == {"status": "error", "message": "App not found"}
+    assert detail_response.status_code == 404
+    assert detail_response.json() == {"detail": "App not found"}
     assert (app_dir / "metadata.json").exists()

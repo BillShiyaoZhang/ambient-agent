@@ -100,12 +100,15 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
-    # Mock LLM API call containing widget block
     async def mock_call_llm_api(provider, model, prompt, tools=None):
         return """
         I've generated a weather widget on your workspace canvas.
         <ambient-widget id="weather-card" title="Local Weather">
-        <html-content><div>Beijing Weather</div></html-content>
+        <js-script>
+        export default function App() {
+            return ambient.html`<div>Beijing Weather</div>`;
+        }
+        </js-script>
         </ambient-widget>
         """
 
@@ -148,7 +151,7 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         assert widget_msg["type"] == "widget"
         assert widget_msg["widget"]["id"] == "weather-card"
         assert widget_msg["widget"]["title"] == "Local Weather"
-        assert "Beijing" in widget_msg["widget"]["html"]
+        assert "Beijing" in widget_msg["widget"]["js"]
 
         # Expect session status idle update
         status_idle = websocket.receive_json()

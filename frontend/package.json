@@ -11,7 +11,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@babel/standalone": "^8.0.4",
     "@tailwindcss/vite": "^4.3.2",
+    "htm": "^3.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwindcss": "^4.3.2"

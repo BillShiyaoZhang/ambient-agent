@@ -2,71 +2,99 @@
 
 当大语言模型需要为用户界面输出交互小程序卡片（Widget）时，它会在返回的文本流中嵌入特定格式的 XML 代码块。后端 `AgentParser` 服务会自动捕获、解析并从最终聊天气泡的文本中剔除这些 XML，然后以卡片形式分发给前端渲染。
 
-## 1. 协议结构定义
+为了同时保障开发的高效性、首屏的高性能渲染、视觉风格的一致性以及自定义界面的自由度，系统采用 **React + HTM** 统一声明式渲染模式。
 
-系统支持两种模式的 Widget 卡片定义：
+---
 
-### A. HTML / CSS / JS 混合渲染模式（默认）
+## 1. 统一声明式渲染协议（推荐首选）
 
-这种模式允许直接定义卡片内部的 HTML 标记、局部样式表以及交互脚本：
+大模型只需输出单个 `<js-script>` 块，通过 `ambient.html`（基于 `htm`）编写声明式的 React 组件。该模式无需加载繁重的编译器，支持响应式 Hooks 以及预置的高清组件。
+
+### A. 协议结构示例
 
 ```xml
-<ambient-widget id="WIDGET_ID" title="WIDGET_TITLE">
-<html-content>
-  <!-- 符合 HTML5 规范的结构，支持 Tailwind 类 -->
-  <div class="p-4 rounded-lg bg-slate-900/50">
-    <button id="action-btn" class="bg-purple-600 px-3 py-1 text-xs text-white rounded">
-      触发操作
-    </button>
-  </div>
-</html-content>
-<css-styles>
-  /* 可选：特定的局部样式扩展 */
-  #action-btn { transition: all 0.2s ease-in-out; }
-</css-styles>
+<ambient-widget id="todo-manager" title="待办任务管理">
 <js-script>
-  // 可选：JavaScript 交互逻辑。
-  // 执行时会自动传入参数 root (指向 Widget 的 DOM 根元素) 和 ambient (SDK)。
-  const btn = root.querySelector("#action-btn");
-  btn.addEventListener("click", () => {
-    ambient.sendMessage("用户点击了 Widget 操作按钮！");
-  });
-</js-script>
-</ambient-widget>
-```
+  // 1. 解构导入 React Hooks
+  const { useState, useEffect } = ambient.react;
 
-### B. A2UI JSON 布局渲染模式
+  // 2. 解构导入系统预置组件（自带样式规范，离线可用）
+  const { Card, Button, TextField, List } = ambient.components;
 
-当大模型生成复杂的结构化控制面板时，可以使用 JSON 声明 UI 组件：
+  export default function TodoWidget() {
+    const [tasks, setTasks] = useState([]);
+    const [input, setInput] = useState("");
 
-```xml
-<ambient-widget id="WIDGET_ID" title="WIDGET_TITLE">
-<layout-json>
-  {
-    "type": "container",
-    "children": [
-      {
-        "type": "button",
-        "id": "my-btn",
-        "label": "确认提交",
-        "color": "primary"
-      }
-    ]
+    useEffect(() => {
+      // 订阅后端实时图数据
+      const unsub = ambient.graph.subscribe({ type: "Task" }, (data) => {
+        setTasks(data.nodes || []);
+      });
+      return unsub;
+    }, []);
+
+    const handleAdd = async () => {
+      if (!input.trim()) return;
+      await ambient.graph.mutate([
+        {
+          action: "create_node",
+          type: "Task",
+          properties: { content: input, completed: false }
+        }
+      ]);
+      setInput("");
+    };
+
+    // 使用 ambient.html 声明界面（使用 \$ 避免模板字符串变量插值冲突）
+    return ambient.html`
+      <\${Card} title="我的待办列表">
+        <div class="flex gap-2 mb-3">
+          <\${TextField} 
+            placeholder="输入新任务..." 
+            value=\${input} 
+            onChange=\${e => setInput(e.target.value)} 
+            onEnter=\${handleAdd}
+          />
+          <\${Button} label="添加" onClick=\${handleAdd} />
+        </div>
+        
+        <!-- 混合使用预置组件与自定义 HTML 节点，并可直接写 Tailwind 工具类 -->
+        <div class="border-t border-white/5 pt-3">
+          <\${List} 
+            items=\${tasks.map(t => t.properties.content)} 
+            itemStyle=\${{ backgroundColor: 'rgba(255,255,255,0.01)' }}
+          />
+        </div>
+      <//>
+    `;
   }
-</layout-json>
-<js-script>
-  // 此时可以绑定状态和 UI 事件句柄
-  ambient.ui.on("click", "my-btn", () => {
-    ambient.sendMessage("A2UI 声明式按钮被点击");
-  });
 </js-script>
 </ambient-widget>
 ```
+
+### B. 预置组件库（`ambient.components`）说明
+
+预置组件遵循系统整体的设计系统（Design System），可以自动适应暗黑/透明毛玻璃主题，并且**完全支持离线渲染**。
+
+1. **容器类组件**：
+   - `<\${Card} title="标题" onClick=\${...}>子节点<//>`：圆角卡片面板。
+   - `<\${Column} gap="8px" padding="10px">子节点<//>`：垂直弹性盒布局。
+   - `<\${Row} gap="8px" align="center">子节点<//>`：水平弹性盒布局。
+2. **基础交互组件**：
+   - `<\${Text} text="内容" style=\${...} />`：文本标签。
+   - `<\${Button} label="按钮文本" variant="primary|secondary|danger" onClick=\${...} />`：扁平交互按钮。
+   - `<\${TextField} label="标签" placeholder="..." value=\${value} onChange=\${...} onEnter=\${...} />`：文本输入框。
+   - `<\${Checkbox} label="标签" checked=\${checked} onChange=\${...} />`：复选框。
+3. **数据展示组件**：
+   - `<\${List} items=\${itemsArray} onItemClick=\${...} itemStyle=\${...} />`：标准间距列表。
+   - `<\${Table} columns=\${columnsArray} rows=\${rowsArray} onRowClick=\${...} />`：自适应表格。
+
+---
 
 ## 2. 字段规范说明
 
-- `id`: 卡片的唯一标识符。英文字母、数字和横杠组合（如 `weather-card`）。如果重名，后台服务会检测冲突，若为旧应用会进入更新生命周期。
-- `title`: 卡片的标题。展示在 Canvas 卡片拖拽标题栏中。
-- `<html-content>`: HTML 实体标记。可直接编写符合现代浏览器标准的 DOM 树。支持行内 Tailwind 工具类（Tailwind CSS v4 在沙箱外自动编译生效）。
-- `<css-styles>`: 局部样式表。在沙箱挂载时会自动转换为 scoped 标签插入卡片容器中，绝不污染系统主界面样式。
-- `<js-script>`: 交互脚本。在隔离的 `new Function` 环境下运行，接收 `(root, ambient, fetch)` 三个注入参数。
+- `id`: 卡片的唯一标识符。英文字母、数字和横杠组合（如 `weather-card`）。
+- `title`: 卡片的标题。展示在 Canvas 拖拽标题栏中。
+- `<js-script>`: 核心交互逻辑与视图渲染脚本。在统一模式下，它需要 `export default` 导出一个标准的 React 组件，并利用宿主传入的 `ambient` API 提供的 `react`（Hooks）、`components`（预置组件）以及 `html`（模板渲染）构建卡片。
+
+---

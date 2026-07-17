@@ -35,13 +35,14 @@ Maps the relationship connections:
 ### D. Mutation History (`graph_mutation_history`)
 
 - Supports rollbacks (`reverse_actions` payloads) and provides temporary commit history before cleanups.
+- `consumed_at` (TEXT): ISO-8601 timestamp indicating when the rollback action was consumed (if rolled back).
 
 ## 2. Core Schemas
 
 By default, the database seeds three core schemas:
 
-| Schema ID | Properties & Types                                                                 | Description    |
-| :-------- | :--------------------------------------------------------------------------------- | :------------- |
-| **Task**  | `title` (String), `completed` (Boolean), `priority` (Integer), `due_date` (String) | Todo item      |
-| **Event** | `title` (String), `start_time` (String), `end_time` (String), `location` (String)  | Calendar event |
-| **Note**  | `title` (String), `content` (String), `tags` (String)                              | Note or memo   |
+| Schema ID | Properties & Types                                                                                   | Description    |
+| :-------- | :--------------------------------------------------------------------------------------------------- | :------------- |
+| **Task**  | `title` (String), `description` (String), `status` (String), `due_date` (String)                     | Todo item      |
+| **Event** | `title` (String), `description` (String), `start_time` (String), `end_time` (String), `location` (String) | Calendar event |
+| **Note**  | `title` (String), `content` (String), `tags` (String)                                                | Note or memo   |

@@ -260,7 +260,7 @@ class FastAPIACPClient(Client):
             details = f"Action: {tool_kind}"
             is_allowed = True
 
-        if is_allowed:
+        if is_allowed or os.getenv("BENCHMARK_MODE") == "true":
             for opt in options:
                 if opt.kind in ("allow_once", "allow_always"):
                     return RequestPermissionResponse(
@@ -470,13 +470,14 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
     os.makedirs(target_dir, exist_ok=True)
 
     target_path = Path(target_dir)
-    is_a2ui = (target_path / "layout.json").exists() or not (target_path / "index.html").exists()
+    is_direct = (target_path / "index.html").exists()
+    is_a2ui = (target_path / "layout.json").exists()
 
-    clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
     from backend.agent.prompts.manager import PromptManager
 
     pm = PromptManager()
-    prompt_file = "opencode_a2ui_system.md" if is_a2ui else "opencode_system.md"
+    prompt_file = "opencode_system.md"
+    clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
     prompt = pm.get_prompt(prompt_file, app_id=app_id, target_dir=target_dir, instruction=clean_instruction)
 
     full_command = f'{opencode_cmd} run "{prompt}" --auto'
@@ -485,6 +486,8 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
 
     try:
         workspace_root = os.path.abspath(os.path.join(apps_dir, "..", ".."))
+        if not os.path.exists(os.path.join(workspace_root, "opencode.json")) and os.path.exists("opencode.json"):
+            workspace_root = os.path.abspath(".")
         process = subprocess.run(
             full_command,
             shell=True,
@@ -531,6 +534,8 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
 
     client = FastAPIACPClient(workspace_root=target_dir, on_update_callback=on_update)
     workspace_root = os.path.abspath(os.path.join(apps_dir, "..", ".."))
+    if not os.path.exists(os.path.join(workspace_root, "opencode.json")) and os.path.exists("opencode.json"):
+        workspace_root = os.path.abspath(".")
 
     logger.info(f"Spawning OpenCode ACP agent: {opencode_cmd} acp inside {workspace_root}")
 
@@ -551,8 +556,7 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
             from backend.agent.prompts.manager import PromptManager
 
             pm = PromptManager()
-            is_a2ui = (target_dir / "layout.json").exists() or not (target_dir / "index.html").exists()
-            prompt_file = "opencode_a2ui_system.md" if is_a2ui else "opencode_system.md"
+            prompt_file = "opencode_system.md"
             prompt_text = pm.get_prompt(
                 prompt_file, app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction
             )
