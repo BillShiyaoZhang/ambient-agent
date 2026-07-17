@@ -901,6 +901,7 @@ class AgentOrchestrator:
         if widget_to_send:
             title = app_id.replace("-", " ").title()
             from backend.agent_parser import serialize_widget_to_text
+
             if widget_to_send.get("html"):
                 title_match = re.search(r"<title>(.*?)</title>", widget_to_send["html"], re.IGNORECASE)
                 if title_match:
@@ -1266,6 +1267,7 @@ class AgentOrchestrator:
         if widget_to_send:
             title = app_id.replace("-", " ").title()
             from backend.agent_parser import serialize_widget_to_text
+
             content = serialize_widget_to_text(widget_to_send)
 
             code_msg = ChatMessage(

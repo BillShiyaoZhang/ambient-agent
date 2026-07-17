@@ -54,8 +54,4 @@ def serialize_widget_to_text(widget: dict[str, Any]) -> str:
     title = widget.get("title", "")
     js = widget.get("js", "")
 
-    return (
-        f'<ambient-widget id="{widget_id}" title="{title}">\n'
-        f"<js-script>\n{js}\n</js-script>\n"
-        f"</ambient-widget>"
-    )
+    return f'<ambient-widget id="{widget_id}" title="{title}">\n<js-script>\n{js}\n</js-script>\n</ambient-widget>'
