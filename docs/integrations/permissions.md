@@ -58,3 +58,33 @@ graph LR
 - **原始 PromptPayload**：记录发送给 LLM 接口的完整系统指令（System Prompt）、聊天上下文历史和注入的 Widget 源码。您可以清晰查看有无敏感隐私数据泄漏。
 - **LLM 返回流 (RAW Response)**：大模型吐出的原始文本或结构化意图，包括未被正则清洗掉的完整 XML 代码块。
 - **审计界面**：用户随时可以在主页侧边栏点击 **Audit Log** 按钮唤起审计面板，它会按时间倒序展示出全部的审计单。
+
+## 4. OpenCode 开发者智能体安全执行策略 `opencode_permissions.json`
+
+除了 Widget 运行时的 API 权限，系统还集成了 OpenCode 开发者智能体，用于在后台自动编译、生成与修改 Widget 的代码。为了确保终端命令以及本地文件操作的安全性，系统在 `backend/opencode_permissions.json` 中定义了静态访问规则配置。
+
+### 结构示例
+
+```json
+{
+  "policy_mode": "interactive",
+  "files": {
+    "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
+    "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"]
+  },
+  "commands": {
+    "allowed_commands": ["npm test", "npm run build", "npm install"],
+    "allowed_prefixes": ["npm install ", "echo "],
+    "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"]
+  }
+}
+```
+
+### 规则说明
+
+- `policy_mode`: 策略模式（如 `"interactive"`）。当检测到未白名单授权的文件写入或终端命令时，后端会通过 WebSocket 挂起并向前端广播审批请求，待用户手动授权后方可执行。
+- `files`: 限制智能体仅能操作符合 `allowed_extensions` 后缀或 `allowed_filenames` 白名单的文件名，同时系统强制执行根目录防穿越越权（Jail Check）检测。
+- `commands`:
+  - `allowed_commands`: 允许精确执行的命令列表。
+  - `allowed_prefixes`: 允许匹配的前缀列表。
+  - `blocklist`: 绝对禁止执行的高危关键字（如 `rm -rf`, `sudo` 等）。

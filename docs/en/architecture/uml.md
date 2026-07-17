@@ -77,6 +77,7 @@ classDiagram
         +model: str
         +prompt: str
         +response: str
+        +stage: str
     }
 
     class AppManager {

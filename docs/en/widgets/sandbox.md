@@ -22,6 +22,16 @@ const runScript = new Function("root", "ambient", "fetch", widget.js);
 runScript(contentEl, ambient, customFetch);
 ```
 
-- **`root`**: Points specifically to the HTML card node. Querying MUST be limited to `root.querySelector` rather than global `document`.
+- **`root`**: Points specifically to the HTML card node (used in HTML/A2UI modes). Querying MUST be limited to `root.querySelector` rather than global `document`.
 - **`fetch`**: Proxy interceptor enforcing a 5-minute memory cache (`CACHE_TTL`) on external GET calls to prevent redundant network fetches.
-- **`ambient`**: Custom SDK containing specific API endpoints.
+- **`ambient`**: Custom SDK containing specific API endpoints. In React mode, it is passed as a prop to the React component, exposing graph, chat, and window controls.
+
+## 3. React JSX Compilation & Scope Isolation
+
+For React JSX widgets, isolation is achieved via a simulated CommonJS module environment:
+- **Module Mocking**: The frontend instantiates a local mock loader `customRequire` that only permits importing `"react"` and `"./controller.js"`.
+- **On-the-Fly Transpilation**: Using `@babel/standalone`, the JSX code is dynamically compiled. The controller's `useController` Hook runs in a separate execution context, with any runtime errors captured safely inside a React `ErrorBoundary` wrapper.
+
+## 4. Fullscreen and Layout Lifecycle Safety
+
+When a Widget transitions to fullscreen, Ambient Agent **does not remount (Zero Remount)** the React DOM tree. Fullscreen toggle is achieved purely via CSS transforms and Canvas layer displacement, preserving 100% of event listeners, input fields, and in-memory states.

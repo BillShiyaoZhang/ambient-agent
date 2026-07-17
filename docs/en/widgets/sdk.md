@@ -32,3 +32,23 @@ The `ambient` object injected in the widget's JS environment exposes API namespa
 
 - `ambient.mcp.callTool(name: string, args: object)`: Resolves an asynchronous MCP tool call.
 - `ambient.mcp.readResource(uri: string)`: Fetches static text from target MCP source URIs.
+
+## 5. Multi-Agent Cooperation (`ambient.agent`)
+
+Allows the widget to communicate directly with background agents and external webhooks.
+
+### `ambient.agent.connect()`
+
+Establishes a connection handshake with the background agent.
+
+### `ambient.agent.send(msg: object)`
+
+Sends a custom JSON message payload to the connected background agent.
+
+### `ambient.agent.on(eventType: string, callback: Function)`
+
+Listens for incoming events dispatched by the background agent.
+- **Parameters**:
+  - `eventType`: Event type to filter (e.g. `"STATE_SNAPSHOT"`, `"STATE_DELTA"`, or `"*"` to listen to all events).
+  - `callback`: Invoked with the event data payload: `(eventData) => void`.
+- **Returns**: `unsubscribe()` function.

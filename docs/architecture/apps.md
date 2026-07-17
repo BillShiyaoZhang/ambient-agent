@@ -2,6 +2,17 @@
 
 在 Ambient Agent 中，**Widget（又称 Apps）** 是由大语言模型动态生成并在前端 Canvas 工作区中挂载运行的微型交互卡片。为了在保障系统安全的同时提供极高的灵活性与响应速度，Widget 采用了类似于 MVC 的 **UI (View) - Controller (Logic) - Data (Model)** 解耦设计，并通过隔离沙箱和响应式通信链路进行高效协作。
 
+## 0. 三种 Widget 渲染模式
+
+系统支持以下三种不同的模式渲染卡片小程序，根据 LLM 生成的 XML 代码段自动匹配：
+
+1. **HTML / CSS / JS 混合渲染模式（Legacy 默认）**：
+   - 视图使用 `<html-content>` 定义原生 HTML，样式使用 `<css-styles>` 定义并由前端动态 Scope 隔离，逻辑由 `<js-script>` 在 `new Function("root", "ambient", "fetch", ...)` 闭包中以 DOM 原生操作方式运行。
+2. **A2UI JSON 布局渲染模式**：
+   - 视图使用 `<layout-json>` 声明 JSON 组件树（如按钮、文本框、列表、表格等），前端递归渲染为标准的 React UI 组件。逻辑在 `<js-script>` 闭包中，通过绑定 `ambient.ui.on` 来监听事件。
+3. **React JSX 动态编译渲染模式**：
+   - 视图使用 `<react-jsx>` 直接定义现代 React 组件代码，由前端加载的 `@babel/standalone` 在浏览器端动态编译。逻辑在 `<js-script>` 中作为 ES 模块导出 `useController` 自定义 Hook。此模式允许编写高动态、组件化的复杂 React Widget。
+
 ## 1. 核心层解耦设计
 
 Widget 的代码与状态在结构上被拆分为独立的三个层次，互不干扰，通过标准接口进行数据通信：

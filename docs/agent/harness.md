@@ -184,4 +184,4 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 | Router（含 multi_intent） | `tests/backend/test_router.py` + `test_multi_intent.py` | 17     |
 | Harness / rework loops    | `tests/backend/test_rework_loops.py` 等                 | 12     |
 
-总计 **57 个核心单元/集成测试全部通过**。
+总计 **57 个核心单元/集成测试全部通过**（全量后端测试集共计 200+ 个测试全部通过）。

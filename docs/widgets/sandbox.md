@@ -34,13 +34,19 @@ runScript(contentEl, ambient, customFetch);
 
 ### 注入参数与访问限制：
 
-1.  **`root`**: 仅指向当前 Widget 的局部根 DOM 节点。
+1.  **`root`**: 仅指向当前 Widget 的局部根 DOM 节点（非 React 模式下使用）。
     - _规范要求_：JS 内部进行 DOM 选择时，禁止使用全局 `document.querySelector`，而必须使用 `root.querySelector`。
     - _安全性_：这样使得该 Widget 无法查询和操作 Canvas 上其他卡片或系统 UI 的节点。
-2.  **`ambient`**: 系统专门为该卡片构造的轻量 SDK 上下文。
+2.  **`ambient`**: 系统专门为该卡片构造的轻量 SDK 上下文。在 React 模式下，作为 props 传给 React 组件，提供 graph 读写、对话、全屏切换和 mcp 调用能力。
 3.  **`fetch`**: 拦截型的代理请求。
     - 它重写了原生的 `window.fetch` 方法，默认开启 **5 分钟的本地内存缓存 (Fetch Cache)**。
     - 只有对外部第三方域名的 `GET` 请求会走该缓存。这避免了在 Widget 销毁后重建或在轮询中造成的重复 API 请求开销。
+
+### React 模式下的编译与隔离：
+
+对于 React JSX 模式，隔离机制通过模拟 CommonJS 环境来执行：
+1. **ES 模块模拟**：前端构造了一个 Mock 模块加载器 `customRequire`，仅允许导入 `"react"` 和 `"./controller.js"`。
+2. **独立编译域**：使用 `@babel/standalone` 动态转换 JSX 语法。控制器 `controller.js` 的 `useController` Hook 会在独立的闭包上下文中运行，然后与视图组件 `index.jsx` 结合，将潜在的脚本异常隔离在 `ErrorBoundary` 之中，以保障主页面可用性。
 
 ## 3. 全屏与布局生命周期安全
 
