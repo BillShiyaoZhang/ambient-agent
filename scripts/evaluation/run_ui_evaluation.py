@@ -459,12 +459,12 @@ This benchmark evaluates **A2UI** (declarative layout specifications) against **
         if a2_img_path.exists():
             report_content += f"![A2UI Render]({a2_img_path.as_uri()})\n"
         else:
-            report_content += f"No A2UI screenshot captured.\n"
+            report_content += "No A2UI screenshot captured.\n"
         report_content += "<!-- slide -->\n"
         if di_img_path.exists():
             report_content += f"![Direct UI Render]({di_img_path.as_uri()})\n"
         else:
-            report_content += f"No Direct UI screenshot captured.\n"
+            report_content += "No Direct UI screenshot captured.\n"
         report_content += "```\n\n"
         
         report_content += "#### ⚖️ LLM Judge Scoring & Analysis\n\n"

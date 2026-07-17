@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import asyncio
 import shutil
 from pathlib import Path
@@ -11,7 +10,6 @@ load_dotenv()
 # Fix python import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.agent.providers import get_llm_provider
 from scripts.evaluation.run_ui_evaluation import SCENARIOS, judge_llm, ARTIFACTS_DIR
 
 RUN_TIMESTAMP = "20260716_202721"
@@ -133,12 +131,12 @@ This benchmark evaluates **A2UI** (declarative layout specifications) against **
         if a2_img_path.exists():
             report_content += f"![A2UI Render]({a2_img_path.as_uri()})\n"
         else:
-            report_content += f"No A2UI screenshot captured.\n"
+            report_content += "No A2UI screenshot captured.\n"
         report_content += "<!-- slide -->\n"
         if di_img_path.exists():
             report_content += f"![Direct UI Render]({di_img_path.as_uri()})\n"
         else:
-            report_content += f"No Direct UI screenshot captured.\n"
+            report_content += "No Direct UI screenshot captured.\n"
         report_content += "```\n\n"
         
         report_content += "#### ⚖️ LLM Judge Scoring & Analysis\n\n"

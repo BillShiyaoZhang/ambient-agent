@@ -901,7 +901,7 @@ class AgentOrchestrator:
         if widget_to_send:
             title = app_id.replace("-", " ").title()
             from backend.agent_parser import serialize_widget_to_text
-            if "html" in widget_to_send and widget_to_send["html"]:
+            if widget_to_send.get("html"):
                 title_match = re.search(r"<title>(.*?)</title>", widget_to_send["html"], re.IGNORECASE)
                 if title_match:
                     title = title_match.group(1).strip()
