@@ -199,6 +199,7 @@ class AppManager:
             not (app_path / "index.html").is_file()
             and not (app_path / "layout.json").is_file()
             and not (app_path / "index.jsx").is_file()
+            and not (app_path / "controller.js").is_file()
         ):
             return None
 
@@ -317,27 +318,12 @@ class AppManager:
                     manifest_data[field] = value
             manifest = AppManifest.from_dict(manifest_data, expected_app_id=app_id)
 
-            if jsx is not _UNSET and jsx:
-                (app_path / "index.jsx").write_text(jsx, encoding="utf-8")
-                (app_path / "controller.js").write_text(js, encoding="utf-8")
-                # Remove files of other modes to avoid confusion
-                (app_path / "layout.json").unlink(missing_ok=True)
-                (app_path / "index.html").unlink(missing_ok=True)
-                (app_path / "style.css").unlink(missing_ok=True)
-            elif layout is not _UNSET:
-                (app_path / "layout.json").write_text(layout, encoding="utf-8")
-                # For A2UI, remove legacy HTML/CSS files to avoid confusion
-                (app_path / "index.html").unlink(missing_ok=True)
-                (app_path / "style.css").unlink(missing_ok=True)
-                (app_path / "index.jsx").unlink(missing_ok=True)
-                # Still save controller.js
-                (app_path / "controller.js").write_text(js, encoding="utf-8")
-            else:
-                # If creating legacy app, make sure layout.json and index.jsx are deleted
-                (app_path / "layout.json").unlink(missing_ok=True)
-                (app_path / "index.jsx").unlink(missing_ok=True)
-                for filename, content in zip(_SOURCE_FILES, (html, css, js), strict=True):
-                    (app_path / filename).write_text(content, encoding="utf-8")
+            (app_path / "controller.js").write_text(js, encoding="utf-8")
+            # Remove legacy files if they exist to keep workspace clean
+            (app_path / "layout.json").unlink(missing_ok=True)
+            (app_path / "index.html").unlink(missing_ok=True)
+            (app_path / "style.css").unlink(missing_ok=True)
+            (app_path / "index.jsx").unlink(missing_ok=True)
 
             manifest.write_atomic(manifest_path)
             AppManifest.read(manifest_path, expected_app_id=app_id)
@@ -381,12 +367,6 @@ class AppManager:
                     key: (app_path / filename).read_text(encoding="utf-8") if (app_path / filename).exists() else ""
                     for key, filename in zip(("html", "css", "js"), _SOURCE_FILES, strict=True)
                 }
-                layout_path = app_path / "layout.json"
-                if layout_path.exists():
-                    source["layout"] = layout_path.read_text(encoding="utf-8")
-                jsx_path = app_path / "index.jsx"
-                if jsx_path.exists():
-                    source["jsx"] = jsx_path.read_text(encoding="utf-8")
                 return {**self._manifest_record(manifest, record), **source}
             except (OSError, UnicodeError, ManifestValidationError):
                 logger.warning("Unable to load App %s", app_id, exc_info=True)

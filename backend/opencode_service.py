@@ -476,12 +476,7 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
     from backend.agent.prompts.manager import PromptManager
 
     pm = PromptManager()
-    if is_direct:
-        prompt_file = "opencode_system.md"
-    elif is_a2ui:
-        prompt_file = "opencode_a2ui_system.md"
-    else:
-        prompt_file = "opencode_react_system.md"
+    prompt_file = "opencode_system.md"
     clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
     prompt = pm.get_prompt(prompt_file, app_id=app_id, target_dir=target_dir, instruction=clean_instruction)
 
@@ -561,15 +556,7 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
             from backend.agent.prompts.manager import PromptManager
 
             pm = PromptManager()
-            is_direct = (target_dir / "index.html").exists()
-            is_a2ui = (target_dir / "layout.json").exists()
-            
-            if is_direct:
-                prompt_file = "opencode_system.md"
-            elif is_a2ui:
-                prompt_file = "opencode_a2ui_system.md"
-            else:
-                prompt_file = "opencode_react_system.md"
+            prompt_file = "opencode_system.md"
             prompt_text = pm.get_prompt(
                 prompt_file, app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction
             )

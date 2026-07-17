@@ -1,74 +1,27 @@
 from backend.agent_parser import parse_widget_from_text
 
 
-def test_parse_valid_widget():
+def test_parse_unified_widget():
     sample_text = """
-    Here is the weather widget you requested:
-    <ambient-widget id="weather-card" title="Local Weather">
-    <html-content>
-      <div class="weather">24°C</div>
-    </html-content>
-    <css-styles>
-      .weather { color: sun; }
-    </css-styles>
+    Here is a unified widget utilizing HTM and React:
+    <ambient-widget id="unified-counter" title="Counter App">
     <js-script>
-      console.log("hello");
+      const { useState } = ambient.react;
+      export default function Counter() {
+        return ambient.html`<div>Counter</div>`;
+      }
     </js-script>
     </ambient-widget>
-    Hope you like it!
     """
 
     widget = parse_widget_from_text(sample_text)
     assert widget is not None
-    assert widget["id"] == "weather-card"
-    assert widget["title"] == "Local Weather"
-    assert "24°C" in widget["html"]
-    assert ".weather {" in widget["css"]
-    assert 'console.log("hello");' in widget["js"]
+    assert widget["id"] == "unified-counter"
+    assert widget["title"] == "Counter App"
+    assert "ambient.html`<div>Counter</div>`" in widget["js"]
 
 
 def test_parse_no_widget():
     sample_text = "Hello, how can I help you today?"
     widget = parse_widget_from_text(sample_text)
     assert widget is None
-
-
-def test_parse_partial_widget():
-    # Test widget missing js-script
-    sample_text = """
-    <ambient-widget id="partial" title="No JS">
-    <html-content><h1>Hi</h1></html-content>
-    <css-styles>h1 { color: red; }</css-styles>
-    </ambient-widget>
-    """
-    widget = parse_widget_from_text(sample_text)
-    assert widget is not None
-    assert widget["id"] == "partial"
-    assert widget["title"] == "No JS"
-    assert widget["html"] == "<h1>Hi</h1>"
-    assert widget["css"] == "h1 { color: red; }"
-    assert widget["js"] == ""
-
-
-def test_parse_a2ui_widget():
-    sample_text = """
-    Here is the task board using the declarative A2UI format:
-    <ambient-widget id="task-board" title="My Tasks" layout-type="a2ui">
-    <layout-json>
-      [
-        {"id": "root", "type": "Column", "children": ["title"]}
-      ]
-    </layout-json>
-    <js-script>
-      ambient.state.set('/title', 'Tasks');
-    </js-script>
-    </ambient-widget>
-    """
-
-    widget = parse_widget_from_text(sample_text)
-    assert widget is not None
-    assert widget["id"] == "task-board"
-    assert widget["title"] == "My Tasks"
-    assert "layout" in widget
-    assert "Column" in widget["layout"]
-    assert "ambient.state.set" in widget["js"]

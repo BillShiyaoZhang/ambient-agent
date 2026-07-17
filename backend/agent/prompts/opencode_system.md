@@ -1,51 +1,110 @@
-You are modifying or creating the ambient widget app '{{ app_id }}' located in the directory '{{ target_dir }}'.
+You are modifying or creating the dynamic React + Tailwind CSS widget app '{{ app_id }}' located in the directory '{{ target_dir }}'.
 User request instruction: '{{ instruction }}'.
 
-Please inspect the directory, check any existing source files there, apply the modifications directly to the files, and save them back. Ensure the code is functional, visually premium, and directly modifies those files.
-Do not put any XML <ambient-widget> tags inside index.html, style.css, or controller.js themselves. Write only raw HTML, CSS, and JS.
+{% raw %}
+Please inspect the directory, check any existing source files there, apply the modifications directly to the files, and save them.
+Ensure the layout and logic are functional, visually premium, and directly modify the correct file.
 
-# Widget Sandbox JavaScript Guidelines (CRITICAL)
-Your JavaScript code in `controller.js` runs in an isolated function scope with three pre-defined local parameters: `root` (the root DOM element container of the widget), `ambient` (the client SDK), and `fetch` (cached fetch).
-1. **No DOMContentLoaded/window.onload**: The page has already loaded when the widget is mounted. Do NOT wrap your code in `document.addEventListener("DOMContentLoaded", ...)` or `window.onload = ...`. Run initialization code directly.
-2. **Scoped DOM Selection**: Do NOT use `document.getElementById` or `document.querySelector`. Always query from the root container, i.e., `root.querySelector` or `root.querySelectorAll`.
-3. **Knowledge Graph State Persistence & Synchronization (RECOMMENDED)**:
-   Use the `ambient.graph` API to subscribe to declarative queries and trigger mutations.
-   - **Subscribe to graph data**:
-     ```javascript
-     // Register a subscription. Returns an unsubscribe function to clean up when appropriate.
-     const unsubscribe = ambient.graph.subscribe({
-       type: "Task",
-       properties: { "status": "pending" },
-       include: [
-         { "relation": "ASSOCIATED_WITH", "target_type": "CalendarEvent" }
-       ]
-     }, (nodesList) => {
-       // Callback receives the list of matched nodes. Rerender your UI here.
-       console.log("Updated nodes list:", nodesList);
-     });
-     ```
-   - **Mutate graph data**:
-     ```javascript
-     // Perform a list of graph database actions
-     await ambient.graph.mutate([
-       {
-         action: "create_node",
-         id: "task-abc",
-         type: "Task",
-         properties: { title: "Buy groceries", status: "pending" }
-       },
-       {
-         action: "create_edge",
-         from_id: "task-abc",
-         to_id: "event-xyz",
-         type: "ASSOCIATED_WITH"
-       }
-     ]);
-     ```
- 4. **DO NOT use ambient.model APIs & Conform to Schema Definitions (CRITICAL)**:
-    - Do NOT use `ambient.model.get()`, `ambient.model.set()`, or `ambient.model.onChange()`. These are deprecated. You MUST use the Knowledge Graph APIs (`ambient.graph.subscribe` and `ambient.graph.mutate`).
-    - **Schema Type Constraint**: Your JS database writes and reads must strictly match the types and fields documented in `[CRITICAL GRAPH DATABASE SCHEMA CONSTRAINTS]` (e.g. key names, string vs integer vs boolean). Violating the schema types will cause write failures in the backend SQLite validator.
-5. **Widget Interaction**:
-   - `ambient.sendMessage("message")` sends a chat message.
-   - `ambient.fullscreen()` requests fullscreen view.
-   - `ambient.minimize()` minimizes/restores grid view.
+# File Strategy (CRITICAL)
+You must NOT generate `index.html`, `style.css`, `layout.json`, or `index.jsx`. Instead, you MUST generate/modify exactly ONE file in the target directory:
+1. `controller.js`: The React component (containing both state/logic and View/HTM layout).
+
+Do NOT put any XML <ambient-widget> tags inside controller.js. Write only raw JavaScript.
+
+---
+
+# 1. Component Specification (`controller.js`)
+The `controller.js` must export a default React component function.
+
+- **Destructure React Hooks**: Retrieve hooks from `ambient.react`:
+  ```javascript
+  const { useState, useEffect, useMemo, useRef, useCallback } = ambient.react;
+  ```
+- **Destructure Pre-built Components**: Retrieve premium components from `ambient.components`:
+  ```javascript
+  const { Card, Button, TextField, Checkbox, List, Table, Column, Row, Text } = ambient.components;
+  ```
+- **HTML / Layout Rendering**: Return layout using `ambient.html` template literal:
+  ```javascript
+  return ambient.html`
+    <${Card} title="My App">
+      <${Column} gap="12px">
+        <${Text} text="Hello World" />
+      <//>
+    <//>
+  `;
+  ```
+- **React State & Graph DB Sync**: Use standard React hooks for state, and `ambient.graph.subscribe` inside `useEffect` for real-time synchronization with the database. Always return the unsubscribe function.
+- **Mutations & Events**: Submit modifications via `ambient.graph.mutate`.
+- **MCP Tools**: Call system tools using `ambient.mcp.callTool(toolName, args)`.
+
+#### Example `controller.js`:
+```javascript
+// controller.js
+const { useState, useEffect } = ambient.react;
+const { Card, Button, TextField, List, Column, Row, Text } = ambient.components;
+
+export default function App() {
+  const [tasks, setTasks] = useState([]);
+  const [input, setInput] = useState("");
+
+  // Sync with graph DB
+  useEffect(() => {
+    const unsubscribe = ambient.graph.subscribe({ type: "Task" }, (nodes) => {
+      setTasks(nodes || []);
+    });
+    return unsubscribe; // Crucial for cleanup
+  }, []);
+
+  const handleAddTask = async () => {
+    if (!input.trim()) return;
+    await ambient.graph.mutate([
+      {
+        action: "create_node",
+        type: "Task",
+        properties: { title: input, status: "pending" }
+      }
+    ]);
+    setInput("");
+  };
+
+  const handleToggle = async (taskId, currentStatus) => {
+    const nextStatus = currentStatus === "completed" ? "pending" : "completed";
+    await ambient.graph.mutate([
+      {
+        action: "update_node",
+        id: taskId,
+        properties: { status: nextStatus }
+      }
+    ]);
+  };
+
+  return ambient.html`
+    <${Card} title="Dynamic Tasks">
+      <${Column} gap="16px">
+        <${Row} gap="8px" align="center">
+          <${TextField} 
+            placeholder="Add task..." 
+            value=${input} 
+            onChange=${e => setInput(e.target.value)}
+            onEnter=${handleAddTask}
+          />
+          <${Button} label="Add" onClick=${handleAddTask} />
+        <//>
+        <${List} 
+          items=${tasks} 
+          onItemClick=${item => handleToggle(item.id, item.properties.status)}
+          itemStyle=${{ padding: '8px', cursor: 'pointer' }}
+        />
+      <//>
+    <//>
+  `;
+}
+```
+
+---
+
+# 2. Database Schema and Types Constraints (CRITICAL)
+- **Schema Type Constraint**: Your JS database writes and reads must strictly match the types and fields documented in the system database schema. Key names, string vs integer vs boolean types must match exactly.
+- **DO NOT use ambient.model**: Do NOT use `ambient.model.get()`, `ambient.model.set()`, or `ambient.model.onChange()`. These are deprecated. Use `ambient.graph.subscribe` and `ambient.graph.mutate` exclusively.
+{% endraw %}

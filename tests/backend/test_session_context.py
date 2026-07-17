@@ -55,8 +55,6 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     app_manager.create_or_update_app(
         app_id="weather-widget",
         title="Weather Widget",
-        html="<div>Beijing: Sunny</div>",
-        css=".sunny { color: yellow; }",
         js="console.log('weather');",
     )
 
@@ -108,6 +106,4 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     # The system message should inject the app details
     system_content = "".join([m["content"] for m in system_msgs])
     assert "[Active App: weather-widget]" in system_content
-    assert "<div>Beijing: Sunny</div>" in system_content
-    assert ".sunny { color: yellow; }" in system_content
     assert "console.log('weather');" in system_content

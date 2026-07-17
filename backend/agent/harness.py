@@ -795,28 +795,11 @@ class AgentOrchestrator:
         if widget_to_send:
             code_msg = ChatMessage(session_id=session_id, role="code", sender="agent", content=raw_response)
             self.db.add(code_msg)
-            if "jsx" in widget_to_send:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    js=widget_to_send["js"],
-                    jsx=widget_to_send["jsx"],
-                )
-            elif "layout" in widget_to_send:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    js=widget_to_send["js"],
-                    layout=widget_to_send["layout"],
-                )
-            else:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    html=widget_to_send["html"],
-                    css=widget_to_send["css"],
-                    js=widget_to_send["js"],
-                )
+            self.app_manager.create_or_update_app(
+                app_id=widget_to_send["id"],
+                title=widget_to_send["title"],
+                js=widget_to_send["js"],
+            )
 
         self.db.commit()
         self.db.refresh(agent_msg)
@@ -917,24 +900,12 @@ class AgentOrchestrator:
         widget_to_send = self.app_manager.get_app_files(app_id)
         if widget_to_send:
             title = app_id.replace("-", " ").title()
-            if "layout" in widget_to_send:
-                content = (
-                    f'<ambient-widget id="{widget_to_send["id"]}" title="{widget_to_send["title"]}" layout-type="a2ui">\n'
-                    f"<layout-json>\n{widget_to_send['layout']}\n</layout-json>\n"
-                    f"<js-script>\n{widget_to_send['js']}\n</js-script>\n"
-                    f"</ambient-widget>"
-                )
-            else:
+            from backend.agent_parser import serialize_widget_to_text
+            if "html" in widget_to_send and widget_to_send["html"]:
                 title_match = re.search(r"<title>(.*?)</title>", widget_to_send["html"], re.IGNORECASE)
                 if title_match:
                     title = title_match.group(1).strip()
-                content = (
-                    f'<ambient-widget id="{widget_to_send["id"]}" title="{widget_to_send["title"]}">\n'
-                    f"<html-content>\n{widget_to_send['html']}\n</html-content>\n"
-                    f"<css-styles>\n{widget_to_send['css']}\n</css-styles>\n"
-                    f"<js-script>\n{widget_to_send['js']}\n</js-script>\n"
-                    f"</ambient-widget>"
-                )
+            content = serialize_widget_to_text(widget_to_send)
 
             code_msg = ChatMessage(
                 session_id=session_id,
@@ -944,28 +915,11 @@ class AgentOrchestrator:
             )
             self.db.add(code_msg)
 
-            if "jsx" in widget_to_send:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    js=widget_to_send["js"],
-                    jsx=widget_to_send["jsx"],
-                )
-            elif "layout" in widget_to_send:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    js=widget_to_send["js"],
-                    layout=widget_to_send["layout"],
-                )
-            else:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=title,
-                    html=widget_to_send["html"],
-                    css=widget_to_send["css"],
-                    js=widget_to_send["js"],
-                )
+            self.app_manager.create_or_update_app(
+                app_id=widget_to_send["id"],
+                title=widget_to_send["title"],
+                js=widget_to_send["js"],
+            )
             widget_to_send = self.app_manager.get_app_files(app_id)
 
         self.db.commit()
@@ -1311,21 +1265,8 @@ class AgentOrchestrator:
         widget_to_send = self.app_manager.get_app_files(app_id)
         if widget_to_send:
             title = app_id.replace("-", " ").title()
-            if "layout" in widget_to_send:
-                content = (
-                    f'<ambient-widget id="{widget_to_send["id"]}" title="{widget_to_send["title"]}" layout-type="a2ui">\n'
-                    f"<layout-json>\n{widget_to_send['layout']}\n</layout-json>\n"
-                    f"<js-script>\n{widget_to_send['js']}\n</js-script>\n"
-                    f"</ambient-widget>"
-                )
-            else:
-                content = (
-                    f'<ambient-widget id="{widget_to_send["id"]}" title="{widget_to_send["title"]}">\n'
-                    f"<html-content>\n{widget_to_send['html']}\n</html-content>\n"
-                    f"<css-styles>\n{widget_to_send['css']}\n</css-styles>\n"
-                    f"<js-script>\n{widget_to_send['js']}\n</js-script>\n"
-                    f"</ambient-widget>"
-                )
+            from backend.agent_parser import serialize_widget_to_text
+            content = serialize_widget_to_text(widget_to_send)
 
             code_msg = ChatMessage(
                 session_id=session_id,
@@ -1335,28 +1276,11 @@ class AgentOrchestrator:
             )
             self.db.add(code_msg)
 
-            if "jsx" in widget_to_send:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    js=widget_to_send["js"],
-                    jsx=widget_to_send["jsx"],
-                )
-            elif "layout" in widget_to_send:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=widget_to_send["title"],
-                    js=widget_to_send["js"],
-                    layout=widget_to_send["layout"],
-                )
-            else:
-                self.app_manager.create_or_update_app(
-                    app_id=widget_to_send["id"],
-                    title=title,
-                    html=widget_to_send["html"],
-                    css=widget_to_send["css"],
-                    js=widget_to_send["js"],
-                )
+            self.app_manager.create_or_update_app(
+                app_id=widget_to_send["id"],
+                title=widget_to_send["title"],
+                js=widget_to_send["js"],
+            )
             widget_to_send = self.app_manager.get_app_files(app_id)
 
         self.db.commit()

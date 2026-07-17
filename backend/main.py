@@ -172,7 +172,7 @@ async def get_app_files(app_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if files:
         return files
-    return {"status": "error", "message": "App not found"}
+    raise HTTPException(status_code=404, detail="App not found")
 
 
 @app.delete("/api/apps/{app_id}")

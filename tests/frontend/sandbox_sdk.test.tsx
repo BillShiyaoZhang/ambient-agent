@@ -19,7 +19,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
   it("should inject ambient.graph.subscribe and trigger callback when update event is fired", async () => {
     let subIdCaptured = "";
     
-    // We will intercept the WebSocket subscription message to get the auto-generated subId
     vi.spyOn(wsService, "sendMessage").mockImplementation((msg: any) => {
       if (msg.type === "graph_subscribe") {
         subIdCaptured = msg.subscription_id;
@@ -31,18 +30,24 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "graph-widget-test",
       title: "Graph Widget Test",
-      html: '<div id="output" data-testid="output">No Data</div>',
+      html: "",
       css: "",
       js: `
-        const unsubscribe = ambient.graph.subscribe({ type: "Task" }, (data) => {
-          root.querySelector("#output").textContent = data.nodes[0].properties.content;
-        });
+        const { useState, useEffect } = ambient.react;
+        export default function App() {
+          const [text, setText] = useState("No Data");
+          useEffect(() => {
+            return ambient.graph.subscribe({ type: "Task" }, (data) => {
+              setText(data.nodes[0].properties.content);
+            });
+          }, []);
+          return ambient.html\`<div data-testid="output">\${text}</div>\`;
+        }
       `,
     };
 
     render(<SandboxWidget widget={mockWidget} />);
 
-    // Verify graph_subscribe message was sent
     expect(wsService.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "graph_subscribe",
@@ -51,7 +56,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     );
     expect(subIdCaptured).not.toBe("");
 
-    // Simulate WS response by dispatching the custom window event
     const eventName = `graph_query_update:${subIdCaptured}`;
     window.dispatchEvent(
       new CustomEvent(eventName, {
@@ -59,7 +63,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
       })
     );
 
-    // Wait for DOM to update
     await waitFor(() => {
       const output = screen.getByTestId("output");
       expect(output.textContent).toBe("Learn Vitest");
@@ -77,24 +80,28 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "graph-widget-test",
       title: "Graph Widget Test",
-      html: '<button id="unsub-btn" data-testid="unsub-btn">Unsubscribe</button>',
+      html: "",
       css: "",
       js: `
-        const unsubscribe = ambient.graph.subscribe({ type: "Task" }, (data) => {});
-        root.querySelector("#unsub-btn").addEventListener("click", () => {
-          unsubscribe();
-        });
+        const { useEffect } = ambient.react;
+        const { Button } = ambient.components;
+        export default function App() {
+          let unsub;
+          useEffect(() => {
+            unsub = ambient.graph.subscribe({ type: "Task" }, (data) => {});
+            return unsub;
+          }, []);
+          return ambient.html\`<\${Button} data-testid="unsub-btn" label="Unsubscribe" onClick=\${() => unsub && unsub()} />\`;
+        }
       `,
     };
 
     render(<SandboxWidget widget={mockWidget} />);
     expect(subIdCaptured).not.toBe("");
 
-    // Click unsubscribe button
     const btn = screen.getByTestId("unsub-btn");
     btn.click();
 
-    // Verify graph_unsubscribe message was sent
     expect(wsService.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "graph_unsubscribe",
@@ -117,14 +124,18 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "graph-widget-test",
       title: "Graph Widget Test",
-      html: '<button id="mutate-btn" data-testid="mutate-btn">Mutate</button>',
+      html: "",
       css: "",
       js: `
-        root.querySelector("#mutate-btn").addEventListener("click", () => {
-          ambient.graph.mutate([
-            { action: "create_node", type: "Task", properties: { content: "Do chores" } }
-          ]);
-        });
+        const { Button } = ambient.components;
+        export default function App() {
+          const handleMutate = () => {
+            ambient.graph.mutate([
+              { action: "create_node", type: "Task", properties: { content: "Do chores" } }
+            ]);
+          };
+          return ambient.html\`<\${Button} data-testid="mutate-btn" label="Mutate" onClick=\${handleMutate} />\`;
+        }
       `,
     };
 
@@ -149,18 +160,24 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "mcp-widget-test",
       title: "MCP Widget Test",
-      html: '<div id="output" data-testid="output">No Data</div>',
+      html: "",
       css: "",
       js: `
-        ambient.mcp.callTool("calc", { x: 5, y: 10 }).then((res) => {
-          root.querySelector("#output").textContent = JSON.stringify(res);
-        });
+        const { useState, useEffect } = ambient.react;
+        export default function App() {
+          const [val, setVal] = useState("No Data");
+          useEffect(() => {
+            ambient.mcp.callTool("calc", { x: 5, y: 10 }).then((res) => {
+              setVal(JSON.stringify(res));
+            });
+          }, []);
+          return ambient.html\`<div data-testid="output">\${val}</div>\`;
+        }
       `,
     };
 
     render(<SandboxWidget widget={mockWidget} />);
 
-    // Intercept WebSocket message to get the auto-generated callId
     expect(wsService.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "mcp_call_tool",
@@ -169,13 +186,11 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
       })
     );
 
-    // Retrieve the callId from the mock implementation call history
     const calls = (wsService.sendMessage as any).mock.calls;
     const mcpCall = calls.find((c: any) => c[0].type === "mcp_call_tool");
     expect(mcpCall).toBeDefined();
     const callIdCaptured = mcpCall[0].call_id;
 
-    // Simulate WS response
     const eventName = `mcp_call_response:mcp-widget-test:${callIdCaptured}`;
     window.dispatchEvent(
       new CustomEvent(eventName, {
@@ -186,50 +201,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     await waitFor(() => {
       const output = screen.getByTestId("output");
       expect(output.textContent).toBe(JSON.stringify({ sum: 15 }));
-    });
-  });
-
-  it("should support ambient.agent.connect and receive state snapshots", async () => {
-    const mockWidget: Widget = {
-      id: "agent-widget-test",
-      title: "Agent Widget Test",
-      layout: JSON.stringify([
-        {
-          id: "root",
-          type: "Text",
-          props: { text: { binding: "/agent_status" } }
-        }
-      ]),
-      js: `
-        const unsubscribe = ambient.agent.connect();
-      `,
-    };
-
-    render(<SandboxWidget widget={mockWidget} />);
-
-    expect(wsService.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "ag_ui_message",
-        app_id: "agent-widget-test",
-        message: { type: "connect" },
-      })
-    );
-
-    // Simulate ag_ui_event representing STATE_SNAPSHOT
-    const eventName = `ag_ui_event:agent-widget-test`;
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(eventName, {
-          detail: {
-            type: "STATE_SNAPSHOT",
-            state: { agent_status: "Agent is thinking..." }
-          },
-        })
-      );
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText("Agent is thinking...")).toBeDefined();
     });
   });
 });
