@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from backend.agent.harness import AgentOrchestrator
 from backend.app_manager import AppManager
+from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import run_opencode_agent_acp
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
@@ -56,6 +57,7 @@ app_manager = AppManager()
 # Initialize workspace storage
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
+app_store = AppStoreService(WORKSPACE_DIR, app_manager)
 
 from backend.graph_db import GraphDatabase
 
@@ -177,6 +179,56 @@ async def save_canvas(data: CanvasConfig, session: WorkspaceStorage = Depends(ge
 # --- AppStore REST endpoints ---
 
 
+class AppStoreLayoutUpdate(BaseModel):
+    revision: int
+    root: list[str]
+    folders: list[dict[str, Any]]
+
+
+@app.get("/api/app-store")
+async def get_app_store():
+    return app_store.get_state()
+
+
+@app.put("/api/app-store/layout")
+async def update_app_store_layout(data: AppStoreLayoutUpdate):
+    try:
+        return app_store.save_layout(data.revision, data.root, data.folders)
+    except LayoutConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "App Store layout changed in another client", "state": exc.current},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/capabilities/{catalog_id}")
+async def register_capability(catalog_id: str, data: CapabilityManifest):
+    expected = app_store.catalog_id(data)
+    if catalog_id != expected:
+        raise HTTPException(status_code=400, detail=f"catalog id must be {expected}")
+    return app_store.register_capability(data)
+
+
+@app.delete("/api/capabilities/{catalog_id}/ui")
+async def delete_capability_ui(catalog_id: str):
+    if app_store.get_capability(catalog_id) is None:
+        raise HTTPException(status_code=404, detail="Capability not found")
+    app_id = app_store.unbind_ui(catalog_id)
+    if app_id:
+        app_manager.delete_app(app_id)
+        app_store.on_app_deleted(app_id)
+    return {"status": "ok", "catalog_id": catalog_id}
+
+
+@app.delete("/api/capabilities/{catalog_id}")
+async def unregister_capability(catalog_id: str):
+    if app_store.delete_capability(catalog_id):
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Capability not found")
+
+
 @app.get("/api/apps")
 async def list_apps():
     return app_manager.list_apps()
@@ -200,6 +252,7 @@ async def delete_app(app_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if success:
+        app_store.on_app_deleted(app_id)
         return {"status": "ok"}
     return {"status": "error", "message": "App not found"}
 
@@ -454,6 +507,120 @@ async def websocket_chat(
                 {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
             )
 
+    async def run_capability_invoke(catalog_id: str, input_data: Any, call_id: str):
+        try:
+            capability = app_store.get_capability(catalog_id)
+            if capability is None:
+                raise ValueError("Capability does not expose an invocation adapter")
+            invocation = capability.invocation
+            manifest = app_manager.get_manifest(invocation.app_id)
+            if manifest is None:
+                raise ValueError("Capability invocation target is unavailable")
+
+            async def send_ws_payload(payload):
+                if payload.get("type") == "backend_permission_request":
+                    req_id = payload.get("request_id")
+                    if req_id:
+                        pending_requests.setdefault(session_id, {})[req_id] = payload
+                await websocket.send_json(payload)
+
+            if invocation.type == "mcp_tool":
+                client = await backend_manager.get_or_start_mcp_client(
+                    app_id=invocation.app_id,
+                    manifest=manifest,
+                    send_ws_message_func=send_ws_payload,
+                )
+                if client is None:
+                    raise ValueError("MCP capability is unavailable")
+                arguments = input_data if isinstance(input_data, dict) else {"input": input_data}
+                result = await client.call(
+                    "tools/call", {"name": invocation.tool_name, "arguments": arguments}
+                )
+            else:
+                message = input_data if isinstance(input_data, dict) else {"content": input_data}
+                await backend_manager.handle_agent_message(
+                    app_id=invocation.app_id,
+                    manifest=manifest,
+                    message=message,
+                    send_ws_message_func=send_ws_payload,
+                )
+                result = {"status": "completed"}
+            await websocket.send_json(
+                {
+                    "type": "capability_call_response",
+                    "catalog_id": catalog_id,
+                    "call_id": call_id,
+                    "result": result,
+                }
+            )
+        except Exception as exc:
+            await websocket.send_json(
+                {
+                    "type": "capability_call_response",
+                    "catalog_id": catalog_id,
+                    "call_id": call_id,
+                    "error": str(exc),
+                }
+            )
+
+    async def run_capability_ui_generation(catalog_id: str):
+        capability = app_store.get_capability(catalog_id)
+        if capability is None:
+            await websocket.send_json(
+                {"type": "capability_ui_generation_failed", "catalog_id": catalog_id, "error": "Not found"}
+            )
+            return
+        if catalog_id in app_store.generating_ids:
+            return
+        if session_id in active_running_sessions:
+            await websocket.send_json(
+                {
+                    "type": "capability_ui_generation_failed",
+                    "catalog_id": catalog_id,
+                    "error": "The current session is already running another task",
+                }
+            )
+            return
+        app_id = app_store.generated_ui_app_id(catalog_id)
+        app_store.generating_ids.add(catalog_id)
+        active_running_sessions.add(session_id)
+        await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "running"})
+        await send_to_session(
+            session_id,
+            {"type": "capability_ui_generation_started", "catalog_id": catalog_id, "app_id": app_id},
+        )
+        try:
+            descriptor = capability.model_dump(exclude_none=True)
+            instruction = (
+                f"Create a polished, responsive UI for the installed capability '{capability.title}'. "
+                f"The capability catalog id is '{catalog_id}'. Use ambient.capabilities.invoke('{catalog_id}', input) "
+                "for every capability action; do not call its provider directly. Build useful controls from the input schema. "
+                f"Capability descriptor: {descriptor}"
+            )
+            _, widget = await orchestrator.generate_capability_ui(
+                session_id=session_id,
+                app_id=app_id,
+                instruction=instruction,
+                on_update=send_ws_update,
+            )
+            if not widget:
+                raise RuntimeError("UI generation completed without an app")
+            app_store.bind_ui(catalog_id, app_id)
+            await send_to_session(session_id, {"type": "widget", "widget": widget})
+            await send_to_session(
+                session_id,
+                {"type": "capability_ui_generation_completed", "catalog_id": catalog_id, "app_id": app_id},
+            )
+        except Exception as exc:
+            await send_to_session(
+                session_id,
+                {"type": "capability_ui_generation_failed", "catalog_id": catalog_id, "error": str(exc)},
+            )
+        finally:
+            app_store.generating_ids.discard(catalog_id)
+            active_running_sessions.discard(session_id)
+            await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "idle"})
+
     try:
         while True:
             # Receive message from user client
@@ -493,6 +660,14 @@ async def websocket_chat(
                 manifest = app_manager.get_manifest(app_id)
                 if manifest:
                     asyncio.create_task(run_mcp_read(app_id, manifest, uri, call_id))
+            elif msg_type == "capability_invoke":
+                asyncio.create_task(
+                    run_capability_invoke(
+                        data.get("catalog_id", ""), data.get("input", {}), data.get("call_id", "")
+                    )
+                )
+            elif msg_type == "generate_capability_ui":
+                asyncio.create_task(run_capability_ui_generation(data.get("catalog_id", "")))
             elif msg_type == "permission_response":
                 request_id = data.get("request_id")
                 approved = data.get("approved", False)

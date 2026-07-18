@@ -792,6 +792,32 @@ class AgentOrchestrator:
             plan=plan, session_id=session_id, content=content, language=language, on_update=on_update
         )
 
+    async def generate_capability_ui(
+        self,
+        session_id: str,
+        app_id: str,
+        instruction: str,
+        on_update: Callable[[Any], Any],
+    ) -> tuple[ChatMessage, dict[str, Any] | None]:
+        """Build a capability UI with a deterministic app id, bypassing intent guessing."""
+        db_session_obj = self.db.get(ChatSession, session_id)
+        if not db_session_obj:
+            db_session_obj = ChatSession(id=session_id, title="Active Chat")
+            self.db.add(db_session_obj)
+            self.db.commit()
+        return await self._handle_widget_build(
+            plan=IntentPlan(
+                kind=IntentKind.WIDGET_CREATE,
+                confidence=1.0,
+                rationale="explicit capability UI generation",
+                app_id=app_id,
+                instruction=instruction,
+            ),
+            session_id=session_id,
+            language=db_session_obj.language or "zh",
+            on_update=on_update,
+        )
+
     # ----- top-level handlers ----------------------------------------------
 
     async def _classify_intent(self, content: str, language: str = "zh") -> IntentPlan:

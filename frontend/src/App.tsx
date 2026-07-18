@@ -6,10 +6,9 @@ import { SandboxWidget } from "./components/SandboxWidget";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { SessionSidebar, type Session } from "./components/SessionSidebar";
-import { AppStoreModal } from "./components/AppStoreModal";
+import { AppCenter } from "./components/AppCenter";
 import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
-import { getTranslation } from "./services/i18n";
 
 
 function App() {
@@ -116,6 +115,12 @@ function App() {
     request_id: string;
     app_id: string;
     report: string;
+    options?: Array<{
+      node_type: string;
+      property_name: string;
+      detected_type?: string;
+      risk?: string;
+    }>;
   }
 
   const [pendingSchemaRequest, setPendingSchemaRequest] = useState<SchemaApprovalRequest | null>(null);
@@ -514,6 +519,14 @@ function App() {
             detail: data,
           })
         );
+      } else if (data.type === "capability_call_response") {
+        window.dispatchEvent(
+          new CustomEvent(`capability_call_response:${data.catalog_id}:${data.call_id}`, {
+            detail: data,
+          })
+        );
+      } else if (typeof data.type === "string" && data.type.startsWith("capability_ui_generation_")) {
+        window.dispatchEvent(new CustomEvent("app-store-refresh", { detail: data }));
       } else if (data.type === "permission_request") {
         setPendingPermission(data);
       } else if (data.type === "backend_permission_request") {
@@ -738,8 +751,8 @@ function App() {
         }}
       />
 
-      {/* AppStore Floating Modal */}
-      <AppStoreModal
+      {/* Fullscreen App Center */}
+      <AppCenter
         isOpen={isAppStoreOpen}
         onClose={() => setIsAppStoreOpen(false)}
         pinnedWidgetIds={pinnedIds}

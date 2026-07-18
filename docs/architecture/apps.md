@@ -124,3 +124,30 @@ sequenceDiagram
 
 3. **使用标准组件库**:
    - 优先使用 `ambient.components` 导出的高质量组件，确保系统设计系统（Design System）的统一性和交互的高级质感。
+
+---
+
+## 4. 应用中心与外部能力
+
+应用中心会统一展示生成式 App、外部 Skill 和 MCP。外部安装器通过 `PUT /api/capabilities/{catalog_id}` 注册版本化能力描述；描述只包含展示信息、输入 Schema，以及指向既有后端 App 的非敏感调用引用。命令、环境变量和凭证继续保存在后端 App manifest 中，不会下发到目录接口。
+
+```json
+{
+  "manifest_version": 1,
+  "id": "calendar-tools",
+  "kind": "mcp",
+  "provider": "Acme",
+  "title": "Calendar Tools",
+  "description": "创建并管理日历事件。",
+  "version": "1.0.0",
+  "tags": ["calendar", "events"],
+  "input_schema": { "type": "object" },
+  "invocation": {
+    "type": "mcp_tool",
+    "app_id": "calendar-backend",
+    "tool_name": "events"
+  }
+}
+```
+
+生成的界面通过 `ambient.capabilities.invoke(catalogId, input)` 调用能力，后端负责解析适配器并继续执行既有的权限确认与审计流程。`GET /api/app-store` 返回统一目录和同步布局；`PUT /api/app-store/layout` 使用 revision 保护，多端发生并发修改时返回 `409`。

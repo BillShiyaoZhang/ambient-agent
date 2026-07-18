@@ -124,3 +124,30 @@ To ensure system reliability and performance, Widget design should adhere to the
 
 3. **Utilize Standard Components**:
    - Prefer using components from `ambient.components` to ensure design consistency and a premium feel.
+
+---
+
+## 4. App Center and External Capabilities
+
+The App Center merges generated Apps with externally installed Skills and MCP tools. External installers register a versioned capability descriptor through `PUT /api/capabilities/{catalog_id}`. A descriptor contains display metadata, an input schema, and a non-secret invocation reference to an existing backend App; commands, environment variables, and credentials stay in the backend App manifest.
+
+```json
+{
+  "manifest_version": 1,
+  "id": "calendar-tools",
+  "kind": "mcp",
+  "provider": "Acme",
+  "title": "Calendar Tools",
+  "description": "Create and manage calendar events.",
+  "version": "1.0.0",
+  "tags": ["calendar", "events"],
+  "input_schema": { "type": "object" },
+  "invocation": {
+    "type": "mcp_tool",
+    "app_id": "calendar-backend",
+    "tool_name": "events"
+  }
+}
+```
+
+Generated interfaces call `ambient.capabilities.invoke(catalogId, input)`. The backend resolves the registered adapter and applies the existing permission and audit flow. `GET /api/app-store` returns the normalized catalog and synchronized layout; `PUT /api/app-store/layout` uses a revision number and returns `409` when another client has saved a newer layout.

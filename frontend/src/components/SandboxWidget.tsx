@@ -264,18 +264,6 @@ interface SandboxWidgetProps {
   onMinimize?: (id: string) => void;
 }
 
-// Global fetch cache to share API responses across all mounts and sandbox instances
-const globalFetchCache = new Map<string, { data: any; timestamp: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
-
-// --- SandboxWidget Prop Interface ---
-
-interface SandboxWidgetProps {
-  widget: Widget;
-  onFullscreen?: (id: string) => void;
-  onMinimize?: (id: string) => void;
-}
-
 export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   widget,
   onFullscreen,
@@ -346,6 +334,32 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           if (!res.ok) throw new Error("Failed to mutate graph");
           return res.json();
         }
+      },
+      capabilities: {
+        invoke: (catalogId: string, input: any) => {
+          return new Promise((resolve, reject) => {
+            const callId = `cap-${Math.random().toString(36).substring(2, 11)}`;
+            const eventName = `capability_call_response:${catalogId}:${callId}`;
+            const handler = (e: Event) => {
+              window.removeEventListener(eventName, handler);
+              const idx = customListenersRef.current.findIndex(
+                l => l.event === eventName && l.handler === handler
+              );
+              if (idx !== -1) customListenersRef.current.splice(idx, 1);
+              const response = (e as CustomEvent).detail;
+              if (response.error) reject(new Error(response.error));
+              else resolve(response.result);
+            };
+            window.addEventListener(eventName, handler);
+            customListenersRef.current.push({ event: eventName, handler });
+            wsService.sendMessage({
+              type: "capability_invoke",
+              catalog_id: catalogId,
+              call_id: callId,
+              input,
+            });
+          });
+        },
       },
       mcp: {
         callTool: (name: string, args: any) => {
