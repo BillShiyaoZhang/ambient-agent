@@ -174,13 +174,19 @@ async def _sub_widget_build(sub: SubIntent, session_id: str, on_update, db_sessi
 async def _task_plan(ctx: TaskContext) -> TaskResult:
     from backend.plan_generation import PlanGenerationService
 
-    await ctx.extra["on_update"]("🔍 正在为您制定开发计划 Plan...")
+    language = ctx.extra.get("language", "zh")
+    is_zh = language == "zh"
+    await ctx.extra["on_update"]("🔍 正在为您制定开发计划 Plan..." if is_zh else "🔍 Formulating development plan...")
 
     plan_svc = PlanGenerationService()
     instruction = ctx.extra.get("instruction") or ctx.plan_input.instruction or ""
     app_id = ctx.app_id
     plan_text = await plan_svc.generate_plan(
-        instruction=instruction, app_id=app_id, schemas_context="", db_session=ctx.extra.get("db_session")
+        instruction=instruction,
+        app_id=app_id,
+        schemas_context="",
+        db_session=ctx.extra.get("db_session"),
+        language=language,
     )
 
     # Ask the user for plan approval.
@@ -194,7 +200,9 @@ async def _task_plan(ctx: TaskContext) -> TaskResult:
     active_plan_requests[payload["request_id"]] = fut
     try:
         await ctx.extra["on_update"](payload)
-        await ctx.extra["on_update"]("⏳ 等待开发计划 Plan 确认中...")
+        await ctx.extra["on_update"](
+            "⏳ 等待开发计划 Plan 确认中..." if is_zh else "⏳ Waiting for development plan approval..."
+        )
         action, response = await fut
     finally:
         active_plan_requests.pop(payload["request_id"], None)
@@ -215,6 +223,7 @@ async def _task_plan(ctx: TaskContext) -> TaskResult:
             current_plan=current,
             feedback=feedback,
             db_session=ctx.extra.get("db_session"),
+            language=language,
         )
         # Re-ask once with the refined plan.
         payload2 = {
@@ -227,7 +236,9 @@ async def _task_plan(ctx: TaskContext) -> TaskResult:
         active_plan_requests[payload2["request_id"]] = fut2
         try:
             await ctx.extra["on_update"](payload2)
-            await ctx.extra["on_update"]("⏳ 等待开发计划 Plan 确认中...")
+            await ctx.extra["on_update"](
+                "⏳ 等待开发计划 Plan 确认中..." if is_zh else "⏳ Waiting for development plan approval..."
+            )
             action2, response2 = await fut2
         finally:
             active_plan_requests.pop(payload2["request_id"], None)
@@ -241,7 +252,9 @@ async def _task_plan(ctx: TaskContext) -> TaskResult:
 async def _task_align_schemas(ctx: TaskContext) -> TaskResult:
     from backend.schema_alignment import SchemaAlignmentService
 
-    await ctx.extra["on_update"]("🔍 正在对齐数据库 Schema...")
+    language = ctx.extra.get("language", "zh")
+    is_zh = language == "zh"
+    await ctx.extra["on_update"]("🔍 正在对齐数据库 Schema..." if is_zh else "🔍 Aligning database schemas...")
 
     align_svc = SchemaAlignmentService()
     db = ctx.extra["graph_db"]
@@ -255,6 +268,7 @@ async def _task_align_schemas(ctx: TaskContext) -> TaskResult:
         db=db,
         db_session=db_session,
         approved_plan=plan_text,
+        language=language,
     )
 
     # Apply any pre-existing extend_schema_props from the original plan input
@@ -286,7 +300,9 @@ async def _task_align_schemas(ctx: TaskContext) -> TaskResult:
     active_schema_requests[payload["request_id"]] = fut
     try:
         await ctx.extra["on_update"](payload)
-        await ctx.extra["on_update"]("⏳ 等待数据库 Schema 确认中...")
+        await ctx.extra["on_update"](
+            "⏳ 等待数据库 Schema 确认中..." if is_zh else "⏳ Waiting for database schema approval..."
+        )
         action, response = await fut
     finally:
         active_schema_requests.pop(payload["request_id"], None)
@@ -321,7 +337,9 @@ async def _task_align_schemas(ctx: TaskContext) -> TaskResult:
 
     if action == "rework_plan":
         # User wants to redo the plan; the harness will re-dirty plan + downstream.
-        await ctx.extra["on_update"]("🔄 正在返回开发计划制定阶段...")
+        await ctx.extra["on_update"](
+            "🔄 正在返回开发计划制定阶段..." if is_zh else "🔄 Returning to development plan formulation phase..."
+        )
         return TaskResult(
             outputs={"proposal": proposal},
             invalidates_if_redo={"plan", "align_schemas", "regen_code", "verify"},
@@ -341,6 +359,7 @@ async def _task_align_schemas(ctx: TaskContext) -> TaskResult:
             db=db,
             db_session=db_session,
             approved_plan=plan_text,
+            language=language,
         )
         # Re-ask once.
         payload2 = {
@@ -353,7 +372,9 @@ async def _task_align_schemas(ctx: TaskContext) -> TaskResult:
         active_schema_requests[payload2["request_id"]] = fut2
         try:
             await ctx.extra["on_update"](payload2)
-            await ctx.extra["on_update"]("⏳ 等待数据库 Schema 确认中...")
+            await ctx.extra["on_update"](
+                "⏳ 等待数据库 Schema 确认中..." if is_zh else "⏳ Waiting for database schema approval..."
+            )
             action2, _response2 = await fut2
         finally:
             active_schema_requests.pop(payload2["request_id"], None)
@@ -393,9 +414,16 @@ async def _task_regen_code(ctx: TaskContext) -> TaskResult:
     instruction = ctx.extra.get("instruction") or ctx.plan_input.instruction or ""
     feedback = ctx.extra.get("code_feedback") or ""
     schemas = db.list_schemas()
-    await ctx.extra["on_update"](
+    language = ctx.extra.get("language", "zh")
+    is_zh = language == "zh"
+
+    status_msg = (
         "🛠️ Plan 与 Schema 对齐已确认。正在启动 OpenCode 开发者智能体生成 code...\n这可能需要一些时间。"
+        if is_zh
+        else "🛠️ Plan and Schema alignment approved. Starting OpenCode developer agent to generate code...\nThis may take some time."
     )
+    await ctx.extra["on_update"](status_msg)
+
     schema_text = "Here is the exact schema definitions registered in the system. Your JavaScript client code MUST conform to these fields and types:\n"
     for s in schemas:
         schema_text += f"- Type '{s['id']}': {json.dumps(s['properties'])}\n"
@@ -403,14 +431,28 @@ async def _task_regen_code(ctx: TaskContext) -> TaskResult:
     if feedback:
         enriched += f"\n\n[CRITICAL: PREVIOUS SCHEMA VERIFICATION ERRORS TO FIX]\n{feedback}"
 
-    cli_output = await ctx.extra["run_opencode"](ctx.app_id, enriched, on_update=ctx.extra["on_update"])
+    # Append strict language instruction so the developer agent builds the UI in target language
+    if is_zh:
+        enriched += "\n\n[LANGUAGE REQUIREMENT]\nYou MUST generate the app's user-facing text, titles, labels, buttons, and placeholders in Chinese (中文)."
+    else:
+        enriched += "\n\n[LANGUAGE REQUIREMENT]\nYou MUST generate the app's user-facing text, titles, labels, buttons, and placeholders in English."
+
+    cli_output = await ctx.extra["run_opencode"](
+        ctx.app_id, enriched, language=language, on_update=ctx.extra["on_update"]
+    )
     return TaskResult(outputs={"cli_output": cli_output})
 
 
 async def _task_verify(ctx: TaskContext) -> TaskResult:
     from backend.schema_verification import SchemaVerificationService
 
-    await ctx.extra["on_update"]("🔍 正在校验代码与 Database Schema 的对齐情况...")
+    language = ctx.extra.get("language", "zh")
+    is_zh = language == "zh"
+    await ctx.extra["on_update"](
+        "🔍 正在校验代码与 Database Schema 的对齐情况..."
+        if is_zh
+        else "🔍 Verifying code alignment with Database Schema..."
+    )
 
     db = ctx.extra["graph_db"]
     app_manager: AppManager = ctx.extra["app_manager"]
@@ -442,7 +484,11 @@ async def _task_verify(ctx: TaskContext) -> TaskResult:
     active_verification_requests[payload["request_id"]] = fut
     try:
         await ctx.extra["on_update"](payload)
-        await ctx.extra["on_update"]("⏳ 等待 Schema 校验警告处理指令...")
+        await ctx.extra["on_update"](
+            "⏳ 等待 Schema 校验警告处理指令..."
+            if is_zh
+            else "⏳ Waiting for schema verification warning instructions..."
+        )
         action, response = await fut
     finally:
         active_verification_requests.pop(payload["request_id"], None)
@@ -457,11 +503,21 @@ async def _task_verify(ctx: TaskContext) -> TaskResult:
             "approved_options": (response or {}).get("approved_options", []) if isinstance(response, dict) else [],
         }
         if action == "rework_code":
-            await ctx.extra["on_update"]("🔄 正在请求 OpenCode 自动修复代码对齐问题...")
+            await ctx.extra["on_update"](
+                "🔄 正在请求 OpenCode 自动修复代码对齐问题..."
+                if is_zh
+                else "🔄 Requesting OpenCode to automatically fix code alignment..."
+            )
         elif action == "rework_schema":
-            await ctx.extra["on_update"]("🔄 正在返回数据库 Schema 对齐调整阶段...")
+            await ctx.extra["on_update"](
+                "🔄 正在返回数据库 Schema 对齐调整阶段..."
+                if is_zh
+                else "🔄 Returning to database schema alignment phase..."
+            )
         elif action == "rework_plan":
-            await ctx.extra["on_update"]("🔄 正在返回开发计划制定阶段...")
+            await ctx.extra["on_update"](
+                "🔄 正在返回开发计划制定阶段..." if is_zh else "🔄 Returning to development plan formulation phase..."
+            )
         return TaskResult(outputs={"diff": diff, "verification_passed": False})
     # Unknown action → treat as bypass.
     return TaskResult(outputs={"diff": diff, "verification_passed": True})
@@ -684,20 +740,23 @@ class AgentOrchestrator:
             self.db.commit()
             self.db.refresh(db_session_obj)
 
+        language = db_session_obj.language or "zh"
+        is_zh = language == "zh"
+
         db_session_obj.updated_at = datetime.now(UTC)
         self.db.add(db_session_obj)
         self.db.commit()
 
         # 2. Classify intent.
-        plan = await self._classify_intent(content)
+        plan = await self._classify_intent(content, language)
 
         if plan.kind == IntentKind.CLARIFY:
-            await self._run_callback(on_update, "🤔 Clarifying with user...")
+            await self._run_callback(on_update, "🤔 正在向您确认..." if is_zh else "🤔 Clarifying with user...")
             reply = ChatMessage(
                 session_id=session_id,
                 role="agent",
                 sender="agent",
-                content=plan.clarification_message or "请提供更多信息。",
+                content=plan.clarification_message or ("请提供更多信息。" if is_zh else "Please provide more details."),
             )
             self.db.add(reply)
             self.db.commit()
@@ -705,25 +764,37 @@ class AgentOrchestrator:
             return reply, None
 
         if plan.kind == IntentKind.GRAPH_MUTATION:
-            return await self._handle_graph_mutation(plan=plan, session_id=session_id, on_update=on_update)
+            return await self._handle_graph_mutation(
+                plan=plan, session_id=session_id, language=language, on_update=on_update
+            )
 
         if plan.kind == IntentKind.GRAPH_QUERY:
-            return await self._handle_graph_query(plan=plan, session_id=session_id, on_update=on_update)
+            return await self._handle_graph_query(
+                plan=plan, session_id=session_id, language=language, on_update=on_update
+            )
 
         if plan.kind == IntentKind.PLAN_AND_ACT:
-            return await self._handle_plan_and_act(plan=plan, session_id=session_id, on_update=on_update)
+            return await self._handle_plan_and_act(
+                plan=plan, session_id=session_id, language=language, on_update=on_update
+            )
 
         if plan.kind == IntentKind.MULTI_INTENT:
-            return await self._handle_multi_intent(plan=plan, session_id=session_id, on_update=on_update)
+            return await self._handle_multi_intent(
+                plan=plan, session_id=session_id, language=language, on_update=on_update
+            )
 
         if plan.kind in (IntentKind.WIDGET_CREATE, IntentKind.WIDGET_MODIFY):
-            return await self._handle_widget_build(plan=plan, session_id=session_id, on_update=on_update)
+            return await self._handle_widget_build(
+                plan=plan, session_id=session_id, language=language, on_update=on_update
+            )
 
-        return await self._handle_converse(plan=plan, session_id=session_id, content=content, on_update=on_update)
+        return await self._handle_converse(
+            plan=plan, session_id=session_id, content=content, language=language, on_update=on_update
+        )
 
     # ----- top-level handlers ----------------------------------------------
 
-    async def _classify_intent(self, content: str) -> IntentPlan:
+    async def _classify_intent(self, content: str, language: str = "zh") -> IntentPlan:
         existing_apps = self.app_manager.list_apps()
         router_context = None
         try:
@@ -748,10 +819,12 @@ class AgentOrchestrator:
             router_context = None
 
         try:
-            plan = await IntentRouter.route(content, router_context, db_session=self.db)
+            plan = await IntentRouter.route(content, router_context, db_session=self.db, language=language)
             # Layer 2: if multi_intent / plan_and_act, refine sub_intents.
             if plan.kind in (IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT):
-                plan = await IntentRouter.refine_sub_intents(plan, router_context, db_session=self.db)
+                plan = await IntentRouter.refine_sub_intents(
+                    plan, router_context, db_session=self.db, language=language
+                )
             return plan
         except Exception as e:
             logger.error(f"Intent classification failed: {e}")
@@ -762,9 +835,11 @@ class AgentOrchestrator:
         plan: IntentPlan,
         session_id: str,
         content: str,
+        language: str,
         on_update: Callable[[Any], Any],
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
-        await self._run_callback(on_update, "🤔 Thinking...")
+        is_zh = language == "zh"
+        await self._run_callback(on_update, "🤔 思考中..." if is_zh else "🤔 Thinking...")
 
         provider_name = os.getenv("LLM_PROVIDER", "ollama")
         model_name = os.getenv("LLM_MODEL", "llama3")
@@ -773,7 +848,7 @@ class AgentOrchestrator:
         from backend.agent.prompts.manager import PromptManager
 
         pm = PromptManager()
-        agent_system_prompt = pm.get_prompt("agent_system.md")
+        agent_system_prompt = pm.get_prompt("agent_system.md", language=language)
 
         llm_prompt_messages = self.context_manager.build_llm_prompt(session_id)
         llm_prompt_messages.insert(0, {"role": "system", "content": agent_system_prompt})
@@ -809,6 +884,7 @@ class AgentOrchestrator:
         self,
         plan: IntentPlan,
         session_id: str,
+        language: str,
         on_update: Callable[[Any], Any],
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         app_id = plan.app_id or ""
@@ -817,13 +893,19 @@ class AgentOrchestrator:
             "FORCE_INTERACTIVE"
         ) != "true"
 
+        is_zh = language == "zh"
+
         if is_testing:
             status_text = (
-                f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
+                f"🛠️ 正在启动 OpenCode 开发者智能体处理应用 '{app_id}' 的请求...\n这可能需要一些时间。"
+                if is_zh
+                else f"🛠️ Starting OpenCode agent to process request for app '{app_id}'...\nThis might take a moment."
             )
             await self._run_callback(on_update, status_text)
-            cli_output = await self.run_opencode_agent_acp_fn(app_id, instruction, on_update=on_update)
-            verification_report = "Bypassed in test mode."
+            cli_output = await self.run_opencode_agent_acp_fn(
+                app_id, instruction, language=language, on_update=on_update
+            )
+            verification_report = "测试模式下已跳过。" if is_zh else "Bypassed in test mode."
         else:
             from backend.graph_db import GraphDatabase
 
@@ -841,6 +923,7 @@ class AgentOrchestrator:
                     "app_manager": self.app_manager,
                     "on_update": on_update,
                     "run_opencode": self.run_opencode_agent_acp_fn,
+                    "language": language,
                 },
             )
 
@@ -883,17 +966,20 @@ class AgentOrchestrator:
                     if intent_kind == "widget_extend_schema":
                         dag.dirty("align_schemas")
 
-            verification_report = verification_report or "✅ Schema Verification PASSED"
+            verification_report = verification_report or (
+                "✅ Schema 校验已通过" if is_zh else "✅ Schema Verification PASSED"
+            )
 
         # Save agent run logs and final widget.
+        log_header = "OpenCode 执行日志：\n\n" if is_zh else "OpenCode Execution Log:\n\n"
+        report_header = (
+            "### 🔍 数据库 Schema 校验报告\n\n" if is_zh else "### 🔍 Database Schema Verification Report\n\n"
+        )
         agent_msg = ChatMessage(
             session_id=session_id,
             role="agent",
             sender="agent",
-            content=(
-                f"OpenCode Execution Log:\n\n```\n{cli_output}\n```\n\n"
-                f"### 🔍 Database Schema Verification Report\n\n{verification_report}"
-            ),
+            content=(f"{log_header}```\n{cli_output}\n```\n\n{report_header}{verification_report}"),
         )
         self.db.add(agent_msg)
 
@@ -931,20 +1017,23 @@ class AgentOrchestrator:
         self,
         plan: IntentPlan,
         session_id: str,
+        language: str,
         on_update: Callable[[Any], Any],
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         from backend.graph_db import GraphDatabase
         from backend.graph_subscription import subscription_manager
         from backend.mutation_tickets import MutationTicketManager
 
-        await self._run_callback(on_update, "🧮 Applying graph mutation…")
+        is_zh = language == "zh"
+        await self._run_callback(on_update, "🧮 Applying graph mutation…" if not is_zh else "🧮 正在应用图形改动…")
 
         workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
         graph_db = GraphDatabase(workspace_dir)
 
         forward_actions = [a for a in (plan.actions or []) if isinstance(a, dict)]
         if not forward_actions:
-            return self._error_reply(session_id, "⚠️ Mutation plan had no actions.")
+            err_msg = "⚠️ Mutation plan had no actions." if not is_zh else "⚠️ 变更计划没有任何操作。"
+            return self._error_reply(session_id, err_msg)
 
         snapshot_before: dict[str, dict[str, Any]] = {}
         affected_ids: set[str] = set()
@@ -988,7 +1077,8 @@ class AgentOrchestrator:
                         edge_type=action.get("type"),
                     )
         except Exception as e:
-            return self._error_reply(session_id, f"⚠️ Graph mutation failed: {e!s}")
+            err_msg = f"⚠️ Graph mutation failed: {e!s}" if not is_zh else f"⚠️ 图形变更失败: {e!s}"
+            return self._error_reply(session_id, err_msg)
 
         ticket = ticket_manager.record(
             session_id=session_id,
@@ -1004,7 +1094,7 @@ class AgentOrchestrator:
 
         await subscription_manager.broadcast_updates(graph_db, _send_ws)
 
-        summary = self._summarize_actions(forward_actions)
+        summary = self._summarize_actions(forward_actions, language)
         preview_payload = {
             "type": "mutation_preview",
             "ticket_id": ticket.ticket_id,
@@ -1015,7 +1105,11 @@ class AgentOrchestrator:
         }
         await self._run_callback(on_update, preview_payload)
 
-        content = f"✅ {summary}\n（这张改动 60 秒内可撤销，点击气泡上的 ⟲ 即可恢复。）"
+        content = (
+            f"✅ {summary}\n（这张改动 60 秒内可撤销，点击气泡上的 ⟲ 即可恢复。）"
+            if is_zh
+            else f"✅ {summary}\n(This change can be undone within 60 seconds. Click ⟲ on the bubble to restore.)"
+        )
         agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=content)
         self.db.add(agent_msg)
         self.db.commit()
@@ -1026,12 +1120,14 @@ class AgentOrchestrator:
         self,
         plan: IntentPlan,
         session_id: str,
+        language: str,
         on_update: Callable[[Any], Any],
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         from backend.graph_db import GraphDatabase
         from backend.graph_query_engine import execute_graph_query
 
-        await self._run_callback(on_update, "🔍 Querying graph…")
+        is_zh = language == "zh"
+        await self._run_callback(on_update, "🔍 Querying graph…" if not is_zh else "🔍 正在查询知识图谱…")
 
         workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
         graph_db = GraphDatabase(workspace_dir)
@@ -1040,14 +1136,14 @@ class AgentOrchestrator:
         results = execute_graph_query(query, graph_db)
 
         if not results:
-            content = "（图中没有匹配的节点。）"
+            content = "（图中没有匹配的节点。）" if is_zh else "(No matching nodes found in the graph.)"
         else:
             lines = []
             for r in results[:10]:
                 props = r.get("properties", {})
                 title = props.get("title") or props.get("summary") or props.get("name") or r["id"]
                 lines.append(f"- {r['type']} `{r['id']}` — {title}")
-            content = "📊 Graph 结果：\n" + "\n".join(lines)
+            content = ("📊 Graph 结果：\n" if is_zh else "📊 Graph Results:\n") + "\n".join(lines)
 
         agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=content)
         self.db.add(agent_msg)
@@ -1059,23 +1155,31 @@ class AgentOrchestrator:
         self,
         plan: IntentPlan,
         session_id: str,
+        language: str,
         on_update: Callable[[Any], Any],
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         from backend.agent.plan_executor import MutationPlanExecutor
 
-        await self._run_callback(on_update, "📋 Planning multi-step graph mutation…")
+        is_zh = language == "zh"
+        await self._run_callback(
+            on_update, "📋 Planning multi-step graph mutation…" if not is_zh else "📋 正在规划多步图形更新…"
+        )
 
         executor = MutationPlanExecutor()
         result = await executor.run_plan(
             plan=plan,
             instruction=plan.instruction or "",
             on_update=on_update,
+            language=language,
         )
 
         if not result.success:
+            err_msg = result.output or (
+                "❌ 多步计划未被授权或执行失败。" if is_zh else "❌ Multi-step plan not authorized or execution failed."
+            )
             return self._error_reply(
                 session_id,
-                result.output or "❌ 多步计划未被授权或执行失败。",
+                err_msg,
             )
 
         agent_msg = ChatMessage(
@@ -1093,6 +1197,7 @@ class AgentOrchestrator:
         self,
         plan: IntentPlan,
         session_id: str,
+        language: str,
         on_update: Callable[[Any], Any],
     ) -> tuple[ChatMessage, dict[str, Any] | None]:
         """Dispatch each sub_intent in order.
@@ -1105,6 +1210,8 @@ class AgentOrchestrator:
         workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
         graph_db = GraphDatabase(workspace_dir)
 
+        is_zh = language == "zh"
+
         last_widget: dict[str, Any] | None = None
         replies: list[str] = []
         for sub in plan.sub_intents or []:
@@ -1116,7 +1223,9 @@ class AgentOrchestrator:
                     rationale="sub_intent",
                     actions=sub.actions,
                 )
-                msg, _ = await self._handle_graph_mutation(plan=single_plan, session_id=session_id, on_update=on_update)
+                msg, _ = await self._handle_graph_mutation(
+                    plan=single_plan, session_id=session_id, language=language, on_update=on_update
+                )
                 replies.append(msg.content)
             elif sub.kind == SubIntentKind.GRAPH_QUERY:
                 single_plan = IntentPlan(
@@ -1124,7 +1233,9 @@ class AgentOrchestrator:
                     rationale="sub_intent",
                     query=sub.query or {},
                 )
-                msg, _ = await self._handle_graph_query(plan=single_plan, session_id=session_id, on_update=on_update)
+                msg, _ = await self._handle_graph_query(
+                    plan=single_plan, session_id=session_id, language=language, on_update=on_update
+                )
                 replies.append(msg.content)
             elif sub.kind in (
                 SubIntentKind.WIDGET_CREATE,
@@ -1147,6 +1258,7 @@ class AgentOrchestrator:
                 msg, widget = await self._handle_widget_build_sub(
                     plan=synth_plan,
                     session_id=session_id,
+                    language=language,
                     on_update=on_update,
                     extend_schema_props=sub.extend_schema_props,
                     code_feedback=sub.feedback,
@@ -1156,7 +1268,12 @@ class AgentOrchestrator:
                     last_widget = widget
 
         if not replies:
-            return self._error_reply(session_id, "⚠️ multi_intent plan had no executable sub_intents.")
+            err_msg = (
+                "⚠️ multi_intent plan had no executable sub_intents."
+                if not is_zh
+                else "⚠️ 多意图计划没有可执行的子意图。"
+            )
+            return self._error_reply(session_id, err_msg)
 
         agent_msg = ChatMessage(
             session_id=session_id,
@@ -1173,6 +1290,7 @@ class AgentOrchestrator:
         self,
         plan: IntentPlan,
         session_id: str,
+        language: str,
         on_update: Callable[[Any], Any],
         extend_schema_props: dict[str, dict[str, str]] | None = None,
         code_feedback: str | None = None,
@@ -1188,6 +1306,8 @@ class AgentOrchestrator:
         workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
         graph_db = GraphDatabase(workspace_dir)
 
+        is_zh = language == "zh"
+
         ctx = TaskContext(
             session_id=session_id,
             app_id=app_id,
@@ -1201,6 +1321,7 @@ class AgentOrchestrator:
                 "run_opencode": self.run_opencode_agent_acp_fn,
                 "code_feedback": code_feedback or "",
                 "pre_extend_schema_props": extend_schema_props or {},
+                "language": language,
             },
         )
 
@@ -1250,16 +1371,19 @@ class AgentOrchestrator:
             if "cli_output" in outputs:
                 cli_output = outputs["cli_output"]
 
-        verification_report = verification_report or "✅ Schema Verification PASSED"
+        verification_report = verification_report or (
+            "✅ Schema 校验已通过" if is_zh else "✅ Schema Verification PASSED"
+        )
 
+        log_header = "OpenCode 执行日志：\n\n" if is_zh else "OpenCode Execution Log:\n\n"
+        report_header = (
+            "### 🔍 数据库 Schema 校验报告\n\n" if is_zh else "### 🔍 Database Schema Verification Report\n\n"
+        )
         agent_msg = ChatMessage(
             session_id=session_id,
             role="agent",
             sender="agent",
-            content=(
-                f"OpenCode Execution Log:\n\n```\n{cli_output}\n```\n\n"
-                f"### 🔍 Database Schema Verification Report\n\n{verification_report}"
-            ),
+            content=(f"{log_header}```\n{cli_output}\n```\n\n{report_header}{verification_report}"),
         )
         self.db.add(agent_msg)
 
@@ -1301,26 +1425,42 @@ class AgentOrchestrator:
             logger.error(f"Error in execution loop callback: {e}")
 
     @staticmethod
-    def _summarize_actions(actions: list[dict[str, Any]]) -> str:
+    def _summarize_actions(actions: list[dict[str, Any]], language: str = "zh") -> str:
+        is_zh = language == "zh"
         parts: list[str] = []
         for action in actions:
             act = action.get("action")
             if act == "create_node":
                 title = (action.get("properties") or {}).get("title") or action.get("id")
-                parts.append(f"已新建 {action.get('type', '节点')}『{title}』")
+                if is_zh:
+                    parts.append(f"已新建 {action.get('type', '节点')}『{title}』")
+                else:
+                    parts.append(f"Created {action.get('type', 'node')} '{title}'")
             elif act == "update_node_property":
-                parts.append(f"已更新节点 `{action.get('id')}`")
+                if is_zh:
+                    parts.append(f"已更新节点 `{action.get('id')}`")
+                else:
+                    parts.append(f"Updated node '{action.get('id')}'")
             elif act == "delete_node":
-                parts.append(f"已删除节点 `{action.get('id')}`")
+                if is_zh:
+                    parts.append(f"已删除节点 `{action.get('id')}`")
+                else:
+                    parts.append(f"Deleted node '{action.get('id')}'")
             elif act == "create_edge":
-                parts.append(f"已创建关联 {action.get('from_id')} → {action.get('to_id')}")
+                if is_zh:
+                    parts.append(f"已创建关联 {action.get('from_id')} → {action.get('to_id')}")
+                else:
+                    parts.append(f"Created link {action.get('from_id')} → {action.get('to_id')}")
             elif act == "delete_edge":
-                parts.append(f"已删除关联 {action.get('from_id')} → {action.get('to_id')}")
+                if is_zh:
+                    parts.append(f"已删除关联 {action.get('from_id')} → {action.get('to_id')}")
+                else:
+                    parts.append(f"Deleted link {action.get('from_id')} → {action.get('to_id')}")
         if not parts:
-            return "已执行图形操作"
+            return "已执行图形操作" if is_zh else "Applied graph mutation"
         if len(parts) == 1:
             return parts[0]
-        return "已完成：" + "; ".join(parts)
+        return ("已完成：" if is_zh else "Completed: ") + "; ".join(parts)
 
     def _error_reply(self, session_id: str, content: str) -> tuple[ChatMessage, None]:
         agent_msg = ChatMessage(session_id=session_id, role="agent", sender="agent", content=content)

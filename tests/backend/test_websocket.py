@@ -70,7 +70,9 @@ def test_websocket_chat_flow(test_session, monkeypatch):
         thinking = websocket.receive_json()
         assert thinking["type"] == "reply"
         assert thinking["message"]["id"] == -1
-        assert "Thinking" in thinking["message"]["content"]
+        assert any(x in thinking["message"]["content"] for x in ["Thinking", "思考中"]), (
+            f"Expected thinking indicator, got: {thinking['message']['content']}"
+        )
 
         # 3. Expect a reply from the agent
         reply = websocket.receive_json()
@@ -138,7 +140,9 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         thinking = websocket.receive_json()
         assert thinking["type"] == "reply"
         assert thinking["message"]["id"] == -1
-        assert "Thinking" in thinking["message"]["content"]
+        assert any(x in thinking["message"]["content"] for x in ["Thinking", "思考中"]), (
+            f"Expected thinking indicator, got: {thinking['message']['content']}"
+        )
 
         # 3. Reply
         reply = websocket.receive_json()

@@ -9,6 +9,7 @@ import { SessionSidebar, type Session } from "./components/SessionSidebar";
 import { AppStoreModal } from "./components/AppStoreModal";
 import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
+import { getTranslation } from "./services/i18n";
 
 
 function App() {
@@ -20,6 +21,25 @@ function App() {
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [widgetSpans, setWidgetSpans] = useState<Record<string, {cols: number, rows: number}>>({});
   const [isConnected, setIsConnected] = useState(false);
+  const [language, setLanguage] = useState<"zh" | "en">("zh");
+
+  const handleLanguageChange = async (lang: "zh" | "en") => {
+    setLanguage(lang);
+    if (activeSessionId) {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSessionId ? { ...s, language: lang } : s))
+      );
+      try {
+        await fetch(`${API_BASE}/api/sessions/${activeSessionId}/language`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ language: lang }),
+        });
+      } catch (err) {
+        console.error("Error setting session language:", err);
+      }
+    }
+  };
 
   const saveCanvasConfig = async (ids: string[], spans: Record<string, {cols: number, rows: number}>) => {
     try {
@@ -338,6 +358,12 @@ function App() {
           const finalId = exists ? nextActiveId : data[0].id;
           setActiveSessionId(finalId);
           localStorage.setItem("last_active_session", finalId);
+          const activeSess = data.find((s: Session) => s.id === finalId);
+          if (activeSess && activeSess.language) {
+            setLanguage(activeSess.language as "zh" | "en");
+          } else {
+            setLanguage("zh");
+          }
         } else {
           // Create a default session if list is empty
           handleCreateSession();
@@ -624,6 +650,12 @@ function App() {
         onSelectSession={(id) => {
           setActiveSessionId(id);
           localStorage.setItem("last_active_session", id);
+          const sess = sessions.find((s) => s.id === id);
+          if (sess && sess.language) {
+            setLanguage(sess.language as "zh" | "en");
+          } else {
+            setLanguage("zh");
+          }
           if (!isSidebarOpen) {
             setIsSidebarOpen(true);
           }
@@ -637,6 +669,7 @@ function App() {
         onDeleteSession={handleDeleteSession}
         isOpen={isSidebarOpen}
         onToggleOpen={() => setIsSidebarOpen(!isSidebarOpen)}
+        language={language}
       />
 
       {/* Chat Panel */}
@@ -647,6 +680,7 @@ function App() {
           isConnected={isConnected}
           width={chatWidth}
           onHideChat={() => setIsSidebarOpen(false)}
+          language={language}
         />
       )}
 
@@ -683,6 +717,8 @@ function App() {
         }}
         showChat={isSidebarOpen}
         onToggleChat={() => setIsSidebarOpen(!isSidebarOpen)}
+        language={language}
+        onLanguageChange={handleLanguageChange}
       />
 
       {/* Audit Log Panel Overlay */}
@@ -710,6 +746,7 @@ function App() {
         onPinWidget={handlePinWidget}
         onUnpinWidget={handleRemoveWidget}
         onRunFullscreen={handleRunFullscreen}
+        language={language}
       />
 
       {/* 🛡️ OpenCode Permission Request Modal */}
@@ -717,13 +754,15 @@ function App() {
         <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md">
           <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
             <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
-              🛡️ OpenCode 授权请求
+              🛡️ {language === "zh" ? "OpenCode 授权请求" : "OpenCode Permission Request"}
             </h3>
             <p className="text-slate-400 text-xs mb-4 leading-relaxed">
-              OpenCode 正在请求执行以下敏感操作。请确认是否允许此操作：
+              {language === "zh"
+                ? "OpenCode 正在请求执行以下敏感操作。请确认是否允许此操作："
+                : "OpenCode is requesting to execute the following sensitive action. Please confirm if you allow it:"}
             </p>
             <div className="bg-black/40 border border-white/5 rounded-lg p-3 mb-5 font-mono text-xs text-cyan-400 break-all select-all">
-              <span className="text-slate-500 font-sans block mb-1">【类型: {pendingPermission.tool_call}】</span>
+              <span className="text-slate-500 font-sans block mb-1">【{language === "zh" ? "类型" : "Type"}: {pendingPermission.tool_call}】</span>
               {pendingPermission.details}
             </div>
             <div className="flex items-center justify-end gap-3 font-medium">
@@ -731,13 +770,13 @@ function App() {
                 onClick={() => handleResolvePermission(false)}
                 className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs"
               >
-                拒绝 (Deny)
+                {language === "zh" ? "拒绝 (Deny)" : "Deny"}
               </button>
               <button
                 onClick={() => handleResolvePermission(true)}
                 className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
               >
-                允许 (Allow)
+                {language === "zh" ? "允许 (Allow)" : "Allow"}
               </button>
             </div>
           </div>
@@ -757,10 +796,12 @@ function App() {
           <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
             <div>
               <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
-                🧠 App 数据 Schema 对齐
+                🧠 {language === "zh" ? "App 数据 Schema 对齐" : "App Schema Alignment"}
               </h3>
               <p className="text-slate-400 text-xs leading-relaxed">
-                为应用 <span className="text-cyan-400 font-mono font-bold">{pendingSchemaRequest.app_id}</span> 规划最规范的全局关联与数据结构，消除数据碎片并确保多 Widget 协同。
+                {language === "zh"
+                  ? `为应用 ${pendingSchemaRequest.app_id} 规划最规范的全局关联与数据结构，消除数据碎片并确保多 Widget 协同。`
+                  : `Plan standard global relationships and data structures for app ${pendingSchemaRequest.app_id} to ensure widget collaboration.`}
               </p>
             </div>
 
@@ -768,7 +809,7 @@ function App() {
             {editedProposal.reused_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
                 <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
-                  🔄 复用全局核心 Schema (推荐公共共享)
+                  🔄 {language === "zh" ? "复用全局核心 Schema (推荐公共共享)" : "Reuse Global Core Schema (Recommended for Shared Data)"}
                 </h4>
                 {editedProposal.reused_schemas.map((rs, sIdx) => (
                   <div key={rs.id} className="border border-cyan-500/20 bg-cyan-950/10 rounded-xl p-4 flex flex-col gap-3">
@@ -783,9 +824,13 @@ function App() {
 
                     {/* Extended Properties */}
                     <div className="flex flex-col gap-2">
-                      <span className="text-[11px] text-slate-400 font-medium">应用自定义扩展属性:</span>
+                      <span className="text-[11px] text-slate-400 font-medium">
+                        {language === "zh" ? "应用自定义扩展属性:" : "Custom Extended Properties:"}
+                      </span>
                       {Object.keys(rs.extended_properties).length === 0 ? (
-                        <p className="text-slate-500 text-[11px] italic">无自定义扩展属性</p>
+                        <p className="text-slate-500 text-[11px] italic">
+                          {language === "zh" ? "无自定义扩展属性" : "No custom extended properties"}
+                        </p>
                       ) : (
                         <div className="flex flex-col gap-2">
                           {Object.entries(rs.extended_properties).map(([key, val]) => (
@@ -795,7 +840,7 @@ function App() {
                                 value={key}
                                 onChange={(e) => handleUpdateExtendedPropertyKey(sIdx, key, e.target.value)}
                                 className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-cyan-500"
-                                placeholder="属性名称"
+                                placeholder={language === "zh" ? "属性名称" : "Property Name"}
                               />
                               <select
                                 value={val}
@@ -810,7 +855,7 @@ function App() {
                               <button
                                 onClick={() => handleRemoveExtendedProperty(sIdx, key)}
                                 className="text-red-400 hover:text-red-300 p-1 text-xs"
-                                title="删除属性"
+                                title={language === "zh" ? "删除属性" : "Delete property"}
                               >
                                 ✕
                               </button>
@@ -822,7 +867,7 @@ function App() {
                         onClick={() => handleAddExtendedProperty(sIdx)}
                         className="text-cyan-400 hover:text-cyan-300 text-xs font-semibold self-start flex items-center gap-1 mt-1"
                       >
-                        + 扩展新字段
+                        + {language === "zh" ? "扩展新字段" : "Extend New Field"}
                       </button>
                     </div>
                   </div>
@@ -834,7 +879,7 @@ function App() {
             {editedProposal.new_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
                 <h4 className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
-                  ✨ 注册全新 Schema (本应用特有概念)
+                  ✨ {language === "zh" ? "注册全新 Schema (本应用特有概念)" : "Register New Schema (App-specific Concept)"}
                 </h4>
                 {editedProposal.new_schemas.map((ns, sIdx) => (
                   <div key={sIdx} className="border border-indigo-500/20 bg-indigo-950/10 rounded-xl p-4 flex flex-col gap-3">
@@ -850,7 +895,7 @@ function App() {
                         onClick={() => handleRemoveNewSchema(sIdx)}
                         className="text-red-400 hover:text-red-300 text-xs ml-auto"
                       >
-                        删除此实体
+                        {language === "zh" ? "删除此实体" : "Delete Schema"}
                       </button>
                     </div>
 
@@ -859,14 +904,18 @@ function App() {
                       value={ns.description}
                       onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "description", e.target.value)}
                       className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-slate-300 placeholder-slate-500 w-full focus:outline-none focus:border-indigo-500"
-                      placeholder="实体说明"
+                      placeholder={language === "zh" ? "实体说明" : "Schema Description"}
                     />
 
                     {/* Properties List */}
                     <div className="flex flex-col gap-2">
-                      <span className="text-[11px] text-slate-400 font-medium">属性结构定义:</span>
+                      <span className="text-[11px] text-slate-400 font-medium">
+                        {language === "zh" ? "属性结构定义:" : "Property Structures:"}
+                      </span>
                       {Object.keys(ns.properties).length === 0 ? (
-                        <p className="text-slate-500 text-[11px] italic">未定义属性</p>
+                        <p className="text-slate-500 text-[11px] italic">
+                          {language === "zh" ? "未定义属性" : "No properties defined"}
+                        </p>
                       ) : (
                         <div className="flex flex-col gap-2">
                           {Object.entries(ns.properties).map(([key, val]) => (
@@ -876,7 +925,7 @@ function App() {
                                 value={key}
                                 onChange={(e) => handleUpdateNewSchemaPropertyKey(sIdx, key, e.target.value)}
                                 className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-indigo-500"
-                                placeholder="属性名称"
+                                placeholder={language === "zh" ? "属性名称" : "Property Name"}
                               />
                               <select
                                 value={val}
@@ -891,7 +940,7 @@ function App() {
                               <button
                                 onClick={() => handleRemoveNewSchemaProperty(sIdx, key)}
                                 className="text-red-400 hover:text-red-300 p-1 text-xs"
-                                title="删除属性"
+                                title={language === "zh" ? "删除属性" : "Delete property"}
                               >
                                 ✕
                               </button>
@@ -903,7 +952,7 @@ function App() {
                         onClick={() => handleAddNewSchemaProperty(sIdx)}
                         className="text-indigo-400 hover:text-indigo-300 text-xs font-semibold self-start flex items-center gap-1 mt-1"
                       >
-                        + 新增属性
+                        + {language === "zh" ? "新增属性" : "Add Property"}
                       </button>
                     </div>
                   </div>
@@ -914,12 +963,16 @@ function App() {
             {/* 💬 自然语言微调反馈输入 */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
-                💬 使用自然语言调整 Schema 定义 (可选):
+                💬 {language === "zh" ? "使用自然语言调整 Schema 定义 (可选):" : "Adjust Schema via Natural Language (Optional):"}
               </span>
               <textarea
                 value={schemaFeedback}
                 onChange={(e) => setSchemaFeedback(e.target.value)}
-                placeholder="例如：'将 PomodoroSession 重命名为 TomatoTimer'、'为 Task 添加 priority 属性并设定为 String 类型'..."
+                placeholder={
+                  language === "zh"
+                    ? "例如：'将 PomodoroSession 重命名为 TomatoTimer'、'为 Task 添加 priority 属性并设定为 String 类型'..."
+                    : "e.g. 'Rename PomodoroSession to TomatoTimer', 'Add priority field (String) to Task'..."
+                }
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-cyan-500 resize-none font-sans"
               />
             </div>
@@ -930,7 +983,7 @@ function App() {
                 onClick={handleAddNewSchema}
                 className="px-3 py-1.5 rounded-lg border border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10 transition-colors text-xs"
               >
-                + 添加全新自定义 Schema
+                + {language === "zh" ? "添加全新自定义 Schema" : "Add New Custom Schema"}
               </button>
               
               <div className="flex items-center gap-3 ml-auto">
@@ -938,27 +991,27 @@ function App() {
                   onClick={() => handleResolveSchemaRequest("rework_plan")}
                   className="px-3.5 py-1.5 rounded-lg border border-yellow-500/30 text-yellow-400 hover:bg-yellow-500/10 transition-colors text-xs font-sans"
                 >
-                  返回开发计划阶段 (Back to Plan)
+                  {language === "zh" ? "返回开发计划阶段 (Back to Plan)" : "Rework Plan"}
                 </button>
                 <button
                   onClick={() => handleResolveSchemaRequest(false)}
                   className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs"
                 >
-                  拒绝并取消生成 (Cancel)
+                  {language === "zh" ? "拒绝并取消生成 (Cancel)" : "Cancel"}
                 </button>
                 {schemaFeedback.trim() && (
                   <button
                     onClick={() => handleResolveSchemaRequest("refine", schemaFeedback)}
                     className="px-4 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-500/30 text-indigo-300 text-xs transition-colors"
                   >
-                    调整 Schema (Refine)
+                    {language === "zh" ? "调整 Schema (Refine)" : "Refine"}
                   </button>
                 )}
                 <button
                   onClick={() => handleResolveSchemaRequest(true)}
                   className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
                 >
-                  确认对齐并编码 (Approve)
+                  {language === "zh" ? "确认对齐并编码 (Approve)" : "Approve"}
                 </button>
               </div>
             </div>
@@ -972,17 +1025,19 @@ function App() {
           <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
             <div>
               <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2 font-sans">
-                📝 App 开发计划确认
+                📝 {language === "zh" ? "App 开发计划确认" : "App Development Plan Confirmation"}
               </h3>
               <p className="text-slate-400 text-xs leading-relaxed font-sans">
-                为应用 <span className="text-cyan-400 font-mono font-bold">{pendingPlanRequest.app_id}</span> 确认最终开发方案。
+                {language === "zh"
+                  ? `为应用 ${pendingPlanRequest.app_id} 确认最终开发方案。`
+                  : `Confirm the final development plan for app ${pendingPlanRequest.app_id}.`}
               </p>
             </div>
 
             {/* Read-only Plan content */}
             <div className="border border-white/10 bg-white/[0.02] rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
               <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
-                📋 开发方案概述
+                📋 {language === "zh" ? "开发方案概述" : "Development Plan Summary"}
               </h4>
               <div className="text-slate-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto pr-1">
                 {pendingPlanRequest.plan}
@@ -992,12 +1047,16 @@ function App() {
             {/* 💬 自然语言微调反馈输入 */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5 font-sans">
-                💬 使用自然语言微调开发计划 (可选):
+                💬 {language === "zh" ? "使用自然语言微调开发计划 (可选):" : "Refine Development Plan via Natural Language (Optional):"}
               </span>
               <textarea
                 value={planFeedback}
                 onChange={(e) => setPlanFeedback(e.target.value)}
-                placeholder="例如：'请使用深蓝色玻璃拟态风格'、'为计算器增加负数输入功能'..."
+                placeholder={
+                  language === "zh"
+                    ? "例如：'请使用深蓝色玻璃拟态风格'、'为计算器增加负数输入功能'..."
+                    : "e.g. 'Please use dark blue glassmorphism style', 'Add support for negative number inputs'..."
+                }
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-cyan-500 resize-none font-sans"
               />
             </div>
@@ -1009,21 +1068,21 @@ function App() {
                   onClick={() => handleResolvePlanRequest(false)}
                   className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs font-sans"
                 >
-                  拒绝并取消生成 (Cancel)
+                  {language === "zh" ? "拒绝并取消生成 (Cancel)" : "Cancel"}
                 </button>
                 {planFeedback.trim() && (
                   <button
                     onClick={() => handleResolvePlanRequest("refine", planFeedback)}
                     className="px-4 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-500/30 text-indigo-300 text-xs transition-colors font-sans"
                   >
-                    调整开发计划 (Refine)
+                    {language === "zh" ? "调整开发计划 (Refine)" : "Refine Plan"}
                   </button>
                 )}
                 <button
                   onClick={() => handleResolvePlanRequest(true)}
                   className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10 font-sans"
                 >
-                  确认计划并开始开发 (Approve)
+                  {language === "zh" ? "确认计划并开始开发 (Approve)" : "Approve & Develop"}
                 </button>
               </div>
             </div>
@@ -1036,17 +1095,19 @@ function App() {
           <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
             <div>
               <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2 font-sans">
-                ⚠️ Schema 校验未完全对齐
+                ⚠️ {language === "zh" ? "Schema 校验未完全对齐" : "Schema Alignment Warning"}
               </h3>
               <p className="text-slate-400 text-xs leading-relaxed font-sans">
-                应用 <span className="text-cyan-400 font-mono font-bold">{pendingVerificationRequest.app_id}</span> 的代码在 Graph DB 校验中发现不一致，请选择处理方式。
+                {language === "zh"
+                  ? `应用 ${pendingVerificationRequest.app_id} 的代码在 Graph DB 校验中发现不一致，请选择处理方式。`
+                  : `Discrepancies found in Graph DB validation for app ${pendingVerificationRequest.app_id}. Please choose action.`}
               </p>
             </div>
 
             {/* Verification Report content */}
             <div className="border border-red-500/20 bg-red-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
               <h4 className="text-xs font-semibold text-red-400 uppercase tracking-wider font-sans">
-                📋 校验报告 (Verification Report)
+                📋 {language === "zh" ? "校验报告 (Verification Report)" : "Verification Report"}
               </h4>
               <div className="text-slate-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto pr-1 font-mono text-[11px]">
                 {pendingVerificationRequest.report}
@@ -1057,7 +1118,7 @@ function App() {
             {Array.isArray(pendingVerificationRequest.options) && pendingVerificationRequest.options.length > 0 && (
               <div className="border border-orange-500/20 bg-orange-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
                 <h4 className="text-xs font-semibold text-orange-400 uppercase tracking-wider font-sans">
-                  🧩 待扩展字段 (Extend Schema For)
+                  🧩 {language === "zh" ? "待扩展字段 (Extend Schema For)" : "Extend Schema For"}
                 </h4>
                 <div className="flex flex-col gap-2">
                   {pendingVerificationRequest.options.map((opt: any, idx: number) => (
@@ -1077,7 +1138,7 @@ function App() {
                           <span className="text-emerald-300">{opt.detected_type}</span>
                         </div>
                         <div className="text-[10px] text-slate-500 mt-0.5">
-                          Risk: {opt.risk === "safe" ? "SAFE (auto-extensible)" : "NEEDS REVIEW"}
+                          {language === "zh" ? "风险: " : "Risk: "}{opt.risk === "safe" ? (language === "zh" ? "安全 (可自动扩展)" : "SAFE (auto-extensible)") : (language === "zh" ? "需要审核" : "NEEDS REVIEW")}
                         </div>
                       </div>
                     </label>
@@ -1089,12 +1150,16 @@ function App() {
             {/* 💬 返工反馈输入 (可选) */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5 font-sans">
-                💬 返工修改指令 (供智能体修复代码或重新规划):
+                💬 {language === "zh" ? "返工修改指令 (供智能体修复代码或重新规划):" : "Rework Instructions (for agent to fix code or replan):"}
               </span>
               <textarea
                 value={verificationFeedback}
                 onChange={(e) => setVerificationFeedback(e.target.value)}
-                placeholder="例如：'请修复 mutations 使用的字段名，使其与 schema 严格一致'、'我们将 Schema 属性重新对齐'..."
+                placeholder={
+                  language === "zh"
+                    ? "例如：'请修复 mutations 使用的字段名，使其与 schema 严格一致'、'我们将 Schema 属性重新对齐'..."
+                    : "e.g. 'Please fix the field names in mutations to strictly match the schema', 'We will realign the schema properties'..."
+                }
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-red-500 resize-none font-sans"
               />
             </div>
@@ -1105,7 +1170,7 @@ function App() {
                 onClick={() => handleResolveVerificationRequest("approve", verificationFeedback, [])}
                 className="px-3.5 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-white/5 transition-colors text-xs font-sans"
               >
-                直接忽略并保存 (Bypass & Save)
+                {language === "zh" ? "直接忽略并保存 (Bypass & Save)" : "Bypass & Save"}
               </button>
 
               <div className="flex items-center gap-2.5 ml-auto">
@@ -1116,7 +1181,7 @@ function App() {
                   }}
                   className="px-3 py-1.5 rounded-lg border border-yellow-500/20 text-yellow-400 hover:bg-yellow-500/10 transition-colors text-xs font-sans"
                 >
-                  返工 Plan
+                  {language === "zh" ? "返工 Plan" : "Rework Plan"}
                 </button>
                 <button
                   onClick={() => {
@@ -1125,7 +1190,7 @@ function App() {
                   }}
                   className="px-3 py-1.5 rounded-lg border border-orange-500/20 text-orange-400 hover:bg-orange-500/10 transition-colors text-xs font-sans"
                 >
-                  扩展勾选字段并重新生成 (Extend Selected)
+                  {language === "zh" ? "扩展勾选字段并重新生成 (Extend Selected)" : "Extend Selected Properties"}
                 </button>
                 <button
                   onClick={() => {
@@ -1134,7 +1199,7 @@ function App() {
                   }}
                   className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 transition-all text-white text-xs shadow-md shadow-red-600/10 font-sans"
                 >
-                  智能修复代码 (Auto-Fix)
+                  {language === "zh" ? "智能修复代码 (Auto-Fix)" : "Auto-Fix Code"}
                 </button>
               </div>
             </div>

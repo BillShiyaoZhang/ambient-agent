@@ -75,6 +75,7 @@ class PlanExecutor(ABC):
         plan: IntentPlan,
         instruction: str,
         on_update: Callable[[Any], Any],
+        language: str = "zh",
     ) -> PlanPhaseResult:  # pragma: no cover - abstract
         """Execute the given plan; return a result describing its outcome."""
 
@@ -92,6 +93,7 @@ class CodingPlanExecutor(PlanExecutor):
         plan: IntentPlan,
         instruction: str,
         on_update: Callable[[Any], Any],
+        language: str = "zh",
     ) -> PlanPhaseResult:
         if not plan.app_id:
             return PlanPhaseResult(
@@ -101,7 +103,7 @@ class CodingPlanExecutor(PlanExecutor):
 
         runner = self._run_opencode_agent_acp_fn or run_opencode_agent_acp
         try:
-            output = await runner(plan.app_id, plan.instruction or instruction, on_update=on_update)
+            output = await runner(plan.app_id, plan.instruction or instruction, language=language, on_update=on_update)
         except Exception as e:
             return PlanPhaseResult(success=False, error=f"opencode failed: {e!s}")
 
@@ -133,6 +135,7 @@ class MutationPlanExecutor(PlanExecutor):
         plan: IntentPlan,
         instruction: str,
         on_update: Callable[[Any], Any],
+        language: str = "zh",
     ) -> PlanPhaseResult:
         actions = [a for a in (plan.actions or []) if isinstance(a, dict)]
         if not actions:
@@ -147,7 +150,7 @@ class MutationPlanExecutor(PlanExecutor):
             workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
             graph_db = GraphDatabase(workspace_dir)
 
-        summary = self._render_plan(actions)
+        summary = self._render_plan(actions, language)
         action_label, approved_plan = await _await_plan_approval(
             plan_str=summary,
             app_id=plan.app_id or "",
@@ -155,11 +158,14 @@ class MutationPlanExecutor(PlanExecutor):
             on_update=on_update,
         )
 
+        is_zh = language == "zh"
         if action_label != "approve":
             return PlanPhaseResult(
                 success=False,
                 error="user denied the plan",
-                output="plan_and_act: 用户拒绝计划，未执行任何 mutation。",
+                output="plan_and_act: 用户拒绝计划，未执行任何 mutation。"
+                if is_zh
+                else "plan_and_act: User denied the plan, no mutation executed.",
             )
 
         # Execute the actions
@@ -178,7 +184,7 @@ class MutationPlanExecutor(PlanExecutor):
             return PlanPhaseResult(
                 success=False,
                 error=f"mutation failed: {e!s}",
-                output="plan_and_act: 执行失败。",
+                output="plan_and_act: 执行失败。" if is_zh else "plan_and_act: Execution failed.",
             )
 
         ticket = MutationTicketManager(graph_db, soft_window_seconds=self._soft_window_seconds).record(
@@ -207,16 +213,21 @@ class MutationPlanExecutor(PlanExecutor):
                     "ticket_id": ticket.ticket_id,
                     "session_id": ticket.session_id,
                     "actions": actions,
-                    "summary": self._render_plan(actions),
+                    "summary": self._render_plan(actions, language),
                     "soft_window_seconds": int(self._soft_window_seconds),
                 }
             )
         except Exception:
             pass
 
+        output_msg = (
+            f"plan_and_act: 完成 {len(actions)} 步 mutation。{self._render_plan(actions, language)}"
+            if is_zh
+            else f"plan_and_act: Completed {len(actions)} step(s) of mutation. {self._render_plan(actions, language)}"
+        )
         return PlanPhaseResult(
             success=True,
-            output=f"plan_and_act: 完成 {len(actions)} 步 mutation。{self._render_plan(actions)}",
+            output=output_msg,
             extra={"ticket_id": ticket.ticket_id, "approved_plan": approved_plan},
         )
 
@@ -252,21 +263,31 @@ class MutationPlanExecutor(PlanExecutor):
                 )
 
     @staticmethod
-    def _render_plan(actions: list[dict[str, Any]]) -> str:
+    def _render_plan(actions: list[dict[str, Any]], language: str = "zh") -> str:
         lines = []
+        is_zh = language == "zh"
         for a in actions:
             act = a.get("action")
             if act == "create_node":
                 title = (a.get("properties") or {}).get("title") or a.get("id")
-                lines.append(f"+ 创建 {a.get('type', '节点')}: {title}")
+                node_type = a.get("type", "节点") if is_zh else a.get("type", "node")
+                lines.append(f"+ 创建 {node_type}: {title}" if is_zh else f"+ Create {node_type}: {title}")
             elif act == "update_node_property":
-                lines.append(f"~ 更新节点 `{a.get('id')}`")
+                lines.append(f"~ 更新节点 `{a.get('id')}`" if is_zh else f"~ Update node `{a.get('id')}`")
             elif act == "delete_node":
-                lines.append(f"- 删除节点 `{a.get('id')}`")
+                lines.append(f"- 删除节点 `{a.get('id')}`" if is_zh else f"- Delete node `{a.get('id')}`")
             elif act == "create_edge":
-                lines.append(f"+ 关联 {a.get('from_id')} -> {a.get('to_id')}")
+                lines.append(
+                    f"+ 关联 {a.get('from_id')} -> {a.get('to_id')}"
+                    if is_zh
+                    else f"+ Link {a.get('from_id')} -> {a.get('to_id')}"
+                )
             elif act == "delete_edge":
-                lines.append(f"- 删除关联 {a.get('from_id')} -> {a.get('to_id')}")
+                lines.append(
+                    f"- 删除关联 {a.get('from_id')} -> {a.get('to_id')}"
+                    if is_zh
+                    else f"- Delete link {a.get('from_id')} -> {a.get('to_id')}"
+                )
         if not lines:
-            return "（无动作）"
-        return "计划：\n  - " + "\n  - ".join(lines)
+            return "（无动作）" if is_zh else "(No actions)"
+        return ("计划：\n  - " if is_zh else "Plan:\n  - ") + "\n  - ".join(lines)

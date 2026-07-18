@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { getTranslation } from "../services/i18n";
 
 interface AppMetadata {
   id: string;
@@ -14,6 +15,7 @@ interface AppStoreModalProps {
   onPinWidget: (id: string) => void;
   onUnpinWidget: (id: string) => void;
   onRunFullscreen: (id: string) => void;
+  language?: "zh" | "en";
 }
 
 export const AppStoreModal: React.FC<AppStoreModalProps> = ({
@@ -23,10 +25,12 @@ export const AppStoreModal: React.FC<AppStoreModalProps> = ({
   onPinWidget,
   onUnpinWidget,
   onRunFullscreen,
+  language = "zh",
 }) => {
   const [apps, setApps] = useState<AppMetadata[]>([]);
   const [loading, setLoading] = useState(false);
   const API_BASE = `http://${window.location.hostname}:8000`;
+  const isZh = language === "zh";
 
   const fetchApps = async () => {
     setLoading(true);
@@ -50,7 +54,10 @@ export const AppStoreModal: React.FC<AppStoreModalProps> = ({
   }, [isOpen]);
 
   const handleDeleteApp = async (id: string) => {
-    if (!confirm(`Are you sure you want to permanently delete the App '${id}'? This deletes all its source files and state data.`)) {
+    const confirmMsg = isZh
+      ? `您确定要永久删除应用 '${id}' 吗？这将会删除其所有源文件和状态数据。`
+      : `Are you sure you want to permanently delete the App '${id}'? This deletes all its source files and state data.`;
+    if (!confirm(confirmMsg)) {
       return;
     }
     try {
@@ -92,10 +99,12 @@ export const AppStoreModal: React.FC<AppStoreModalProps> = ({
         <div className="p-4 border-b border-white/[0.06] flex justify-between items-center bg-white/[0.01]">
           <div>
             <h2 className="text-sm font-semibold text-white tracking-wide">
-              Ambient App Store
+              {getTranslation("appStoreTitle", language)}
             </h2>
             <p className="text-[10px] text-white/40 mt-0.5">
-              Browse and manage all MVC applications built dynamically by your agent.
+              {isZh
+                ? "浏览并管理由您的智能体动态构建的所有 MVC 应用。"
+                : "Browse and manage all MVC applications built dynamically by your agent."}
             </p>
           </div>
           <button
@@ -121,9 +130,13 @@ export const AppStoreModal: React.FC<AppStoreModalProps> = ({
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 9.172V5L8 4z" />
                 </svg>
               </div>
-              <h3 className="text-sm font-semibold text-white/80">No apps built yet</h3>
+              <h3 className="text-sm font-semibold text-white/80">
+                {isZh ? "暂无已构建的应用" : "No apps built yet"}
+              </h3>
               <p className="text-xs text-white/40 mt-1 max-w-sm mx-auto">
-                Chat with the agent and ask it to build a visual utility (e.g. "Build a calculator app") to populate your store!
+                {isZh
+                  ? "与智能体交谈并让它构建可视化工具（例如：“制作一个计算器组件”）来充实您的商店！"
+                  : "Chat with the agent and ask it to build a visual utility (e.g. \"Build a calculator app\") to populate your store!"}
               </p>
             </div>
           ) : (
@@ -154,10 +167,10 @@ export const AppStoreModal: React.FC<AppStoreModalProps> = ({
 
                     <div className="flex-1 mt-3">
                       <p className="text-[10px] text-white/30">
-                        Created: {new Date(app.created_at).toLocaleDateString()}
+                        {isZh ? "创建于: " : "Created: "}{new Date(app.created_at).toLocaleDateString()}
                       </p>
                       <p className="text-[10px] text-white/30 mt-0.5">
-                        Updated: {new Date(app.updated_at).toLocaleDateString()}
+                        {isZh ? "更新于: " : "Updated: "}{new Date(app.updated_at).toLocaleDateString()}
                       </p>
                     </div>
 
@@ -168,32 +181,32 @@ export const AppStoreModal: React.FC<AppStoreModalProps> = ({
                           <button
                             onClick={() => onUnpinWidget(app.id)}
                             className="px-2.5 py-1 text-[10px] font-semibold bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 rounded border border-cyan-500/20 transition-all cursor-pointer shadow-sm"
-                            title="Unpin from Canvas"
+                            title={isZh ? "从画布上取消固定" : "Unpin from Canvas"}
                           >
-                            Unpin
+                            {isZh ? "取消固定" : "Unpin"}
                           </button>
                         ) : (
                           <button
                             onClick={() => onPinWidget(app.id)}
                             className="px-2.5 py-1 text-[10px] font-semibold bg-white/[0.02] hover:bg-white/[0.06] text-white/80 rounded border border-white/10 transition-all cursor-pointer shadow-sm"
-                            title="Pin to Canvas"
+                            title={isZh ? "固定到画布" : "Pin to Canvas"}
                           >
-                            Pin
+                            {isZh ? "固定" : "Pin"}
                           </button>
                         )}
                         <button
                           onClick={() => onRunFullscreen(app.id)}
                           className="px-2.5 py-1 text-[10px] font-semibold bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white rounded border border-white/10 transition-all shadow-sm shadow-cyan-600/10 cursor-pointer"
-                          title="Run App Fullscreen"
+                          title={isZh ? "全屏运行应用" : "Run App Fullscreen"}
                         >
-                          Run
+                          {isZh ? "运行" : "Run"}
                         </button>
                       </div>
                       
                       <button
                         onClick={() => handleDeleteApp(app.id)}
                         className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/20 hover:text-red-400 transition-colors cursor-pointer"
-                        title="Uninstall App"
+                        title={isZh ? "卸载应用" : "Uninstall App"}
                       >
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />

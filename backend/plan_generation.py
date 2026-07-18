@@ -9,17 +9,21 @@ logger = logging.getLogger("plan_generation")
 
 class PlanGenerationService:
     @staticmethod
-    async def generate_plan(instruction: str, app_id: str, schemas_context: str, db_session: Any = None) -> str:
+    async def generate_plan(
+        instruction: str, app_id: str, schemas_context: str, db_session: Any = None, language: str = "zh"
+    ) -> str:
         """
         Generates a high-level summary implementation plan describing the widget and its UI elements.
         """
-        system_prompt = """You are an Ambient Agent Development Architect.
+        is_zh = language == "zh"
+        system_prompt = f"""You are an Ambient Agent Development Architect.
 Your task is to generate a concise, high-level implementation plan for a new or modified widget.
 The plan must only cover:
 1. The main purpose of the widget.
 2. The key user interface elements/features that will be added or modified.
 
-Keep the plan extremely short, clear, and direct. Do NOT include code, files, or technical configuration steps."""
+Keep the plan extremely short, clear, and direct. Do NOT include code, files, or technical configuration steps.
+IMPORTANT: You MUST write the plan in {"Chinese (中文)" if is_zh else "English"}."""
 
         user_prompt = f"""We are designing/modifying a widget app:
 App ID: "{app_id}"
@@ -42,18 +46,28 @@ Please write a brief implementation plan for this widget."""
             logger.error(f"Failed to generate implementation plan: {e}")
             return (
                 f"Implementation Plan for '{app_id}': Build widget UI conforming to the instruction: '{instruction}'."
+                if not is_zh
+                else f"应用 '{app_id}' 的开发计划：根据指令 '{instruction}' 构建组件界面。"
             )
 
     @staticmethod
     async def refine_plan(
-        instruction: str, app_id: str, schemas_context: str, current_plan: str, feedback: str, db_session: Any = None
+        instruction: str,
+        app_id: str,
+        schemas_context: str,
+        current_plan: str,
+        feedback: str,
+        db_session: Any = None,
+        language: str = "zh",
     ) -> str:
         """
         Refines the current plan using direct natural language feedback from the user.
         """
-        system_prompt = """You are an Ambient Agent Development Architect.
+        is_zh = language == "zh"
+        system_prompt = f"""You are an Ambient Agent Development Architect.
 Your task is to refine the implementation plan based on direct feedback from the user.
-Keep it a concise, high-level plan covering the widget's purpose and UI elements. Do NOT write source code."""
+Keep it a concise, high-level plan covering the widget's purpose and UI elements. Do NOT write source code.
+IMPORTANT: You MUST write the refined plan in {"Chinese (中文)" if is_zh else "English"}."""
 
         user_prompt = f"""We are building/modifying a widget app:
 App ID: "{app_id}"

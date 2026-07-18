@@ -12,7 +12,12 @@ logger = logging.getLogger("schema_alignment")
 class SchemaAlignmentService:
     @staticmethod
     async def align_schemas(
-        instruction: str, app_id: str, db: GraphDatabase, db_session: Any = None, approved_plan: str = ""
+        instruction: str,
+        app_id: str,
+        db: GraphDatabase,
+        db_session: Any = None,
+        approved_plan: str = "",
+        language: str = "zh",
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
@@ -29,7 +34,8 @@ class SchemaAlignmentService:
             schemas_info += f"  Description: {schema['description']}\n"
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
-        system_prompt = """You are a Graph Database Schema Alignment Architect.
+        is_zh = language == "zh"
+        system_prompt = f"""You are a Graph Database Schema Alignment Architect.
 Your task is to analyze a request to build a widget application and match its data storage requirements against our existing Graph Database Schemas.
 
 ### Guidelines:
@@ -38,30 +44,32 @@ Your task is to analyze a request to build a widget application and match its da
 3. **New Schemas**: Propose new schemas only if the concept is entirely new and does not overlap with any existing schemas.
 4. **Supported Data Types**: Property fields must use one of these types: "string", "integer", "number", "boolean".
 
+IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
+
 ### Output Format:
 You MUST output ONLY a valid JSON object matching the following structure, with NO surrounding chat text, no markdown explanation, just the JSON block:
-{
+{{
   "reused_schemas": [
-    {
+    {{
       "id": "Task",
       "reason": "To represent individual items on the checklist",
-      "extended_properties": {
+      "extended_properties": {{
         "difficulty_level": "string"
-      }
-    }
+      }}
+    }}
   ],
   "new_schemas": [
-    {
+    {{
       "id": "PomodoroSession",
       "name": "Pomodoro Session",
       "description": "Represents a completed focused pomodoro block",
-      "properties": {
+      "properties": {{
         "duration_minutes": "integer",
         "completed": "boolean"
-      }
-    }
+      }}
+    }}
   ]
-}
+}}
 """
 
         user_prompt = f"""We are building a widget app with:
@@ -132,6 +140,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         db: GraphDatabase,
         db_session: Any = None,
         approved_plan: str = "",
+        language: str = "zh",
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
@@ -142,7 +151,8 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
             schemas_info += f"- Schema ID: '{schema['id']}'\n"
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
-        system_prompt = """You are a Graph Database Schema Alignment Architect.
+        is_zh = language == "zh"
+        system_prompt = f"""You are a Graph Database Schema Alignment Architect.
 Your task is to refine an existing database schema proposal based on direct natural language feedback from the user.
 
 ### Guidelines:
@@ -150,30 +160,32 @@ Your task is to refine an existing database schema proposal based on direct natu
 2. Property fields must use one of these types: "string", "integer", "number", "boolean".
 3. Implement exactly what the user requests in their feedback.
 
+IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
+
 ### Output Format:
 You MUST output ONLY a valid JSON object matching the following structure, with NO surrounding chat text, no markdown explanation, just the JSON block:
-{
+{{
   "reused_schemas": [
-    {
+    {{
       "id": "Task",
       "reason": "To represent individual items on the checklist",
-      "extended_properties": {
+      "extended_properties": {{
         "difficulty_level": "string"
-      }
-    }
+      }}
+    }}
   ],
   "new_schemas": [
-    {
+    {{
       "id": "PomodoroSession",
       "name": "Pomodoro Session",
       "description": "Represents a completed focused pomodoro block",
-      "properties": {
+      "properties": {{
         "duration_minutes": "integer",
         "completed": "boolean"
-      }
-    }
+      }}
+    }}
   ]
-}
+}}
 """
 
         user_prompt = f"""We are building a widget app with:

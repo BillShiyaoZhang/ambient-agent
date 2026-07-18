@@ -64,3 +64,10 @@ cheapest, most data-grounded path.
     the original intent.
 12. If you are unsure, pick `converse` rather than guessing.
 13. When identifying whether a request targets an existing widget, pay close attention to the widget's Intents, Description, and Title. If the request semantically matches the Intents or Description of an existing widget, you must map it to that widget's ID (preferring `widget_modify` or the appropriate sub-intent).
+
+# Language Settings
+{% if language == 'en' %}
+Ensure all generated natural-language fields (such as 'rationale', 'instruction', and 'clarification_message') are in English.
+{% else %}
+确保所有生成的自然语言字段（如 'rationale'、'instruction' 和 'clarification_message'）都使用中文（Chinese）。
+{% endif %}

@@ -1,4 +1,5 @@
 import React from "react";
+import { getTranslation } from "../services/i18n";
 
 export interface Widget {
   id: string;
@@ -23,6 +24,8 @@ interface DashboardCanvasProps {
   onWidgetSpansChange: (spans: WidgetSpans) => void;
   showChat: boolean;
   onToggleChat: () => void;
+  language?: "zh" | "en";
+  onLanguageChange?: (lang: "zh" | "en") => void;
 }
 
 interface WidgetSpans {
@@ -45,6 +48,8 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
   onWidgetSpansChange,
   showChat,
   onToggleChat,
+  language = "zh",
+  onLanguageChange = () => {},
 }) => {
   const handleResizeMouseDown = (
     e: React.MouseEvent,
@@ -97,16 +102,18 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
     document.addEventListener("mouseup", handleMouseUp);
   };
 
+  const isZh = language === "zh";
+
   return (
     <div className="flex-1 h-full flex flex-col overflow-hidden bg-transparent">
       {/* Top Header */}
       <div className="py-3 px-5 border-b border-white/[0.06] flex justify-between items-center bg-white/[0.01]">
         <div>
           <h1 className="text-sm font-semibold tracking-tight text-white/90">
-            Workspace Canvas
+            {getTranslation("workspaceCanvas", language)}
           </h1>
           <p className="text-[10px] text-white/40 mt-0.5">
-            Widgets generated dynamically by your agent are pinned here.
+            {isZh ? "智能体动态生成的组件将固定在此处。" : "Widgets generated dynamically by your agent are pinned here."}
           </p>
         </div>
         
@@ -118,12 +125,12 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
                 ? "bg-white/[0.03] hover:bg-white/[0.08] text-white/80 border-white/10 hover:border-cyan-500/20"
                 : "bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border-cyan-500/20 shadow-sm"
             }`}
-            title={showChat ? "Hide Chat Panel" : "Show Chat Panel"}
+            title={showChat ? (isZh ? "隐藏聊天面板" : "Hide Chat Panel") : (isZh ? "显示聊天面板" : "Show Chat Panel")}
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
             </svg>
-            {showChat ? "Hide Chat" : "Show Chat"}
+            {showChat ? (isZh ? "隐藏聊天" : "Hide Chat") : (isZh ? "显示聊天" : "Show Chat")}
           </button>
 
           {onOpenAppStore && (
@@ -134,7 +141,7 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
               <svg className="w-3.5 h-3.5 text-cyan-400/90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
               </svg>
-              App Store
+              {getTranslation("appStore", language)}
             </button>
           )}
           
@@ -145,7 +152,18 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
             <svg className="w-3.5 h-3.5 text-cyan-400/90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
-            Audit Log
+            {getTranslation("auditLog", language)}
+          </button>
+
+          <button
+            onClick={() => onLanguageChange(language === "zh" ? "en" : "zh")}
+            className="px-2.5 py-1.5 text-xs font-semibold bg-white/[0.03] hover:bg-white/[0.08] text-white/90 rounded-lg border border-white/10 flex items-center gap-1.5 transition-all hover:border-cyan-500/20 shadow-sm cursor-pointer"
+            title={language === "zh" ? "Switch to English" : "切换为中文"}
+          >
+            <svg className="w-3.5 h-3.5 text-cyan-400/90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 002 2h2m4-1c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            {language === "zh" ? "English" : "中文"}
           </button>
         </div>
       </div>
@@ -169,9 +187,9 @@ export const DashboardCanvas: React.FC<DashboardCanvasProps> = ({
                 />
               </svg>
             </div>
-            <h3 className="text-xs font-semibold text-white/80">No active widgets</h3>
+            <h3 className="text-xs font-semibold text-white/80">{getTranslation("noWidgetsFound", language)}</h3>
             <p className="text-[11px] text-white/40 mt-1 max-w-xs">
-              Ask your agent a question that benefits from a GUI—like checking weather, writing notes, or listing tasks.
+              {isZh ? "向智能体提问以生成有图形界面的组件，例如查看天气、记录便签或列出任务。" : "Ask your agent a question that benefits from a GUI—like checking weather, writing notes, or listing tasks."}
             </p>
           </div>
         ) : (

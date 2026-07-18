@@ -143,6 +143,7 @@ class WorkspaceStorage:
                     return ChatSession(
                         id=data["id"],
                         title=data["title"],
+                        language=data.get("language", "zh"),
                         created_at=created_at or datetime.now(UTC),
                         updated_at=updated_at or datetime.now(UTC),
                     )
@@ -294,6 +295,7 @@ class WorkspaceStorage:
         data = {
             "id": session.id,
             "title": session.title,
+            "language": session.language,
             "created_at": session.created_at.isoformat()
             if isinstance(session.created_at, datetime)
             else session.created_at,

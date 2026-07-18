@@ -52,7 +52,7 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
     # 4. Mock ACP OpenCode agent call
     opencode_counter = 0
 
-    async def mock_run_opencode(app_id, instruction, on_update):
+    async def mock_run_opencode(app_id, instruction, language="zh", on_update=None):
         nonlocal opencode_counter
         opencode_counter += 1
         # Retrieve app_manager from main to write test files

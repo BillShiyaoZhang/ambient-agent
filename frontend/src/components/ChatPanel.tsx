@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { getTranslation } from "../services/i18n";
 
 export interface Message {
   id?: number;
@@ -13,6 +14,7 @@ interface ChatPanelProps {
   isConnected: boolean;
   width?: number;
   onHideChat?: () => void;
+  language?: "zh" | "en";
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
@@ -21,9 +23,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   isConnected,
   width = 320,
   onHideChat,
+  language = "zh",
 }) => {
   const [inputText, setInputText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isZh = language === "zh";
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,7 +49,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold tracking-tight text-white/90">
-            Ambient Chat
+            {isZh ? "Ambient 智能助手" : "Ambient Chat"}
           </h2>
           <div className="flex items-center gap-1.5">
             <span
@@ -56,7 +60,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               }`}
             />
             <span className="text-[10px] text-white/40">
-              {isConnected ? "Connected" : "Offline"}
+              {isConnected ? (isZh ? "已连接" : "Connected") : (isZh ? "已离线" : "Offline")}
             </span>
           </div>
         </div>
@@ -65,7 +69,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           <button
             onClick={onHideChat}
             className="p-1 hover:bg-white/5 text-white/40 hover:text-white/80 rounded-lg transition-colors cursor-pointer"
-            title="Hide Chat & History"
+            title={isZh ? "隐藏聊天与历史记录" : "Hide Chat & History"}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
@@ -78,7 +82,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
         {messages.length === 0 ? (
           <div className="h-full flex items-center justify-center text-center text-xs text-white/30 p-4">
-            Start talking to your Ambient Agent. The agent can spawn custom widgets on your canvas workspace.
+            {isZh
+              ? "开始与 Ambient 智能体对话。智能体可以为您在工作区画布上生成定制的交互式小组件。"
+              : "Start talking to your Ambient Agent. The agent can spawn custom widgets on your canvas workspace."}
           </div>
         ) : (
           messages.map((msg, index) => (
@@ -98,7 +104,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 {msg.content}
               </div>
               <span className="text-[9px] text-white/20 mt-0.5 px-0.5">
-                {msg.sender === "user" ? "You" : "Agent"}
+                {msg.sender === "user" ? (isZh ? "您" : "You") : (isZh ? "智能助手" : "Agent")}
               </span>
             </div>
           ))
@@ -114,7 +120,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             disabled={!isConnected}
-            placeholder={isConnected ? "Send a message..." : "Connecting..."}
+            placeholder={
+              isConnected
+                ? (isZh ? "发送消息..." : "Send a message...")
+                : (isZh ? "正在连接..." : "Connecting...")
+            }
             className="flex-1 px-3 py-1.5 text-xs bg-white/[0.02] border border-white/10 rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-cyan-500/40 focus:ring-1 focus:ring-cyan-500/10 transition-all disabled:opacity-50"
           />
           <button
@@ -122,7 +132,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             disabled={!isConnected || !inputText.trim()}
             className="px-3 py-1.5 text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] disabled:bg-white/[0.01] disabled:opacity-30 disabled:border-white/5 disabled:hover:shadow-none text-white rounded-lg border border-white/10 hover:border-cyan-500/30 hover:shadow-[0_0_8px_rgba(6,182,212,0.1)] transition-all cursor-pointer"
           >
-            Send
+            {getTranslation("send", language)}
           </button>
         </div>
       </form>

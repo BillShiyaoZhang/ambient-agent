@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class ChatSession(BaseModel):
     id: str
     title: str
+    language: str = "zh"
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
