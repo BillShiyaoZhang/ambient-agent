@@ -43,7 +43,7 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
     monkeypatch.setattr("backend.schema_alignment.SchemaAlignmentService.align_schemas", mock_align_schemas)
 
     # 4. Mock ACP OpenCode agent call
-    async def mock_run_opencode(app_id, instruction, on_update):
+    async def mock_run_opencode(app_id, instruction, language="zh", on_update=None):
         # Retrieve app_manager from main to write test files
         from backend.main import app_manager
 
@@ -153,13 +153,13 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
 
         # Expect final Verification report message
         verify_report = websocket.receive_json()
-        assert "Database Schema Verification Report" in verify_report["message"]["content"]
+        assert any(x in verify_report["message"]["content"] for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"])
         assert "✅ Schema Verification PASSED" in verify_report["message"]["content"]
 
         # Expect final log + verification report reply
         final_log = websocket.receive_json()
         print("DEBUG FINAL_LOG:", final_log)
-        assert "OpenCode Execution Log" in final_log["message"]["content"]
+        assert any(x in final_log["message"]["content"] for x in ["OpenCode Execution Log", "OpenCode 执行日志"])
         assert "✅ Schema Verification PASSED" in final_log["message"]["content"]
 
         # Expect widget delivery message

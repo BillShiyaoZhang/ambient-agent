@@ -151,13 +151,13 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
 
         # Expect verification report message
         verify_report = websocket.receive_json()
-        assert "Database Schema Verification Report" in verify_report["message"]["content"]
+        assert any(x in verify_report["message"]["content"] for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"])
 
         # Expect final reply and execution logs
         reply_msg = websocket.receive_json()
         assert reply_msg["type"] == "reply"
-        assert "OpenCode Execution Log" in reply_msg["message"]["content"]
-        assert "Database Schema Verification Report" in reply_msg["message"]["content"]
+        assert any(x in reply_msg["message"]["content"] for x in ["OpenCode Execution Log", "OpenCode 执行日志"])
+        assert any(x in reply_msg["message"]["content"] for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"])
 
         # Expect session status idle update
         status_idle = websocket.receive_json()

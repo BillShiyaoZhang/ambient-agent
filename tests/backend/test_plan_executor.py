@@ -41,7 +41,7 @@ async def test_stub_executor_returns_plan_result():
 async def test_coding_plan_executor_runs_widget_pipeline(monkeypatch):
     captured: dict = {}
 
-    async def fake_run_opencode(app_id, instruction, on_update):
+    async def fake_run_opencode(app_id, instruction, language="zh", on_update=None):
         captured["app_id"] = app_id
         captured["instruction"] = instruction
         return "ran opencode"

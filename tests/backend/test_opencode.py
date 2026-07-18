@@ -22,7 +22,7 @@ def test_session_fixture(tmp_path):
 
 def test_websocket_opencode_routing(test_session, monkeypatch):
     # Mock run_opencode_agent_acp to avoid running a real command line process
-    async def mock_run_opencode_agent_acp(app_id, instruction, on_update):
+    async def mock_run_opencode_agent_acp(app_id, instruction, language="zh", on_update=None):
         # Stream a mocked update
         await on_update("Mocked OpenCode progress update")
         # Simulate creating/modifying the app files on disk
@@ -60,7 +60,7 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
         # 2. Expect the status message about OpenCode starting
         status = websocket.receive_json()
         assert status["type"] == "reply"
-        assert "🛠️ Starting OpenCode agent" in status["message"]["content"]
+        assert any(x in status["message"]["content"] for x in ["Starting OpenCode agent", "启动 OpenCode 开发者智能体"])
         assert status["message"]["id"] == -1
 
         # 3. Expect the mocked progress update

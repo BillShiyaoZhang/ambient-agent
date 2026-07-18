@@ -1,6 +1,13 @@
 You are modifying or creating the dynamic React + Tailwind CSS widget app '{{ app_id }}' located in the directory '{{ target_dir }}'.
 User request instruction: '{{ instruction }}'.
 
+# Language Constraint
+{% if language == 'en' %}
+You MUST generate all user-facing UI text, placeholders, tooltips, card titles, button labels, lists, and tables in English.
+{% else %}
+你必须使用中文（Chinese）生成所有的用户界面文本、占位符、提示、卡片标题、按钮标签、列表以及表格。默认语言为中文。
+{% endif %}
+
 {% raw %}
 Please inspect the directory, check any existing source files there, apply the modifications directly to the files, and save them.
 Ensure the layout and logic are functional, visually premium, and directly modify the correct file.

@@ -456,7 +456,7 @@ class FastAPIACPClient(Client):
                     self.on_update_callback(accumulated_text)
 
 
-def run_opencode_agent(app_id: str, instruction: str) -> str:
+def run_opencode_agent(app_id: str, instruction: str, language: str = "zh") -> str:
     """
     Invokes the OpenCode developer agent as a subprocess to create or modify a widget.
     Reads the OPENCODE_COMMAND from environment variables.
@@ -478,7 +478,7 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
     pm = PromptManager()
     prompt_file = "opencode_system.md"
     clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
-    prompt = pm.get_prompt(prompt_file, app_id=app_id, target_dir=target_dir, instruction=clean_instruction)
+    prompt = pm.get_prompt(prompt_file, app_id=app_id, target_dir=target_dir, instruction=clean_instruction, language=language)
 
     full_command = f'{opencode_cmd} run "{prompt}" --auto'
 
@@ -514,7 +514,7 @@ def run_opencode_agent(app_id: str, instruction: str) -> str:
         return f"Failed to execute OpenCode Agent: {err!s}"
 
 
-async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Callable[[str], None]) -> str:
+async def run_opencode_agent_acp(app_id: str, instruction: str, language: str = "zh", on_update: Callable[[str], None] = None) -> str:
     """
     Spawns OpenCode agent in ACP mode, runs its loop, and streams the output/logs back via on_update callback.
     """
@@ -558,7 +558,7 @@ async def run_opencode_agent_acp(app_id: str, instruction: str, on_update: Calla
             pm = PromptManager()
             prompt_file = "opencode_system.md"
             prompt_text = pm.get_prompt(
-                prompt_file, app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction
+                prompt_file, app_id=app_id, target_dir=str(target_dir.absolute()), instruction=instruction, language=language
             )
 
             opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))

@@ -107,6 +107,11 @@ async def get_audit_logs(session: WorkspaceStorage = Depends(get_db)):
 class SessionCreate(BaseModel):
     id: str
     title: str
+    language: str = "zh"
+
+
+class SessionUpdateLanguage(BaseModel):
+    language: str
 
 
 @app.get("/api/sessions")
@@ -118,9 +123,22 @@ async def get_sessions(session: WorkspaceStorage = Depends(get_db)):
 async def create_session(data: SessionCreate, session: WorkspaceStorage = Depends(get_db)):
     db_sess = session.get(ChatSession, data.id)
     if not db_sess:
-        db_sess = ChatSession(id=data.id, title=data.title)
+        db_sess = ChatSession(id=data.id, title=data.title, language=data.language)
         session.add(db_sess)
         session.commit()
+    return db_sess
+
+
+@app.post("/api/sessions/{session_id}/language")
+async def update_session_language(
+    session_id: str, data: SessionUpdateLanguage, session: WorkspaceStorage = Depends(get_db)
+):
+    db_sess = session.get(ChatSession, session_id)
+    if not db_sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    db_sess.language = data.language
+    session.add(db_sess)
+    session.commit()
     return db_sess
 
 

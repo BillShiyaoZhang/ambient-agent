@@ -1,10 +1,12 @@
 import React from "react";
+import { getTranslation } from "../services/i18n";
 
 export interface Session {
   id: string;
   title: string;
   created_at: string;
   updated_at: string;
+  language?: string;
 }
 
 interface SessionSidebarProps {
@@ -16,6 +18,7 @@ interface SessionSidebarProps {
   onDeleteSession: (id: string) => void;
   isOpen: boolean;
   onToggleOpen: () => void;
+  language?: "zh" | "en";
 }
 
 export const SessionSidebar: React.FC<SessionSidebarProps> = ({
@@ -27,7 +30,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onDeleteSession,
   isOpen,
   onToggleOpen,
+  language = "zh",
 }) => {
+  const isZh = language === "zh";
+
   return (
     <div
       className={`h-full flex flex-col glass border-r border-white/[0.06] transition-all duration-300 relative ${
@@ -37,8 +43,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       {/* Sidebar Header */}
       <div className="p-4 border-b border-white/5 flex items-center justify-between overflow-hidden shrink-0">
         {isOpen ? (
-          <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-            Conversations
+          <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 whitespace-nowrap font-sans">
+            {getTranslation("conversations", language)}
           </h2>
         ) : (
           <div className="w-8 h-8 rounded-lg bg-white/[0.03] border border-white/5 flex items-center justify-center text-slate-300 font-semibold text-xs mx-auto">
@@ -51,13 +57,13 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       <div className="p-3 shrink-0">
         <button
           onClick={onCreateSession}
-          className="w-full py-1.5 px-3 text-xs font-medium bg-white/[0.03] hover:bg-white/[0.08] text-white rounded-lg flex items-center justify-center gap-1.5 transition-all border border-white/10 hover:border-cyan-500/30 hover:shadow-[0_0_8px_rgba(6,182,212,0.1)] cursor-pointer"
-          title="New Chat"
+          className="w-full py-1.5 px-3 text-xs font-medium bg-white/[0.03] hover:bg-white/[0.08] text-white rounded-lg flex items-center justify-center gap-1.5 transition-all border border-white/10 hover:border-cyan-500/30 hover:shadow-[0_0_8px_rgba(6,182,212,0.1)] cursor-pointer font-sans"
+          title={getTranslation("newChat", language)}
         >
           <svg className="w-4 h-4 text-cyan-400/90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
-          {isOpen && <span className="whitespace-nowrap">New Chat</span>}
+          {isOpen && <span className="whitespace-nowrap">{getTranslation("newChat", language)}</span>}
         </button>
       </div>
 
@@ -103,7 +109,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                     onDeleteSession(sess.id);
                   }}
                   className="opacity-0 group-hover:opacity-100 p-1 hover:bg-white/5 rounded text-white/30 hover:text-red-400 transition-all cursor-pointer"
-                  title="Delete Chat"
+                  title={getTranslation("deleteChat", language)}
                 >
                   <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -120,7 +126,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         <button
           onClick={onToggleOpen}
           className="p-1.5 hover:bg-white/[0.03] rounded-lg text-white/30 hover:text-white/70 transition-colors cursor-pointer"
-          title={isOpen ? "Collapse Sidebar" : "Expand Sidebar"}
+          title={isOpen ? (isZh ? "折叠侧边栏" : "Collapse Sidebar") : (isZh ? "展开侧边栏" : "Expand Sidebar")}
         >
           {isOpen ? (
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

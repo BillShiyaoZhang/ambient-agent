@@ -51,6 +51,7 @@ class IntentRouter:
         db_session: Session | None = None,
         provider_name: str | None = None,
         model_name: str | None = None,
+        language: str = "zh",
         *,
         override_system_prompt: str | None = None,
         context_sections: list[str] | None = None,
@@ -102,6 +103,7 @@ class IntentRouter:
                 override_system_prompt=override_system_prompt,
                 context_sections=sections,
                 include_widget_keyword_hint=include_widget_keyword_hint,
+                language=language,
             )
             if plan is not None:
                 return plan
@@ -131,6 +133,7 @@ class IntentRouter:
         provider_name: str | None = None,
         model_name: str | None = None,
         extra_context: dict[str, Any] | None = None,
+        language: str = "zh",
     ) -> IntentPlan:
         """Layer 2 of the router: specialise sub-intents.
 
@@ -162,6 +165,7 @@ class IntentRouter:
                     sections=["widgets", "graph_counts", "schemas"],
                 ),
                 extra_context=json.dumps(extra_context or {}, ensure_ascii=False),
+                language=language,
             )
         except Exception as e:
             logger.warning(f"Could not load refine_sub_intent.md prompt: {e}")
@@ -231,6 +235,7 @@ class IntentRouter:
         provider_name: str,
         model_name: str,
         db_session: Any = None,
+        language: str = "zh",
         *,
         override_system_prompt: str | None = None,
         context_sections: list[str] | None = None,
@@ -251,6 +256,7 @@ class IntentRouter:
                         sections=context_sections,
                         include_widget_keyword_hint=include_widget_keyword_hint,
                     ),
+                    language=language,
                 )
             except Exception as e:
                 logger.warning(f"Could not load router_v2.md prompt: {e}")
