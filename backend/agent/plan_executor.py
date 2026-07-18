@@ -163,7 +163,9 @@ class MutationPlanExecutor(PlanExecutor):
             return PlanPhaseResult(
                 success=False,
                 error="user denied the plan",
-                output="plan_and_act: 用户拒绝计划，未执行任何 mutation。" if is_zh else "plan_and_act: User denied the plan, no mutation executed.",
+                output="plan_and_act: 用户拒绝计划，未执行任何 mutation。"
+                if is_zh
+                else "plan_and_act: User denied the plan, no mutation executed.",
             )
 
         # Execute the actions
@@ -218,7 +220,11 @@ class MutationPlanExecutor(PlanExecutor):
         except Exception:
             pass
 
-        output_msg = f"plan_and_act: 完成 {len(actions)} 步 mutation。{self._render_plan(actions, language)}" if is_zh else f"plan_and_act: Completed {len(actions)} step(s) of mutation. {self._render_plan(actions, language)}"
+        output_msg = (
+            f"plan_and_act: 完成 {len(actions)} 步 mutation。{self._render_plan(actions, language)}"
+            if is_zh
+            else f"plan_and_act: Completed {len(actions)} step(s) of mutation. {self._render_plan(actions, language)}"
+        )
         return PlanPhaseResult(
             success=True,
             output=output_msg,
@@ -271,9 +277,17 @@ class MutationPlanExecutor(PlanExecutor):
             elif act == "delete_node":
                 lines.append(f"- 删除节点 `{a.get('id')}`" if is_zh else f"- Delete node `{a.get('id')}`")
             elif act == "create_edge":
-                lines.append(f"+ 关联 {a.get('from_id')} -> {a.get('to_id')}" if is_zh else f"+ Link {a.get('from_id')} -> {a.get('to_id')}")
+                lines.append(
+                    f"+ 关联 {a.get('from_id')} -> {a.get('to_id')}"
+                    if is_zh
+                    else f"+ Link {a.get('from_id')} -> {a.get('to_id')}"
+                )
             elif act == "delete_edge":
-                lines.append(f"- 删除关联 {a.get('from_id')} -> {a.get('to_id')}" if is_zh else f"- Delete link {a.get('from_id')} -> {a.get('to_id')}")
+                lines.append(
+                    f"- 删除关联 {a.get('from_id')} -> {a.get('to_id')}"
+                    if is_zh
+                    else f"- Delete link {a.get('from_id')} -> {a.get('to_id')}"
+                )
         if not lines:
             return "（无动作）" if is_zh else "(No actions)"
         return ("计划：\n  - " if is_zh else "Plan:\n  - ") + "\n  - ".join(lines)

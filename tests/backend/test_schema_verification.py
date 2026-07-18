@@ -153,7 +153,10 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
 
         # Expect final Verification report message
         verify_report = websocket.receive_json()
-        assert any(x in verify_report["message"]["content"] for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"])
+        assert any(
+            x in verify_report["message"]["content"]
+            for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"]
+        )
         assert "✅ Schema Verification PASSED" in verify_report["message"]["content"]
 
         # Expect final log + verification report reply

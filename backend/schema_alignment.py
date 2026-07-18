@@ -12,7 +12,12 @@ logger = logging.getLogger("schema_alignment")
 class SchemaAlignmentService:
     @staticmethod
     async def align_schemas(
-        instruction: str, app_id: str, db: GraphDatabase, db_session: Any = None, approved_plan: str = "", language: str = "zh"
+        instruction: str,
+        app_id: str,
+        db: GraphDatabase,
+        db_session: Any = None,
+        approved_plan: str = "",
+        language: str = "zh",
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
