@@ -53,9 +53,7 @@ def test_provider_api_never_returns_secret_and_session_model_persists(tmp_path, 
 
 def test_delete_referenced_provider_returns_conflict(tmp_path, monkeypatch):
     _, store = _isolate_llm(tmp_path, monkeypatch)
-    store.create_provider(
-        {"id": "local", "name": "Local", "preset": "ollama", "models": [{"id": "qwen"}]}, {}
-    )
+    store.create_provider({"id": "local", "name": "Local", "preset": "ollama", "models": [{"id": "qwen"}]}, {})
     store.update_settings({"default_model": {"provider_id": "local", "model_id": "qwen"}})
 
     with TestClient(main_module.app) as client:

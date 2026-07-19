@@ -246,7 +246,9 @@ class BackendManager:
                         if line.startswith("data:"):
                             try:
                                 event_data = json.loads(line[5:].strip())
-                                await send_ws_message_func({"type": "ag_ui_event", "app_id": app_id, "event": event_data})
+                                await send_ws_message_func(
+                                    {"type": "ag_ui_event", "app_id": app_id, "event": event_data}
+                                )
                             except Exception as e:
                                 logger.error(f"Error parsing agent SSE event: {e}")
         except Exception:

@@ -29,9 +29,7 @@ async def discover_models(store: LLMConfigStore, provider_id: str) -> list[dict[
     profile, preset, credentials = store.provider_runtime(provider_id)
     strategy = preset.get("discovery")
     base_url = (
-        profile.connection.get("base_url")
-        or preset.get("default_base_url")
-        or _DEFAULT_BASES.get(profile.preset)
+        profile.connection.get("base_url") or preset.get("default_base_url") or _DEFAULT_BASES.get(profile.preset)
     )
     discovered: list[dict[str, Any]] = []
     headers: dict[str, str] = {}
@@ -138,18 +136,20 @@ async def test_provider(
     prompt = "Reply with OK."
     if test_tools:
         prompt = "Call the ambient_tool_test function with value OK. Do not answer in text."
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "ambient_tool_test",
-                "description": "Validate function calling",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"value": {"type": "string"}},
-                    "required": ["value"],
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ambient_tool_test",
+                    "description": "Validate function calling",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
                 },
-            },
-        }]
+            }
+        ]
     result = await LLMService(store).generate(
         ModelSelection(provider_id=provider_id, model_id=chosen),
         [{"role": "user", "content": prompt}],

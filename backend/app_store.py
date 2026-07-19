@@ -330,8 +330,10 @@ class AppStoreService:
             # V1 keeps its historical status for API compatibility, but is still
             # directly launchable through the normalized default action. V2
             # headless capabilities are first-class ready apps.
-            status = "generating" if catalog_id in self.generating_ids else (
-                "ready" if ready or manifest.manifest_version == 2 else "needs_ui"
+            status = (
+                "generating"
+                if catalog_id in self.generating_ids
+                else ("ready" if ready or manifest.manifest_version == 2 else "needs_ui")
             )
             result.append(
                 {
@@ -396,7 +398,9 @@ class AppStoreService:
                 seen_items.add(item_id)
                 items.append(item_id)
             if len(items) >= 2:
-                normalized_folders.append({"id": folder_id, "name": str(raw_folder.get("name", "Folder"))[:80], "items": items})
+                normalized_folders.append(
+                    {"id": folder_id, "name": str(raw_folder.get("name", "Folder"))[:80], "items": items}
+                )
                 folder_entry_map[f"folder:{folder_id}"] = f"folder:{folder_id}"
             elif len(items) == 1:
                 folder_entry_map[f"folder:{folder_id}"] = items[0]

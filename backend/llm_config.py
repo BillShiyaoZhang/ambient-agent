@@ -163,7 +163,13 @@ PROVIDER_CATALOG = [
     _preset("cerebras", "Cerebras", "global", "cerebras", discovery="openai"),
     _preset("perplexity", "Perplexity", "global", "perplexity"),
     _preset("nvidia_nim", "NVIDIA NIM", "global", "nvidia_nim", [_API_KEY, _field("base_url", "Base URL", kind="url")]),
-    _preset("huggingface", "Hugging Face", "global", "huggingface", [_API_KEY, _field("base_url", "Endpoint URL", kind="url")]),
+    _preset(
+        "huggingface",
+        "Hugging Face",
+        "global",
+        "huggingface",
+        [_API_KEY, _field("base_url", "Endpoint URL", kind="url")],
+    ),
     _preset("vercel_ai_gateway", "Vercel AI Gateway", "global", "vercel_ai_gateway"),
     _preset("novita", "Novita AI", "global", "novita"),
     _preset(
@@ -193,35 +199,117 @@ PROVIDER_CATALOG = [
     _preset("volcengine", "Volcengine / Doubao", "china", "volcengine"),
     _preset("zhipu", "Zhipu / GLM", "china", "zai"),
     _preset("siliconflow", "SiliconFlow", "china", "openai", [_API_KEY, _BASE_URL], discovery="openai"),
-    _preset("azure", "Azure OpenAI / Microsoft Foundry", "enterprise", "azure", [
-        _API_KEY, _BASE_URL, _field("api_version", "API version"),
-    ]),
-    _preset("bedrock", "Amazon Bedrock", "enterprise", "bedrock", [
-        _field("aws_access_key_id", "AWS access key", secret=True, kind="password"),
-        _field("aws_secret_access_key", "AWS secret key", secret=True, kind="password"),
-        _field("aws_session_token", "AWS session token", secret=True, kind="password"),
-        _field("region", "AWS region", required=True), _field("profile", "AWS profile"),
-    ]),
-    _preset("vertex_ai", "Google Vertex AI", "enterprise", "vertex_ai", [
-        _field("project", "Project ID", required=True), _field("region", "Region", required=True),
-        _field("service_account_json", "Service account JSON", secret=True, kind="textarea"),
-    ]),
+    _preset(
+        "azure",
+        "Azure OpenAI / Microsoft Foundry",
+        "enterprise",
+        "azure",
+        [
+            _API_KEY,
+            _BASE_URL,
+            _field("api_version", "API version"),
+        ],
+    ),
+    _preset(
+        "bedrock",
+        "Amazon Bedrock",
+        "enterprise",
+        "bedrock",
+        [
+            _field("aws_access_key_id", "AWS access key", secret=True, kind="password"),
+            _field("aws_secret_access_key", "AWS secret key", secret=True, kind="password"),
+            _field("aws_session_token", "AWS session token", secret=True, kind="password"),
+            _field("region", "AWS region", required=True),
+            _field("profile", "AWS profile"),
+        ],
+    ),
+    _preset(
+        "vertex_ai",
+        "Google Vertex AI",
+        "enterprise",
+        "vertex_ai",
+        [
+            _field("project", "Project ID", required=True),
+            _field("region", "Region", required=True),
+            _field("service_account_json", "Service account JSON", secret=True, kind="textarea"),
+        ],
+    ),
     _preset("databricks", "Databricks", "enterprise", "databricks", [_API_KEY, _BASE_URL]),
-    _preset("watsonx", "IBM watsonx", "enterprise", "watsonx", [
-        _API_KEY, _field("project", "Project ID", required=True), _field("base_url", "Base URL", kind="url"),
-    ]),
+    _preset(
+        "watsonx",
+        "IBM watsonx",
+        "enterprise",
+        "watsonx",
+        [
+            _API_KEY,
+            _field("project", "Project ID", required=True),
+            _field("base_url", "Base URL", kind="url"),
+        ],
+    ),
     _preset("cloudflare", "Cloudflare AI Gateway", "enterprise", "openai", [_API_KEY, _BASE_URL], discovery="openai"),
-    _preset("ollama", "Ollama", "local", "ollama", [_field("base_url", "Base URL", kind="url")], base_url="http://localhost:11434", discovery="ollama"),
-    _preset("lmstudio", "LM Studio", "local", "openai", [_field("base_url", "Base URL", kind="url")], base_url="http://localhost:1234/v1", discovery="openai"),
-    _preset("vllm", "vLLM", "local", "openai", [_field("base_url", "Base URL", kind="url")], base_url="http://localhost:8000/v1", discovery="openai"),
-    _preset("llamacpp", "llama.cpp", "local", "openai", [_field("base_url", "Base URL", kind="url")], base_url="http://localhost:8080/v1", discovery="openai"),
-    _preset("tgi", "Hugging Face TGI", "local", "openai", [_field("base_url", "Base URL", kind="url")], discovery="openai"),
-    _preset("xinference", "Xinference", "local", "openai", [_field("base_url", "Base URL", kind="url")], discovery="openai"),
-    _preset("openai_compatible", "OpenAI-compatible Chat", "generic", "openai", [_API_KEY, _BASE_URL], discovery="openai"),
-    _preset("openai_responses", "OpenAI-compatible Responses", "generic", "openai", [_API_KEY, _BASE_URL], api_mode="responses", discovery="openai"),
+    _preset(
+        "ollama",
+        "Ollama",
+        "local",
+        "ollama",
+        [_field("base_url", "Base URL", kind="url")],
+        base_url="http://localhost:11434",
+        discovery="ollama",
+    ),
+    _preset(
+        "lmstudio",
+        "LM Studio",
+        "local",
+        "openai",
+        [_field("base_url", "Base URL", kind="url")],
+        base_url="http://localhost:1234/v1",
+        discovery="openai",
+    ),
+    _preset(
+        "vllm",
+        "vLLM",
+        "local",
+        "openai",
+        [_field("base_url", "Base URL", kind="url")],
+        base_url="http://localhost:8000/v1",
+        discovery="openai",
+    ),
+    _preset(
+        "llamacpp",
+        "llama.cpp",
+        "local",
+        "openai",
+        [_field("base_url", "Base URL", kind="url")],
+        base_url="http://localhost:8080/v1",
+        discovery="openai",
+    ),
+    _preset(
+        "tgi", "Hugging Face TGI", "local", "openai", [_field("base_url", "Base URL", kind="url")], discovery="openai"
+    ),
+    _preset(
+        "xinference", "Xinference", "local", "openai", [_field("base_url", "Base URL", kind="url")], discovery="openai"
+    ),
+    _preset(
+        "openai_compatible", "OpenAI-compatible Chat", "generic", "openai", [_API_KEY, _BASE_URL], discovery="openai"
+    ),
+    _preset(
+        "openai_responses",
+        "OpenAI-compatible Responses",
+        "generic",
+        "openai",
+        [_API_KEY, _BASE_URL],
+        api_mode="responses",
+        discovery="openai",
+    ),
     _preset("anthropic_compatible", "Anthropic-compatible", "generic", "anthropic", [_API_KEY, _BASE_URL]),
     _preset("litellm_proxy", "LiteLLM Proxy", "generic", "openai", [_API_KEY, _BASE_URL], discovery="openai"),
-    _preset("custom_litellm", "Custom LiteLLM provider", "generic", "", [_API_KEY, _field("base_url", "Base URL", kind="url")]),
+    _preset(
+        "custom_litellm",
+        "Custom LiteLLM provider",
+        "generic",
+        "",
+        [_API_KEY, _field("base_url", "Base URL", kind="url")],
+    ),
 ]
 
 _CATALOG_BY_ID = {item["id"]: item for item in PROVIDER_CATALOG}

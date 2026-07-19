@@ -71,18 +71,22 @@ def test_pre_split_minimax_profile_migrates_to_china_without_touching_credential
     llm_dir = tmp_path / "llm"
     llm_dir.mkdir()
     (llm_dir / "config.json").write_text(
-        json.dumps({
-            "version": 1,
-            "providers": [{
-                "id": "old-minimax",
-                "name": "MiniMax",
-                "preset": "minimax",
-                "connection": {},
-                "credential_refs": {"api_key": {"source": "stored"}},
-                "models": [{"id": "MiniMax-M2.7"}],
-            }],
-            "settings": {"default_model": None, "fast_model": None},
-        }),
+        json.dumps(
+            {
+                "version": 1,
+                "providers": [
+                    {
+                        "id": "old-minimax",
+                        "name": "MiniMax",
+                        "preset": "minimax",
+                        "connection": {},
+                        "credential_refs": {"api_key": {"source": "stored"}},
+                        "models": [{"id": "MiniMax-M2.7"}],
+                    }
+                ],
+                "settings": {"default_model": None, "fast_model": None},
+            }
+        ),
         encoding="utf-8",
     )
     (llm_dir / "secrets.json").write_text(
@@ -105,23 +109,27 @@ def test_minimax_migration_removes_non_chat_catalog_models_but_keeps_selected_mo
     llm_dir = tmp_path / "llm"
     llm_dir.mkdir()
     (llm_dir / "config.json").write_text(
-        json.dumps({
-            "version": 2,
-            "providers": [{
-                "id": "minimaxi-cn",
-                "name": "MiniMax CN",
-                "preset": "minimaxi",
-                "connection": {},
-                "models": [
-                    {"id": "speech-02-hd", "source": "catalog"},
-                    {"id": "MiniMax-M3", "source": "catalog"},
+        json.dumps(
+            {
+                "version": 2,
+                "providers": [
+                    {
+                        "id": "minimaxi-cn",
+                        "name": "MiniMax CN",
+                        "preset": "minimaxi",
+                        "connection": {},
+                        "models": [
+                            {"id": "speech-02-hd", "source": "catalog"},
+                            {"id": "MiniMax-M3", "source": "catalog"},
+                        ],
+                    }
                 ],
-            }],
-            "settings": {
-                "default_model": {"provider_id": "minimaxi-cn", "model_id": "MiniMax-M3"},
-                "fast_model": None,
-            },
-        }),
+                "settings": {
+                    "default_model": {"provider_id": "minimaxi-cn", "model_id": "MiniMax-M3"},
+                    "fast_model": None,
+                },
+            }
+        ),
         encoding="utf-8",
     )
 

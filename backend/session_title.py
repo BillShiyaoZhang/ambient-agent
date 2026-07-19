@@ -21,7 +21,7 @@ def is_placeholder_title(title: str) -> bool:
 def sanitize_title(raw_title: str, language: str) -> str:
     first_line = next((line.strip() for line in (raw_title or "").splitlines() if line.strip()), "")
     cleaned = re.sub(r"^(?:标题|Title)\s*[:：]\s*", "", first_line, flags=re.IGNORECASE)
-    cleaned = cleaned.strip().strip('"\'`“”‘’')
+    cleaned = cleaned.strip().strip("\"'`“”‘’")
     cleaned = cleaned.rstrip("。.!！?？;；:：").strip()
     return cleaned[:48]
 

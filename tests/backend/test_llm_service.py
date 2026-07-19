@@ -74,18 +74,22 @@ async def test_responses_output_is_normalized_to_same_internal_shape(tmp_path):
     )
 
     assert result.text == "ready"
-    assert result.tool_calls == [{
-        "id": "call-2",
-        "type": "function",
-        "function": {"name": "write", "arguments": '{"x":1}'},
-    }]
+    assert result.tool_calls == [
+        {
+            "id": "call-2",
+            "type": "function",
+            "function": {"name": "write", "arguments": '{"x":1}'},
+        }
+    ]
     assert "input" in captured and "messages" not in captured
-    assert captured["tools"] == [{
-        "type": "function",
-        "name": "write",
-        "description": "Write",
-        "parameters": {"type": "object"},
-    }]
+    assert captured["tools"] == [
+        {
+            "type": "function",
+            "name": "write",
+            "description": "Write",
+            "parameters": {"type": "object"},
+        }
+    ]
 
 
 @pytest.mark.asyncio

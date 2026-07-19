@@ -382,9 +382,7 @@ class WorkspaceStorage:
             "id": session.id,
             "title": session.title,
             "language": session.language,
-            "model_selection": session.model_selection.model_dump(mode="json")
-            if session.model_selection
-            else None,
+            "model_selection": session.model_selection.model_dump(mode="json") if session.model_selection else None,
             "created_at": session.created_at.isoformat()
             if isinstance(session.created_at, datetime)
             else session.created_at,

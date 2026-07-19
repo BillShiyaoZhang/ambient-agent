@@ -190,9 +190,7 @@ async def update_session_language(
 
 
 @app.put("/api/sessions/{session_id}/model")
-async def update_session_model(
-    session_id: str, data: ModelSelection, session: WorkspaceStorage = Depends(get_db)
-):
+async def update_session_model(session_id: str, data: ModelSelection, session: WorkspaceStorage = Depends(get_db)):
     try:
         llm_config_store.resolve(data)
     except LLMConfigError as exc:
@@ -260,9 +258,7 @@ async def update_llm_provider(
 
 @app.delete("/api/llm/providers/{provider_id}")
 async def delete_llm_provider(provider_id: str, session: WorkspaceStorage = Depends(get_db)):
-    if any(
-        chat.model_selection and chat.model_selection.provider_id == provider_id for chat in session.get_sessions()
-    ):
+    if any(chat.model_selection and chat.model_selection.provider_id == provider_id for chat in session.get_sessions()):
         raise HTTPException(
             status_code=409,
             detail={"code": "llm_provider_in_use", "message": "Provider is referenced by a session"},
@@ -280,7 +276,9 @@ async def discover_llm_provider_models(provider_id: str):
     try:
         return {"models": await discover_models(llm_config_store, provider_id)}
     except LLMConfigError as exc:
-        raise HTTPException(status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}) from exc
+        raise HTTPException(
+            status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}
+        ) from exc
 
 
 @app.post("/api/llm/providers/{provider_id}/test")
@@ -288,7 +286,9 @@ async def test_llm_provider(provider_id: str, data: ProviderTestRequest):
     try:
         return await test_provider(llm_config_store, provider_id, data.model_id, test_tools=data.mode == "tools")
     except LLMConfigError as exc:
-        raise HTTPException(status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}) from exc
+        raise HTTPException(
+            status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}
+        ) from exc
 
 
 @app.get("/api/llm/settings")
@@ -865,9 +865,7 @@ async def websocket_chat(
                 run_store.finish_step(run["id"], "agent_orchestration", {"message": str(e)}, status="failed")
                 if current["status"] == "waiting_user":
                     run_store.transition(run["id"], "running", summary="Agent task failed")
-                run_store.transition(
-                    run["id"], "failed", summary="Agent task failed", error={"message": str(e)}
-                )
+                run_store.transition(run["id"], "failed", summary="Agent task failed", error={"message": str(e)})
         finally:
             # Clean up pending requests, latest status, and active session flag
             pending_requests.pop(session_id, None)
@@ -906,6 +904,7 @@ async def websocket_chat(
 
     async def run_mcp_call(app_id, manifest, tool_name, arguments, call_id):
         try:
+
             async def mirror_event(payload: dict[str, Any]):
                 await websocket.send_json(payload)
 
@@ -1216,9 +1215,7 @@ async def websocket_chat(
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
                 if run_store.get_interaction(request_id):
-                    run_coordinator.resolve_interaction(
-                        request_id, {"approved": approved_status, "feedback": feedback}
-                    )
+                    run_coordinator.resolve_interaction(request_id, {"approved": approved_status, "feedback": feedback})
             elif msg_type == "graph_subscribe":
                 sub_id = data.get("subscription_id")
                 query = data.get("query", {})

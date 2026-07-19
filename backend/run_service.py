@@ -230,7 +230,7 @@ class RunStore:
         try:
             with self._connect() as connection:
                 connection.execute(
-                """
+                    """
                 INSERT INTO runs(
                     id, owner_id, action_id, action_title, source_type, source_id,
                     adapter_type, runtime_id, tool_name, input_json, status,
@@ -239,10 +239,25 @@ class RunStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
-                    run_id, owner_id, action_id, action_title, source_type, source_id,
-                    adapter_type, runtime_id, tool_name, _json(input_data), status,
-                    recovery, parent_run_id, retry_of, idempotency_key, attempt,
-                    now, now, started_at,
+                        run_id,
+                        owner_id,
+                        action_id,
+                        action_title,
+                        source_type,
+                        source_id,
+                        adapter_type,
+                        runtime_id,
+                        tool_name,
+                        _json(input_data),
+                        status,
+                        recovery,
+                        parent_run_id,
+                        retry_of,
+                        idempotency_key,
+                        attempt,
+                        now,
+                        now,
+                        started_at,
                     ),
                 )
                 self._append_event(connection, run_id, "run_created", {"status": status})
@@ -265,18 +280,21 @@ class RunStore:
             if run is None:
                 return None
             run["interactions"] = [
-                _decode_row(row) for row in connection.execute(
+                _decode_row(row)
+                for row in connection.execute(
                     "SELECT * FROM run_interactions WHERE run_id=? ORDER BY created_at", (run_id,)
                 ).fetchall()
             ]
             run["steps"] = [
-                _decode_row(row) for row in connection.execute(
+                _decode_row(row)
+                for row in connection.execute(
                     "SELECT * FROM run_steps WHERE run_id=? ORDER BY id", (run_id,)
                 ).fetchall()
             ]
             if include_events:
                 run["events"] = [
-                    _decode_row(row) for row in connection.execute(
+                    _decode_row(row)
+                    for row in connection.execute(
                         "SELECT * FROM run_events WHERE run_id=? ORDER BY sequence", (run_id,)
                     ).fetchall()
                 ]
@@ -338,9 +356,7 @@ class RunStore:
                 column = f"{key}_json" if key in _JSON_COLUMNS else key
                 encoded[column] = _json(value) if key in _JSON_COLUMNS and value is not None else value
             assignments = ", ".join(f"{key}=?" for key in encoded)
-            connection.execute(
-                f"UPDATE runs SET {assignments} WHERE id=?", [*encoded.values(), run_id]
-            )
+            connection.execute(f"UPDATE runs SET {assignments} WHERE id=?", [*encoded.values(), run_id])
             self._append_event(connection, run_id, "status_changed", {"from": current, "to": status, **updates})
         return self.get_run(run_id) or {}
 
@@ -353,7 +369,9 @@ class RunStore:
             )
             self._append_event(connection, run_id, "progress", {"progress": progress, "summary": summary})
 
-    def claim_next(self, worker_id: str, global_limit: int, owner_limit: int, lease_seconds: int = 30) -> dict[str, Any] | None:
+    def claim_next(
+        self, worker_id: str, global_limit: int, owner_limit: int, lease_seconds: int = 30
+    ) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             running_count = connection.execute(
@@ -370,7 +388,10 @@ class RunStore:
             candidates = connection.execute(
                 "SELECT * FROM runs WHERE status='queued' AND adapter_type<>'internal' ORDER BY created_at, id LIMIT 100"
             ).fetchall()
-            row = next((candidate for candidate in candidates if owner_counts.get(candidate["owner_id"], 0) < owner_limit), None)
+            row = next(
+                (candidate for candidate in candidates if owner_counts.get(candidate["owner_id"], 0) < owner_limit),
+                None,
+            )
             if row is None:
                 return None
             now = _now()
@@ -483,7 +504,12 @@ class RunStore:
                    VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
                 (interaction_id, run_id, interaction_type, prompt, _json(payload), _now()),
             )
-            self._append_event(connection, run_id, "interaction_requested", {"interaction_id": interaction_id, "type": interaction_type})
+            self._append_event(
+                connection,
+                run_id,
+                "interaction_requested",
+                {"interaction_id": interaction_id, "type": interaction_type},
+            )
         return self.get_interaction(interaction_id) or {}
 
     def get_interaction(self, interaction_id: str) -> dict[str, Any] | None:
@@ -670,7 +696,9 @@ class RunCoordinator:
                 tool_name = action.invocation.tool_name
             self.store.update_progress(run_id, 0.05, "Starting")
             if not self.store.begin_step(run_id, "invoke"):
-                step = next((step for step in self.store.get_run(run_id)["steps"] if step["step_key"] == "invoke"), None)
+                step = next(
+                    (step for step in self.store.get_run(run_id)["steps"] if step["step_key"] == "invoke"), None
+                )
                 result = step.get("output") if step else None
             else:
                 manifest = self.app_manager.get_manifest(app_id)
@@ -783,9 +811,16 @@ class RunCoordinator:
     ) -> dict[str, Any]:
         self.ensure_started()
         run = self.store.create_run(
-            owner_id=f"app:{app_id}", action_id=tool_name, action_title=tool_name,
-            source_type=source_type, source_id=source_id, adapter_type="mcp_tool",
-            runtime_id=app_id, tool_name=tool_name, input_data=input_data, recovery="manual",
+            owner_id=f"app:{app_id}",
+            action_id=tool_name,
+            action_title=tool_name,
+            source_type=source_type,
+            source_id=source_id,
+            adapter_type="mcp_tool",
+            runtime_id=app_id,
+            tool_name=tool_name,
+            input_data=input_data,
+            recovery="manual",
         )
         if event_callback:
             self._event_callbacks[run["id"]] = event_callback
@@ -796,9 +831,16 @@ class RunCoordinator:
         self, *, owner_id: str, action_id: str, title: str, source_type: str, source_id: str | None, input_data: Any
     ) -> dict[str, Any]:
         return self.store.create_run(
-            owner_id=owner_id, action_id=action_id, action_title=title,
-            source_type=source_type, source_id=source_id, adapter_type="internal",
-            runtime_id="internal:agent", input_data=input_data, recovery="manual", status="queued",
+            owner_id=owner_id,
+            action_id=action_id,
+            action_title=title,
+            source_type=source_type,
+            source_id=source_id,
+            adapter_type="internal",
+            runtime_id="internal:agent",
+            input_data=input_data,
+            recovery="manual",
+            status="queued",
         )
 
     def claim_external(self, run_id: str) -> dict[str, Any] | None:
@@ -835,11 +877,19 @@ class RunCoordinator:
         if original["status"] not in TERMINAL_STATUSES | {"needs_attention"}:
             raise ValueError("only terminal or needs-attention runs can be retried")
         run = self.store.create_run(
-            owner_id=original["owner_id"], action_id=original["action_id"], action_title=original["action_title"],
-            source_type=original["source_type"], source_id=original["source_id"],
-            adapter_type=original["adapter_type"], runtime_id=original["runtime_id"], tool_name=original["tool_name"],
-            input_data=original["input"], recovery=original["recovery"], parent_run_id=original["parent_run_id"],
-            retry_of=run_id, attempt=int(original["attempt"]) + 1,
+            owner_id=original["owner_id"],
+            action_id=original["action_id"],
+            action_title=original["action_title"],
+            source_type=original["source_type"],
+            source_id=original["source_id"],
+            adapter_type=original["adapter_type"],
+            runtime_id=original["runtime_id"],
+            tool_name=original["tool_name"],
+            input_data=original["input"],
+            recovery=original["recovery"],
+            parent_run_id=original["parent_run_id"],
+            retry_of=run_id,
+            attempt=int(original["attempt"]) + 1,
         )
         self._wake.set()
         return run

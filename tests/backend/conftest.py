@@ -19,11 +19,14 @@ def isolated_main_llm_configuration(tmp_path, monkeypatch):
         },
         {},
     )
-    store.update_settings({
-        "default_model": {"provider_id": "test-provider", "model_id": "test-model"},
-        "fast_model": {"provider_id": "test-provider", "model_id": "test-model"},
-    })
+    store.update_settings(
+        {
+            "default_model": {"provider_id": "test-provider", "model_id": "test-model"},
+            "fast_model": {"provider_id": "test-provider", "model_id": "test-model"},
+        }
+    )
     monkeypatch.setattr(main, "llm_config_store", store)
+
     class StubTitleService:
         def __init__(self, *_args, **_kwargs):
             pass
