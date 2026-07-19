@@ -15,6 +15,9 @@
   animation: app-center-enter 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+.app-center-shell.is-home { position: absolute; z-index: 1; animation: none; }
+.app-center-shell.is-overlay { position: fixed; }
+
 .app-center-shell::before {
   content: "";
   position: absolute;
@@ -220,3 +223,38 @@
 @keyframes app-center-slide { from { opacity: 0; transform: translateX(30px); } }
 @keyframes app-center-menu { from { opacity: 0; transform: scale(.94) translateY(-4px); } }
 @keyframes app-center-spin { to { transform: rotate(360deg); } }
+
+:root[data-theme="light"] .app-center-shell {
+  --app-center-text: rgba(24, 27, 36, .95);
+  --app-center-muted: rgba(54, 61, 79, .58);
+  background:
+    radial-gradient(circle at 50% 115%, rgba(115, 91, 220, .17), transparent 46%),
+    linear-gradient(145deg, #edf2fa 0%, #faf9fc 44%, #e9eef7 100%);
+}
+:root[data-theme="light"] .app-center-shell::before { opacity: .12; background-image: radial-gradient(rgba(62, 70, 92, .24) .65px, transparent .65px); }
+:root[data-theme="light"] .app-center-brand-mark,
+:root[data-theme="light"] .app-center-search-wrap,
+:root[data-theme="light"] .app-center-filters,
+:root[data-theme="light"] .app-center-folder-icon { border-color: rgba(48, 57, 78, .12); background-color: rgba(255,255,255,.58); box-shadow: inset 0 1px #fff, 0 16px 40px rgba(64,72,96,.13); }
+:root[data-theme="light"] .app-center-search-wrap input,
+:root[data-theme="light"] .app-center-folder-title-row input { color: rgba(24,27,36,.95); }
+:root[data-theme="light"] .app-center-search-wrap input::placeholder { color: rgba(55,62,80,.42); }
+:root[data-theme="light"] .app-center-filters { background: rgba(255,255,255,.45); }
+:root[data-theme="light"] .app-center-filters button { color: rgba(45,51,67,.55); }
+:root[data-theme="light"] .app-center-filters button.is-active { color: rgba(24,27,36,.95); background: rgba(255,255,255,.78); box-shadow: 0 4px 14px rgba(65,72,94,.12); }
+:root[data-theme="light"] .app-center-tile-title { color: rgba(25,28,37,.9); text-shadow: 0 1px 8px rgba(255,255,255,.8); }
+:root[data-theme="light"] .app-center-close,
+:root[data-theme="light"] .app-center-folder-title-row button,
+:root[data-theme="light"] .app-center-details-close { color: rgba(35,41,55,.62); background: rgba(255,255,255,.58); }
+:root[data-theme="light"] .app-center-folder-layer,
+:root[data-theme="light"] .app-center-details-layer { background: rgba(224,229,240,.48); }
+:root[data-theme="light"] .app-center-folder-panel,
+:root[data-theme="light"] .app-center-details,
+:root[data-theme="light"] .app-center-menu { color: rgba(24,27,36,.94); border-color: rgba(255,255,255,.82); background: linear-gradient(145deg, rgba(255,255,255,.94), rgba(237,241,248,.92)); box-shadow: inset 0 1px #fff, 0 35px 90px rgba(58,66,90,.24); }
+:root[data-theme="light"] .app-center-details > p,
+:root[data-theme="light"] .app-center-details dt,
+:root[data-theme="light"] .app-center-menu-heading small { color: rgba(49,55,71,.58); }
+:root[data-theme="light"] .app-center-details dd,
+:root[data-theme="light"] .app-center-menu-heading strong { color: rgba(24,27,36,.88); }
+:root[data-theme="light"] .app-center-menu > button { color: rgba(35,40,54,.75); }
+:root[data-theme="light"] .app-center-menu > button:hover { color: rgba(24,27,36,.96); background: rgba(67,75,99,.08); }

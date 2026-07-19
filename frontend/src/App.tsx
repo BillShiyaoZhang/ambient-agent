@@ -1,26 +1,48 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import wsService from "./services/websocket";
-import { ChatPanel, type Message } from "./components/ChatPanel";
-import { DashboardCanvas, type Widget } from "./components/DashboardCanvas";
+import type { Message } from "./components/ChatPanel";
+import type { Widget } from "./components/DashboardCanvas";
 import { SandboxWidget } from "./components/SandboxWidget";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AuditLogPanel } from "./components/AuditLogPanel";
-import { SessionSidebar, type Session } from "./components/SessionSidebar";
+import type { Session } from "./components/SessionSidebar";
 import { AppCenter } from "./components/AppCenter";
 import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
+import { AppWorkspace } from "./components/AppWorkspace";
+import { AgentChatOverlay } from "./components/AgentChatOverlay";
+import { createThemeController, type ThemeSnapshot } from "./services/theme";
+import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
+import { Languages, Moon, ShieldCheck, Sun } from "lucide-react";
 
+const API_BASE = `http://${window.location.hostname}:8000`;
 
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
-  const API_BASE = `http://${window.location.hostname}:8000`;
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [widgets, setWidgets] = useState<Widget[]>([]);
-  const [pinnedIds, setPinnedIds] = useState<string[]>([]);
-  const [widgetSpans, setWidgetSpans] = useState<Record<string, {cols: number, rows: number}>>({});
+  const [canvasConfig, setCanvasConfig] = useState<CanvasConfigV3>(() => ({ ...EMPTY_CANVAS, windows: {} }));
   const [isConnected, setIsConnected] = useState(false);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const chatOpenRef = useRef(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const themeControllerRef = useRef<ReturnType<typeof createThemeController> | null>(null);
+  if (!themeControllerRef.current) themeControllerRef.current = createThemeController();
+  const [theme, setTheme] = useState<ThemeSnapshot>(() => themeControllerRef.current!.snapshot());
+
+  useEffect(() => {
+    const controller = themeControllerRef.current!;
+    const unsubscribe = controller.subscribe(setTheme);
+    return () => { unsubscribe(); controller.destroy(); };
+  }, []);
+
+  const handleChatOpenChange = (open: boolean) => {
+    chatOpenRef.current = open;
+    setIsChatOpen(open);
+    if (open) setUnreadCount(0);
+  };
 
   const handleLanguageChange = async (lang: "zh" | "en") => {
     setLanguage(lang);
@@ -40,20 +62,18 @@ function App() {
     }
   };
 
-  const saveCanvasConfig = async (ids: string[], spans: Record<string, {cols: number, rows: number}>) => {
+  const saveCanvasConfig = useCallback(async (config: CanvasConfigV3) => {
     try {
       await fetch(`${API_BASE}/api/canvas`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned_ids: ids, widget_spans: spans, version: 2 }),
+        body: JSON.stringify(config),
       });
     } catch (err) {
       console.error("Error saving canvas configuration:", err);
     }
-  };
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
-  const [fullscreenAppId, setFullscreenAppId] = useState<string | null>(null);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
   
   interface PermissionRequest {
@@ -312,33 +332,7 @@ function App() {
     setEditedProposal(updated);
   };
 
-  const [chatWidth, setChatWidth] = useState<number>(() => {
-    const saved = localStorage.getItem("chat_panel_width");
-    return saved ? parseInt(saved, 10) : 320;
-  });
-
   const [mutationPreview, setMutationPreview] = useState<MutationPreviewData | null>(null);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = chatWidth;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const newWidth = Math.max(240, Math.min(800, startWidth + deltaX));
-      setChatWidth(newWidth);
-      localStorage.setItem("chat_panel_width", newWidth.toString());
-    };
-
-    const handleMouseUp = () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-  };
 
   // 1. Fetch sessions list on mount
   const fetchSessions = async (selectId?: string) => {
@@ -393,7 +387,32 @@ function App() {
     };
   }, []);
 
-  // 2. Fetch messages & pinned apps when activeSessionId changes
+  useEffect(() => {
+    const loadCanvasConfig = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/canvas`);
+        if (!res.ok) return;
+        const raw = await res.json();
+        const config = migrateCanvasConfig(raw);
+        setCanvasConfig(config);
+        const loaded = await Promise.all(config.open_app_ids.map(async (id) => {
+          try {
+            const appRes = await fetch(`${API_BASE}/api/apps/${id}`);
+            return appRes.ok ? await appRes.json() as Widget : null;
+          } catch {
+            return null;
+          }
+        }));
+        setWidgets(loaded.filter((widget): widget is Widget => Boolean(widget)));
+        if (raw.version !== 3) saveCanvasConfig(config);
+      } catch (err) {
+        console.error("Error loading canvas configuration:", err);
+      }
+    };
+    loadCanvasConfig();
+  }, [saveCanvasConfig]);
+
+  // 2. Fetch messages and connect the selected chat session.
   useEffect(() => {
     if (!activeSessionId) return;
 
@@ -412,60 +431,15 @@ function App() {
       }
     };
 
-    // Load pinned app IDs and fetch their source files from canvas configuration
-    const loadCanvasConfig = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/canvas`);
-        if (res.ok) {
-          const config = await res.json();
-          const ids = Array.from(new Set<string>(config.pinned_ids || []));
-          let spans = config.widget_spans || {};
-          const version = config.version || 1;
-
-          if (version < 2) {
-            const migratedSpans: Record<string, {cols: number, rows: number}> = {};
-            for (const key of Object.keys(spans)) {
-              let cols = spans[key].cols || 1;
-              let rows = spans[key].rows || 1;
-              // Map old 1-3 cols to 4-12 cols
-              cols = Math.min(12, cols * 4);
-              // Map old 1-4 rows to 4-16 rows (where 1 old row of 320px = 4 new rows of 80px)
-              rows = Math.min(16, rows * 4);
-              migratedSpans[key] = { cols, rows };
-            }
-            spans = migratedSpans;
-            saveCanvasConfig(ids, spans);
-          }
-
-          setPinnedIds(ids);
-          setWidgetSpans(spans);
-
-          const loadedWidgets: Widget[] = [];
-          for (const id of ids) {
-            try {
-              const appRes = await fetch(`${API_BASE}/api/apps/${id}`);
-              if (appRes.ok) {
-                const appData = await appRes.json();
-                loadedWidgets.push(appData);
-              }
-            } catch (err) {
-              console.error(`Error loading pinned widget ${id}:`, err);
-            }
-          }
-          setWidgets(loadedWidgets);
-        }
-      } catch (err) {
-        console.error("Error loading canvas configuration:", err);
-      }
-    };
-
     loadSessionHistory();
-    loadCanvasConfig();
 
     // Connect WebSocket
     const wsUrl = `ws://${window.location.hostname}:8000/ws/chat`;
     wsService.connect(wsUrl, activeSessionId, (data) => {
       if (data.type === "ack" || data.type === "reply") {
+        if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
+          setUnreadCount((count) => count + 1);
+        }
         setMessages((prev) => {
           const isRealReply = data.message.id !== undefined && data.message.id !== -1;
           const cleanPrev = isRealReply ? prev.filter((m) => m.id !== -1) : prev;
@@ -488,11 +462,24 @@ function App() {
             : [...prev, data.widget];
         });
         
-        // Auto-pin newly created widget and sync to backend
-        setPinnedIds((prev) => {
-          const updated = prev.includes(data.widget.id) ? prev : [...prev, data.widget.id];
-          saveCanvasConfig(updated, widgetSpans);
-          return updated;
+        setCanvasConfig((previous) => {
+          const id = data.widget.id as string;
+          const ids = [...previous.open_app_ids.filter((appId) => appId !== id), id];
+          const next: CanvasConfigV3 = {
+            ...previous,
+            open_app_ids: ids,
+            active_app_id: id,
+            windows: {
+              ...previous.windows,
+              [id]: {
+                mode: "maximized",
+                bounds: previous.windows[id]?.bounds ?? { x: 0.16, y: 0.12, width: 0.68, height: 0.72 },
+                restoreBounds: previous.windows[id]?.bounds,
+              },
+            },
+          };
+          saveCanvasConfig(next);
+          return next;
         });
 
       } else if (data.type === "graph_query_update") {
@@ -539,6 +526,8 @@ function App() {
         setPendingVerificationRequest(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
+      } else if (data.type === "session_title_updated") {
+        setSessions((previous) => previous.map((session) => session.id === data.session_id ? { ...session, title: data.title } : session));
       } else if (data.type === "mutation_preview") {
         setMutationPreview({
           ticket_id: data.ticket_id,
@@ -566,16 +555,16 @@ function App() {
     return () => {
       wsService.disconnect();
     };
-  }, [activeSessionId]);
+  }, [activeSessionId, saveCanvasConfig]);
 
   const handleCreateSession = async () => {
     const newId = Math.random().toString(36).substring(2, 15);
-    const newTitle = `New Chat ${sessions.length + 1}`;
+    const newTitle = language === "zh" ? "新对话" : "New conversation";
     try {
       const res = await fetch(`${API_BASE}/api/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: newId, title: newTitle }),
+        body: JSON.stringify({ id: newId, title: newTitle, language }),
       });
       if (res.ok) {
         localStorage.setItem("last_active_session", newId);
@@ -611,20 +600,17 @@ function App() {
   };
 
   const handleRemoveWidget = (id: string) => {
-    if (!activeSessionId) return;
-    setPinnedIds((prev) => {
-      const updated = prev.filter((wId) => wId !== id);
-      const updatedSpans = { ...widgetSpans };
-      delete updatedSpans[id];
-      setWidgetSpans(updatedSpans);
-      saveCanvasConfig(updated, updatedSpans);
-      return updated;
+    setCanvasConfig((previous) => {
+      const ids = previous.open_app_ids.filter((appId) => appId !== id);
+      const windows = { ...previous.windows };
+      delete windows[id];
+      const next = { ...previous, open_app_ids: ids, active_app_id: ids.at(-1) ?? null, windows };
+      saveCanvasConfig(next);
+      return next;
     });
-    setWidgets((prev) => prev.filter((w) => w.id !== id));
   };
 
-  const handlePinWidget = async (id: string) => {
-    if (!activeSessionId) return;
+  const handleOpenApp = async (id: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/apps/${id}`);
       if (res.ok) {
@@ -635,103 +621,136 @@ function App() {
             ? prev.map((w) => (w.id === id ? appData : w))
             : [...prev, appData];
         });
-        setPinnedIds((prev) => {
-          const updated = prev.includes(id) ? prev : [...prev, id];
-          saveCanvasConfig(updated, widgetSpans);
-          return updated;
+        setCanvasConfig((previous) => {
+          const ids = [...previous.open_app_ids.filter((appId) => appId !== id), id];
+          const existing = previous.windows[id];
+          const next: CanvasConfigV3 = {
+            ...previous,
+            open_app_ids: ids,
+            active_app_id: id,
+            windows: {
+              ...previous.windows,
+              [id]: {
+                mode: "maximized",
+                bounds: existing?.bounds ?? { x: 0.16, y: 0.12, width: 0.68, height: 0.72 },
+                restoreBounds: existing?.mode === "floating" ? existing.bounds : existing?.restoreBounds,
+              },
+            },
+          };
+          saveCanvasConfig(next);
+          return next;
         });
       }
     } catch (err) {
-      console.error("Error pinning app:", err);
+      console.error("Error opening app:", err);
     }
-  };
-
-  const handleRunFullscreen = (id: string) => {
-    setFullscreenAppId(id);
     setIsAppStoreOpen(false);
   };
 
+  const handleCanvasChange = (next: CanvasConfigV3, persist = false) => {
+    setCanvasConfig(next);
+    if (persist) saveCanvasConfig(next);
+  };
 
+  const handleSelectSession = (id: string) => {
+    setActiveSessionId(id);
+    localStorage.setItem("last_active_session", id);
+    const selected = sessions.find((session) => session.id === id);
+    setLanguage(selected?.language === "en" ? "en" : "zh");
+  };
+
+  const setAppWindowMode = (id: string, mode: "maximized" | "floating") => {
+    setCanvasConfig((previous) => {
+      const current = previous.windows[id];
+      if (!current) return previous;
+      const ids = [...previous.open_app_ids.filter((appId) => appId !== id), id];
+      const next: CanvasConfigV3 = {
+        ...previous,
+        open_app_ids: ids,
+        active_app_id: id,
+        windows: {
+          ...previous.windows,
+          [id]: mode === "maximized"
+            ? { ...current, mode, restoreBounds: current.mode === "floating" ? current.bounds : current.restoreBounds, snapZone: undefined }
+            : { ...current, mode, bounds: current.restoreBounds ?? current.bounds, snapZone: undefined },
+        },
+      };
+      saveCanvasConfig(next);
+      return next;
+    });
+  };
+
+  const uniqueWidgets = widgets.filter((widget, index, list) => list.findIndex((candidate) => candidate.id === widget.id) === index);
+  const appCenter = (mode: "home" | "overlay") => (
+    <AppCenter
+      mode={mode}
+      isOpen={mode === "home" || isAppStoreOpen}
+      onClose={() => setIsAppStoreOpen(false)}
+      pinnedWidgetIds={canvasConfig.open_app_ids}
+      onPinWidget={handleOpenApp}
+      onUnpinWidget={handleRemoveWidget}
+      onRunFullscreen={handleOpenApp}
+      language={language}
+    />
+  );
 
   return (
-    <div className="flex w-screen h-screen overflow-hidden text-slate-100 font-sans bg-[#08080a]">
-      {/* Session History Sidebar */}
-      <SessionSidebar
+    <div className="w-screen h-screen overflow-hidden font-sans" data-theme={theme.effective}>
+      {canvasConfig.open_app_ids.length === 0 ? appCenter("home") : (
+        <>
+          <AppWorkspace
+            widgets={uniqueWidgets}
+            canvas={canvasConfig}
+            onCanvasChange={handleCanvasChange}
+            renderWidgetContent={(widget) => (
+              <ErrorBoundary key={widget.id}>
+                <SandboxWidget
+                  widget={widget}
+                  onFullscreen={(id) => setAppWindowMode(id, "maximized")}
+                  onMinimize={(id) => setAppWindowMode(id, "floating")}
+                />
+              </ErrorBoundary>
+            )}
+            onOpenAudit={() => setIsAuditOpen(true)}
+            onOpenAppStore={() => setIsAppStoreOpen(true)}
+            language={language}
+            onLanguageChange={handleLanguageChange}
+            theme={theme}
+            onThemeChange={(preference) => themeControllerRef.current!.setPreference(preference)}
+          />
+          {appCenter("overlay")}
+        </>
+      )}
+
+      {canvasConfig.open_app_ids.length === 0 && (
+        <div className="home-controls" aria-label={language === "zh" ? "主页设置" : "Home settings"}>
+          <button onClick={() => setIsAuditOpen(true)} aria-label={language === "zh" ? "审计日志" : "Audit log"}><ShieldCheck size={17} /></button>
+          <button onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")} aria-label={language === "zh" ? "切换为英文" : "Switch to Chinese"}><Languages size={17} /></button>
+          <label aria-label={language === "zh" ? "主题" : "Theme"}>
+            {theme.effective === "dark" ? <Moon size={16} /> : <Sun size={16} />}
+            <select value={theme.preference} onChange={(event) => themeControllerRef.current!.setPreference(event.target.value as "system" | "light" | "dark")}>
+              <option value="system">{language === "zh" ? "跟随系统" : "System"}</option>
+              <option value="light">{language === "zh" ? "浅色" : "Light"}</option>
+              <option value="dark">{language === "zh" ? "深色" : "Dark"}</option>
+            </select>
+          </label>
+        </div>
+      )}
+
+      <AgentChatOverlay
+        open={isChatOpen}
+        unreadCount={unreadCount}
+        messages={messages}
         sessions={sessions}
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
-        onSelectSession={(id) => {
-          setActiveSessionId(id);
-          localStorage.setItem("last_active_session", id);
-          const sess = sessions.find((s) => s.id === id);
-          if (sess && sess.language) {
-            setLanguage(sess.language as "zh" | "en");
-          } else {
-            setLanguage("zh");
-          }
-          if (!isSidebarOpen) {
-            setIsSidebarOpen(true);
-          }
-        }}
-        onCreateSession={() => {
-          handleCreateSession();
-          if (!isSidebarOpen) {
-            setIsSidebarOpen(true);
-          }
-        }}
+        isConnected={isConnected}
+        language={language}
+        onOpenChange={handleChatOpenChange}
+        onSendMessage={handleSendMessage}
+        onSelectSession={handleSelectSession}
+        onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
-        isOpen={isSidebarOpen}
-        onToggleOpen={() => setIsSidebarOpen(!isSidebarOpen)}
-        language={language}
-      />
-
-      {/* Chat Panel */}
-      {isSidebarOpen && (
-        <ChatPanel
-          messages={messages}
-          onSendMessage={handleSendMessage}
-          isConnected={isConnected}
-          width={chatWidth}
-          onHideChat={() => setIsSidebarOpen(false)}
-          language={language}
-        />
-      )}
-
-      {/* Drag Splitter Handle */}
-      {isSidebarOpen && (
-        <div
-          onMouseDown={handleMouseDown}
-          className="w-1 h-full cursor-col-resize hover:bg-cyan-500/30 active:bg-cyan-600/50 transition-colors bg-white/[0.04] shrink-0"
-          title="Drag to resize panels"
-        />
-      )}
-
-      {/* Workspace Canvas */}
-      <DashboardCanvas
-        activeSessionId={activeSessionId}
-        widgets={widgets.filter((w, idx, self) => self.findIndex(x => x.id === w.id) === idx)}
-        onRemoveWidget={handleRemoveWidget}
-        renderWidgetContent={(widget) => (
-          <ErrorBoundary key={widget.id}>
-            <SandboxWidget
-              widget={widget}
-              onFullscreen={(id) => setFullscreenAppId(id)}
-            />
-          </ErrorBoundary>
-        )}
-        onOpenAudit={() => setIsAuditOpen(true)}
-        onOpenAppStore={() => setIsAppStoreOpen(true)}
-        onFullscreenWidget={(id) => setFullscreenAppId(id)}
-        fullscreenAppId={fullscreenAppId}
-        widgetSpans={widgetSpans}
-        onWidgetSpansChange={(updatedSpans) => {
-          setWidgetSpans(updatedSpans);
-          saveCanvasConfig(pinnedIds, updatedSpans);
-        }}
-        showChat={isSidebarOpen}
-        onToggleChat={() => setIsSidebarOpen(!isSidebarOpen)}
-        language={language}
-        onLanguageChange={handleLanguageChange}
       />
 
       {/* Audit Log Panel Overlay */}
@@ -749,17 +768,6 @@ function App() {
         onDismiss={(ticketId) => {
           setMutationPreview((curr) => (curr && curr.ticket_id === ticketId ? null : curr));
         }}
-      />
-
-      {/* Fullscreen App Center */}
-      <AppCenter
-        isOpen={isAppStoreOpen}
-        onClose={() => setIsAppStoreOpen(false)}
-        pinnedWidgetIds={pinnedIds}
-        onPinWidget={handlePinWidget}
-        onUnpinWidget={handleRemoveWidget}
-        onRunFullscreen={handleRunFullscreen}
-        language={language}
       />
 
       {/* 🛡️ OpenCode Permission Request Modal */}

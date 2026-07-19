@@ -17,6 +17,7 @@ from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import run_opencode_agent_acp
+from backend.session_title import SessionTitleService, is_placeholder_title
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 
 # Global registry of active WebSockets mapping session_id -> Set[WebSocket]
@@ -30,6 +31,7 @@ latest_session_status: dict[str, Any] = {}
 
 # Set of active session IDs currently running generation tasks
 active_running_sessions: set[str] = set()
+session_title_tasks: dict[str, asyncio.Task] = {}
 
 
 async def send_to_session(session_id: str, data: Any):
@@ -161,8 +163,12 @@ async def delete_session(session_id: str, session: WorkspaceStorage = Depends(ge
 
 
 class CanvasConfig(BaseModel):
-    pinned_ids: list[str]
-    widget_spans: dict[str, Any]
+    version: int | None = None
+    open_app_ids: list[str] | None = None
+    active_app_id: str | None = None
+    windows: dict[str, Any] | None = None
+    pinned_ids: list[str] | None = None
+    widget_spans: dict[str, Any] | None = None
 
 
 @app.get("/api/canvas")
@@ -172,7 +178,7 @@ async def get_canvas(session: WorkspaceStorage = Depends(get_db)):
 
 @app.post("/api/canvas")
 async def save_canvas(data: CanvasConfig, session: WorkspaceStorage = Depends(get_db)):
-    session.save_canvas_config(data.model_dump())
+    session.save_canvas_config(data.model_dump(exclude_none=True))
     return {"status": "ok"}
 
 
@@ -332,6 +338,24 @@ async def websocket_chat(
     orchestrator = AgentOrchestrator(
         db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp
     )
+    title_service = SessionTitleService(session)
+
+    def start_title_generation(content: str) -> None:
+        if session_id in session_title_tasks or not is_placeholder_title(db_session_obj.title):
+            return
+
+        async def generate_and_broadcast() -> None:
+            try:
+                title = await title_service.generate(session_id, content, db_session_obj.language or "zh")
+                if title:
+                    db_session_obj.title = title
+                    await broadcast_global({"type": "session_title_updated", "session_id": session_id, "title": title})
+            except Exception as exc:
+                print("Error generating session title:", exc)
+            finally:
+                session_title_tasks.pop(session_id, None)
+
+        session_title_tasks[session_id] = asyncio.create_task(generate_and_broadcast())
 
     # Callback to send incremental updates to client
     async def send_ws_update(data: Any):
@@ -389,7 +413,6 @@ async def websocket_chat(
                     },
                 },
             )
-
             # Mark session as running and broadcast globally
             active_running_sessions.add(session_id)
             await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "running"})
@@ -428,6 +451,7 @@ async def websocket_chat(
             latest_session_status.pop(session_id, None)
             active_running_sessions.discard(session_id)
             await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "idle"})
+            start_title_generation(content_str)
 
     # Restore connection state for the client
     try:

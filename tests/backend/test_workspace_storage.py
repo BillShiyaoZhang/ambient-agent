@@ -73,8 +73,10 @@ def test_workspace_storage_crud(tmp_path):
     storage.save_canvas_config(config)
 
     canvas_data = storage.get_canvas_config()
-    assert canvas_data["pinned_ids"] == ["app1", "app2"]
-    assert canvas_data["widget_spans"]["app1"]["cols"] == 2
+    assert canvas_data["version"] == 3
+    assert canvas_data["open_app_ids"] == ["app1", "app2"]
+    assert canvas_data["active_app_id"] == "app2"
+    assert canvas_data["windows"]["app1"]["mode"] == "floating"
 
     # 5. Delete Session
     success = storage.delete_session(session_id)

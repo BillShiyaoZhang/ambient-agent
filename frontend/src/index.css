@@ -8,9 +8,54 @@
   font-weight: 400;
 
   color-scheme: dark;
-  color: rgba(255, 255, 255, 0.9);
-  background: radial-gradient(circle at 50% 50%, #0e0e12 0%, #060608 100%);
+  color: rgba(255, 255, 255, 0.92);
+  background: #08090d;
   background-attachment: fixed;
+
+  --workspace-bg: #08090d;
+  --workspace-bg-solid: #08090d;
+  --workspace-wallpaper: linear-gradient(145deg, #080a12 0%, #11131e 48%, #090a10 100%);
+  --wallpaper-glow-a: rgba(86, 112, 255, .26);
+  --wallpaper-glow-b: rgba(193, 83, 188, .20);
+  --text-primary: rgba(249, 250, 255, .95);
+  --text-secondary: rgba(230, 233, 246, .66);
+  --text-tertiary: rgba(220, 225, 241, .40);
+  --glass-border: rgba(255,255,255,.08);
+  --glass-border-strong: rgba(255,255,255,.15);
+  --glass-fallback: #161821;
+  --window-surface: linear-gradient(145deg, rgba(28,30,42,.90), rgba(12,13,20,.88));
+  --window-shadow: 0 28px 80px rgba(0,0,0,.45), inset 0 1px rgba(255,255,255,.08);
+  --window-shadow-active: 0 34px 100px rgba(0,0,0,.58), 0 0 0 1px rgba(255,255,255,.06), inset 0 1px rgba(255,255,255,.11);
+  --titlebar-surface: linear-gradient(to bottom, rgba(255,255,255,.075), rgba(255,255,255,.025));
+  --window-control: rgba(255,255,255,.17);
+  --window-control-hover: rgba(255,255,255,.72);
+  --app-content: rgba(6,7,11,.42);
+  --toolbar-surface: rgba(28,30,42,.68);
+  --toolbar-shadow: 0 18px 50px rgba(0,0,0,.35), inset 0 1px rgba(255,255,255,.12);
+  --popover-surface: rgba(27,29,40,.91);
+  --popover-shadow: 0 24px 70px rgba(0,0,0,.5), inset 0 1px rgba(255,255,255,.09);
+  --control-hover: rgba(255,255,255,.085);
+  --app-chip: linear-gradient(145deg, rgba(128,111,255,.35), rgba(255,255,255,.06));
+  --accent: #8b78f6;
+  --accent-border: rgba(164,146,255,.55);
+  --accent-soft: rgba(127,101,255,.15);
+  --snap-preview: rgba(130,115,255,.14);
+  --glass-shadow: 0 20px 70px rgba(0,0,0,.34), inset 0 1px rgba(255,255,255,.12);
+  --chat-surface: linear-gradient(145deg, rgba(31,33,46,.88), rgba(14,15,23,.90));
+  --chat-shadow: 0 35px 100px rgba(0,0,0,.56), inset 0 1px rgba(255,255,255,.10);
+  --message-agent: rgba(255,255,255,.045);
+  --message-user: rgba(123,98,238,.18);
+  --composer-surface: rgba(5,6,10,.28);
+  --fab-surface: linear-gradient(145deg, rgba(139,120,246,.96), rgba(105,82,218,.94));
+  --fab-text: #fff;
+  --fab-shadow: 0 18px 45px rgba(73,53,171,.42), inset 0 1px rgba(255,255,255,.30);
+  --widget-text: rgba(249,250,255,.92);
+  --widget-muted: rgba(222,226,240,.55);
+  --widget-surface: rgba(255,255,255,.055);
+  --widget-surface-soft: rgba(255,255,255,.035);
+  --widget-input: rgba(4,5,9,.28);
+  --widget-border: rgba(255,255,255,.09);
+  --widget-control: #4c5262;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -18,12 +63,71 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: rgba(24,26,34,.94);
+  background: #edf0f7;
+  --workspace-bg: #edf0f7;
+  --workspace-bg-solid: #edf0f7;
+  --workspace-wallpaper: linear-gradient(145deg, #edf2fa 0%, #f8f7fb 48%, #e8edf7 100%);
+  --wallpaper-glow-a: rgba(88,123,255,.22);
+  --wallpaper-glow-b: rgba(211,105,195,.18);
+  --text-primary: rgba(23,25,34,.94);
+  --text-secondary: rgba(43,47,61,.66);
+  --text-tertiary: rgba(56,61,78,.44);
+  --glass-border: rgba(45,53,74,.11);
+  --glass-border-strong: rgba(255,255,255,.78);
+  --glass-fallback: #f4f6fb;
+  --window-surface: linear-gradient(145deg, rgba(255,255,255,.85), rgba(238,242,249,.78));
+  --window-shadow: 0 24px 70px rgba(65,73,96,.19), inset 0 1px rgba(255,255,255,.88);
+  --window-shadow-active: 0 30px 90px rgba(54,62,88,.25), 0 0 0 1px rgba(255,255,255,.74), inset 0 1px #fff;
+  --titlebar-surface: linear-gradient(to bottom, rgba(255,255,255,.62), rgba(255,255,255,.22));
+  --window-control: rgba(63,70,91,.18);
+  --window-control-hover: rgba(255,255,255,.95);
+  --app-content: rgba(255,255,255,.48);
+  --toolbar-surface: rgba(250,252,255,.70);
+  --toolbar-shadow: 0 14px 42px rgba(65,73,96,.18), inset 0 1px #fff;
+  --popover-surface: rgba(251,252,255,.90);
+  --popover-shadow: 0 22px 60px rgba(58,65,87,.22), inset 0 1px #fff;
+  --control-hover: rgba(66,75,101,.085);
+  --app-chip: linear-gradient(145deg, rgba(126,108,236,.22), rgba(255,255,255,.76));
+  --accent: #6d57dd;
+  --accent-border: rgba(108,84,221,.45);
+  --accent-soft: rgba(108,84,221,.11);
+  --snap-preview: rgba(108,84,221,.12);
+  --glass-shadow: 0 18px 58px rgba(60,68,92,.18), inset 0 1px #fff;
+  --chat-surface: linear-gradient(145deg, rgba(255,255,255,.88), rgba(241,244,250,.90));
+  --chat-shadow: 0 30px 80px rgba(51,59,84,.23), inset 0 1px #fff;
+  --message-agent: rgba(72,79,101,.055);
+  --message-user: rgba(109,87,221,.12);
+  --composer-surface: rgba(255,255,255,.60);
+  --fab-surface: linear-gradient(145deg, #7b65ea, #6048ce);
+  --fab-shadow: 0 16px 38px rgba(82,62,184,.30), inset 0 1px rgba(255,255,255,.42);
+  --widget-text: rgba(23,25,34,.94);
+  --widget-muted: rgba(48,53,68,.58);
+  --widget-surface: rgba(255,255,255,.58);
+  --widget-surface-soft: rgba(66,74,97,.05);
+  --widget-input: rgba(255,255,255,.68);
+  --widget-border: rgba(50,58,78,.12);
+  --widget-control: #687086;
+}
+
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  overflow-x: hidden;
+  overflow: hidden;
 }
+
+#root { width: 100vw; height: 100vh; }
+.ambient-widget-root { color: var(--widget-text); background: transparent; }
+.audit-panel { color: var(--text-primary); background: var(--chat-surface); border-color: var(--glass-border-strong); }
+.audit-panel .text-white,.audit-panel .text-white\/80 { color: var(--text-primary); }
+.audit-panel .text-white\/60,.audit-panel .text-white\/50,.audit-panel .text-white\/40,.audit-panel .text-white\/30 { color: var(--text-secondary); }
+.theme-modal-panel { color: var(--text-primary); background: var(--popover-surface); border-color: var(--glass-border-strong); }
+:root[data-theme="light"] [class~="bg-[#0b0b0e]"] { color: var(--text-primary) !important; background: var(--popover-surface) !important; border-color: var(--glass-border-strong) !important; }
+:root[data-theme="light"] [class~="bg-[#0b0b0e]"] .text-white { color: var(--text-primary) !important; }
+:root[data-theme="light"] [class~="bg-[#0b0b0e]"] .text-slate-400 { color: var(--text-secondary) !important; }
 
 /* Custom Scrollbars - Modern Tech Style */
 ::-webkit-scrollbar {

@@ -52,16 +52,17 @@ const Card = ({ title, children, style, onClick, ...rest }: any) => {
     <div
       onClick={onClick}
       style={{
-        border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: "8px",
+        border: "1px solid var(--widget-border, rgba(255,255,255,0.08))",
+        borderRadius: "12px",
         padding: "16px",
-        backgroundColor: "rgba(30,41,59,0.3)",
+        color: "var(--widget-text, rgba(255,255,255,0.9))",
+        backgroundColor: "var(--widget-surface, rgba(30,41,59,0.3))",
         cursor: onClick ? "pointer" : undefined,
         ...style
       }}
       {...rest}
     >
-      {title && <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "12px", color: "rgba(255,255,255,0.9)", borderBottom: "1px solid rgba(255,255,255,0.06)", paddingBottom: "6px" }}>{title}</h3>}
+      {title && <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "12px", color: "var(--widget-text, rgba(255,255,255,0.9))", borderBottom: "1px solid var(--widget-border, rgba(255,255,255,0.06))", paddingBottom: "6px" }}>{title}</h3>}
       {children}
     </div>
   );
@@ -93,7 +94,7 @@ const Button = ({ label, variant, style, onClick, ...rest }: any) => {
         border: "none",
         fontWeight: "600",
         fontSize: "13px",
-        backgroundColor: variant === "danger" ? "#ef4444" : variant === "secondary" ? "#475569" : "#2563eb",
+        backgroundColor: variant === "danger" ? "#ef4444" : variant === "secondary" ? "var(--widget-control, #475569)" : "var(--accent, #2563eb)",
         color: "#ffffff",
         display: "inline-flex",
         alignItems: "center",
@@ -110,7 +111,7 @@ const Button = ({ label, variant, style, onClick, ...rest }: any) => {
 const TextField = ({ label, placeholder, value, onChange, onEnter, style, ...rest }: any) => {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "6px", ...style }}>
-      {label && <label style={{ fontSize: "12px", fontWeight: "500", color: "rgba(255,255,255,0.5)" }}>{label}</label>}
+      {label && <label style={{ fontSize: "12px", fontWeight: "500", color: "var(--widget-muted, rgba(255,255,255,0.5))" }}>{label}</label>}
       <input
         type="text"
         placeholder={placeholder}
@@ -124,9 +125,9 @@ const TextField = ({ label, placeholder, value, onChange, onEnter, style, ...res
         style={{
           padding: "8px 12px",
           borderRadius: "6px",
-          backgroundColor: "rgba(15,23,42,0.4)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          color: "#ffffff",
+          backgroundColor: "var(--widget-input, rgba(15,23,42,0.4))",
+          border: "1px solid var(--widget-border, rgba(255,255,255,0.08))",
+          color: "var(--widget-text, #ffffff)",
           fontSize: "13px",
           outline: "none",
           width: "100%"
@@ -147,7 +148,7 @@ const Checkbox = ({ label, checked, onChange, style, ...rest }: any) => {
         style={{ cursor: "pointer" }}
         {...rest}
       />
-      <span style={{ fontSize: "13px", color: "rgba(255,255,255,0.8)" }}>{label}</span>
+      <span style={{ fontSize: "13px", color: "var(--widget-text, rgba(255,255,255,0.8))" }}>{label}</span>
     </label>
   );
 };
@@ -163,8 +164,8 @@ const List = ({ items, itemStyle, onItemClick, style, ...rest }: any) => {
         const currentItemStyle = {
           padding: "8px 12px",
           borderRadius: "6px",
-          backgroundColor: "rgba(255,255,255,0.02)",
-          border: "1px solid rgba(255,255,255,0.03)",
+          backgroundColor: "var(--widget-surface-soft, rgba(255,255,255,0.02))",
+          border: "1px solid var(--widget-border, rgba(255,255,255,0.03))",
           fontSize: "13px",
           cursor: onItemClick ? "pointer" : "default",
           ...itemStyle
@@ -297,6 +298,14 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
         if (onMinimizeRef.current) {
           onMinimizeRef.current(widget.id);
         }
+      },
+      theme: {
+        get preference() {
+          return document.documentElement.dataset.themePreference || "system";
+        },
+        get effective() {
+          return document.documentElement.dataset.theme || "dark";
+        },
       },
       graph: {
         subscribe: (query: any, callback: (data: any) => void) => {
@@ -450,7 +459,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     <div
       id={widget.id}
       data-testid={`sandbox-${widget.id}`}
-      className="w-full h-full text-white/90 overflow-auto"
+      className="ambient-widget-root w-full h-full overflow-auto"
     >
       {Component ? (
         <ErrorBoundary>

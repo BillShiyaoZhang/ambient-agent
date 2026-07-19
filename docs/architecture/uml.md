@@ -87,8 +87,15 @@ classDiagram
         +save_canvas_config(config) void
     }
 
+    class SessionTitleService {
+        +generate(session_id: str, first_message: str, language: str) str|None
+        +sanitize_title(raw_title: str, language: str) str
+    }
+
     ChatSession "1" --* "0..*" ChatMessage : contains
     AppManager --> AppRecordStore : persists lifecycle timestamps
+    SessionTitleService --> WorkspaceStorage : updates placeholder titles
+    SessionTitleService --> LLMService : generates concise title
 ```
 
 ### 1.3 意图路由与上下文模块

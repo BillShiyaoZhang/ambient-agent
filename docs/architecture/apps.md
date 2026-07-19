@@ -129,6 +129,10 @@ sequenceDiagram
 
 ## 4. 应用中心与外部能力
 
+应用中心同时支持两种宿主模式：没有 App 打开时以 `home` 模式成为工作区主页；已有 App 时以 `overlay` 模式覆盖当前工作区。打开 App 会创建全局 Canvas V3 窗口，默认最大化。多个 App 保持挂载，窗口最大化、恢复、吸附和切换不会重新创建其 React 根节点。
+
+Canvas V3 使用归一化窗口边界，在不同尺寸设备上恢复后重新约束到可视区域。旧版 `pinned_ids/widget_spans` 在读取时迁移，聊天 session 切换不改变全局 App 工作区。
+
 应用中心会统一展示生成式 App、外部 Skill 和 MCP。外部安装器通过 `PUT /api/capabilities/{catalog_id}` 注册版本化能力描述；描述只包含展示信息、输入 Schema，以及指向既有后端 App 的非敏感调用引用。命令、环境变量和凭证继续保存在后端 App manifest 中，不会下发到目录接口。
 
 ```json
@@ -151,3 +155,5 @@ sequenceDiagram
 ```
 
 生成的界面通过 `ambient.capabilities.invoke(catalogId, input)` 调用能力，后端负责解析适配器并继续执行既有的权限确认与审计流程。`GET /api/app-store` 返回统一目录和同步布局；`PUT /api/app-store/layout` 使用 revision 保护，多端发生并发修改时返回 `409`。
+
+宿主主题通过语义 CSS tokens 传递给标准组件，并通过 `ambient.theme` 暴露给 Widget。自定义 Widget 可以读取主题，但宿主不会重写其硬编码颜色。

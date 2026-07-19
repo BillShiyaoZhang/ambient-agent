@@ -44,12 +44,12 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm">
+    <div className="audit-overlay fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm">
       {/* Click outside to close */}
       <div className="flex-1" onClick={onClose} />
 
       {/* Slide drawer */}
-      <div className="w-[600px] max-w-full h-full glass border-l border-white/10 flex flex-col shadow-2xl animate-slide-in">
+      <div className="audit-panel w-[600px] max-w-full h-full glass border-l border-white/10 flex flex-col shadow-2xl animate-slide-in">
         {/* Header */}
         <div className="p-6 border-b border-white/5 flex items-center justify-between bg-white/[0.01]">
           <div>

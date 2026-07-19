@@ -20,7 +20,18 @@
 
 ### `ambient.minimize()`
 
-将当前全屏状态的 Widget 卡片恢复至其原本的网格大小。
+将当前最大化 Widget 恢复为可移动、可缩放的浮动窗口。
+
+### `ambient.theme`
+
+当前宿主主题的只读快照：
+
+```javascript
+ambient.theme.preference // "system" | "light" | "dark"
+ambient.theme.effective  // "light" | "dark"
+```
+
+主题变化会让 Widget React 根节点重新渲染。标准 `ambient.components` 自动使用新的语义色；自定义颜色可根据 `ambient.theme.effective` 自行切换。
 
 ## 2. 图数据库操作
 

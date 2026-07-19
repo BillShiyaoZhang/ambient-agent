@@ -19,8 +19,8 @@ export const AppPermissionModal: React.FC<AppPermissionModalProps> = ({
   const isMcp = pendingRequest.permission_type === "mcp_spawn";
 
   return (
-    <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md">
-      <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+    <div className="theme-modal-backdrop fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md">
+      <div className="theme-modal-panel bg-[#0b0b0e] border border-white/10 p-6 rounded-xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
         <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
           🛡️ 后端服务授权请求 ({pendingRequest.app_id})
         </h3>

@@ -13,6 +13,7 @@ CLASS_TO_FILE = {
     "ContextManager": "backend/context_manager.py",
     "AgentParser": "backend/agent_parser.py",
     "LLMService": "backend/llm_service.py",
+    "SessionTitleService": "backend/session_title.py",
     "AgentOrchestrator": "backend/agent/harness.py",
     "IntentRouter": "backend/agent/router.py",
     "BaseLLMProvider": "backend/agent/providers.py",

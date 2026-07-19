@@ -10,6 +10,91 @@ from pydantic import BaseModel
 from backend.models import ChatMessage, ChatSession, LLMAuditLog
 
 
+CANVAS_VERSION = 3
+DEFAULT_WINDOW_BOUNDS = {"x": 0.16, "y": 0.12, "width": 0.68, "height": 0.72}
+WINDOW_MODES = {"maximized", "floating", "snapped"}
+SNAP_ZONES = {"left", "right", "top-left", "top-right", "bottom-left", "bottom-right"}
+
+
+def _number(value: Any, fallback: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return fallback
+
+
+def _normalize_bounds(value: Any) -> dict[str, float]:
+    raw = value if isinstance(value, dict) else {}
+    width = min(1.0, max(0.3, _number(raw.get("width"), DEFAULT_WINDOW_BOUNDS["width"])))
+    height = min(1.0, max(0.3, _number(raw.get("height"), DEFAULT_WINDOW_BOUNDS["height"])))
+    x = min(1.0 - width, max(0.0, _number(raw.get("x"), DEFAULT_WINDOW_BOUNDS["x"])))
+    y = min(1.0 - height, max(0.0, _number(raw.get("y"), DEFAULT_WINDOW_BOUNDS["y"])))
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _default_window(index: int, mode: str = "maximized") -> dict[str, Any]:
+    offset = min(index * 0.025, 0.16)
+    bounds = _normalize_bounds(
+        {
+            "x": DEFAULT_WINDOW_BOUNDS["x"] + offset,
+            "y": DEFAULT_WINDOW_BOUNDS["y"] + offset,
+            "width": DEFAULT_WINDOW_BOUNDS["width"],
+            "height": DEFAULT_WINDOW_BOUNDS["height"],
+        }
+    )
+    return {"mode": mode, "bounds": bounds}
+
+
+def normalize_canvas_config(config: Any) -> dict[str, Any]:
+    """Return the global workspace configuration in the Canvas V3 wire shape."""
+    raw = config if isinstance(config, dict) else {}
+    is_v3 = raw.get("version") == CANVAS_VERSION or "open_app_ids" in raw
+    source_ids = raw.get("open_app_ids", []) if is_v3 else raw.get("pinned_ids", [])
+    open_app_ids: list[str] = []
+    for app_id in source_ids if isinstance(source_ids, list) else []:
+        if isinstance(app_id, str) and app_id and app_id not in open_app_ids:
+            open_app_ids.append(app_id)
+
+    source_windows = raw.get("windows", {}) if is_v3 else {}
+    legacy_spans = raw.get("widget_spans", {}) if not is_v3 else {}
+    windows: dict[str, Any] = {}
+    for index, app_id in enumerate(open_app_ids):
+        candidate = source_windows.get(app_id) if isinstance(source_windows, dict) else None
+        if isinstance(candidate, dict):
+            mode = candidate.get("mode") if candidate.get("mode") in WINDOW_MODES else "maximized"
+            window = {"mode": mode, "bounds": _normalize_bounds(candidate.get("bounds"))}
+            if isinstance(candidate.get("restoreBounds"), dict):
+                window["restoreBounds"] = _normalize_bounds(candidate["restoreBounds"])
+            if candidate.get("snapZone") in SNAP_ZONES:
+                window["snapZone"] = candidate["snapZone"]
+            windows[app_id] = window
+            continue
+
+        if isinstance(legacy_spans, dict) and isinstance(legacy_spans.get(app_id), dict):
+            span = legacy_spans[app_id]
+            cols = min(12.0, max(4.0, _number(span.get("cols"), 8.0)))
+            rows = min(12.0, max(4.0, _number(span.get("rows"), 8.0)))
+            offset = min(index * 0.025, 0.16)
+            windows[app_id] = {
+                "mode": "floating",
+                "bounds": _normalize_bounds(
+                    {"x": 0.12 + offset, "y": 0.1 + offset, "width": cols / 12.0, "height": rows / 12.0}
+                ),
+            }
+        else:
+            windows[app_id] = _default_window(index, "floating" if not is_v3 else "maximized")
+
+    active_app_id = raw.get("active_app_id")
+    if active_app_id not in open_app_ids:
+        active_app_id = open_app_ids[-1] if open_app_ids else None
+
+    return {
+        "version": CANVAS_VERSION,
+        "open_app_ids": open_app_ids,
+        "active_app_id": active_app_id,
+        "windows": windows,
+    }
+
+
 def migrate_old_data(workspace_dir: str) -> None:
     """
     Checks if legacy db.sqlite3 or backend/apps directory exist.
@@ -275,16 +360,16 @@ class WorkspaceStorage:
         if os.path.exists(canvas_file):
             try:
                 with open(canvas_file, encoding="utf-8") as f:
-                    return json.load(f)
+                    return normalize_canvas_config(json.load(f))
             except Exception:
                 pass
-        return {"pinned_ids": [], "widget_spans": {}}
+        return normalize_canvas_config({})
 
     def save_canvas_config(self, config: dict[str, Any]) -> None:
         canvas_file = os.path.join(self.workspace_dir, "canvas.json")
         try:
             with open(canvas_file, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
+                json.dump(normalize_canvas_config(config), f, indent=2, ensure_ascii=False)
         except Exception:
             pass
 

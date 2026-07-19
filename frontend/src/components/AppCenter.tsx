@@ -78,6 +78,7 @@ interface AppStoreState {
 
 interface AppCenterProps {
   isOpen: boolean;
+  mode?: "home" | "overlay";
   onClose: () => void;
   pinnedWidgetIds: string[];
   onPinWidget: (id: string) => void;
@@ -239,6 +240,7 @@ function FolderExitDrop({ isZh }: { isZh: boolean }) {
 
 export const AppCenter: React.FC<AppCenterProps> = ({
   isOpen,
+  mode = "overlay",
   onClose,
   pinnedWidgetIds,
   onPinWidget,
@@ -285,8 +287,8 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   }, [isZh]);
 
   useEffect(() => {
-    if (isOpen) fetchStore();
-  }, [isOpen, fetchStore]);
+    if (isOpen || mode === "home") fetchStore();
+  }, [isOpen, mode, fetchStore]);
 
   useEffect(() => {
     const refresh = () => fetchStore();
@@ -513,7 +515,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen && mode !== "home") return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -525,7 +527,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
         else if (detailsId) setDetailsId(null);
         else if (openFolderId) setOpenFolderId(null);
         else if (query) setQuery("");
-        else onClose();
+        else if (mode !== "home") onClose();
       }
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
         const tiles = Array.from(document.querySelectorAll<HTMLElement>("[data-launcher-entry]"));
@@ -539,9 +541,9 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, activeId, menu, detailsId, openFolderId, query, onClose]);
+  }, [isOpen, mode, activeId, menu, detailsId, openFolderId, query, onClose]);
 
-  if (!isOpen) return null;
+  if (!isOpen && mode !== "home") return null;
 
   const openFolder = openFolderId ? foldersById.get(openFolderId) : undefined;
   const detailsItem = detailsId ? itemsById.get(detailsId) : undefined;
@@ -574,7 +576,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   };
 
   return (
-    <div className="app-center-shell" role="dialog" aria-modal="true" aria-label={isZh ? "应用中心" : "App Center"}>
+    <div className={`app-center-shell ${mode === "home" ? "is-home" : "is-overlay"}`} role={mode === "home" ? "main" : "dialog"} aria-modal={mode === "overlay" ? "true" : undefined} aria-label={isZh ? "应用中心" : "App Center"}>
       <div className="app-center-aurora app-center-aurora-one" />
       <div className="app-center-aurora app-center-aurora-two" />
       <header className="app-center-header">
@@ -596,7 +598,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
           />
           <kbd>⌘ K</kbd>
         </div>
-        <button className="app-center-close" onClick={onClose} aria-label={isZh ? "关闭" : "Close"}><X size={21} /></button>
+        {mode !== "home" && <button className="app-center-close" onClick={onClose} aria-label={isZh ? "关闭" : "Close"}><X size={21} /></button>}
       </header>
 
       <nav className="app-center-filters" aria-label={isZh ? "应用类型" : "App types"}>
