@@ -1,5 +1,5 @@
 {
-  "policy_mode": "interactive",
+  "policy_mode": "strict",
   "files": {
     "allowed_extensions": [".js", ".json", ".md"],
     "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
@@ -7,13 +7,9 @@
   "commands": {
     "allowed_commands": [
       "npm test",
-      "npm run build",
-      "npm install"
+      "npm run build"
     ],
-    "allowed_prefixes": [
-      "npm install ",
-      "echo "
-    ],
+    "allowed_prefixes": [],
     "blocklist": [
       "rm -rf",
       "curl",

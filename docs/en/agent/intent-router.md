@@ -29,3 +29,7 @@ graph TD
 - `WIDGET_CREATE` / `WIDGET_MODIFY`: Card code generation.
 - `GRAPH_QUERY` / `GRAPH_MUTATION`: SQLite graph database reads and writes.
 - `MULTI_INTENT`: Triggers the second-layer refinement `refine_sub_intents()` to detail action schemas.
+
+## 3. Durable multi-intent execution
+
+`refine_sub_intents()` fills each SubIntent payload, query/graph-mutation arguments, or code-rework parameters. `DurableAgentWorkflow` preflights the complete list before any write. An unknown kind, missing argument, or unauthorized effect fails before execution. After preflight, `multi_dispatch` executes sub-intents serially as a saga; only a step with complete compensation data can be rolled back automatically. An unknown top-level or refined kind fails closed to `CLARIFY` rather than being reported as a successful conversation.

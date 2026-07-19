@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -80,6 +81,14 @@ class GraphDatabase:
                     snapshot_before TEXT,
                     pinned INTEGER DEFAULT 0,
                     consumed_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS graph_effects (
+                    idempotency_key TEXT PRIMARY KEY,
+                    input_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
             """)
@@ -388,6 +397,602 @@ class GraphDatabase:
                 "DELETE FROM graph_edges WHERE from_id = ? AND to_id = ? AND type = ?", (from_id, to_id, edge_type)
             )
             return cursor.rowcount > 0
+
+    # --- Atomic mutation batches -----------------------------------------
+
+    @staticmethod
+    def _required_text(action: dict[str, Any], field: str) -> str:
+        value = action.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Graph mutation field '{field}' must be a non-empty string")
+        return value
+
+    @staticmethod
+    def _node_from_conn(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT id, type, properties, namespace, created_at FROM graph_nodes WHERE id=?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "type": row["type"],
+            "properties": json.loads(row["properties"] or "{}"),
+            "namespace": row["namespace"],
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _edge_from_conn(
+        conn: sqlite3.Connection, from_id: str, to_id: str, edge_type: str
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT from_id, to_id, type, properties, created_at FROM graph_edges "
+            "WHERE from_id=? AND to_id=? AND type=?",
+            (from_id, to_id, edge_type),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "from_id": row["from_id"],
+            "to_id": row["to_id"],
+            "type": row["type"],
+            "properties": json.loads(row["properties"] or "{}"),
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _validate_properties_in_conn(
+        conn: sqlite3.Connection, node_type: str, properties: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = conn.execute("SELECT properties FROM graph_schemas WHERE id=?", (node_type,)).fetchone()
+        if row is None:
+            return dict(properties)
+        schema_props = json.loads(row["properties"] or "{}")
+        validated = dict(properties)
+        for key, value in properties.items():
+            expected = str(schema_props.get(key, "")).lower()
+            if expected == "string" and not isinstance(value, str):
+                validated[key] = str(value)
+            elif expected == "integer":
+                try:
+                    validated[key] = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Property '{key}' on node type '{node_type}' must be an integer") from exc
+            elif expected == "number":
+                try:
+                    validated[key] = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Property '{key}' on node type '{node_type}' must be a number") from exc
+            elif expected == "boolean":
+                if isinstance(value, bool):
+                    validated[key] = value
+                elif str(value).lower() in {"true", "1", "yes"}:
+                    validated[key] = True
+                elif str(value).lower() in {"false", "0", "no"}:
+                    validated[key] = False
+                else:
+                    raise ValueError(f"Property '{key}' on node type '{node_type}' must be a boolean")
+        return validated
+
+    def apply_actions_atomic(
+        self,
+        actions: list[dict[str, Any]],
+        *,
+        session_id: str | None = None,
+        ticket_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate and commit a mutation batch, its undo data, and ticket atomically.
+
+        Internal reverse actions (``replace_node`` and ``restore_node``) are
+        accepted only by this method and preserve fields that a merge-style
+        update cannot remove.
+        """
+
+        if not isinstance(actions, list) or not actions:
+            raise ValueError("Graph mutation must contain at least one action")
+        if any(not isinstance(action, dict) for action in actions):
+            raise ValueError("Every graph mutation action must be an object")
+
+        normalized: list[dict[str, Any]] = []
+        reverse_actions: list[dict[str, Any]] = []
+        snapshot_before: dict[str, Any] = {"nodes": {}, "edges": {}}
+        now = datetime.now(UTC).isoformat()
+        ticket_id = ticket_id or (f"tkt-{uuid.uuid4().hex[:12]}" if session_id else None)
+        canonical_input = json.dumps(actions, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        input_hash = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
+
+        with self.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                existing_effect = conn.execute(
+                    "SELECT input_hash,result_json FROM graph_effects WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing_effect:
+                    if existing_effect["input_hash"] != input_hash:
+                        raise ValueError("Graph idempotency key was reused with different actions")
+                    return json.loads(existing_effect["result_json"])
+            for raw_action in actions:
+                action = dict(raw_action)
+                kind = self._required_text(action, "action")
+
+                if kind == "create_node":
+                    node_id = action.get("id") or str(uuid.uuid4())
+                    if not isinstance(node_id, str) or not node_id:
+                        raise ValueError("create_node.id must be a string")
+                    node_type = action.get("type", "Generic")
+                    if not isinstance(node_type, str) or not node_type:
+                        raise ValueError("create_node.type must be a string")
+                    properties = action.get("properties") or {}
+                    if not isinstance(properties, dict):
+                        raise ValueError("create_node.properties must be an object")
+                    old_node = self._node_from_conn(conn, node_id)
+                    if old_node:
+                        reverse_actions.append(
+                            {
+                                "action": "replace_node",
+                                "id": node_id,
+                                "type": old_node["type"],
+                                "properties": old_node["properties"],
+                            }
+                        )
+                        snapshot_before["nodes"][node_id] = old_node
+                    else:
+                        reverse_actions.append({"action": "delete_node", "id": node_id})
+                    validated = self._validate_properties_in_conn(conn, node_type, properties)
+                    namespace = validated.get("namespace")
+                    if not namespace and node_id.startswith("app:"):
+                        parts = node_id.split(":")
+                        if len(parts) >= 2:
+                            namespace = parts[1]
+                            validated["namespace"] = namespace
+                    conn.execute(
+                        """INSERT INTO graph_nodes(id,type,properties,namespace,created_at) VALUES(?,?,?,?,?)
+                           ON CONFLICT(id) DO UPDATE SET type=excluded.type,
+                           properties=excluded.properties, namespace=excluded.namespace""",
+                        (node_id, node_type, json.dumps(validated), namespace, now),
+                    )
+                    normalized.append(
+                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
+                    )
+
+                elif kind in {"update_node_property", "replace_node"}:
+                    node_id = self._required_text(action, "id")
+                    old_node = self._node_from_conn(conn, node_id)
+                    if old_node is None:
+                        raise ValueError(f"Node with ID '{node_id}' does not exist")
+                    snapshot_before["nodes"].setdefault(node_id, old_node)
+                    reverse_actions.append(
+                        {
+                            "action": "replace_node",
+                            "id": node_id,
+                            "type": old_node["type"],
+                            "properties": old_node["properties"],
+                        }
+                    )
+                    incoming = action.get("properties") or {}
+                    if not isinstance(incoming, dict):
+                        raise ValueError(f"{kind}.properties must be an object")
+                    node_type = action.get("type", old_node["type"])
+                    properties = (
+                        dict(incoming)
+                        if kind == "replace_node"
+                        else {**old_node["properties"], **incoming}
+                    )
+                    validated = self._validate_properties_in_conn(conn, node_type, properties)
+                    conn.execute(
+                        "UPDATE graph_nodes SET type=?, properties=?, namespace=? WHERE id=?",
+                        (node_type, json.dumps(validated), validated.get("namespace"), node_id),
+                    )
+                    normalized.append(
+                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
+                    )
+
+                elif kind == "delete_node":
+                    node_id = self._required_text(action, "id")
+                    old_node = self._node_from_conn(conn, node_id)
+                    if old_node is None:
+                        raise ValueError(f"Node with ID '{node_id}' does not exist")
+                    edge_rows = conn.execute(
+                        "SELECT from_id,to_id,type,properties,created_at FROM graph_edges "
+                        "WHERE from_id=? OR to_id=?",
+                        (node_id, node_id),
+                    ).fetchall()
+                    edges = [
+                        {
+                            "from_id": row["from_id"],
+                            "to_id": row["to_id"],
+                            "type": row["type"],
+                            "properties": json.loads(row["properties"] or "{}"),
+                        }
+                        for row in edge_rows
+                    ]
+                    snapshot_before["nodes"][node_id] = old_node
+                    for edge in edges:
+                        key = f"{edge['from_id']}\x1f{edge['to_id']}\x1f{edge['type']}"
+                        snapshot_before["edges"][key] = edge
+                    reverse_actions.append(
+                        {
+                            "action": "restore_node",
+                            "id": node_id,
+                            "type": old_node["type"],
+                            "properties": old_node["properties"],
+                            "edges": edges,
+                        }
+                    )
+                    conn.execute("DELETE FROM graph_edges WHERE from_id=? OR to_id=?", (node_id, node_id))
+                    conn.execute("DELETE FROM graph_nodes WHERE id=?", (node_id,))
+                    normalized.append({"action": kind, "id": node_id})
+
+                elif kind == "restore_node":
+                    node_id = self._required_text(action, "id")
+                    node_type = self._required_text(action, "type")
+                    properties = action.get("properties") or {}
+                    edges = action.get("edges") or []
+                    if not isinstance(properties, dict) or not isinstance(edges, list):
+                        raise ValueError("restore_node payload is malformed")
+                    old_node = self._node_from_conn(conn, node_id)
+                    if old_node:
+                        reverse_actions.append(
+                            {
+                                "action": "replace_node",
+                                "id": node_id,
+                                "type": old_node["type"],
+                                "properties": old_node["properties"],
+                            }
+                        )
+                    else:
+                        reverse_actions.append({"action": "delete_node", "id": node_id})
+                    validated = self._validate_properties_in_conn(conn, node_type, properties)
+                    conn.execute(
+                        """INSERT INTO graph_nodes(id,type,properties,namespace,created_at) VALUES(?,?,?,?,?)
+                           ON CONFLICT(id) DO UPDATE SET type=excluded.type,
+                           properties=excluded.properties, namespace=excluded.namespace""",
+                        (node_id, node_type, json.dumps(validated), validated.get("namespace"), now),
+                    )
+                    for edge in edges:
+                        from_id = self._required_text(edge, "from_id")
+                        to_id = self._required_text(edge, "to_id")
+                        edge_type = self._required_text(edge, "type")
+                        if self._node_from_conn(conn, from_id) is None or self._node_from_conn(conn, to_id) is None:
+                            raise ValueError("Cannot restore an edge whose endpoint is missing")
+                        conn.execute(
+                            """INSERT INTO graph_edges(from_id,to_id,type,properties,created_at)
+                               VALUES(?,?,?,?,?) ON CONFLICT(from_id,to_id,type)
+                               DO UPDATE SET properties=excluded.properties""",
+                            (from_id, to_id, edge_type, json.dumps(edge.get("properties") or {}), now),
+                        )
+                    normalized.append(action)
+
+                elif kind in {"create_edge", "delete_edge"}:
+                    from_id = self._required_text(action, "from_id")
+                    to_id = self._required_text(action, "to_id")
+                    edge_type = self._required_text(action, "type")
+                    old_edge = self._edge_from_conn(conn, from_id, to_id, edge_type)
+                    edge_key = f"{from_id}\x1f{to_id}\x1f{edge_type}"
+                    if old_edge:
+                        snapshot_before["edges"][edge_key] = old_edge
+                    if kind == "create_edge":
+                        if self._node_from_conn(conn, from_id) is None:
+                            raise ValueError(f"Source node '{from_id}' does not exist")
+                        if self._node_from_conn(conn, to_id) is None:
+                            raise ValueError(f"Target node '{to_id}' does not exist")
+                        properties = action.get("properties") or {}
+                        if not isinstance(properties, dict):
+                            raise ValueError("create_edge.properties must be an object")
+                        reverse_actions.append(
+                            {
+                                "action": "create_edge",
+                                "from_id": from_id,
+                                "to_id": to_id,
+                                "type": edge_type,
+                                "properties": old_edge["properties"],
+                            }
+                            if old_edge
+                            else {
+                                "action": "delete_edge",
+                                "from_id": from_id,
+                                "to_id": to_id,
+                                "type": edge_type,
+                            }
+                        )
+                        conn.execute(
+                            """INSERT INTO graph_edges(from_id,to_id,type,properties,created_at)
+                               VALUES(?,?,?,?,?) ON CONFLICT(from_id,to_id,type)
+                               DO UPDATE SET properties=excluded.properties""",
+                            (from_id, to_id, edge_type, json.dumps(properties), now),
+                        )
+                        normalized.append(
+                            {
+                                "action": kind,
+                                "from_id": from_id,
+                                "to_id": to_id,
+                                "type": edge_type,
+                                "properties": properties,
+                            }
+                        )
+                    else:
+                        if old_edge is None:
+                            raise ValueError(f"Edge '{from_id}->{to_id}:{edge_type}' does not exist")
+                        reverse_actions.append(
+                            {
+                                "action": "create_edge",
+                                "from_id": from_id,
+                                "to_id": to_id,
+                                "type": edge_type,
+                                "properties": old_edge["properties"],
+                            }
+                        )
+                        conn.execute(
+                            "DELETE FROM graph_edges WHERE from_id=? AND to_id=? AND type=?",
+                            (from_id, to_id, edge_type),
+                        )
+                        normalized.append(
+                            {"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type}
+                        )
+                else:
+                    raise ValueError(f"Unsupported graph mutation action: {kind}")
+
+            reverse_actions.reverse()
+            if session_id and ticket_id:
+                conn.execute(
+                    """INSERT INTO graph_mutation_history(
+                           id,session_id,forward_actions,reverse_actions,snapshot_before,pinned,created_at
+                       ) VALUES(?,?,?,?,?,0,?)""",
+                    (
+                        ticket_id,
+                        session_id,
+                        json.dumps(normalized),
+                        json.dumps(reverse_actions),
+                        json.dumps(snapshot_before),
+                        now,
+                    ),
+                )
+
+            effect_result = {
+                "ticket_id": ticket_id,
+                "actions": normalized,
+                "reverse_actions": reverse_actions,
+                "snapshot_before": snapshot_before,
+            }
+            if idempotency_key:
+                conn.execute(
+                    "INSERT INTO graph_effects(idempotency_key,input_hash,result_json,created_at) VALUES(?,?,?,?)",
+                    (idempotency_key, input_hash, json.dumps(effect_result), now),
+                )
+
+        return effect_result
+
+    def preflight_actions(self, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Validate a batch against one consistent graph snapshot without writing."""
+
+        if not isinstance(actions, list) or not actions:
+            raise ValueError("Graph mutation must contain at least one action")
+        if any(not isinstance(action, dict) for action in actions):
+            raise ValueError("Every graph mutation action must be an object")
+        normalized: list[dict[str, Any]] = []
+        with self.get_conn() as conn:
+            nodes = {row["id"] for row in conn.execute("SELECT id FROM graph_nodes").fetchall()}
+            edges = {
+                (row["from_id"], row["to_id"], row["type"])
+                for row in conn.execute("SELECT from_id,to_id,type FROM graph_edges").fetchall()
+            }
+            for raw in actions:
+                action = dict(raw)
+                kind = self._required_text(action, "action")
+                if kind == "create_node":
+                    node_id = action.get("id") or str(uuid.uuid4())
+                    node_type = action.get("type", "Generic")
+                    properties = action.get("properties") or {}
+                    if not isinstance(node_id, str) or not node_id:
+                        raise ValueError("create_node.id must be a string")
+                    if not isinstance(node_type, str) or not node_type:
+                        raise ValueError("create_node.type must be a string")
+                    if not isinstance(properties, dict):
+                        raise ValueError("create_node.properties must be an object")
+                    validated = self._validate_properties_in_conn(conn, node_type, properties)
+                    nodes.add(node_id)
+                    normalized.append(
+                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
+                    )
+                elif kind == "update_node_property":
+                    node_id = self._required_text(action, "id")
+                    if node_id not in nodes:
+                        raise ValueError(f"Node with ID '{node_id}' does not exist")
+                    properties = action.get("properties") or {}
+                    if not isinstance(properties, dict):
+                        raise ValueError("update_node_property.properties must be an object")
+                    normalized.append({"action": kind, "id": node_id, "properties": properties})
+                elif kind == "delete_node":
+                    node_id = self._required_text(action, "id")
+                    if node_id not in nodes:
+                        raise ValueError(f"Node with ID '{node_id}' does not exist")
+                    nodes.remove(node_id)
+                    edges = {edge for edge in edges if edge[0] != node_id and edge[1] != node_id}
+                    normalized.append({"action": kind, "id": node_id})
+                elif kind in {"create_edge", "delete_edge"}:
+                    from_id = self._required_text(action, "from_id")
+                    to_id = self._required_text(action, "to_id")
+                    edge_type = self._required_text(action, "type")
+                    edge_key = (from_id, to_id, edge_type)
+                    if kind == "create_edge":
+                        if from_id not in nodes or to_id not in nodes:
+                            raise ValueError("create_edge endpoints must exist after preceding actions")
+                        properties = action.get("properties") or {}
+                        if not isinstance(properties, dict):
+                            raise ValueError("create_edge.properties must be an object")
+                        edges.add(edge_key)
+                        normalized.append(
+                            {
+                                "action": kind,
+                                "from_id": from_id,
+                                "to_id": to_id,
+                                "type": edge_type,
+                                "properties": properties,
+                            }
+                        )
+                    else:
+                        if edge_key not in edges:
+                            raise ValueError(f"Edge '{from_id}->{to_id}:{edge_type}' does not exist")
+                        edges.remove(edge_key)
+                        normalized.append(
+                            {"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type}
+                        )
+                else:
+                    raise ValueError(f"Unsupported graph mutation action: {kind}")
+        return normalized
+
+    @staticmethod
+    def _normalize_schema_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(proposal, dict):
+            raise ValueError("Schema proposal must be an object")
+        allowed_types = {"string", "integer", "number", "boolean"}
+        normalized: dict[str, list[dict[str, Any]]] = {"reused_schemas": [], "new_schemas": []}
+        for item in proposal.get("reused_schemas", []) or []:
+            if not isinstance(item, dict):
+                raise ValueError("reused_schemas entries must be objects")
+            schema_id = GraphDatabase._required_text(item, "id")
+            extension = item.get("extended_properties") or {}
+            if not isinstance(extension, dict) or any(
+                not isinstance(key, str) or value not in allowed_types for key, value in extension.items()
+            ):
+                raise ValueError(f"Schema '{schema_id}' has invalid extended_properties")
+            normalized["reused_schemas"].append(
+                {**item, "id": schema_id, "extended_properties": dict(extension)}
+            )
+        for item in proposal.get("new_schemas", []) or []:
+            if not isinstance(item, dict):
+                raise ValueError("new_schemas entries must be objects")
+            schema_id = GraphDatabase._required_text(item, "id")
+            properties = item.get("properties") or {}
+            if not isinstance(properties, dict) or any(
+                not isinstance(key, str) or value not in allowed_types for key, value in properties.items()
+            ):
+                raise ValueError(f"Schema '{schema_id}' has invalid properties")
+            normalized["new_schemas"].append(
+                {
+                    "id": schema_id,
+                    "name": str(item.get("name") or schema_id),
+                    "description": str(item.get("description") or ""),
+                    "properties": dict(properties),
+                }
+            )
+        return normalized
+
+    def effective_schemas(self, proposal: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Return the schema inventory with an approved, uncommitted proposal overlaid."""
+
+        schemas = {schema["id"]: dict(schema) for schema in self.list_schemas()}
+        if proposal is None:
+            return list(schemas.values())
+        normalized = self._normalize_schema_proposal(proposal)
+        for item in normalized["reused_schemas"]:
+            schema = schemas.get(item["id"])
+            if schema is None:
+                raise ValueError(f"Reused schema '{item['id']}' does not exist")
+            schema["properties"] = {
+                **(schema.get("properties") or {}),
+                **item["extended_properties"],
+            }
+        for item in normalized["new_schemas"]:
+            schemas[item["id"]] = {**item, "is_core": False}
+        return [schemas[key] for key in sorted(schemas)]
+
+    def apply_schema_proposal_atomic(
+        self,
+        proposal: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply an approved schema proposal in one transaction and return its undo snapshot."""
+
+        normalized = self._normalize_schema_proposal(proposal)
+        canonical_input = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        input_hash = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
+        snapshot: dict[str, Any] = {}
+        now = datetime.now(UTC).isoformat()
+        with self.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                existing_effect = conn.execute(
+                    "SELECT input_hash,result_json FROM graph_effects WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing_effect:
+                    if existing_effect["input_hash"] != input_hash:
+                        raise ValueError("Schema idempotency key was reused with a different proposal")
+                    return json.loads(existing_effect["result_json"])
+            for item in [*normalized["reused_schemas"], *normalized["new_schemas"]]:
+                schema_id = item["id"]
+                row = conn.execute("SELECT * FROM graph_schemas WHERE id=?", (schema_id,)).fetchone()
+                snapshot[schema_id] = dict(row) if row is not None else None
+            for item in normalized["reused_schemas"]:
+                row = conn.execute("SELECT * FROM graph_schemas WHERE id=?", (item["id"],)).fetchone()
+                if row is None:
+                    raise ValueError(f"Reused schema '{item['id']}' does not exist")
+                properties = {**json.loads(row["properties"] or "{}"), **item["extended_properties"]}
+                conn.execute(
+                    "UPDATE graph_schemas SET properties=? WHERE id=?",
+                    (json.dumps(properties), item["id"]),
+                )
+            for item in normalized["new_schemas"]:
+                conn.execute(
+                    """INSERT INTO graph_schemas(id,name,description,properties,is_core,created_at)
+                       VALUES(?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET
+                       name=excluded.name, description=excluded.description,
+                       properties=excluded.properties""",
+                    (
+                        item["id"],
+                        item["name"],
+                        item["description"],
+                        json.dumps(item["properties"]),
+                        now,
+                    ),
+                )
+            effect_result = {"proposal": normalized, "snapshot": snapshot}
+            if idempotency_key:
+                conn.execute(
+                    "INSERT INTO graph_effects(idempotency_key,input_hash,result_json,created_at) VALUES(?,?,?,?)",
+                    (idempotency_key, input_hash, json.dumps(effect_result), now),
+                )
+        return effect_result
+
+    def restore_schema_snapshot(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> None:
+        """Restore schemas and invalidate the matching effect ledger atomically."""
+
+        if not isinstance(snapshot, dict):
+            raise ValueError("Schema snapshot must be an object")
+        with self.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for schema_id, old in snapshot.items():
+                if old is None:
+                    conn.execute("DELETE FROM graph_schemas WHERE id=?", (schema_id,))
+                    continue
+                conn.execute(
+                    """INSERT INTO graph_schemas(id,name,description,properties,is_core,created_at)
+                       VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                       name=excluded.name, description=excluded.description,
+                       properties=excluded.properties, is_core=excluded.is_core,
+                       created_at=excluded.created_at""",
+                    (
+                        old["id"],
+                        old["name"],
+                        old["description"],
+                        old["properties"],
+                        old["is_core"],
+                        old["created_at"],
+                    ),
+                )
+            if idempotency_key:
+                conn.execute("DELETE FROM graph_effects WHERE idempotency_key=?", (idempotency_key,))
 
     # Backwards compatibility mappings for tests or direct node/edge lookups
     @property

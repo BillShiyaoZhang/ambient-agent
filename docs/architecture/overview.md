@@ -1,170 +1,127 @@
 # 系统架构概述
 
-Ambient Agent 围绕动态的 **GUI 卡片工作区 (Canvas Workspace)** 架构进行设计。系统中的“Apps”是指大模型动态生成的、兼容 React 的**微型交互卡片（Widgets）**。本页面概述了这些卡片小程序的总体架构、前后端连接方式以及所涉及的技术框架。
+Ambient Agent 是一个本地优先的 Canvas 工作区：React 前端承载聊天、任务中心和动态 Widget；FastAPI 后端管理会话、持久 Run、图数据、App artifact、LLM 以及外部 MCP/Agent runtime。
 
-## 1. 架构模块图
-
-为了更清晰地展示系统各模块的权责，我们将整体架构图拆分为系统宏观总览与各个子系统的细节视图。
-
-### 1.1 系统宏观架构总览
-
-展示了前端工作区、后端编排器、存储层与外部集成服务之间的宏观通信链路：
+## 1. 当前系统边界
 
 ```mermaid
-graph TB
-    Frontend["前端"] <-->|WebSocket| Backend["后端"]
-    Frontend -->|HTTP| Backend
-    Backend <-->|SQLModel ORM| Data["数据与存储层"]
-    Backend <-->|JSON-RPC / HTTPS| External["外部集成 (MCP / LLM)"]
+flowchart TB
+    subgraph Frontend[React 客户端]
+        Chat[聊天与审批 UI]
+        Tasks[任务中心 / Run projection]
+        Canvas[Canvas 与 Widget runtime]
+    end
+
+    subgraph API[FastAPI 接入层]
+        ChatWS[/ws/chat]
+        RunWS[/ws/runs replay stream]
+        REST[Sessions / Runs / Apps / Graph REST]
+    end
+
+    subgraph Runtime[后端执行层]
+        Coordinator[RunCoordinator]
+        Reducer[DurableAgentWorkflow v2]
+        Domain[AgentOrchestrator domain helpers]
+        Gateway[Tool Gateway]
+        Backend[BackendManager]
+        OpenCode[OpenCode ACP]
+    end
+
+    subgraph Storage[工作区状态]
+        Runs[(.ambient/runs.db)]
+        Sessions[(session/message/audit storage)]
+        Graph[(graph.db)]
+        Apps[(apps live + sibling staging)]
+    end
+
+    subgraph External[外部执行]
+        Models[LLM providers]
+        MCP[MCP stdio processes]
+        Agents[remote Agent endpoints]
+    end
+
+    Chat --> ChatWS
+    Tasks <--> RunWS
+    Canvas --> REST
+    ChatWS --> Coordinator
+    ChatWS --> Sessions
+    REST --> Coordinator
+    Coordinator --> Runs
+    Coordinator --> Reducer
+    Coordinator --> Backend
+    Reducer --> Gateway
+    Reducer --> Domain
+    Reducer --> OpenCode
+    Reducer --> Sessions
+    Reducer --> Graph
+    Gateway --> Graph
+    Backend --> MCP
+    Backend --> Agents
+    OpenCode --> Apps
+    Reducer --> Models
+    Domain --> Models
 ```
 
-### 1.2 前端工作区与沙箱架构
+`RunStore + RunCoordinator` 是 chat `internal_agent`、Capability、MCP tool/resource 和远端 Agent action 的唯一 durable control plane。`AgentOrchestrator` 只提供路由、Converse 和格式化 domain helper；WebSocket ingress 只提交命令、resolve 持久 interaction 并投影结果，不直接执行 workflow 或外部副作用。
 
-展示前端主控制、画布网格以及隔离沙箱在渲染卡片时的层级与通信关系：
-
-```mermaid
-graph TB
-    subgraph Frontend["前端"]
-        App["主控协调"] --> Canvas["画布工作区"]
-        Canvas --> Sandbox["安全沙箱容器"]
-        App <--> WSClient["WebSocket 客户端"]
-    end
-    WSClient <-->|/ws/chat| BE["后端接口"]
-    Sandbox -->|/api/graph/mutate| BE
-    Sandbox -->|"/api/apps/{id}"| BE
-```
-
-### 1.3 后端核心编排与执行流
-
-展示后端 WebSocket 连接分发、生命周期编排器以及动态解析编译的层级关系：
-
-```mermaid
-graph TB
-    subgraph Backend["后端"]
-        Main["Web & WS 入口"] <--> Orchestrator["编排调度"]
-        Orchestrator --> Parser["XML 动态代码解析"]
-        Orchestrator --> AppMgr["卡片磁盘读写"]
-        Main <--> BackendMgr["MCP 守护进程与授权"]
-    end
-    FE["前端 WebSocket"] <-->|/ws/chat| Main
-    Orchestrator <-->|HTTPS| LLM["外部 LLM 服务"]
-    BackendMgr <-->|stdio| MCP["MCP 服务端"]
-```
-
-### 1.4 数据存储与外部集成
-
-展示后端服务如何读写磁盘/数据库，以及如何集成外部大语言模型与 MCP 工具服务：
-
-```mermaid
-graph TB
-    subgraph Backend["后端核心服务"]
-        AppMgr["AppManager"]
-        Main["main.py / WS"]
-        BackendMgr["BackendManager"]
-        Orchestrator["AgentOrchestrator"]
-    end
-    subgraph Data["数据与存储层"]
-        SQLiteDB[("图数据库存储")]
-        DiskApps[("本地磁盘目录")]
-    end
-    subgraph External["外部集成服务"]
-        LLM["大模型 API 服务"]
-        MCPServer["MCP 服务端"]
-    end
-    AppMgr <-->|读写卡片源码| DiskApps
-    Main <-->|SQLModel ORM 映射| SQLiteDB
-    BackendMgr <-->|JSON-RPC 2.0 stdio| MCPServer
-    Orchestrator <-->|HTTPS 客户端 httpx| LLM
-```
-
-## 2. 动态卡片生命周期序列
-
-本序列图描绘了 Widget 卡片的完整生命周期，包括用户输入、后端解析落盘、WebSocket 广播、前端沙箱挂载及后续的数据交互：
+## 2. Durable Run 生命周期
 
 ```mermaid
 sequenceDiagram
-    autonumber
     actor User as 用户
-    participant FE as 前端
-    participant BE as 后端
-    participant LLM as 大语言模型
-    participant DB as SQLite 数据库 / 磁盘
+    participant Client as Web / Widget
+    participant API as FastAPI
+    participant Store as RunStore
+    participant Worker as RunCoordinator
+    participant Adapter as reducer / MCP / Agent adapter
 
-    %% 阶段 1：卡片生成
-    User->>FE: 输入：“创建一个待办列表卡片”
-    FE->>BE: 通过 WebSocket 发送对话消息
-    BE->>LLM: 组装上下文并调用 Chat Completion 接口
-    LLM-->>BE: 返回携带 <ambient-widget> XML 语法的流
-    BE->>BE: AgentParser 自动解析 HTML、CSS 和 JS 代码段
-    BE->>DB: AppManager 将源码文件写入本地磁盘目录
-    BE-->>FE: 通过 WebSocket 广播新卡片元数据并更新画布布局
-
-    %% 阶段 2：卡片挂载渲染
-    FE->>FE: DashboardCanvas 挂载 SandboxWidget(id)
-    FE->>BE: 发起 GET /api/apps/{app_id} 获取源码文件
-    BE-->>FE: 返回文件源码内容
-    FE->>FE: 执行 CSS Scoping 隔离样式
-    FE->>FE: 将 HTML 挂载入独立的卡片 DOM 节点
-    FE->>FE: 通过 'new Function("root", "ambient", ...)' 安全沙箱执行 JS
-
-    %% 阶段 3：数据交互与查询订阅
-    FE->>BE: WS: graph_subscribe (订阅 Task 类别数据)
-    BE->>DB: SQLite: 注册实时图查询订阅句柄
-    DB-->>BE: 返回首屏查询数据
-    BE-->>FE: 通过 WebSocket 推送查询数据
-    FE->>FE: 渲染卡片界面并展示待办数据
-
-    %% 阶段 4：数据变更
-    User->>FE: 点击“完成待办”按钮
-    FE->>BE: 发送 POST /api/graph/mutate 变更请求
-    BE->>DB: SQLite: 事务修改节点属性 (completed=true)
-    BE->>BE: 检测到变更，触发关联订阅重跑与广播
-    BE-->>FE: 推送最新的查询结果数据
-    FE->>FE: 重新渲染局部视图，任务显示已完成
+    User->>Client: 启动 action
+    Client->>API: POST /api/runs 或兼容 invoke
+    API->>Store: 创建 queued Run
+    Worker->>Store: claim + lease_epoch
+    Worker->>Adapter: 执行一个 fenced step
+    Adapter-->>Worker: typed outcome
+    Worker->>Store: 原子提交 step + state + status + events
+    Store-->>Client: /ws/runs 可回放 event
 ```
 
-## 3. 通信链路划分
+同一 session 使用 FIFO lane；`waiting_user` 释放 worker slot 但继续占有 lane。interaction 响应通过 Run version 防止迟到审批，恢复后由 scheduler 重新领取。
 
-前后端在处理 Widget 卡片时使用两种通信协议协同：
+Multi-intent 在任何写入前对整体子意图做 preflight，再按序作为 saga 执行。已完成步骤只有在保存完整补偿数据时才自动回滚；其他未知副作用进入 `needs_attention`。
 
-### A. 双向长连接 WebSockets (接口: `/ws/chat`)
+## 3. Widget 代码生命周期
 
-负责高实时、双向的数据流同步：
+Widget build 由 `DurableAgentWorkflow` 的显式 phase 驱动；OpenCode 采用 staging/promotion：
 
-- **对话与布局同步**：广播用户的聊天消息、卡片在 Canvas 上被拖拽/缩放/固定后的网格布局设置。
-- **响应式查询订阅**：卡片 JS 通过 `ambient.graph.subscribe()` 订阅的数据流均走此通道推送。
-- **MCP 命令行回调**：当 Widget 通过 SDK 触发 MCP 调用时，后台在执行完子进程后通过 WS 发回响应。
+```mermaid
+flowchart LR
+    Intent[route: Widget create / modify] --> Plan[plan / wait_plan]
+    Plan --> Schema[align_schema / wait_schema]
+    Schema --> Stage[创建 per-run staging App]
+    Stage --> ACP[OpenCode 只操作 staging]
+    ACP --> Verify[verify staging artifact + Schema]
+    Verify -->|通过或明确 override| Promote[promote: marker + 原子替换 live App]
+    Verify -->|失败/返工| Preserve[删除 staging；保留 live App]
+```
 
-图查询订阅由 WebSocket 客户端按连接生命周期管理：Widget 可以在连接进入 `OPEN` 前注册；若组件在此期间卸载，注册会被取消且不会发送无效的订阅或退订消息。连接建立或会话切换导致重连时，客户端只重放当前仍有效的订阅。普通对话、审批和工具调用命令不进入该重放集合，避免断线期间的操作在稍后被意外执行。
+每个 staging artifact 与 Run checkpoint 绑定；recovery 根据持久 promotion marker 区分“已发布”和“仍待验证”，失败或取消会清理 staging。artifact validation 检查必需文件、大小、UTF-8 和 default export，并使用与前端一致的 Babel pipeline 编译，在禁用动态代码生成、无宿主网络全局且有超时的 Node VM 中完成 module-load smoke；`window`、`document`、`fetch`、WebSocket、Worker、storage、动态 import/require 等直接能力 fail closed。Schema verification 是另一层。这仍不是完整的浏览器 render smoke 或 OS 级 sandbox。
 
-### B. 事务型 REST HTTP APIs
+## 4. 数据与通信
 
-处理结构化文件读取或非实时突发请求：
+- `/ws/chat`：聊天命令、durable interaction 响应、MCP tool/resource 与 Agent Run 的响应投影，以及图订阅控制。
+- `/ws/runs?after_sequence=N`：版本化、可回放的 workspace Run event stream。
+- Runs REST：创建、查询、取消、重试、effect reconciliation 和 resolve interaction。
+- Apps REST：读取或管理 live App artifact。
+- Graph REST/WebSocket：写命令先进入 graph v2 Run，查询和 subscription 保持兼容。
 
-- `GET /api/apps` 与 `GET /api/apps/{app_id}`：拉取卡片列表或用于前端沙箱挂载读取的代码文件。
-- `DELETE /api/apps/{app_id}`：卸载特定卡片并清理磁盘空间。
-- `POST /api/graph/mutate`：原子事务型修改图数据库中的节点或关系边。
+客户端只重放声明为订阅的读模型，不会在断线重连时重放聊天、审批或工具命令。Run event 客户端使用 `stream_epoch + sequence` 检测 reset/gap，并以 `event_id` 去重。
 
-## 4. 沙箱与 `ambient` 开发包
+Run event payload 在入库前按敏感键递归脱敏并限制大小，`redacted` 说明内容曾被隐去或截断。Event 与 LLM audit 默认保留 30 天，分别由 `RUN_EVENT_RETENTION_DAYS` 和 `AGENT_AUDIT_RETENTION_DAYS` 调整。
 
-为保障系统安全与组件样式绝对隔离，所有 Widget 的交互逻辑均在前端 `SandboxWidget` 内部的容器沙箱中执行。有关 Widget (Apps) 的 UI/Controller/Data 架构设计，请参见[Widget 应用架构设计](/architecture/apps.md)。有关沙箱编译机制与 `ambient` 提供的多维度数据交互 API，请参阅[沙箱隔离机制](/widgets/sandbox)及[ambient SDK 参考手册](/widgets/sdk)。
+## 5. 安全边界说明
 
-## 5. 技术栈与所用框架
-
-本系统基于以下现代开源技术栈构建：
-
-### 前端技术栈
-
-1.  **React 19**：现代核心前端框架，支持并发渲染与灵活的 Hooks 挂载。
-2.  **TypeScript**：强类型保障静态接口安全与逻辑推导。
-3.  **Vite**：闪电般快速的模块打包器与本地热重载开发服务器。
-4.  **Tailwind CSS v4**：样式实用类，通过 `@tailwindcss/vite` 在构建时自动编译出 scoped 卡片样式。
-5.  **原生 WebSockets API**：浏览器标准双向通信接口，避免了 socket.io 的冗余开销。
-
-### 后端技术栈
-
-1.  **FastAPI**：超高性能的 Python 异步 Web/WebSocket 框架。
-2.  **Uvicorn**：轻量级 ASGI 服务器。
-3.  **SQLModel (SQLAlchemy + Pydantic)**：用于 SQLite 的 ORM 框架，完美兼容 Pydantic 的类型验证与对象关系映射。
-4.  **HTTPX**：用于与云端大模型或 Ollama 之间执行高效的异步 HTTP 请求通信。
-5.  **Agent Client Protocol (ACP)**：规范智能体协作与工具委派的数据契约。
+- 模型本地工具经过 `ToolGateway` 的 schema、effect、scope、approval、timeout、幂等和输出限制；当前 Converse 只暴露 read tools。
+- MCP 进程使用精确 argv、受限继承环境、initialize/capability negotiation、调用 deadline、有界 stdout/stderr、best-effort cancellation 和 terminate→kill。
+- OpenCode 校验 app ID、拒绝 traversal/symlink、使用 argv 而非 shell、限制 cwd/environment/output，并在 staging 中工作。
+- 浏览器 Widget 的 `new Function` 只提供模块作用域和 ErrorBoundary，不是 hostile-code security sandbox；真正的强隔离仍需要 iframe/Worker/独立 origin 或 OS sandbox。
+- MCP/ACP/远端 Agent 使用各自的协议 adapter，但都由 RunCoordinator effect boundary 管理；它们不是 Python ToolGateway 调用。OpenCode 仍没有强制的 OS 网络隔离，权限提示不应被解释为完整 sandbox。

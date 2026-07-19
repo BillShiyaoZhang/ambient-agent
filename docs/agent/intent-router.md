@@ -47,4 +47,4 @@ graph TD
 2.  `GRAPH_MUTATION` (往数据库插入买牛奶的 `Task` 实体)
 3.  `WIDGET_EXTEND_SCHEMA` (将该小程序的权限契约对齐到 `Task` 架构)
 
-第二层路由 `refine_sub_intents()` 会调用 LLM #2 填充每一个 SubIntent 的详细属性 payload、 Cypher 语句或代码修复参数，最后交由任务管道 `WidgetDAG` 统一按依赖关系顺序串联执行。
+第二层路由 `refine_sub_intents()` 调用 LLM #2 填充每一个 SubIntent 的 payload、查询/图变更参数或代码修复参数。`DurableAgentWorkflow` 会先对整个子意图列表做 preflight，任何未知类型、缺少参数或不可授权副作用都在写入前失败。通过后由 `multi_dispatch` 按序作为 saga 执行；只有保存完整补偿数据的步骤才能自动回滚。路由或细化返回未知 kind 时 fail closed 为 `CLARIFY`，不降级成普通成功对话。

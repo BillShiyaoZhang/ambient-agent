@@ -1,8 +1,13 @@
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app, get_db
+from backend.main import app, app_manager, get_db
 from backend.models import ChatSession
+from backend.opencode_service import OpenCodeStagedResult
+from backend.schema_diff import VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -10,7 +15,12 @@ from backend.workspace_storage import WorkspaceStorage
 def test_session_fixture(tmp_path):
     workspace_dir = str(tmp_path / "workspace")
     storage = WorkspaceStorage(workspace_dir)
+
+    old_apps_dir = app_manager.apps_dir
+    app_manager.apps_dir = storage.apps_dir
+
     yield storage
+    app_manager.apps_dir = old_apps_dir
 
 
 def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
@@ -43,26 +53,40 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
     monkeypatch.setattr("backend.schema_alignment.SchemaAlignmentService.align_schemas", mock_align_schemas)
 
     # 4. Mock ACP OpenCode agent call
-    async def mock_run_opencode(app_id, instruction, language="zh", on_update=None):
-        # Retrieve app_manager from main to write test files
-        from backend.main import app_manager
-
-        app_manager.create_or_update_app(
-            app_id=app_id,
-            title="Stopwatch App",
-            html="<title>Stopwatch App</title><div>00:00</div>",
-            css="",
-            js="console.log('stopwatch active');",
+    async def mock_run_opencode(
+        app_id,
+        instruction,
+        language="zh",
+        on_update=None,
+        promote=True,
+    ):
+        assert instruction
+        assert language == "zh"
+        assert on_update is not None
+        assert promote is False
+        apps_dir = Path(app_manager.apps_dir)
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = apps_dir / f".{app_id}.staging-{uuid4().hex}"
+        staging_dir.mkdir()
+        (staging_dir / "index.html").write_text("<title>Stopwatch App</title>", encoding="utf-8")
+        (staging_dir / "controller.js").write_text(
+            "export default function App() { return ambient.html`<div>00:00</div>`; }",
+            encoding="utf-8",
         )
-        return "OpenCode successfully ran"
+        return OpenCodeStagedResult(
+            output="OpenCode successfully ran",
+            app_id=app_id,
+            staging_dir=staging_dir,
+            live_dir=apps_dir / app_id,
+        )
 
     monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
 
     # 5. Mock Schema Verification
-    async def mock_verify(app_id, widget_code, registered_schemas, db_session=None):
-        return "✅ Schema Verification PASSED"
+    async def mock_diff(*args, **kwargs):
+        return VerificationDiff()
 
-    monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
+    monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.diff", mock_diff)
 
     def override_get_db():
         yield test_session
@@ -159,19 +183,28 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch):
         )
         assert "✅ Schema Verification PASSED" in verify_report["message"]["content"]
 
-        # Expect final log + verification report reply
-        final_log = websocket.receive_json()
-        print("DEBUG FINAL_LOG:", final_log)
+        # Promotion emits both a durable App artifact and the final reply. Their
+        # projection order is not part of the public WebSocket contract.
+        tail = []
+        for _ in range(4):
+            event = websocket.receive_json()
+            if event.get("type") == "session_status_update" and event.get("status") == "idle":
+                status_idle = event
+                break
+            tail.append(event)
+        else:  # pragma: no cover - keeps a hung/malformed projection failure explicit
+            pytest.fail("workflow did not reach idle after promotion")
+
+        final_log = next(event for event in tail if event.get("type") == "reply")
         assert any(x in final_log["message"]["content"] for x in ["OpenCode Execution Log", "OpenCode 执行日志"])
         assert "✅ Schema Verification PASSED" in final_log["message"]["content"]
 
         # Expect widget delivery message
-        widget_msg = websocket.receive_json()
+        widget_msg = next(event for event in tail if event.get("type") == "widget")
         assert widget_msg["type"] == "widget"
         assert widget_msg["widget"]["id"] == "test-app"
 
         # Expect idle status update
-        status_idle = websocket.receive_json()
         assert status_idle["type"] == "session_status_update"
         assert status_idle["status"] == "idle"
 

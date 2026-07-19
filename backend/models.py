@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,7 @@ class ChatSession(BaseModel):
 class ChatMessage(BaseModel):
     id: int | None = None
     session_id: str | None = "default-session"
+    run_id: str | None = None
     role: str = "user"  # 'user', 'agent', 'code', 'system', 'tool_call'
     sender: str = "user"  # 'user' or 'agent', kept for compatibility
     content: str
@@ -31,3 +33,15 @@ class LLMAuditLog(BaseModel):
     prompt: str
     response: str
     stage: str = "chat"  # e.g. chat | route | plan | mutation | verify
+    run_id: str | None = None
+    session_id: str | None = None
+    step_id: str | None = None
+    attempt: int | None = None
+    trace_id: str | None = None
+    latency_ms: float | None = None
+    usage: dict[str, Any] | None = None
+    finish_reason: str | None = None
+    error: str | None = None
+    prompt_hash: str | None = None
+    tool_schema_hash: str | None = None
+    artifact_hashes: dict[str, str] = Field(default_factory=dict)

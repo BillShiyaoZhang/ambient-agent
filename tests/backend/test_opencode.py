@@ -1,6 +1,10 @@
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.main import app, app_manager, get_db
 from backend.workspace_storage import WorkspaceStorage
 
@@ -20,20 +24,22 @@ def test_session_fixture(tmp_path):
     app_manager.apps_dir = old_apps_dir
 
 
-def test_websocket_opencode_routing(test_session, monkeypatch):
-    # Mock run_opencode_agent_acp to avoid running a real command line process
-    async def mock_run_opencode_agent_acp(app_id, instruction, language="zh", on_update=None):
-        # Stream a mocked update
-        await on_update("Mocked OpenCode progress update")
-        # Simulate creating/modifying the app files on disk
-        app_manager.create_or_update_app(
-            app_id=app_id,
-            title="Test Timer App",
-            js="export default function App() { return ambient.html`<div class='timer'>12:34</div>`; }",
-        )
-        return "Mocked OpenCode success: stopwatch files updated on disk."
+def test_app_slash_command_uses_durable_router_without_opencode_bypass(test_session, monkeypatch):
+    routed = []
 
-    monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode_agent_acp)
+    async def mock_route(content, *_args, **_kwargs):
+        routed.append(content)
+        return IntentPlan(
+            kind=IntentKind.CLARIFY,
+            rationale="slash commands use the same durable routing path",
+            clarification_message="Please describe the app requirements.",
+        )
+
+    async def unexpected_opencode(*_args, **_kwargs):
+        pytest.fail("WebSocket input must not bypass the durable workflow into OpenCode")
+
+    monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
+    monkeypatch.setattr("backend.main.run_opencode_agent_acp", unexpected_opencode)
 
     # Override get_db dependency
     def override_get_db():
@@ -41,49 +47,46 @@ def test_websocket_opencode_routing(test_session, monkeypatch):
 
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
+    session_id = f"opencode-routing-{uuid4().hex}"
 
-    with client.websocket_connect("/ws/chat") as websocket:
+    with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
-        # Send a message starting with /app to trigger OpenCode routing
+        # Legacy slash input is accepted for compatibility, but it is now an
+        # ordinary command submitted to the durable internal_agent adapter.
         websocket.send_json({"sender": "user", "content": "/app test-timer Add standard start/stop buttons"})
 
         # 1. Expect acknowledgment
         ack = websocket.receive_json()
         assert ack["type"] == "ack"
 
-        # Expect session status running update
-        status_running = websocket.receive_json()
-        assert status_running["type"] == "session_status_update"
-        assert status_running["status"] == "running"
+        # Scheduler completion may race the compatibility status projection;
+        # both are tied to the same durable Run and are asserted as a set.
+        projected = []
+        for _ in range(4):
+            event = websocket.receive_json()
+            projected.append(event)
+            if event.get("type") == "session_status_update" and event.get("status") == "idle":
+                break
 
-        # 2. Expect the status message about OpenCode starting
-        status = websocket.receive_json()
-        assert status["type"] == "reply"
-        assert any(x in status["message"]["content"] for x in ["Starting OpenCode agent", "启动 OpenCode 开发者智能体"])
-        assert status["message"]["id"] == -1
-
-        # 3. Expect the mocked progress update
-        progress = websocket.receive_json()
-        assert progress["type"] == "reply"
-        assert "Mocked OpenCode progress update" in progress["message"]["content"]
-        assert progress["message"]["id"] == -1
-
-        # 4. Expect the final execution log reply
-        reply = websocket.receive_json()
+        status_running = next(
+            event
+            for event in projected
+            if event.get("type") == "session_status_update" and event.get("status") == "running"
+        )
+        reply = next(event for event in projected if event.get("type") == "reply")
         assert reply["type"] == "reply"
-        assert "Mocked OpenCode success" in reply["message"]["content"]
+        assert reply["message"]["content"] == "Please describe the app requirements."
 
-        # 5. Expect the updated widget to be sent
-        widget_msg = websocket.receive_json()
-        assert widget_msg["type"] == "widget"
-        assert widget_msg["widget"]["id"] == "test-timer"
-        assert widget_msg["widget"]["title"] == "Test Timer App"
-        assert "12:34" in widget_msg["widget"]["js"]
-
-        # Expect session status idle update
-        status_idle = websocket.receive_json()
+        status_idle = next(
+            event
+            for event in projected
+            if event.get("type") == "session_status_update" and event.get("status") == "idle"
+        )
         assert status_idle["type"] == "session_status_update"
         assert status_idle["status"] == "idle"
+
+    assert routed == ["/app test-timer Add standard start/stop buttons"]
+    assert not (Path(test_session.apps_dir) / "test-timer").exists()
 
     app.dependency_overrides.clear()

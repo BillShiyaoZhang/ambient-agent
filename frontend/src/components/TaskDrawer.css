@@ -38,5 +38,5 @@
 .task-interaction strong { font-size: 11px; }
 .task-interaction > div { display: flex; justify-content: flex-end; gap: 7px; }
 .task-interaction button.is-primary { color: white; background: var(--accent); }
-.task-run-detail footer { display: flex; gap: 8px; margin-top: 20px; }
+.task-run-detail footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 @keyframes task-spin { to { transform: rotate(360deg); } }

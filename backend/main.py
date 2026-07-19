@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -12,37 +14,48 @@ from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from backend.agent.harness import AgentOrchestrator
+from backend.agent.durable_workflow import DurableAgentWorkflow
+from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
-from backend.llm_runtime import use_model_selections
 from backend.llm_service import set_default_llm_store
-from backend.opencode_service import run_opencode_agent_acp
-from backend.run_service import RunCoordinator, RunStore
-from backend.session_title import SessionTitleService, is_placeholder_title
+from backend.opencode_service import (
+    cleanup_orphaned_opencode_staging,
+    recover_interrupted_opencode_promotions,
+    run_opencode_agent_acp,
+)
+from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
+from backend.session_title import is_placeholder_title, sanitize_title
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 
 # Global registry of active WebSockets mapping session_id -> Set[WebSocket]
 active_websockets: dict[str, set[WebSocket]] = {}
-
-# Registry of pending interactive requests: session_id -> dict of request_id -> request_payload
-pending_requests: dict[str, dict[str, Any]] = {}
-
-# Registry of latest status updates (Thinking/logs): session_id -> payload dict
-latest_session_status: dict[str, Any] = {}
+legacy_run_projection_websockets: set[WebSocket] = set()
 
 # Set of active session IDs currently running generation tasks
 active_running_sessions: set[str] = set()
-session_title_tasks: dict[str, asyncio.Task] = {}
 
 
 async def send_to_session(session_id: str, data: Any):
     """Sends JSON data to all active websockets connected to a specific session."""
     sockets = active_websockets.get(session_id, set())
     for ws in list(sockets):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            pass
+
+
+async def send_legacy_run_projection(session_id: str, data: Any):
+    """Compatibility projection; the bundled frontend consumes /ws/runs."""
+
+    sockets = active_websockets.get(session_id, set())
+    for ws in list(sockets):
+        if ws not in legacy_run_projection_websockets:
+            continue
         try:
             await ws.send_json(data)
         except Exception:
@@ -84,10 +97,171 @@ run_store = RunStore(WORKSPACE_DIR)
 run_coordinator = RunCoordinator(run_store, app_store, app_manager, backend_manager)
 
 
+async def _run_opencode_staged(
+    app_id: str,
+    instruction: str,
+    language: str = "zh",
+    on_update: Any = None,
+    promote: bool = True,
+):
+    # Resolve the module global at call time so test/local hosts can inject a
+    # deterministic runner without rebuilding the durable reducer.
+    return await run_opencode_agent_acp(
+        app_id,
+        instruction,
+        language=language,
+        on_update=on_update,
+        promote=promote,
+    )
+
+
+durable_agent_workflow = DurableAgentWorkflow(
+    workspace_dir=WORKSPACE_DIR,
+    run_store=run_store,
+    app_manager=app_manager,
+    graph_db=graph_db,
+    llm_config_store=lambda: llm_config_store,
+    opencode_runner=_run_opencode_staged,
+    event_sink=send_legacy_run_projection,
+)
+run_coordinator.register_internal_agent_executor(durable_agent_workflow)
+
+
+def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
+    """Resolve and freeze the model choices used by a newly submitted Run."""
+
+    settings = llm_config_store.get_settings()
+    primary_data = chat_session.model_selection or settings.get("default_model")
+    if not primary_data:
+        return {}
+    primary = ModelSelection.model_validate(primary_data)
+    fast = ModelSelection.model_validate(settings.get("fast_model") or primary)
+    llm_config_store.resolve(primary)
+    llm_config_store.resolve(fast)
+    return {
+        "primary": primary.model_dump(mode="json"),
+        "fast": fast.model_dump(mode="json"),
+    }
+
+
+def _active_chat_session_ids() -> set[str]:
+    active = run_store.list_runs(status=",".join(sorted(ACTIVE_STATUSES)), limit=500)
+    return {
+        str(run["source_id"])
+        for run in active
+        if run.get("source_type") == "chat"
+        and run.get("source_id")
+        and run.get("status") != "needs_attention"
+    }
+
+
+async def _project_agent_run_status(run: dict[str, Any]) -> None:
+    if run.get("adapter_type") != "internal_agent" or run.get("source_type") != "chat":
+        return
+    session_id = str(run.get("source_id") or "")
+    if not session_id:
+        return
+    run_state = run.get("state") if isinstance(run.get("state"), dict) else {}
+    state_data = run_state.get("data") if isinstance(run_state.get("data"), dict) else {}
+    capability_catalog_id = state_data.get("capability_catalog_id")
+    capability_app_id = state_data.get("capability_app_id")
+    if capability_catalog_id and run.get("status") in {"succeeded", "failed", "cancelled", "needs_attention"}:
+        app_store.generating_ids.discard(str(capability_catalog_id))
+        if run.get("status") == "succeeded" and capability_app_id:
+            app_store.bind_ui(str(capability_catalog_id), str(capability_app_id))
+            await send_to_session(
+                session_id,
+                {
+                    "type": "capability_ui_generation_completed",
+                    "catalog_id": capability_catalog_id,
+                    "app_id": capability_app_id,
+                    "run_id": run["id"],
+                },
+            )
+        else:
+            error = run.get("error") or {}
+            await send_to_session(
+                session_id,
+                {
+                    "type": "capability_ui_generation_failed",
+                    "catalog_id": capability_catalog_id,
+                    "app_id": capability_app_id,
+                    "run_id": run["id"],
+                    "error": error.get("message") or run.get("summary") or run.get("status"),
+                },
+            )
+    if run.get("status") in ACTIVE_STATUSES - {"needs_attention"}:
+        if session_id not in active_running_sessions:
+            active_running_sessions.add(session_id)
+            await broadcast_global(
+                {"type": "session_status_update", "session_id": session_id, "status": "running", "run_id": run["id"]}
+            )
+        return
+    if session_id in _active_chat_session_ids():
+        return
+    active_running_sessions.discard(session_id)
+    if run.get("status") in {"failed", "needs_attention"}:
+        error = run.get("error") or {}
+        code = error.get("code") or "agent_run_failed"
+        payload_type = "llm_error" if str(code).startswith("llm_") else "error"
+        await send_to_session(
+            session_id,
+            {
+                "type": payload_type,
+                "run_id": run["id"],
+                "code": code,
+                "message": error.get("message") or run.get("summary") or "Agent task failed",
+                **({"action": "open_llm_settings"} if payload_type == "llm_error" else {}),
+            },
+        )
+    await broadcast_global(
+        {"type": "session_status_update", "session_id": session_id, "status": "idle", "run_id": run["id"]}
+    )
+
+
+run_coordinator.register_status_listener(_project_agent_run_status)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Perform automated migration from db.sqlite3 and backend/apps to workspace
     migrate_old_data(WORKSPACE_DIR)
+    active_running_sessions.clear()
+    active_running_sessions.update(_active_chat_session_ids())
+    db_storage.cleanup_audit_logs()
+    try:
+        recover_interrupted_opencode_promotions(app_manager.apps_dir)
+    except (OSError, ValueError):
+        pass
+    staging_references: set[str] = set()
+    for active_run in run_store.list_runs(status=",".join(sorted(ACTIVE_STATUSES)), limit=500):
+        active_state = active_run.get("state") if isinstance(active_run.get("state"), dict) else {}
+        active_data = active_state.get("data") if isinstance(active_state.get("data"), dict) else {}
+        for handle_key in ("staged_app", "staged_app_cleanup_pending"):
+            staged_app = (
+                active_data.get(handle_key)
+                if isinstance(active_data.get(handle_key), dict)
+                else {}
+            )
+            if staged_app.get("staging_dir"):
+                staging_references.add(str(staged_app["staging_dir"]))
+    try:
+        staging_grace = float(os.getenv("OPENCODE_STAGING_GRACE_SECONDS", "3600"))
+        cleanup_orphaned_opencode_staging(
+            app_manager.apps_dir,
+            referenced_staging_paths=staging_references,
+            grace_seconds=staging_grace,
+        )
+    except (OSError, ValueError):
+        # Invalid cleanup configuration must never make startup delete more
+        # aggressively; it simply disables this best-effort reaper pass.
+        pass
+    app_store.generating_ids.clear()
+    for active_run in run_store.list_runs(status=",".join(sorted(ACTIVE_STATUSES)), limit=500):
+        active_state = active_run.get("state") if isinstance(active_run.get("state"), dict) else {}
+        active_data = active_state.get("data") if isinstance(active_state.get("data"), dict) else {}
+        if active_data.get("capability_catalog_id"):
+            app_store.generating_ids.add(str(active_data["capability_catalog_id"]))
     await run_coordinator.start()
     yield
     await run_coordinator.shutdown()
@@ -357,6 +531,11 @@ class RunInteractionResolve(BaseModel):
     response: Any
 
 
+class RunEffectReconcile(BaseModel):
+    resolution: str
+    note: str | None = None
+
+
 @app.post("/api/runs", status_code=202)
 async def create_run(data: RunCreate):
     source = data.source or {}
@@ -401,6 +580,18 @@ async def cancel_run(run_id: str):
         return run_coordinator.cancel(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/reconcile")
+async def reconcile_run_effect(run_id: str, data: RunEffectReconcile):
+    try:
+        return run_store.reconcile_effect(run_id, data.resolution, note=data.note)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/runs/{run_id}/retry", status_code=202)
@@ -419,44 +610,7 @@ async def resolve_run_interaction(interaction_id: str, data: RunInteractionResol
         interaction = run_store.get_interaction(interaction_id)
         if interaction is None:
             raise KeyError(interaction_id)
-        payload = interaction.get("payload") or {}
         response = data.response if isinstance(data.response, dict) else {"approved": bool(data.response)}
-        approved = response.get("approved", False)
-        nested_request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
-        request_type = payload.get("type") or nested_request.get("type")
-        if request_type == "plan_approval_request":
-            from backend.agent.harness import active_plan_requests
-
-            future = active_plan_requests.get(interaction_id)
-            if future and not future.done():
-                action = "refine" if approved == "refine" else "approve" if approved else "deny"
-                value = response.get("plan", payload.get("plan", ""))
-                if action == "refine":
-                    value = {"plan": value, "feedback": response.get("feedback", "")}
-                future.set_result((action, value))
-        elif request_type == "schema_approval_request":
-            from backend.agent.harness import active_schema_requests
-
-            future = active_schema_requests.get(interaction_id)
-            if future and not future.done():
-                action = str(approved) if isinstance(approved, str) else "approve" if approved else "deny"
-                future.set_result((action, response.get("proposal", payload.get("proposal", {}))))
-        elif request_type == "verification_approval_request":
-            from backend.agent.harness import active_verification_requests
-
-            future = active_verification_requests.get(interaction_id)
-            if future and not future.done():
-                action = approved if isinstance(approved, str) else "approve" if approved else "deny"
-                future.set_result((action, {"feedback": response.get("feedback", "")}))
-        elif request_type == "backend_permission_request":
-            backend_manager.resolve_permission(interaction_id, bool(approved))
-        elif request_type == "permission_request":
-            from backend.opencode_service import active_acp_clients
-
-            for client in active_acp_clients.values():
-                if interaction_id in client.pending_permissions:
-                    client.resolve_permission(interaction_id, bool(approved))
-                    break
         return run_coordinator.resolve_interaction(interaction_id, response)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Interaction not found") from exc
@@ -479,9 +633,39 @@ async def stop_runtime(runtime_id: str):
 
 
 @app.websocket("/ws/runs")
-async def websocket_runs(websocket: WebSocket, after_sequence: int = 0):
+async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_epoch: str | None = None):
     await websocket.accept()
     sequence = max(0, after_sequence)
+    stream = run_store.stream_info()
+    if stream_epoch is not None and stream_epoch != stream["stream_epoch"]:
+        await websocket.send_json(
+            {
+                "type": "run_stream_reset",
+                "stream_epoch": stream["stream_epoch"],
+                "latest_sequence": stream["latest_sequence"],
+                "reason": "epoch_mismatch",
+            }
+        )
+        await websocket.close()
+        return
+    if sequence > stream["latest_sequence"]:
+        await websocket.send_json(
+            {
+                "type": "run_stream_reset",
+                "stream_epoch": stream["stream_epoch"],
+                "latest_sequence": stream["latest_sequence"],
+                "reason": "sequence_rewound",
+            }
+        )
+        await websocket.close()
+        return
+    await websocket.send_json(
+        {
+            "type": "run_stream_ready",
+            "stream_epoch": stream["stream_epoch"],
+            "latest_sequence": stream["latest_sequence"],
+        }
+    )
     idle_ticks = 0
     try:
         while True:
@@ -491,7 +675,9 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0):
                 await websocket.send_json({"type": "run_event", "event": event})
             idle_ticks += 1
             if idle_ticks >= 40:
-                await websocket.send_json({"type": "run_heartbeat", "sequence": sequence})
+                await websocket.send_json(
+                    {"type": "run_heartbeat", "sequence": sequence, "stream_epoch": stream["stream_epoch"]}
+                )
                 idle_ticks = 0
             await asyncio.sleep(0.5)
     except (WebSocketDisconnect, RuntimeError):
@@ -582,34 +768,98 @@ async def delete_app(app_id: str):
 
 class GraphMutateRequest(BaseModel):
     actions: list[dict[str, Any]]
+    session_id: str = "graph-api"
+    idempotency_key: str | None = None
+
+
+async def _run_approved_graph_mutation(
+    actions: list[dict[str, Any]],
+    *,
+    session_id: str,
+    idempotency_key: str | None,
+    title: str,
+) -> dict[str, Any]:
+    """Execute an explicit graph command through the durable reducer."""
+
+    if not session_id or len(session_id) > 200:
+        raise ValueError("session_id must be between 1 and 200 characters")
+    # Tests and embedded hosts can replace the workspace GraphDatabase after
+    # module import; the reducer must always use the current control-plane DB.
+    durable_agent_workflow.graph_db = graph_db
+    intent = IntentPlan(
+        kind=IntentKind.GRAPH_MUTATION,
+        confidence=1.0,
+        rationale="explicit graph mutation command",
+        actions=actions,
+    )
+    state = AgentRunState(
+        workflow_type=IntentKind.GRAPH_MUTATION.value,
+        workflow_version=DurableAgentWorkflow.VERSION,
+        session_id=session_id,
+        phase="graph_preflight",
+        intent=intent.to_dict(),
+        data={"language": "zh", "explicit_command_approval": True},
+    )
+    run = run_coordinator.submit_internal_agent(
+        owner_id=f"graph:{session_id}",
+        action_id="mutate",
+        title=title,
+        session_id=session_id,
+        input_data={"actions": actions},
+        source_type="api",
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+        state=state,
+        idempotency_key=idempotency_key,
+    )
+
+    deadline = asyncio.get_running_loop().time() + 30.0
+    approved_interaction_id: str | None = None
+    while True:
+        current = run_store.get_run(run["id"])
+        if current is None:
+            raise RuntimeError("Durable graph Run disappeared")
+        if current["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
+            return current
+        if current["status"] == "waiting_user":
+            pending = next(
+                (
+                    interaction
+                    for interaction in current.get("interactions", [])
+                    if interaction.get("status") == "pending"
+                    and interaction.get("type") == "graph_mutation_approval"
+                ),
+                None,
+            )
+            if pending and pending["id"] != approved_interaction_id:
+                approved_interaction_id = pending["id"]
+                run_coordinator.resolve_interaction(
+                    pending["id"],
+                    {"approved": True, "run_version": current["version"]},
+                    expected_run_version=current["version"],
+                )
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(f"Durable graph Run {run['id']} did not finish in 30s")
+        await asyncio.sleep(0.01)
 
 
 @app.post("/api/graph/mutate")
 async def mutate_graph(data: GraphMutateRequest):
     try:
-        for action in data.actions:
-            act_type = action.get("action")
-            if act_type == "create_node":
-                graph_db.create_node(
-                    node_id=action.get("id"),
-                    node_type=action.get("type", "Generic"),
-                    properties=action.get("properties"),
-                )
-            elif act_type == "update_node_property":
-                graph_db.update_node_property(node_id=action.get("id"), properties=action.get("properties"))
-            elif act_type == "delete_node":
-                graph_db.delete_node(node_id=action.get("id"))
-            elif act_type == "create_edge":
-                graph_db.create_edge(
-                    from_id=action.get("from_id"),
-                    to_id=action.get("to_id"),
-                    edge_type=action.get("type"),
-                    properties=action.get("properties"),
-                )
-            elif act_type == "delete_edge":
-                graph_db.delete_edge(
-                    from_id=action.get("from_id"), to_id=action.get("to_id"), edge_type=action.get("type")
-                )
+        completed = await _run_approved_graph_mutation(
+            data.actions,
+            session_id=data.session_id,
+            idempotency_key=data.idempotency_key,
+            title="Graph mutation",
+        )
+        if completed["status"] != "succeeded":
+            error = completed.get("error") or {}
+            return {
+                "status": "error",
+                "run_id": completed["id"],
+                "message": error.get("message", completed["status"]),
+            }
+        mutation = completed.get("result") or {}
         # Broadcast changes to all websocket subscribers
         from backend.graph_subscription import subscription_manager
 
@@ -620,7 +870,12 @@ async def mutate_graph(data: GraphMutateRequest):
                 pass
 
         await subscription_manager.broadcast_updates(graph_db, send_ws)
-        return {"status": "success"}
+        return {
+            "status": "success",
+            "run_id": completed["id"],
+            "ticket_id": mutation["ticket_id"],
+            "actions": mutation["actions"],
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -630,7 +885,10 @@ async def mutate_graph(data: GraphMutateRequest):
 
 @app.websocket("/ws/chat")
 async def websocket_chat(
-    websocket: WebSocket, session_id: str | None = None, session: WorkspaceStorage = Depends(get_db)
+    websocket: WebSocket,
+    session_id: str | None = None,
+    projection: str = "legacy",
+    session: WorkspaceStorage = Depends(get_db),
 ):
     await websocket.accept()
 
@@ -641,6 +899,8 @@ async def websocket_chat(
     if session_id not in active_websockets:
         active_websockets[session_id] = set()
     active_websockets[session_id].add(websocket)
+    if projection != "commands_only":
+        legacy_run_projection_websockets.add(websocket)
 
     # Ensure session exists in DB
     db_session_obj = session.get(ChatSession, session_id)
@@ -649,260 +909,145 @@ async def websocket_chat(
         session.add(db_session_obj)
         session.commit()
 
-    orchestrator = AgentOrchestrator(
-        db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp
-    )
-    title_service = SessionTitleService(session, config_store=llm_config_store)
+    async def update_session_title(content: str) -> None:
+        """Name a new session deterministically without an out-of-band model task."""
 
-    def start_title_generation(content: str) -> None:
-        if session_id in session_title_tasks or not is_placeholder_title(db_session_obj.title):
+        current = session.get(ChatSession, session_id) or db_session_obj
+        if not is_placeholder_title(current.title):
             return
+        title = sanitize_title(" ".join(content.split()), current.language or "zh")
+        if not title:
+            return
+        current.title = title
+        session.add(current)
+        session.commit()
+        await broadcast_global(
+            {"type": "session_title_updated", "session_id": session_id, "title": title}
+        )
 
-        async def generate_and_broadcast() -> None:
-            try:
-                title = await title_service.generate(session_id, content, db_session_obj.language or "zh")
-                if title:
-                    db_session_obj.title = title
-                    await broadcast_global({"type": "session_title_updated", "session_id": session_id, "title": title})
-            except Exception as exc:
-                print("Error generating session title:", exc)
-            finally:
-                session_title_tasks.pop(session_id, None)
+    async def submit_user_message(content_str: str, sender_str: str) -> dict[str, Any] | None:
+        """Persist the command and enqueue the scheduler-owned workflow."""
 
-        session_title_tasks[session_id] = asyncio.create_task(generate_and_broadcast())
+        if not content_str.strip():
+            await send_to_session(session_id, {"type": "error", "message": "Message content must not be empty"})
+            return None
 
-    # Callback to send incremental updates to client
-    async def send_ws_update(data: Any):
-        try:
-            if isinstance(data, dict):
-                payload = data
-                # Capture pending requests
-                if data.get("type") in ("schema_approval_request", "permission_request", "plan_approval_request"):
-                    req_id = data.get("request_id")
-                    if req_id:
-                        if session_id not in pending_requests:
-                            pending_requests[session_id] = {}
-                        pending_requests[session_id][req_id] = data
-            else:
-                payload = {
-                    "type": "reply",
-                    "message": {
-                        "id": -1,
-                        "sender": "agent",
-                        "role": "agent",
-                        "content": data,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    },
-                }
-                # Store latest status update
-                latest_session_status[session_id] = payload
+        user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
+        session.add(user_msg)
+        current_session = session.get(ChatSession, session_id) or db_session_obj
+        current_session.updated_at = datetime.now(UTC)
+        session.add(current_session)
+        session.commit()
+        session.refresh(user_msg)
 
-            await send_to_session(session_id, payload)
-        except Exception:
-            pass
+        # Preserve the existing chat acknowledgement ordering. Execution is not
+        # started by this socket; the durable scheduler claims the command.
+        await send_to_session(
+            session_id,
+            {
+                "type": "ack",
+                "message": {
+                    "id": user_msg.id,
+                    "sender": user_msg.sender,
+                    "role": user_msg.role,
+                    "content": user_msg.content,
+                    "timestamp": user_msg.timestamp.isoformat() if user_msg.timestamp else None,
+                },
+            },
+        )
 
-    async def process_user_message(content_str: str, sender_str: str):
-        run = run_coordinator.create_external_run(
+        model_snapshot = _snapshot_model_config(current_session)
+
+        state = AgentRunState(
+            workflow_type="agent_chat",
+            workflow_version=DurableAgentWorkflow.VERSION,
+            session_id=session_id,
+            phase="route",
+            model_snapshot=model_snapshot,
+            data={
+                "workspace_dir": session.workspace_dir,
+                "user_message_id": user_msg.id,
+            },
+        )
+        run = run_coordinator.submit_internal_agent(
             owner_id=f"ambient-agent:{session_id}",
             action_id="chat",
             title="Agent task",
-            source_type="chat",
-            source_id=session_id,
-            input_data={"content": content_str, "sender": sender_str},
+            session_id=session_id,
+            input_data={"content": content_str, "sender": sender_str, "user_message_id": user_msg.id},
+            workflow_type=state.workflow_type,
+            workflow_version=state.workflow_version,
+            state=state,
+            idempotency_key=f"chat:{session_id}:{user_msg.id}",
         )
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            run_coordinator.bind_external_task(run["id"], current_task)
+        user_msg.run_id = run["id"]
+        session.add(user_msg)
+        session.commit()
 
-        async def run_update(data: Any):
-            event_type = data.get("type", "agent_update") if isinstance(data, dict) else "agent_update"
-            run_store.append_event(run["id"], event_type, data)
-            if isinstance(data, dict) and event_type in (
-                "schema_approval_request",
-                "permission_request",
-                "plan_approval_request",
-                "verification_approval_request",
-            ):
-                request_id = data.get("request_id")
-                if request_id:
-                    checkpoint_step = {
-                        "plan_approval_request": "plan",
-                        "schema_approval_request": "schema_alignment",
-                        "permission_request": "execution_permission",
-                        "verification_approval_request": "verification",
-                    }[event_type]
-                    if run_store.begin_step(run["id"], checkpoint_step):
-                        run_store.finish_step(run["id"], checkpoint_step, {"request_id": request_id, "payload": data})
-                    run_store.create_interaction(
-                        run["id"], event_type.removesuffix("_request"), "Agent needs your input", data, request_id
-                    )
-                    current = run_store.get_run(run["id"])
-                    if current and current["status"] == "running":
-                        run_store.transition(run["id"], "waiting_user", summary="Waiting for your input")
-            await send_ws_update(data)
-
-        try:
-            while run_coordinator.claim_external(run["id"]) is None:
-                current = run_store.get_run(run["id"])
-                if current is None or current["status"] == "cancelled":
-                    return
-                await asyncio.sleep(0.05)
-            run_store.begin_step(run["id"], "agent_orchestration")
-            # Save user message to database (committed immediately so we get the ID for ack)
-            user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
-            session.add(user_msg)
-
-            # Reload before every run so a model change from another client is not
-            # overwritten by the session object captured when the socket opened.
-            current_session = session.get(ChatSession, session_id) or db_session_obj
-            current_session.updated_at = datetime.now(UTC)
-            session.add(current_session)
-            session.commit()
-            session.refresh(user_msg)
-
-            # Send acknowledgement back to client
-            await send_to_session(
-                session_id,
-                {
-                    "type": "ack",
-                    "message": {
-                        "id": user_msg.id,
-                        "sender": user_msg.sender,
-                        "role": user_msg.role,
-                        "content": user_msg.content,
-                        "timestamp": user_msg.timestamp.isoformat() if user_msg.timestamp else None,
-                    },
-                },
-            )
-            # Mark session as running and broadcast globally
+        if session_id not in active_running_sessions:
             active_running_sessions.add(session_id)
-            await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "running"})
-
-            # Resolve once when the run starts. Context variables keep concurrent
-            # sessions isolated and ensure UI changes affect only the next run.
-            settings = llm_config_store.get_settings()
-            primary_data = current_session.model_selection or settings.get("default_model")
-            if not primary_data:
-                raise LLMConfigError(
-                    "Configure a default model before starting a task",
-                    code="llm_configuration_required",
-                )
-            primary_snapshot = ModelSelection.model_validate(primary_data)
-            fast_snapshot = ModelSelection.model_validate(settings.get("fast_model") or primary_snapshot)
-            llm_config_store.resolve(primary_snapshot)
-            llm_config_store.resolve(fast_snapshot)
-            with use_model_selections(primary_snapshot, fast_snapshot):
-                agent_msg, widget_to_send = await orchestrator.handle_message(
-                    session_id=session_id, content=content_str, on_update=run_update
-                )
-
-            # Send the final agent explanation/execution log back to client
-            await send_to_session(
-                session_id,
+            await broadcast_global(
                 {
-                    "type": "reply",
-                    "message": {
-                        "id": agent_msg.id,
-                        "sender": agent_msg.sender,
-                        "role": agent_msg.role,
-                        "content": agent_msg.content,
-                        "timestamp": agent_msg.timestamp.isoformat() if agent_msg.timestamp else None,
-                    },
-                },
+                    "type": "session_status_update",
+                    "session_id": session_id,
+                    "status": "running",
+                    "run_id": run["id"],
+                }
             )
-
-            # Send widget creation/update to frontend
-            if widget_to_send:
-                try:
-                    await send_to_session(session_id, {"type": "widget", "widget": widget_to_send})
-                except Exception:
-                    pass
-            current = run_store.get_run(run["id"])
-            if current and current["status"] == "cancel_requested":
-                run_store.finish_step(run["id"], "agent_orchestration", status="cancelled")
-                run_store.transition(run["id"], "cancelled", summary="Cancelled")
-            elif current and current["status"] not in {"succeeded", "failed", "cancelled"}:
-                if current["status"] == "waiting_user":
-                    run_store.transition(run["id"], "running", summary="Finishing")
-                result = {"message": agent_msg.content, "app_id": widget_to_send.get("id") if widget_to_send else None}
-                run_store.finish_step(run["id"], "agent_orchestration", result)
-                run_store.transition(
-                    run["id"],
-                    "succeeded",
-                    summary="Agent task completed",
-                    result=result,
-                    artifacts=[{"type": "app", "id": widget_to_send.get("id")}] if widget_to_send else [],
-                )
-        except asyncio.CancelledError:
-            current = run_store.get_run(run["id"])
-            if current and current["status"] == "cancel_requested":
-                run_store.finish_step(run["id"], "agent_orchestration", status="cancelled")
-                run_store.transition(run["id"], "cancelled", summary="Cancelled")
-            raise
-        except LLMConfigError as e:
-            error_payload = {
-                "type": "llm_error",
-                "code": e.code,
-                "message": str(e),
-                "action": "open_llm_settings",
-            }
-            await send_to_session(session_id, error_payload)
-            current = run_store.get_run(run["id"])
-            if current and current["status"] not in {"succeeded", "failed", "cancelled"}:
-                run_store.finish_step(run["id"], "agent_orchestration", error_payload, status="failed")
-                if current["status"] == "waiting_user":
-                    run_store.transition(run["id"], "running", summary="LLM configuration required")
-                run_store.transition(
-                    run["id"],
-                    "failed",
-                    summary="LLM configuration required",
-                    error={"code": e.code, "message": str(e)},
-                )
-        except Exception as e:
-            print("Error in process_user_message:", e)
-            current = run_store.get_run(run["id"])
-            if current and current["status"] not in {"succeeded", "failed", "cancelled"}:
-                run_store.finish_step(run["id"], "agent_orchestration", {"message": str(e)}, status="failed")
-                if current["status"] == "waiting_user":
-                    run_store.transition(run["id"], "running", summary="Agent task failed")
-                run_store.transition(run["id"], "failed", summary="Agent task failed", error={"message": str(e)})
-        finally:
-            # Clean up pending requests, latest status, and active session flag
-            pending_requests.pop(session_id, None)
-            latest_session_status.pop(session_id, None)
-            active_running_sessions.discard(session_id)
-            await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "idle"})
-            start_title_generation(content_str)
+        await update_session_title(content_str)
+        return run
 
     # Restore connection state for the client
     try:
-        # Send all active running sessions
-        await websocket.send_json({"type": "active_sessions_list", "active_session_ids": list(active_running_sessions)})
+        # Rebuild projection from SQLite so reconnect behavior does not depend
+        # on process-local task or Future registries.
+        active_running_sessions.clear()
+        active_running_sessions.update(_active_chat_session_ids())
+        await websocket.send_json(
+            {"type": "active_sessions_list", "active_session_ids": sorted(active_running_sessions)}
+        )
 
-        # Send latest status/logs if session is running
-        if session_id in latest_session_status:
-            await websocket.send_json(latest_session_status[session_id])
-
-        # Send any pending requests
-        if session_id in pending_requests:
-            for req_data in pending_requests[session_id].values():
-                await websocket.send_json(req_data)
+        waiting_runs = run_store.list_runs(status="waiting_user", limit=500)
+        for waiting_run in reversed(waiting_runs):
+            if waiting_run.get("source_type") != "chat" or waiting_run.get("source_id") != session_id:
+                continue
+            full_run = run_store.get_run(waiting_run["id"]) or {}
+            for interaction in full_run.get("interactions", []):
+                if interaction.get("status") == "pending" and isinstance(interaction.get("payload"), dict):
+                    await websocket.send_json(interaction["payload"])
     except Exception:
         pass
 
-    async def run_agent_msg(app_id, manifest, agent_msg_content):
+    async def submit_agent_msg(app_id, agent_msg_content):
         try:
 
-            async def send_ws_payload(payload):
+            async def mirror_event(payload: dict[str, Any]):
                 await websocket.send_json(payload)
 
-            await backend_manager.handle_agent_message(
-                app_id=app_id, manifest=manifest, message=agent_msg_content, send_ws_message_func=send_ws_payload
+            run = run_coordinator.submit_direct_agent_message(
+                app_id,
+                agent_msg_content,
+                source_type="chat",
+                source_id=session_id,
+                event_callback=mirror_event,
             )
+
+            async def project_completion(completed: dict[str, Any]) -> None:
+                if completed["status"] != "succeeded":
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "app_id": app_id,
+                            "run_id": run["id"],
+                            "message": (completed.get("error") or {}).get("message", completed["status"]),
+                        }
+                    )
+
+            run_coordinator.register_completion_callback(run["id"], project_completion)
         except Exception as e:
             await websocket.send_json({"type": "error", "app_id": app_id, "message": str(e)})
 
-    async def run_mcp_call(app_id, manifest, tool_name, arguments, call_id):
+    async def submit_mcp_call(app_id, tool_name, arguments, call_id):
         try:
 
             async def mirror_event(payload: dict[str, Any]):
@@ -912,54 +1057,90 @@ async def websocket_chat(
                 app_id,
                 tool_name,
                 arguments,
-                source_type="app",
-                source_id=app_id,
+                source_type="chat",
+                source_id=session_id,
+                idempotency_key=(
+                    f"ws:{session_id}:mcp_call:{app_id}:{call_id}" if call_id else None
+                ),
+                correlation={
+                    "projection_type": "mcp_call_response",
+                    "call_id": call_id,
+                    "app_id": app_id,
+                },
                 event_callback=mirror_event,
             )
-            completed = await run_coordinator.wait_terminal(run["id"])
-            if completed["status"] == "succeeded":
-                await websocket.send_json(
-                    {
-                        "type": "mcp_call_response",
-                        "app_id": app_id,
-                        "call_id": call_id,
-                        "run_id": run["id"],
-                        "result": completed.get("result"),
-                    }
-                )
-            else:
-                raise RuntimeError((completed.get("error") or {}).get("message", completed["status"]))
+
+            async def project_completion(completed: dict[str, Any]) -> None:
+                payload = {
+                    "type": "mcp_call_response",
+                    "app_id": app_id,
+                    "call_id": call_id,
+                    "run_id": run["id"],
+                }
+                if completed["status"] == "succeeded":
+                    payload["result"] = completed.get("result")
+                else:
+                    payload["error"] = (completed.get("error") or {}).get(
+                        "message", completed["status"]
+                    )
+                await websocket.send_json(payload)
+
+            run_coordinator.register_completion_callback(run["id"], project_completion)
         except Exception as e:
             await websocket.send_json(
                 {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
             )
 
-    async def run_mcp_read(app_id, manifest, uri, call_id):
+    async def submit_mcp_read(app_id, uri, call_id):
         try:
 
-            async def send_ws_payload(payload):
-                if payload.get("type") == "backend_permission_request":
-                    req_id = payload.get("request_id")
-                    if req_id:
-                        if session_id not in pending_requests:
-                            pending_requests[session_id] = {}
-                        pending_requests[session_id][req_id] = payload
+            async def mirror_event(payload: dict[str, Any]):
                 await websocket.send_json(payload)
 
-            client = await backend_manager.get_or_start_mcp_client(
-                app_id=app_id, manifest=manifest, send_ws_message_func=send_ws_payload
+            run = run_coordinator.submit_direct_mcp_request(
+                app_id,
+                "resources/read",
+                {"uri": uri},
+                source_type="chat",
+                source_id=session_id,
+                idempotency_key=(
+                    f"ws:{session_id}:mcp_read:{app_id}:{call_id}" if call_id else None
+                ),
+                correlation={
+                    "projection_type": "mcp_read_response",
+                    "call_id": call_id,
+                    "app_id": app_id,
+                },
+                event_callback=mirror_event,
             )
-            if client:
-                result = await client.call("resources/read", {"uri": uri})
-                await websocket.send_json(
-                    {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "result": result}
-                )
+
+            async def project_completion(completed: dict[str, Any]) -> None:
+                payload = {
+                    "type": "mcp_read_response",
+                    "app_id": app_id,
+                    "call_id": call_id,
+                    "run_id": run["id"],
+                }
+                if completed["status"] == "succeeded":
+                    payload["result"] = completed.get("result")
+                else:
+                    payload["error"] = (completed.get("error") or {}).get(
+                        "message", completed["status"]
+                    )
+                await websocket.send_json(payload)
+
+            run_coordinator.register_completion_callback(run["id"], project_completion)
         except Exception as e:
             await websocket.send_json(
                 {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
             )
 
-    async def run_capability_invoke(catalog_id: str, input_data: Any, call_id: str, action_id: str | None = None):
+    async def submit_capability_invoke(
+        catalog_id: str,
+        input_data: Any,
+        call_id: str,
+        action_id: str | None = None,
+    ):
         try:
             capability = app_store.get_capability(catalog_id)
             if capability is None:
@@ -972,19 +1153,34 @@ async def websocket_chat(
                 input_data if isinstance(input_data, dict) else {"input": input_data},
                 source_type="app",
                 source_id=session_id,
+                idempotency_key=(
+                    f"ws:{session_id}:capability:{catalog_id}:{selected_action}:{call_id}"
+                    if call_id
+                    else None
+                ),
+                correlation={
+                    "projection_type": "capability_call_response",
+                    "call_id": call_id,
+                    "catalog_id": catalog_id,
+                    "action_id": selected_action,
+                },
             )
-            completed = await run_coordinator.wait_terminal(run["id"])
-            if completed["status"] != "succeeded":
-                raise RuntimeError((completed.get("error") or {}).get("message", completed["status"]))
-            await websocket.send_json(
-                {
+            async def project_completion(completed: dict[str, Any]) -> None:
+                payload = {
                     "type": "capability_call_response",
                     "catalog_id": catalog_id,
                     "call_id": call_id,
                     "run_id": run["id"],
-                    "result": completed.get("result"),
                 }
-            )
+                if completed["status"] == "succeeded":
+                    payload["result"] = completed.get("result")
+                else:
+                    payload["error"] = (completed.get("error") or {}).get(
+                        "message", completed["status"]
+                    )
+                await websocket.send_json(payload)
+
+            run_coordinator.register_completion_callback(run["id"], project_completion)
         except Exception as exc:
             await websocket.send_json(
                 {
@@ -1004,54 +1200,114 @@ async def websocket_chat(
             return
         if catalog_id in app_store.generating_ids:
             return
-        if session_id in active_running_sessions:
-            await websocket.send_json(
-                {
-                    "type": "capability_ui_generation_failed",
-                    "catalog_id": catalog_id,
-                    "error": "The current session is already running another task",
-                }
-            )
-            return
         app_id = app_store.generated_ui_app_id(catalog_id)
         app_store.generating_ids.add(catalog_id)
-        active_running_sessions.add(session_id)
-        await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "running"})
-        await send_to_session(
-            session_id,
-            {"type": "capability_ui_generation_started", "catalog_id": catalog_id, "app_id": app_id},
-        )
         try:
             descriptor = capability.model_dump(exclude_none=True)
+            descriptor_hash = hashlib.sha256(
+                json.dumps(
+                    descriptor,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:16]
             instruction = (
                 f"Create a polished, responsive UI for the installed capability '{capability.title}'. "
                 f"The capability catalog id is '{catalog_id}'. Use ambient.capabilities.invoke('{catalog_id}', input) "
                 "for every capability action; do not call its provider directly. Build useful controls from the input schema. "
                 f"Capability descriptor: {descriptor}"
             )
-            _, widget = await orchestrator.generate_capability_ui(
-                session_id=session_id,
+            current_session = session.get(ChatSession, session_id) or db_session_obj
+            intent = IntentPlan(
+                kind=IntentKind.WIDGET_CREATE,
+                confidence=1.0,
+                rationale="explicit capability UI generation",
                 app_id=app_id,
                 instruction=instruction,
-                on_update=send_ws_update,
             )
-            if not widget:
-                raise RuntimeError("UI generation completed without an app")
-            app_store.bind_ui(catalog_id, app_id)
-            await send_to_session(session_id, {"type": "widget", "widget": widget})
+            state = AgentRunState(
+                workflow_type=IntentKind.WIDGET_CREATE.value,
+                workflow_version=DurableAgentWorkflow.VERSION,
+                session_id=session_id,
+                phase="plan",
+                intent=intent.to_dict(),
+                model_snapshot=_snapshot_model_config(current_session),
+                data={
+                    "workspace_dir": session.workspace_dir,
+                    "language": current_session.language or "zh",
+                    "capability_catalog_id": catalog_id,
+                    "capability_app_id": app_id,
+                },
+            )
+            run = run_coordinator.submit_internal_agent(
+                owner_id=f"ambient-agent:{session_id}",
+                action_id="generate_capability_ui",
+                title=f"Generate UI for {capability.title}",
+                session_id=session_id,
+                input_data={"content": instruction, "catalog_id": catalog_id, "app_id": app_id},
+                workflow_type=state.workflow_type,
+                workflow_version=state.workflow_version,
+                state=state,
+                idempotency_key=f"capability-ui:{catalog_id}:{app_id}:{descriptor_hash}",
+            )
+            if run["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
+                await _project_agent_run_status(run)
+                return
+            active_running_sessions.add(session_id)
+            await broadcast_global(
+                {
+                    "type": "session_status_update",
+                    "session_id": session_id,
+                    "status": "running",
+                    "run_id": run["id"],
+                }
+            )
             await send_to_session(
                 session_id,
-                {"type": "capability_ui_generation_completed", "catalog_id": catalog_id, "app_id": app_id},
+                {
+                    "type": "capability_ui_generation_started",
+                    "catalog_id": catalog_id,
+                    "app_id": app_id,
+                    "run_id": run["id"],
+                },
             )
         except Exception as exc:
+            app_store.generating_ids.discard(catalog_id)
             await send_to_session(
                 session_id,
                 {"type": "capability_ui_generation_failed", "catalog_id": catalog_id, "error": str(exc)},
             )
-        finally:
-            app_store.generating_ids.discard(catalog_id)
-            active_running_sessions.discard(session_id)
-            await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "idle"})
+
+    async def resolve_durable_interaction(request_id: str | None, response: dict[str, Any]) -> bool:
+        if not request_id:
+            return False
+        interaction = run_store.get_interaction(request_id)
+        if interaction is None:
+            return False
+        interaction_run = run_store.get_run(interaction["run_id"])
+        if not interaction_run:
+            return False
+        try:
+            run_coordinator.resolve_interaction(request_id, response)
+        except (KeyError, ValueError) as exc:
+            await websocket.send_json(
+                {
+                    "type": "interaction_error",
+                    "request_id": request_id,
+                    "message": str(exc),
+                }
+            )
+        return True
+
+    async def reject_unknown_interaction(request_id: str | None) -> None:
+        await websocket.send_json(
+            {
+                "type": "interaction_error",
+                "request_id": request_id,
+                "message": "Interaction is not pending in the durable Run store",
+            }
+        )
 
     try:
         while True:
@@ -1063,22 +1319,15 @@ async def websocket_chat(
                 request_id = data.get("request_id")
                 approved = data.get("approved", False)
 
-                # Remove from pending_requests
-                for sess_id, reqs in list(pending_requests.items()):
-                    if request_id in reqs:
-                        reqs.pop(request_id)
-                        if not reqs:
-                            pending_requests.pop(sess_id, None)
+                if not await resolve_durable_interaction(request_id, {"approved": approved}):
+                    await reject_unknown_interaction(request_id)
 
-                backend_manager.resolve_permission(request_id, approved)
-                if run_store.get_interaction(request_id):
-                    run_coordinator.resolve_interaction(request_id, {"approved": approved})
             elif msg_type == "ag_ui_message":
                 app_id = data.get("app_id")
                 agent_msg_content = data.get("message", {})
                 manifest = app_manager.get_manifest(app_id)
                 if manifest:
-                    asyncio.create_task(run_agent_msg(app_id, manifest, agent_msg_content))
+                    await submit_agent_msg(app_id, agent_msg_content)
             elif msg_type == "mcp_call_tool":
                 app_id = data.get("app_id")
                 tool_name = data.get("name")
@@ -1086,136 +1335,61 @@ async def websocket_chat(
                 call_id = data.get("call_id")
                 manifest = app_manager.get_manifest(app_id)
                 if manifest:
-                    asyncio.create_task(run_mcp_call(app_id, manifest, tool_name, arguments, call_id))
+                    await submit_mcp_call(app_id, tool_name, arguments, call_id)
             elif msg_type == "mcp_read_resource":
                 app_id = data.get("app_id")
                 uri = data.get("uri")
                 call_id = data.get("call_id")
                 manifest = app_manager.get_manifest(app_id)
                 if manifest:
-                    asyncio.create_task(run_mcp_read(app_id, manifest, uri, call_id))
+                    await submit_mcp_read(app_id, uri, call_id)
             elif msg_type == "capability_invoke":
-                asyncio.create_task(
-                    run_capability_invoke(
-                        data.get("catalog_id", ""),
-                        data.get("input", {}),
-                        data.get("call_id", ""),
-                        data.get("action_id"),
-                    )
+                await submit_capability_invoke(
+                    data.get("catalog_id", ""),
+                    data.get("input", {}),
+                    data.get("call_id", ""),
+                    data.get("action_id"),
                 )
             elif msg_type == "generate_capability_ui":
-                asyncio.create_task(run_capability_ui_generation(data.get("catalog_id", "")))
+                await run_capability_ui_generation(data.get("catalog_id", ""))
             elif msg_type == "permission_response":
                 request_id = data.get("request_id")
                 approved = data.get("approved", False)
 
-                # Remove from pending_requests
-                for sess_id, reqs in list(pending_requests.items()):
-                    if request_id in reqs:
-                        reqs.pop(request_id)
-                        if not reqs:
-                            pending_requests.pop(sess_id, None)
-
-                from backend.opencode_service import active_acp_clients
-
-                resolved = False
-                for client in active_acp_clients.values():
-                    if request_id in client.pending_permissions:
-                        client.resolve_permission(request_id, approved)
-                        resolved = True
-                if not resolved:
-                    print(f"Warning: permission request {request_id} not found in active clients.")
-                if run_store.get_interaction(request_id):
-                    run_coordinator.resolve_interaction(request_id, {"approved": approved})
+                if not await resolve_durable_interaction(request_id, {"approved": approved}):
+                    await reject_unknown_interaction(request_id)
             elif msg_type == "schema_approval_response":
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")
                 proposal = data.get("proposal", {})
                 feedback = data.get("feedback", "")
 
-                # Remove from pending_requests
-                for sess_id, reqs in list(pending_requests.items()):
-                    if request_id in reqs:
-                        reqs.pop(request_id)
-                        if not reqs:
-                            pending_requests.pop(sess_id, None)
-
-                action = "deny"
-                response_data = None
-
-                if approved_status is True or approved_status == "approve":
-                    action = "approve"
-                    response_data = proposal
-                elif approved_status == "refine":
-                    action = "refine"
-                    response_data = {"feedback": feedback, "proposal": proposal}
-                elif approved_status == "rework_plan":
-                    action = "rework_plan"
-                    response_data = {"feedback": feedback}
-
-                from backend.agent.harness import active_schema_requests
-
-                fut = active_schema_requests.get(request_id)
-                if fut and not fut.done():
-                    fut.set_result((action, response_data))
-                if run_store.get_interaction(request_id):
-                    run_coordinator.resolve_interaction(
-                        request_id, {"approved": approved_status, "proposal": proposal, "feedback": feedback}
-                    )
+                if not await resolve_durable_interaction(
+                    request_id,
+                    {"approved": approved_status, "proposal": proposal, "feedback": feedback},
+                ):
+                    await reject_unknown_interaction(request_id)
             elif msg_type == "plan_approval_response":
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")
                 plan = data.get("plan", "")
                 feedback = data.get("feedback", "")
 
-                # Remove from pending_requests
-                for sess_id, reqs in list(pending_requests.items()):
-                    if request_id in reqs:
-                        reqs.pop(request_id)
-                        if not reqs:
-                            pending_requests.pop(sess_id, None)
-
-                action = "deny"
-                response_data = None
-
-                if approved_status is True or approved_status == "approve":
-                    action = "approve"
-                    response_data = plan
-                elif approved_status == "refine":
-                    action = "refine"
-                    response_data = {"feedback": feedback, "plan": plan}
-
-                from backend.agent.harness import active_plan_requests
-
-                fut = active_plan_requests.get(request_id)
-                if fut and not fut.done():
-                    fut.set_result((action, response_data))
-                if run_store.get_interaction(request_id):
-                    run_coordinator.resolve_interaction(
-                        request_id, {"approved": approved_status, "plan": plan, "feedback": feedback}
-                    )
+                if not await resolve_durable_interaction(
+                    request_id,
+                    {"approved": approved_status, "plan": plan, "feedback": feedback},
+                ):
+                    await reject_unknown_interaction(request_id)
             elif msg_type == "verification_approval_response":
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")  # "approve", "rework_code", "rework_schema", "rework_plan"
                 feedback = data.get("feedback", "")
 
-                # Remove from pending_requests
-                for sess_id, reqs in list(pending_requests.items()):
-                    if request_id in reqs:
-                        reqs.pop(request_id)
-                        if not reqs:
-                            pending_requests.pop(sess_id, None)
-
-                action = approved_status or "approve"
-                response_data = {"feedback": feedback}
-
-                from backend.agent.harness import active_verification_requests
-
-                fut = active_verification_requests.get(request_id)
-                if fut and not fut.done():
-                    fut.set_result((action, response_data))
-                if run_store.get_interaction(request_id):
-                    run_coordinator.resolve_interaction(request_id, {"approved": approved_status, "feedback": feedback})
+                if not await resolve_durable_interaction(
+                    request_id,
+                    {"approved": approved_status, "feedback": feedback},
+                ):
+                    await reject_unknown_interaction(request_id)
             elif msg_type == "graph_subscribe":
                 sub_id = data.get("subscription_id")
                 query = data.get("query", {})
@@ -1237,30 +1411,28 @@ async def websocket_chat(
 
                     mgr = MutationTicketManager(graph_db)
                     reverses = await mgr.rollback(session_id, ticket_id)
-                    # Apply inverse actions; report success/failure back
                     applied: list[str] = []
                     errors: list[str] = []
-                    for r in reverses:
+                    if not reverses:
+                        errors.append("Rollback ticket has no complete inverse actions")
+                    else:
                         try:
-                            act = r.get("action")
-                            if act == "update_node_property":
-                                graph_db.update_node_property(
-                                    node_id=r.get("id"),
-                                    properties=r.get("properties", {}),
-                                )
-                                applied.append(r.get("id", "?"))
-                            elif act == "delete_node":
-                                graph_db.delete_node(node_id=r.get("id"))
-                                applied.append(r.get("id", "?"))
-                            elif act == "delete_edge":
-                                graph_db.delete_edge(
-                                    from_id=r.get("from_id"),
-                                    to_id=r.get("to_id"),
-                                    edge_type=r.get("type"),
-                                )
-                                applied.append(f"{r.get('from_id')}->{r.get('to_id')}")
+                            completed = await _run_approved_graph_mutation(
+                                reverses,
+                                session_id=session_id,
+                                idempotency_key=f"rollback:{session_id}:{ticket_id}",
+                                title="Graph mutation rollback",
+                            )
+                            if completed["status"] != "succeeded":
+                                error = completed.get("error") or {}
+                                raise RuntimeError(error.get("message", completed["status"]))
+                            rollback_result = completed.get("result") or {}
+                            applied.extend(
+                                str(action.get("id") or f"{action.get('from_id')}->{action.get('to_id')}")
+                                for action in rollback_result["actions"]
+                            )
                         except Exception as e:
-                            errors.append(f"{r}: {e!s}")
+                            errors.append(str(e))
 
                     async def _send_ws(ws, payload):
                         try:
@@ -1298,12 +1470,12 @@ async def websocket_chat(
             else:
                 sender = data.get("sender", "user")
                 content = data.get("content", "")
-                # Run the orchestrator logic in a concurrent background task to avoid blocking the WS read loop
-                asyncio.create_task(process_user_message(content, sender))
+                await submit_user_message(content, sender)
 
     except WebSocketDisconnect:
         pass
     finally:
+        legacy_run_projection_websockets.discard(websocket)
         if session_id in active_websockets:
             active_websockets[session_id].discard(websocket)
             if not active_websockets[session_id]:

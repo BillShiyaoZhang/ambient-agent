@@ -103,13 +103,14 @@ def test_unconfigured_websocket_run_returns_actionable_error(tmp_path, monkeypat
             assert websocket.receive_json()["type"] == "ack"
             assert websocket.receive_json()["status"] == "running"
             error = websocket.receive_json()
+            if error["type"] == "session_title_updated":
+                error = websocket.receive_json()
 
-    assert error == {
-        "type": "llm_error",
-        "code": "llm_configuration_required",
-        "message": "Configure a default model before starting a task",
-        "action": "open_llm_settings",
-    }
+    assert error["type"] == "llm_error"
+    assert error["code"] == "llm_configuration_required"
+    assert error["message"] == "Configure a default model before starting a task"
+    assert error["action"] == "open_llm_settings"
+    assert error["run_id"]
 
 
 def test_upstream_provider_failure_is_not_reported_as_request_validation_error(monkeypatch):

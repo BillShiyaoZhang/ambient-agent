@@ -1,90 +1,70 @@
-# 权限与审计
+# 权限、执行边界与审计
 
-为了保障宿主机的文件系统、终端环境安全，以及让用户随时清晰知晓数据的去向，Ambient Agent 引入了一套**显式授权审批与多维度数据审计系统**。
+Ambient Agent 使用多层 enforcement，而不是一个全局“已授权”布尔值。模型本地工具、MCP spawn、远端 Agent、OpenCode ACP 和浏览器 Widget 的安全属性不同。
 
-## 1. 权限配置文件 `backend_permissions.json`
+## 1. 模型本地工具：Tool Gateway
 
-系统的权限记录以静态 JSON 的形式持久化保存在工作区根目录下的 `workspace/backend_permissions.json` 文件中。
+模型请求的 Python tool 由 `ToolGateway` 执行。每个 `ToolSpec` 声明：
 
-### 结构示例
+- 强类型 input/output schema；
+- `read`、`write`、`delete`、`execute` 或 `network` effect；
+- 所需 scopes 与 `never/always` 审批策略；
+- timeout、最大输出字节数、幂等键要求及敏感参数字段。
 
-```json
-{
-  "weather-app": {
-    "mcp_servers": [
-      {
-        "command": ["python", "-m", "mcp_weather"],
-        "args": ["--port", "9000"]
-      }
-    ],
-    "agents": ["http://localhost:5000/agent/v1"]
-  }
-}
-```
+Gateway fail closed：拒绝未注册 tool、未知/非法参数、scope 不足、缺少审批和缺少幂等键；tool event 会对声明的敏感参数脱敏。常规 Converse 目前只暴露 read tools。
 
-### 属性说明
+当前幂等 result cache 是进程内实现；它避免同一进程中的重复调用，但不是跨重启 exactly-once 账本。带副作用的 durable workflow 仍应使用持久 idempotency key 和底层事务/补偿。
 
-- **Key (如 `weather-app`)**: 对应 Widget 的 `app_id`。所有权限以应用卡片为单位进行网状授权和强隔离。
-- `mcp_servers`: 允许拉起运行的 MCP 命令列表（command 和 args 的数组前缀必须精确匹配）。
-- `agents`: 允许该 Widget 连接和委托的外部智能体 SSE/Webhook URL 白名单。
+## 2. MCP 与远端 Agent 权限
 
-## 2. 运行时弹窗求权
+`workspace/backend_permissions.json` 按 App 保存批准身份。MCP 的新身份包括精确 `command`、`args`、显式 env 的 SHA-256 digest 和 manifest revision；任何一项改变都需要重新批准。远端 Agent 当前按完整 endpoint URL 批准。
 
-当 Widget 触发了上述未被白名单授权的高危动作时，后端的 `BackendManager` 会实施拦截：
+Capability、MCP tool/resource 和 Agent Run 的未批准调用会产生持久 Run interaction；resolve 以 `run_version` 原子记录响应并重新入队。权限状态不依赖全局 Future，可跨后端重启恢复。
 
-1.  **挂起等待**：后端生成包含 `request_id` 的 Promise 异步锁，并挂起该调用线程。
-2.  **前端广播**：通过 WebSocket 发送 `type: "backend_permission_request"` 消息至前端。
-3.  **UI 弹窗**：React 前端的 `AppPermissionModal` 组件被唤起，以醒目的警示框提示用户：_“卡片 [AppID] 正在请求执行命令行权限，是否允许？”_
-4.  **保存并释放**：用户如果点击“拒绝”，后端抛出异常拒绝运行；如果点击“同意”，后端将配置追加到 `backend_permissions.json` 之中保存，并释放 Promise 锁恢复执行。
+Spawn approval 只代表允许启动特定 runtime identity，不自动代表任意 MCP tool 都已授权。Capability action 通过 manifest 固定 tool name；客户端提交的 MCP tool Run 会持久具体 tool name，但尚未根据 `tools/list` 生成动态 allowlist。
 
-## 3. 大模型传输审计面板
+## 3. OpenCode ACP
 
-大模型的数据泄漏与安全同样是一个焦点。为了让大模型每一次调用都绝对透明，系统实现了一个**明细审计链条**：
+OpenCode 只在 per-Run sibling staging App 中工作：
 
-### 审计数据流向
+1. 先校验 `app_id`，live/staging 都必须是 Apps 目录的直接子项；
+2. 拒绝 `..`、目录外路径、symlink/junction 和已有 App 内的不安全 link；
+3. 使用 `create_subprocess_exec(argv)`，不使用 shell；command/args 中的 shell 控制字符被拒绝；
+4. terminal cwd 必须位于 staging，环境只继承小型白名单并限制请求注入变量；
+5. command policy 对 argv 做 exact/prefix token 比较，并保留 blocklist；未知 ACP tool kind 默认拒绝；
+6. stdout/stderr 有总字节上限，子进程在独立 process group 中运行，终止采用 TERM→KILL；
+7. 只有 artifact 与 Schema verification 通过或用户明确 override 后，`promote` 才原子替换 live App；失败/返工会删除 staging。
 
-```mermaid
-graph LR
-    Harness[Orchestrator / IntentRouter] -->|Call generate| LLMSvc[LLMService]
-    LLMSvc -->|Record RAW Payload| AuditTable[(LLMAuditLog Table)]
-    LLMSvc -->|Request HTTPS| LLM[LLM Server]
-
-    FE[AuditLogPanel.tsx] -->|GET /api/audit-logs| API[FastAPI Endpoint]
-    API -->|Query| AuditTable
-```
-
-### 核心审计内容：
-
-- **原始 PromptPayload**：记录发送给 LLM 接口的完整系统指令（System Prompt）、聊天上下文历史和注入的 Widget 源码。您可以清晰查看有无敏感隐私数据泄漏。
-- **LLM 返回流 (RAW Response)**：大模型吐出的原始文本或结构化意图，包括未被正则清洗掉的完整 XML 代码块。
-- **审计界面**：用户随时可以在主页侧边栏点击 **Audit Log** 按钮唤起审计面板，它会按时间倒序展示出全部的审计单。
-
-## 4. OpenCode 开发者智能体安全执行策略 `opencode_permissions.json`
-
-除了 Widget 运行时的 API 权限，系统还集成了 OpenCode 开发者智能体，用于在后台自动编译、生成与修改 Widget 的代码。为了确保终端命令以及本地文件操作的安全性，系统在 `backend/opencode_permissions.json` 中定义了静态访问规则配置。
-
-### 结构示例
+`opencode_permissions.json` 的生产结构为 strict 精确 argv 白名单：
 
 ```json
 {
-  "policy_mode": "interactive",
+  "policy_mode": "strict",
   "files": {
     "allowed_extensions": [".js", ".json", ".md"],
     "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
   },
   "commands": {
-    "allowed_commands": ["npm test", "npm run build", "npm install"],
-    "allowed_prefixes": ["npm install ", "echo "],
-    "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"]
+    "allowed_commands": ["npm test", "npm run build"],
+    "allowed_prefixes": [],
+    "blocklist": ["rm -rf", "curl", "wget", "sudo"]
   }
 }
 ```
 
-### 规则说明
+command 会被解析为固定 executable + argv token，通过 `create_subprocess_exec()` 执行。生产 policy 不允许 prefix 或任意 terminal/network；policy 外 ACP 请求直接 fail closed，不挂起 durable worker 等待进程内审批。
 
-- `policy_mode`: 策略模式（如 `"interactive"`）。当检测到未白名单授权的文件写入或终端命令时，后端会通过 WebSocket 挂起并向前端广播审批请求，待用户手动授权后方可执行。
-- `files`: 限制智能体仅能操作符合 `allowed_extensions` 后缀或 `allowed_filenames` 白名单的文件名，同时系统强制执行根目录防穿越越权（Jail Check）检测。
-- `commands`:
-  - `allowed_commands`: 允许精确执行的命令列表。
-  - `allowed_prefixes`: 允许匹配的前缀列表。
-  - `blocklist`: 绝对禁止执行的高危关键字（如 `rm -rf`, `sudo` 等）。
+## 4. 审计与敏感数据
+
+- Run events 使用版本化 envelope，并带 Run/session/step/attempt/trace 关联字段。
+- Tool Gateway event 记录脱敏参数、effect、状态和输出大小。
+- `LLMAuditLog` 保存有界、按 tool schema 脱敏的 prompt/response preview，以及 hash、usage、latency 和 trace 关联。
+
+Run event 会递归脱敏常见 secret 键并限制 payload 大小，`redacted` 标记表示内容曾被隐去/截断。终态 Run events 与 LLM audit 默认保留 30 天，分别由 `RUN_EVENT_RETENTION_DAYS` 和 `AGENT_AUDIT_RETENTION_DAYS` 调整。它们仍是 workspace 内的敏感数据，不应向不受信任用户暴露。
+
+## 5. 不应误解为强 sandbox 的部分
+
+- OpenCode 的路径、argv、env、进程与 staging 控制降低风险，但没有 OS 级 filesystem/network isolation。
+- MCP 子进程同样没有默认 network deny 或独立用户/容器隔离。
+- 浏览器 Widget 的 `new Function` 是模块加载方式，不是 hostile-code security boundary。
+- 用户审批不能代替强制授权、最小 scope、幂等和副作用审计。

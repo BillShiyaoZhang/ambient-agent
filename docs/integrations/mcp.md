@@ -1,61 +1,82 @@
 # MCP 工具集成
 
-Model Context Protocol (MCP) 是用于大模型连接外部数据源与本地命令行工具的开放协议。Ambient Agent 的后台集成了 MCP 客户端，允许特定的 Widget 卡片通过安全通信，调用宿主机上的各种命令和读取本地资源。
+Ambient Agent 通过 `BackendManager` 托管 MCP stdio 子进程，并由 `StdioJsonRpcClient` 实现有界的 JSON-RPC 2.0 生命周期。MCP tool action 通常作为持久 Run 执行，而不是由浏览器连接直接拥有。
 
-## 1. 运行机制与生命周期
-
-在 `backend/backend_manager.py` 中，系统实现了一个基于 stdio 管道输入输出的异步 JSON-RPC 2.0 客户端 `StdioJsonRpcClient`：
+## 1. 调用路径
 
 ```mermaid
 sequenceDiagram
-    participant Widget as Sandbox JS (ambient.mcp)
-    participant FE as Frontend WebSocket
-    participant BE as Backend (BackendManager)
-    participant Daemon as MCP Daemon (CLI Process)
+    participant Widget as Widget ambient.mcp
+    participant WS as /ws/chat ingress
+    participant Run as RunCoordinator / RunStore
+    participant BM as BackendManager
+    participant MCP as MCP stdio process
 
-    Widget->>FE: ambient.mcp.callTool('git_status', {})
-    FE->>BE: WS: mcp_call_tool
-    BE->>BE: 检查/触发权限询问
-    BE->>Daemon: Stdio stdin: {"jsonrpc": "2.0", "method": "tools/call", ...}
-    Daemon-->>BE: Stdio stdout: {"jsonrpc": "2.0", "result": {...}}
-    BE-->>FE: WS: mcp_call_response
-    FE-->>Widget: Promise.resolve(result)
+    Widget->>WS: mcp_call_tool(app_id, name, arguments, call_id)
+    WS->>Run: submit_direct_mcp()
+    Run->>BM: get_or_start_mcp_client()
+    BM->>MCP: initialize
+    MCP-->>BM: protocolVersion + capabilities
+    BM->>MCP: notifications/initialized
+    Run->>MCP: tools/call
+    MCP-->>Run: JSON-RPC result/error
+    Run->>Run: fenced terminal commit + event
+    Run-->>WS: mcp_call_response(run_id, result)
+    WS-->>Widget: resolve Promise
 ```
 
-### 启动与通道：
+Capability manifest 中的 `mcp_tool` action 同样由 `RunCoordinator` 执行，并在调用前校验 input/result schema。Manifest action 固定具体 `tool_name`。Widget `mcp_call_tool` 提交 `mcp_tool` Run，`mcp_read_resource` 提交只读 `mcp_request` Run。WebSocket 注册 best-effort 兼容投影但不等待或拥有 JSON-RPC 调用；`projection_type + call_id` 持久化在 Run correlation 中，同一 call id 也进入 idempotency identity，可从 canonical Run/event 恢复关联。
 
-1.  **进程拉起**：当 Widget 声明需要使用 MCP 且用户授权同意后，`BackendManager` 会通过 Python `asyncio.create_subprocess_exec` 拉起外部 CLI 工具子进程。
-2.  **Stdio 管道交互**：子进程与后台通过标准输入 `stdin` 和标准输出 `stdout` 交互，每行一条 JSON-RPC 协议消息。
-3.  **WebSocket 桥接**：前台发来的请求被分配唯一的 `call_id`，并向后端发送。后端执行 MCP 并把异步结果通过 `mcp_call_response` 发回给前端特定的事件监听器。
+## 2. Client 生命周期
 
-## 2. API 调用方式
+`StdioJsonRpcClient.start()`：
 
-Widget 的 JavaScript 环境可以通过 `ambient` 提供的方法进行异步调用：
+1. 使用 `asyncio.create_subprocess_exec()` 和 manifest 的 argv 启动进程，不经过 shell。
+2. 只继承运行可执行文件、locale 和临时目录所需的小型环境白名单，再合并 manifest 显式 env。
+3. 启动独立 stdout reader 与有界 stderr-tail reader。
+4. 在 initialize deadline 内发送 MCP `initialize`，验证 protocol version 与 capability object，保存 negotiated capabilities，再发送 `notifications/initialized`。
+5. 只有完成 handshake 且 transport 未失败时，`is_healthy` 才为真。
 
-### 调用 MCP 工具 (Call Tool)
+每次 `call()`：
 
-```javascript
-// 示例：运行 git 状态查询工具
-ambient.mcp
-  .callTool("git_status", { repo_path: "/workspace" })
-  .then((result) => {
-    console.log("Git status outputs:", result);
-  })
-  .catch((err) => {
-    console.error("Tool execution failed:", err);
-  });
+- 分配唯一 request ID，并要求合法 JSON-RPC 2.0 object；
+- 调用 `tools/*`、`resources/*`、`prompts/*` 或 `completion/*` 前检查 server 是否声明对应 capability；resource subscribe 还要求 `subscribe: true`；
+- response 必须恰好包含 `result` 或 `error`；
+- 使用可配置 deadline 和最大单行 response 大小；
+- timeout 或 caller cancellation 会清理 pending Future，并 best-effort 发送 `notifications/cancelled`；
+- malformed JSON、超大响应或 stdout EOF 会使 transport 失败，并以同一异常结束所有 pending request。
+
+Server 发起的 `ping` 会得到正常 JSON-RPC response；其他未声明的 client method 返回 `-32601`，不会被静默挂起。Notification 与已经 timeout/cancel 的迟到 response 可以安全忽略。
+
+`stop()` 先 terminate，在 bounded grace period 后升级为 kill，随后关闭 stdin、reader task 和所有 pending request。Backend shutdown 与 `/api/runtimes/{id}/stop` 都使用该路径。
+
+## 3. 权限身份
+
+MCP spawn 权限不只比较可执行命令。新身份由以下字段共同确定：
+
+```json
+{
+  "command": ["python", "-m", "mcp_weather"],
+  "args": ["--stdio"],
+  "env_digest": "sha256-of-explicit-manifest-env",
+  "manifest_revision": "2:1.4.0"
+}
 ```
 
-### 读取 MCP 资源 (Read Resource)
+manifest revision 或显式 env 改变会形成新的身份并重新求权。批准内容保存于 `workspace/backend_permissions.json`。
 
-```javascript
-// 示例：读取特定的环境日志资源
-ambient.mcp.readResource("file:///logs/today.txt").then((content) => {
-  root.querySelector("#log-view").textContent = content;
-});
-```
+Capability 与 direct MCP tool/resource Run 在执行前把未批准 spawn 保存成 Run interaction；resolve 以 `run_version` 原子记录响应并重新入队。权限不依赖全局 Future，后端重启后 interaction 仍可恢复。
 
-## 3. 安全规范
+## 4. 取消、恢复与副作用
 
-- **进程隔离**：所有 MCP 进程都是随 Widget 的生命周期按需启动。当卡片被销毁或 Session 关闭时，后端会自动调用 `StdioJsonRpcClient.stop()`，通过 `terminate()` 干净地销毁子进程。
-- **权限白名单**：任何 Widget 想要启动或调用任何外部 CLI 进程，都必须在 `backend_permissions.json` 中配置显式白名单，否则会进入拦截阻断状态并向用户弹窗求权。
+- 取消 running MCP Run 会取消 scheduler task；client 随后向 MCP server 发送 advisory cancellation。
+- 如果调用已经送到外部进程且结果无法确认，manual-recovery Run 进入 `needs_attention`，不会声称安全取消或安全失败。Manifest 的 `restart_safe` 字符串不会覆盖这一规则；只有白名单只读 request 或未来具备可强制幂等/对账协议的 adapter 才可自动重放。
+- 健康的 client 可按 app_id 复用；manifest identity 变化时旧 client 会停止并重新启动。
+- Run lease epoch 只保护本地 checkpoint/commit，不能让外部 MCP tool 自动 exactly-once。需要 exactly-once 的 action 仍必须由 tool 自身支持 idempotency key。
+
+## 5. 当前限制
+
+- client 已按 capability family 拒绝未声明的 method，但尚未调用 `tools/list` 建立动态 per-tool allowlist。
+- Capability action 的 tool 名由 manifest 固定；`mcp_call_tool` 入口的 tool 名作为 Run input 持久、审计和校验。
+- MCP 进程有 argv/env/I/O/生命周期约束，但不是 OS 级 filesystem/network sandbox。
+- client capability 当前为空，因此不支持 sampling/roots 等 server request；`ping` 已支持，其他 method 会收到显式 `-32601`。

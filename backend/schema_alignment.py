@@ -3,7 +3,8 @@ import logging
 import re
 from typing import Any
 
-from backend.agent.providers import get_llm_provider
+from backend.agent.providers import ToolLoopBudget, get_llm_provider
+from backend.agent.errors import BudgetExhaustedError, WorkflowError
 from backend.graph_db import GraphDatabase
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
@@ -20,6 +21,8 @@ class SchemaAlignmentService:
         db_session: Any = None,
         approved_plan: str = "",
         language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
@@ -95,7 +98,12 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
         raw_response = ""
         try:
-            raw_response = await provider.generate(messages, db_session=db_session)
+            raw_response = await provider.generate(
+                messages,
+                db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "schema_alignment"},
+            )
 
             # Clean response and parse JSON
             cleaned = raw_response.strip()
@@ -125,12 +133,15 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
             return proposal
 
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to generate or parse schema alignment: {e}. Raw response: {raw_response}")
-            # Safe fallback: assume no schemas to reuse or create, just let it proceed
-            return {"reused_schemas": [], "new_schemas": []}
+            raise WorkflowError(
+                "Schema alignment generation or parsing failed",
+                code="schema_alignment_failed",
+                retryable=True,
+            ) from e
 
     @staticmethod
     async def refine_proposal(
@@ -142,6 +153,8 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         db_session: Any = None,
         approved_plan: str = "",
         language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
@@ -215,7 +228,12 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
 
         raw_response = ""
         try:
-            raw_response = await provider.generate(messages, db_session=db_session)
+            raw_response = await provider.generate(
+                messages,
+                db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "schema_alignment_refine"},
+            )
             cleaned = raw_response.strip()
             code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
             if code_block_match:
@@ -235,8 +253,12 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
             if "new_schemas" not in proposal:
                 proposal["new_schemas"] = []
             return proposal
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to refine schema alignment: {e}. Raw response: {raw_response}")
-            return current_proposal
+            raise WorkflowError(
+                "Schema alignment refinement failed",
+                code="schema_alignment_refinement_failed",
+                retryable=True,
+            ) from e

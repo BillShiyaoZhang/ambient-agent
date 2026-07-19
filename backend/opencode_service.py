@@ -1,15 +1,23 @@
 import asyncio
-import logging
+import contextlib
+import hashlib
 import json
+import logging
+import math
 import os
+import re
+import shlex
 import shutil
+import signal
 import subprocess
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from acp import Client, spawn_agent_process, text_block
+from acp import Client, connect_to_agent, default_environment, text_block
 from acp.exceptions import RequestError
 from acp.schema import (
     AllowedOutcome,
@@ -29,10 +37,559 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
+from backend.app_manifest import ManifestValidationError, validate_app_id
+
 logger = logging.getLogger("opencode_service")
 
-# Registry of active ACP clients to map incoming WebSocket permission responses
-active_acp_clients: dict[str, "FastAPIACPClient"] = {}
+_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT = 256 * 1024
+_MAX_TERMINAL_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
+_MAX_CONTROLLER_BYTES = 2 * 1024 * 1024
+_PROCESS_TERMINATION_GRACE_SECONDS = 2.0
+_SHELL_CONTROL_PATTERN = re.compile(r"[\x00\r\n;&|<>`]|\$\(")
+_TERMINAL_INHERITED_ENV = {
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NO_COLOR",
+    "PATH",
+    "PATHEXT",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+}
+_TERMINAL_REQUEST_ENV = {
+    "CI",
+    "FORCE_COLOR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NODE_ENV",
+    "NO_COLOR",
+    "TZ",
+}
+
+
+class OpenCodeAgentError(RuntimeError):
+    """Base error for a failed OpenCode execution."""
+
+
+class OpenCodeACPError(OpenCodeAgentError):
+    """Base error for a failed OpenCode ACP execution."""
+
+
+class OpenCodeACPInputError(OpenCodeACPError, ValueError):
+    """Raised before execution when an App ID or path is unsafe."""
+
+
+class OpenCodeACPStartupError(OpenCodeACPError):
+    """Raised when the OpenCode ACP process cannot be started."""
+
+
+class OpenCodeACPTimeoutError(OpenCodeACPError, TimeoutError):
+    """Raised when the OpenCode ACP turn exceeds its deadline."""
+
+
+class OpenCodeACPProtocolError(OpenCodeACPError):
+    """Raised when ACP initialization, session creation, or prompting fails."""
+
+
+class OpenCodeArtifactError(OpenCodeACPError):
+    """Raised when staged output is missing or malformed."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCodeStagedResult:
+    """A validated staged App whose caller must either promote or discard."""
+
+    output: str
+    app_id: str
+    staging_dir: Path
+    live_dir: Path
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
+def _resolve_in_workspace(path_str: str | Path, workspace_root: Path) -> Path:
+    """Resolve a path and require that it remains inside a real workspace directory."""
+    if not isinstance(path_str, (str, os.PathLike)):
+        raise ValueError("Path must be a string or path-like value")
+    try:
+        root = workspace_root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"Invalid workspace root: {exc!s}") from exc
+    if not root.is_dir():
+        raise ValueError("Workspace root is not a directory")
+
+    raw_path = Path(path_str)
+    if ".." in raw_path.parts:
+        raise ValueError("Directory traversal attempt blocked")
+    candidate = raw_path if raw_path.is_absolute() else root / raw_path
+    try:
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"Invalid path: {exc!s}") from exc
+    if resolved != root and not resolved.is_relative_to(root):
+        raise ValueError("Directory traversal attempt blocked")
+
+    # Reject links even when they happen to point back into the jail. This avoids
+    # link-swap surprises between validation and the subsequent filesystem call.
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Directory traversal attempt blocked") from exc
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if _is_link_or_junction(cursor):
+            raise ValueError("Symbolic links are not allowed in the workspace path")
+    return resolved
+
+
+def _parse_command_argv(command: str, args: list[str] | None = None) -> list[str]:
+    """Parse ACP command fields into argv without ever invoking a shell."""
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("Command must be a non-empty string")
+    supplied_args = [] if args is None else args
+    if not isinstance(supplied_args, list) or not all(isinstance(arg, str) for arg in supplied_args):
+        raise ValueError("Command args must be a list of strings")
+    if _SHELL_CONTROL_PATTERN.search(command):
+        raise ValueError("Shell control syntax is not allowed")
+    if any("\x00" in arg for arg in supplied_args):
+        raise ValueError("Command args must not contain null bytes")
+    try:
+        command_parts = shlex.split(command, posix=os.name != "nt")
+    except ValueError as exc:
+        raise ValueError(f"Invalid command quoting: {exc!s}") from exc
+    if supplied_args and len(command_parts) != 1:
+        raise ValueError("Command must contain only the executable when args are supplied")
+    argv = [*command_parts, *supplied_args]
+    if not argv:
+        raise ValueError("Command must include an executable")
+    return argv
+
+
+def _safe_terminal_environment(env: list[EnvVariable] | None) -> dict[str, str]:
+    process_env = {name: value for name in _TERMINAL_INHERITED_ENV if (value := os.environ.get(name)) is not None}
+    for item in env or []:
+        name = getattr(item, "name", None)
+        value = getattr(item, "value", None)
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise ValueError("Environment entries must contain string names and values")
+        if name not in _TERMINAL_REQUEST_ENV:
+            raise ValueError(f"Environment variable is not allowed: {name}")
+        if "\x00" in value:
+            raise ValueError(f"Environment variable contains a null byte: {name}")
+        process_env[name] = value
+    return process_env
+
+
+async def _terminate_process(
+    proc: asyncio.subprocess.Process,
+    *,
+    process_group: bool,
+    grace_seconds: float = _PROCESS_TERMINATION_GRACE_SECONDS,
+) -> None:
+    """Terminate a process (and, when isolated, its group), then escalate to kill."""
+    if proc.returncode is not None:
+        return
+
+    def send(sig: signal.Signals) -> None:
+        try:
+            if process_group and os.name != "nt":
+                os.killpg(proc.pid, sig)
+            elif sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+
+    send(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+        return
+    except TimeoutError:
+        send(signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError):
+        await proc.wait()
+
+
+@contextlib.asynccontextmanager
+async def spawn_agent_process(
+    to_client: Client,
+    command: str,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+    cwd: str | Path | None = None,
+    transport_kwargs: Mapping[str, Any] | None = None,
+    **connection_kwargs: Any,
+) -> AsyncIterator[tuple[Any, asyncio.subprocess.Process]]:
+    """Spawn an ACP process in an isolated process group with bounded shutdown."""
+    transport_options = dict(transport_kwargs or {})
+    shutdown_timeout = float(transport_options.pop("shutdown_timeout", _PROCESS_TERMINATION_GRACE_SECONDS))
+    stream_limit = int(transport_options.pop("limit", 1024 * 1024))
+    if transport_options:
+        raise ValueError(f"Unsupported ACP transport options: {', '.join(sorted(transport_options))}")
+
+    process_env = dict(default_environment())
+    if env:
+        process_env.update(env)
+    process_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_kwargs["start_new_session"] = True
+
+    proc = await asyncio.create_subprocess_exec(
+        command,
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(cwd) if cwd is not None else None,
+        env=process_env,
+        limit=stream_limit,
+        **process_kwargs,
+    )
+    if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+        await _terminate_process(proc, process_group=True, grace_seconds=shutdown_timeout)
+        raise OpenCodeACPStartupError("OpenCode ACP process did not expose stdio pipes")
+
+    async def drain_stderr() -> None:
+        while await proc.stderr.read(4096):
+            pass
+
+    stderr_task = asyncio.create_task(drain_stderr())
+    try:
+        conn = connect_to_agent(to_client, proc.stdin, proc.stdout, **connection_kwargs)
+        try:
+            yield conn, proc
+        finally:
+            await conn.close()
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+            with contextlib.suppress(Exception):
+                await proc.stdin.wait_closed()
+        if proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=shutdown_timeout)
+            except TimeoutError:
+                await _terminate_process(proc, process_group=True, grace_seconds=shutdown_timeout)
+        if not stderr_task.done():
+            stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stderr_task
+
+
+def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]:
+    """Copy an existing App into a private sibling staging directory."""
+    staging_dir: Path | None = None
+    try:
+        validate_app_id(app_id)
+    except ManifestValidationError as exc:
+        raise OpenCodeACPInputError(f"invalid app_id: {exc!s}") from exc
+
+    try:
+        apps_root = Path(apps_dir).resolve(strict=False)
+        apps_root.mkdir(parents=True, exist_ok=True)
+        live_dir = apps_root / app_id
+        if _is_link_or_junction(live_dir):
+            raise OpenCodeACPInputError("App path must not be a symbolic link or junction")
+        if live_dir.exists() and not live_dir.is_dir():
+            raise OpenCodeACPInputError("App path must be a directory")
+        if live_dir.resolve(strict=False).parent != apps_root:
+            raise OpenCodeACPInputError("App path must be a direct child of the Apps directory")
+
+        staging_dir = apps_root / f".{app_id}.staging-{uuid.uuid4().hex}"
+        if live_dir.exists():
+            for path in live_dir.rglob("*"):
+                if _is_link_or_junction(path):
+                    raise OpenCodeACPInputError(
+                        f"Existing App contains an unsafe link: {path.relative_to(live_dir)}"
+                    )
+            shutil.copytree(live_dir, staging_dir)
+        else:
+            staging_dir.mkdir()
+        return live_dir, staging_dir
+    except OpenCodeACPError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        if staging_dir is not None and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise OpenCodeACPStartupError(f"Unable to prepare OpenCode staging directory: {exc!s}") from exc
+
+
+def _validate_staged_app(staging_dir: Path) -> None:
+    controller_path = _resolve_in_workspace("controller.js", staging_dir)
+    if not controller_path.is_file():
+        raise OpenCodeArtifactError("OpenCode did not produce the required controller.js artifact")
+    try:
+        raw = controller_path.read_bytes()
+    except OSError as exc:
+        raise OpenCodeArtifactError(f"Unable to read generated controller.js: {exc!s}") from exc
+    if not raw or len(raw) > _MAX_CONTROLLER_BYTES:
+        raise OpenCodeArtifactError("Generated controller.js is empty or exceeds the size limit")
+    try:
+        source = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OpenCodeArtifactError("Generated controller.js must be valid UTF-8") from exc
+    if "\x00" in source or re.search(r"\bexport\s+default\b", source) is None:
+        raise OpenCodeArtifactError("Generated controller.js must contain a default export")
+
+    verifier = Path(__file__).resolve().parent.parent / "scripts" / "verify_widget_controller.mjs"
+    node_executable = shutil.which("node")
+    if node_executable is None or not verifier.is_file():
+        raise OpenCodeArtifactError("Widget syntax/runtime verifier is unavailable")
+    try:
+        completed = subprocess.run(
+            [node_executable, str(verifier), str(controller_path)],
+            cwd=staging_dir,
+            env=_safe_terminal_environment(None),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OpenCodeArtifactError(f"Widget syntax/runtime verification failed: {exc!s}") from exc
+    if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout or "unknown verifier error").strip()
+        raise OpenCodeArtifactError(
+            f"Widget syntax/runtime/security verification failed: "
+            f"{diagnostic[:_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT]}"
+        )
+
+
+def _promote_staging_app(staging_dir: Path, live_dir: Path) -> None:
+    """Promote a validated sibling directory, restoring the old App if the swap fails."""
+    if not live_dir.exists():
+        staging_dir.replace(live_dir)
+        return
+
+    backup_dir = live_dir.parent / f".{live_dir.name}.backup-{uuid.uuid4().hex}"
+    journal = live_dir.parent / f".ambient-promotion-{live_dir.name}-{uuid.uuid4().hex}.json"
+    journal.write_text(
+        json.dumps(
+            {
+                "app_id": live_dir.name,
+                "live_name": live_dir.name,
+                "staging_name": staging_dir.name,
+                "backup_name": backup_dir.name,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    live_dir.replace(backup_dir)
+    try:
+        staging_dir.replace(live_dir)
+    except Exception:
+        with contextlib.suppress(Exception):
+            backup_dir.replace(live_dir)
+        with contextlib.suppress(OSError):
+            journal.unlink()
+        raise
+    try:
+        shutil.rmtree(backup_dir)
+        journal.unlink()
+    except OSError:
+        # The startup recovery pass will finish cleanup. Keeping the journal is
+        # safer than guessing which directory is authoritative after a crash.
+        logger.warning("Unable to finalize OpenCode promotion journal %s", journal, exc_info=True)
+
+
+def _validated_staging_handle(result: OpenCodeStagedResult, *, require_exists: bool) -> tuple[Path, Path]:
+    if not isinstance(result, OpenCodeStagedResult):
+        raise TypeError("staged result must be an OpenCodeStagedResult")
+    try:
+        validate_app_id(result.app_id)
+    except ManifestValidationError as exc:
+        raise OpenCodeACPInputError(f"invalid staged app_id: {exc!s}") from exc
+
+    try:
+        apps_root = result.live_dir.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise OpenCodeACPInputError(f"Invalid Apps directory: {exc!s}") from exc
+    expected_live = apps_root / result.app_id
+    if result.live_dir.resolve(strict=False) != expected_live:
+        raise OpenCodeACPInputError("Staged live path does not match its App ID")
+
+    staging_dir = result.staging_dir
+    expected_name = re.compile(rf"\.{re.escape(result.app_id)}\.staging-[0-9a-f]{{32}}")
+    if staging_dir.parent.resolve(strict=False) != apps_root or expected_name.fullmatch(staging_dir.name) is None:
+        raise OpenCodeACPInputError("Staging path is not a recognized direct child of the Apps directory")
+    if _is_link_or_junction(staging_dir):
+        raise OpenCodeACPInputError("Staging path must not be a symbolic link or junction")
+    if require_exists and not staging_dir.is_dir():
+        raise OpenCodeACPInputError("Staging directory no longer exists")
+    if _is_link_or_junction(expected_live):
+        raise OpenCodeACPInputError("Live App path must not be a symbolic link or junction")
+    return expected_live, staging_dir
+
+
+def validate_opencode_staging(result: OpenCodeStagedResult) -> Path:
+    """Validate a retained staging result and return its controller artifact path."""
+    _, staging_dir = _validated_staging_handle(result, require_exists=True)
+    _validate_staged_app(staging_dir)
+    return staging_dir / "controller.js"
+
+
+def promote_opencode_staging(result: OpenCodeStagedResult) -> Path:
+    """Revalidate and promote a retained staging result to its live App directory."""
+    live_dir, staging_dir = _validated_staging_handle(result, require_exists=True)
+    _validate_staged_app(staging_dir)
+    try:
+        _promote_staging_app(staging_dir, live_dir)
+    except Exception as exc:
+        raise OpenCodeArtifactError(f"Unable to promote generated App: {exc!s}") from exc
+    return live_dir
+
+
+def validate_opencode_promotion(result: OpenCodeStagedResult, run_id: str) -> Path | None:
+    """Return the promoted controller when a matching durable marker exists."""
+
+    live_dir, staging_dir = _validated_staging_handle(result, require_exists=False)
+    if staging_dir.exists() or not live_dir.is_dir() or _is_link_or_junction(live_dir):
+        return None
+    marker = live_dir / ".ambient-promotion.json"
+    if not marker.is_file():
+        return None
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OpenCodeACPProtocolError("Published App has an invalid promotion marker") from exc
+    if payload.get("run_id") != run_id:
+        return None
+    _validate_staged_app(live_dir)
+    controller = live_dir / "controller.js"
+    artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
+    if payload.get("artifact_hash") != artifact_hash:
+        raise OpenCodeACPProtocolError("Published App does not match its promotion marker")
+    return controller
+
+
+def discard_opencode_staging(result: OpenCodeStagedResult) -> None:
+    """Idempotently discard a retained staging result without touching the live App."""
+    _, staging_dir = _validated_staging_handle(result, require_exists=False)
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+
+
+def cleanup_orphaned_opencode_staging(
+    apps_dir: str | Path,
+    *,
+    referenced_staging_paths: set[str | Path],
+    grace_seconds: float = 3600.0,
+    now_epoch: float | None = None,
+) -> list[Path]:
+    """Remove only old, unreferenced, recognized staging directories."""
+
+    if not isinstance(grace_seconds, (int, float)) or not math.isfinite(grace_seconds) or grace_seconds < 0:
+        raise ValueError("grace_seconds must be a finite non-negative number")
+    current_time = time.time() if now_epoch is None else now_epoch
+    if not isinstance(current_time, (int, float)) or not math.isfinite(current_time):
+        raise ValueError("now_epoch must be a finite number")
+
+    root_path = Path(apps_dir)
+    if _is_link_or_junction(root_path):
+        raise ValueError("Apps directory must not be a symbolic link or junction")
+    root = root_path.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("Apps directory must be a directory")
+
+    referenced: set[Path] = set()
+    for raw_path in referenced_staging_paths:
+        try:
+            candidate = Path(raw_path).resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if candidate.parent == root:
+            referenced.add(candidate)
+
+    pattern = re.compile(r"^\.([a-z0-9]+(?:-[a-z0-9]+)*)\.staging-[0-9a-f]{32}$")
+    removed: list[Path] = []
+    for candidate in root.iterdir():
+        match = pattern.fullmatch(candidate.name)
+        if match is None or candidate in referenced or _is_link_or_junction(candidate):
+            continue
+        try:
+            validate_app_id(match.group(1))
+            if not candidate.is_dir():
+                continue
+            age_seconds = float(current_time) - candidate.stat(follow_symlinks=False).st_mtime
+            if age_seconds < grace_seconds:
+                continue
+            # Recheck immediately before deletion so a simple link swap fails
+            # closed rather than following an out-of-root target.
+            if _is_link_or_junction(candidate) or candidate.parent.resolve(strict=True) != root:
+                continue
+            shutil.rmtree(candidate)
+            removed.append(candidate)
+        except (ManifestValidationError, OSError, RuntimeError):
+            logger.warning("Unable to clean orphan OpenCode staging directory %s", candidate, exc_info=True)
+    return removed
+
+
+def recover_interrupted_opencode_promotions(apps_dir: str | Path) -> list[dict[str, str]]:
+    """Recover the two-rename promotion window using its durable journal."""
+
+    root_path = Path(apps_dir)
+    if _is_link_or_junction(root_path):
+        raise ValueError("Apps directory must not be a symbolic link or junction")
+    root = root_path.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("Apps directory must be a directory")
+    journal_pattern = re.compile(r"^\.ambient-promotion-([a-z0-9]+(?:-[a-z0-9]+)*)-[0-9a-f]{32}\.json$")
+    recovered: list[dict[str, str]] = []
+    for journal in root.iterdir():
+        match = journal_pattern.fullmatch(journal.name)
+        if match is None or _is_link_or_junction(journal) or not journal.is_file():
+            continue
+        try:
+            payload = json.loads(journal.read_text(encoding="utf-8"))
+            app_id = validate_app_id(payload.get("app_id"))
+            if app_id != match.group(1) or payload.get("live_name") != app_id:
+                raise ValueError("Promotion journal App identity does not match its filename")
+            staging_name = str(payload.get("staging_name") or "")
+            backup_name = str(payload.get("backup_name") or "")
+            if re.fullmatch(rf"\.{re.escape(app_id)}\.staging-[0-9a-f]{{32}}", staging_name) is None:
+                raise ValueError("Promotion journal has an invalid staging path")
+            if re.fullmatch(rf"\.{re.escape(app_id)}\.backup-[0-9a-f]{{32}}", backup_name) is None:
+                raise ValueError("Promotion journal has an invalid backup path")
+            live = root / app_id
+            staging = root / staging_name
+            backup = root / backup_name
+            if any(_is_link_or_junction(path) for path in (live, staging, backup)):
+                raise ValueError("Promotion journal references an unsafe link")
+
+            if not live.exists() and backup.is_dir():
+                # Crash after old live -> backup but before staging -> live.
+                backup.replace(live)
+                journal.unlink()
+                recovered.append({"app_id": app_id, "action": "restored_previous_live"})
+            elif live.is_dir() and backup.is_dir() and not staging.exists():
+                # Crash after the new staging became live; finish cleanup.
+                shutil.rmtree(backup)
+                journal.unlink()
+                recovered.append({"app_id": app_id, "action": "finalized_new_live"})
+            elif live.is_dir() and staging.is_dir() and not backup.exists():
+                # Journal was durable before any rename; no effect occurred.
+                journal.unlink()
+                recovered.append({"app_id": app_id, "action": "cleared_unstarted_journal"})
+        except (ManifestValidationError, OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+            logger.error("OpenCode promotion journal requires manual attention: %s", journal, exc_info=True)
+    return recovered
 
 
 _OPENCODE_NPM_BY_PRESET = {
@@ -132,30 +689,22 @@ class PermissionPolicyManager:
         except Exception as e:
             logger.error(f"Error loading permission policy: {e}")
         return {
-            "policy_mode": "interactive",
+            "policy_mode": "strict",
             "files": {
                 "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
                 "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"],
             },
             "commands": {
-                "allowed_commands": ["npm test", "npm run build", "npm install"],
-                "allowed_prefixes": ["npm install ", "echo "],
+                "allowed_commands": ["npm test", "npm run build"],
+                "allowed_prefixes": [],
                 "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"],
             },
         }
 
     def validate_file_path(self, path_str: str, workspace_root: Path) -> bool:
-        # Check directory traversal (strict jail)
         try:
-            resolved_workspace = workspace_root.resolve()
-            p = Path(path_str)
-            if p.is_absolute():
-                resolved_path = p.resolve()
-            else:
-                resolved_path = (workspace_root / p).resolve()
-            if not str(resolved_path).startswith(str(resolved_workspace)):
-                return False
-        except Exception:
+            resolved_path = _resolve_in_workspace(path_str, workspace_root)
+        except (OSError, ValueError):
             return False
 
         # Validate file suffix/name
@@ -170,58 +719,57 @@ class PermissionPolicyManager:
         return False
 
     def validate_command(self, command_str: str) -> bool:
-        command_str = command_str.strip()
-        commands_cfg = self.policy.get("commands", {})
+        try:
+            argv = _parse_command_argv(command_str)
+        except ValueError:
+            return False
+        return self.validate_argv(argv)
 
-        # Check blocklist first
-        blocklist = commands_cfg.get("blocklist", [])
-        for blocked in blocklist:
-            if blocked in command_str:
+    def validate_argv(self, argv: list[str]) -> bool:
+        if not argv or not all(isinstance(arg, str) and arg for arg in argv):
+            return False
+        commands_cfg = self.policy.get("commands", {})
+        canonical = shlex.join(argv)
+
+        for blocked in commands_cfg.get("blocklist", []):
+            if blocked in canonical:
                 return False
 
-        # Check allowed commands exactly
-        allowed_commands = commands_cfg.get("allowed_commands", [])
-        if command_str in allowed_commands:
-            return True
-
-        # Check allowed prefixes
-        allowed_prefixes = commands_cfg.get("allowed_prefixes", [])
-        for prefix in allowed_prefixes:
-            if command_str.startswith(prefix):
-                return True
+        for allowed in commands_cfg.get("allowed_commands", []):
+            try:
+                if argv == _parse_command_argv(allowed):
+                    return True
+            except ValueError:
+                logger.warning("Ignoring malformed allowed command in %s: %r", self.config_path, allowed)
 
         return False
 
 
 class FastAPIACPClient(Client):
     def __init__(self, workspace_root: Path, on_update_callback: Callable[[str], None]):
-        self.workspace_root = workspace_root
+        self.workspace_root = workspace_root.resolve(strict=True)
+        if not self.workspace_root.is_dir():
+            raise ValueError("ACP workspace root must be a directory")
         self.on_update_callback = on_update_callback
         self.terminals: dict[str, asyncio.subprocess.Process] = {}
         self.terminal_buffers: dict[str, bytes] = {}
         self.terminal_tasks: dict[str, asyncio.Task] = {}
+        self.terminal_output_limits: dict[str, int] = {}
+        self.terminal_output_bytes: dict[str, int] = {}
+        self.terminal_output_truncated: dict[str, bool] = {}
+        self.terminal_process_groups: set[str] = set()
         self.output_buffer: list[str] = []
-        self.pending_permissions: dict[str, asyncio.Future] = {}
-
-    def resolve_permission(self, request_id: str, approved: bool):
-        fut = self.pending_permissions.get(request_id)
-        if fut and not fut.done():
-            fut.set_result(approved)
 
     async def read_text_file(
         self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: Any
     ) -> ReadTextFileResponse:
-        full_path = self.workspace_root / path
-
-        # Directory traversal jail check
         try:
-            resolved_workspace = self.workspace_root.resolve()
-            resolved_path = full_path.resolve()
-        except Exception as e:
-            raise RequestError.invalid_params(f"Invalid path: {e!s}")
-
-        if not str(resolved_path).startswith(str(resolved_workspace)):
-            raise RequestError.invalid_params("Directory traversal attempt blocked.")
+            full_path = _resolve_in_workspace(path, self.workspace_root)
+        except ValueError as exc:
+            message = str(exc)
+            if "traversal" in message.lower() or "symbolic" in message.lower():
+                message = "Directory traversal attempt blocked."
+            raise RequestError.invalid_params(message)
 
         try:
             with open(full_path, encoding="utf-8") as f:
@@ -233,17 +781,13 @@ class FastAPIACPClient(Client):
     async def write_text_file(
         self, session_id: str, path: str, content: str, **kwargs: Any
     ) -> WriteTextFileResponse | None:
-        full_path = self.workspace_root / path
-
-        # Directory traversal jail check
         try:
-            resolved_workspace = self.workspace_root.resolve()
-            resolved_path = full_path.resolve()
-        except Exception as e:
-            raise RequestError.invalid_params(f"Invalid path: {e!s}")
-
-        if not str(resolved_path).startswith(str(resolved_workspace)):
-            raise RequestError.invalid_params("Directory traversal attempt blocked.")
+            full_path = _resolve_in_workspace(path, self.workspace_root)
+        except ValueError as exc:
+            message = str(exc)
+            if "traversal" in message.lower() or "symbolic" in message.lower():
+                message = "Directory traversal attempt blocked."
+            raise RequestError.invalid_params(message)
 
         try:
             os.makedirs(full_path.parent, exist_ok=True)
@@ -266,21 +810,23 @@ class FastAPIACPClient(Client):
         details = ""
 
         if tool_kind == "execute":
-            # Command execution
             cmd = ""
-            args = []
-            if isinstance(tool_call.raw_input, dict):
-                cmd = tool_call.raw_input.get("command", "")
-                args = tool_call.raw_input.get("args", [])
-            elif hasattr(tool_call, "title") and tool_call.title:
+            args: list[str] = []
+            raw_input = getattr(tool_call, "raw_input", None)
+            if isinstance(raw_input, dict):
+                cmd = raw_input.get("command", "")
+                args = raw_input.get("args", [])
+            elif isinstance(getattr(tool_call, "title", None), str):
                 cmd = tool_call.title
 
-            cmd_full = cmd
-            if args:
-                cmd_full = f"{cmd} " + " ".join(args)
-
-            details = f"Command: {cmd_full}"
-            is_allowed = policy_mgr.validate_command(cmd_full)
+            try:
+                argv = _parse_command_argv(cmd, args)
+            except ValueError as exc:
+                return RequestPermissionResponse(
+                    outcome=DeniedOutcome(outcome="cancelled", message=f"Invalid command: {exc!s}")
+                )
+            details = f"Command: {shlex.join(argv)}"
+            is_allowed = policy_mgr.validate_argv(argv)
 
         elif tool_kind in ("edit", "read", "delete", "move"):
             # File system operations
@@ -315,20 +861,9 @@ class FastAPIACPClient(Client):
 
             details = f"File {tool_kind}: {path_str}"
 
-            # Directory traversal check
-            is_traversal_safe = False
             try:
-                resolved_workspace = self.workspace_root.resolve()
-                p = Path(path_str)
-                if p.is_absolute():
-                    resolved_path = p.resolve()
-                else:
-                    resolved_path = (self.workspace_root / p).resolve()
-                is_traversal_safe = str(resolved_path).startswith(str(resolved_workspace))
-            except Exception:
-                is_traversal_safe = False
-
-            if not is_traversal_safe:
+                _resolve_in_workspace(path_str, self.workspace_root)
+            except (OSError, ValueError):
                 logger.warning(f"Blocking directory traversal attempt in permission request: {path_str}")
                 return RequestPermissionResponse(
                     outcome=DeniedOutcome(outcome="cancelled", message="Directory traversal blocked")
@@ -337,11 +872,12 @@ class FastAPIACPClient(Client):
             is_allowed = policy_mgr.validate_file_path(path_str, self.workspace_root)
 
         else:
-            # Fallback auto-approve for other tool types
-            details = f"Action: {tool_kind}"
-            is_allowed = True
+            logger.warning("Blocking unknown ACP tool kind: %r", tool_kind)
+            return RequestPermissionResponse(
+                outcome=DeniedOutcome(outcome="cancelled", message=f"Unsupported tool kind: {tool_kind!s}")
+            )
 
-        if is_allowed or os.getenv("BENCHMARK_MODE") == "true":
+        if is_allowed:
             for opt in options:
                 if opt.kind in ("allow_once", "allow_always"):
                     return RequestPermissionResponse(
@@ -349,55 +885,16 @@ class FastAPIACPClient(Client):
                     )
             return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
-        # Strict policy mode -> fail immediately
-        if policy_mgr.policy.get("policy_mode") == "strict":
-            return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-
-        # Interactive mode -> prompt user
-        request_id = str(uuid.uuid4())
-        fut = asyncio.Future()
-        self.pending_permissions[request_id] = fut
-
-        if self.on_update_callback:
-            try:
-                # Send the permission request over the websocket
-                if asyncio.iscoroutinefunction(self.on_update_callback):
-                    await self.on_update_callback(
-                        {
-                            "type": "permission_request",
-                            "request_id": request_id,
-                            "tool_call": tool_kind,
-                            "details": details,
-                        }
-                    )
-                else:
-                    self.on_update_callback(
-                        {
-                            "type": "permission_request",
-                            "request_id": request_id,
-                            "tool_call": tool_kind,
-                            "details": details,
-                        }
-                    )
-            except Exception as e:
-                logger.error(f"Error sending permission request: {e}")
-                return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-
-        # Wait up to 60 seconds for approval response
-        try:
-            approved = await asyncio.wait_for(fut, timeout=60.0)
-        except TimeoutError:
-            approved = False
-        finally:
-            self.pending_permissions.pop(request_id, None)
-
-        if approved:
-            for opt in options:
-                if opt.kind in ("allow_once", "allow_always"):
-                    return RequestPermissionResponse(
-                        outcome=AllowedOutcome(option_id=opt.option_id, outcome="selected")
-                    )
-        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        # An external ACP turn cannot be suspended safely while releasing its
+        # durable worker lease. Anything outside the exact pre-approved policy
+        # therefore fails closed; there is no process-local approval Future.
+        logger.warning("Blocking ACP request outside the exact policy: %s", details)
+        return RequestPermissionResponse(
+            outcome=DeniedOutcome(
+                outcome="cancelled",
+                message="Operation is outside the pre-approved OpenCode policy",
+            )
+        )
 
     async def create_terminal(
         self,
@@ -409,30 +906,46 @@ class FastAPIACPClient(Client):
         output_byte_limit: int | None = None,
         **kwargs: Any,
     ) -> CreateTerminalResponse:
-        exec_cwd = self.workspace_root
-        if cwd:
-            exec_cwd = self.workspace_root / cwd
+        try:
+            argv = _parse_command_argv(command, args)
+            if not PermissionPolicyManager().validate_argv(argv):
+                raise ValueError("Command is not allowed by the OpenCode terminal policy")
+            exec_cwd = _resolve_in_workspace(cwd or ".", self.workspace_root)
+            if not exec_cwd.is_dir():
+                raise ValueError("Terminal cwd must be an existing directory")
+            process_env = _safe_terminal_environment(env)
+        except ValueError as exc:
+            raise RequestError.invalid_params(str(exc))
 
-        cmd_str = command
-        if args:
-            cmd_str = f"{command} " + " ".join(args)
+        if output_byte_limit is None:
+            effective_output_limit = _DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT
+        elif not isinstance(output_byte_limit, int) or isinstance(output_byte_limit, bool) or output_byte_limit <= 0:
+            raise RequestError.invalid_params("output_byte_limit must be positive")
+        else:
+            effective_output_limit = min(output_byte_limit, _MAX_TERMINAL_OUTPUT_BYTE_LIMIT)
 
-        process_env = os.environ.copy()
-        if env:
-            for item in env:
-                process_env[item.name] = item.value
+        process_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_kwargs["start_new_session"] = True
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd_str,
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(exec_cwd),
                 env=process_env,
+                **process_kwargs,
             )
             terminal_id = str(uuid.uuid4())
             self.terminals[terminal_id] = proc
             self.terminal_buffers[terminal_id] = b""
+            self.terminal_output_limits[terminal_id] = effective_output_limit
+            self.terminal_output_bytes[terminal_id] = 0
+            self.terminal_output_truncated[terminal_id] = False
+            self.terminal_process_groups.add(terminal_id)
 
             task = asyncio.create_task(self._read_terminal_output(terminal_id, proc))
             self.terminal_tasks[terminal_id] = task
@@ -444,10 +957,18 @@ class FastAPIACPClient(Client):
     async def _read_terminal_output(self, terminal_id: str, proc: asyncio.subprocess.Process):
         async def read_stream(stream):
             while True:
-                line = await stream.read(4096)
-                if not line:
+                chunk = await stream.read(4096)
+                if not chunk:
                     break
-                self.terminal_buffers[terminal_id] += line
+                limit = self.terminal_output_limits[terminal_id]
+                stored = self.terminal_output_bytes[terminal_id]
+                remaining = max(0, limit - stored)
+                if remaining:
+                    accepted = chunk[:remaining]
+                    self.terminal_buffers[terminal_id] += accepted
+                    self.terminal_output_bytes[terminal_id] += len(accepted)
+                if len(chunk) > remaining:
+                    self.terminal_output_truncated[terminal_id] = True
 
         await asyncio.gather(read_stream(proc.stdout), read_stream(proc.stderr))
 
@@ -465,7 +986,11 @@ class FastAPIACPClient(Client):
         if proc.returncode is not None:
             exit_status = TerminalExitStatus(exit_code=proc.returncode)
 
-        return TerminalOutputResponse(output=decoded_output, truncated=False, exit_status=exit_status)
+        return TerminalOutputResponse(
+            output=decoded_output,
+            truncated=self.terminal_output_truncated.get(terminal_id, False),
+            exit_status=exit_status,
+        )
 
     async def wait_for_terminal_exit(
         self, session_id: str, terminal_id: str, **kwargs: Any
@@ -476,8 +1001,10 @@ class FastAPIACPClient(Client):
         proc = self.terminals[terminal_id]
         await proc.wait()
 
-        if terminal_id in self.terminal_tasks:
-            self.terminal_tasks[terminal_id].cancel()
+        task = self.terminal_tasks.get(terminal_id)
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
         return WaitForTerminalExitResponse(exit_code=proc.returncode, signal=None)
 
@@ -485,10 +1012,7 @@ class FastAPIACPClient(Client):
         if terminal_id not in self.terminals:
             return None
         proc = self.terminals[terminal_id]
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        await _terminate_process(proc, process_group=terminal_id in self.terminal_process_groups)
         return KillTerminalResponse()
 
     async def release_terminal(
@@ -496,16 +1020,18 @@ class FastAPIACPClient(Client):
     ) -> ReleaseTerminalResponse | None:
         if terminal_id in self.terminals:
             proc = self.terminals[terminal_id]
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            await _terminate_process(proc, process_group=terminal_id in self.terminal_process_groups)
             self.terminals.pop(terminal_id)
-        if terminal_id in self.terminal_buffers:
-            self.terminal_buffers.pop(terminal_id)
-        if terminal_id in self.terminal_tasks:
-            self.terminal_tasks[terminal_id].cancel()
-            self.terminal_tasks.pop(terminal_id)
+        self.terminal_buffers.pop(terminal_id, None)
+        self.terminal_output_limits.pop(terminal_id, None)
+        self.terminal_output_bytes.pop(terminal_id, None)
+        self.terminal_output_truncated.pop(terminal_id, None)
+        self.terminal_process_groups.discard(terminal_id)
+        task = self.terminal_tasks.pop(terminal_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         return ReleaseTerminalResponse()
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
@@ -537,141 +1063,119 @@ class FastAPIACPClient(Client):
                     self.on_update_callback(accumulated_text)
 
 
-def run_opencode_agent(app_id: str, instruction: str, language: str = "zh") -> str:
-    """
-    Invokes the OpenCode developer agent as a subprocess to create or modify a widget.
-    Reads the OPENCODE_COMMAND from environment variables.
-    (Kept for backwards compatibility / synchronous fallback).
-    """
-    opencode_cmd = os.getenv("OPENCODE_COMMAND", "opencode")
-    workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
-    apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
-    target_dir = os.path.join(apps_dir, app_id)
-
-    os.makedirs(target_dir, exist_ok=True)
-
-    target_path = Path(target_dir)
-    is_direct = (target_path / "index.html").exists()
-    is_a2ui = (target_path / "layout.json").exists()
-
-    from backend.agent.prompts.manager import PromptManager
-
-    pm = PromptManager()
-    prompt_file = "opencode_system.md"
-    clean_instruction = instruction.replace('"', "'").replace("\n", " ").replace("\r", "")
-    prompt = pm.get_prompt(
-        prompt_file, app_id=app_id, target_dir=target_dir, instruction=clean_instruction, language=language
-    )
-
-    full_command = f'{opencode_cmd} run "{prompt}" --auto'
-
-    logger.info(f"Executing OpenCode CLI agent: {full_command}")
-
-    try:
-        workspace_root = os.path.abspath(os.path.join(apps_dir, "..", ".."))
-        if not os.path.exists(os.path.join(workspace_root, "opencode.json")) and os.path.exists("opencode.json"):
-            workspace_root = os.path.abspath(".")
-        process = subprocess.run(
-            full_command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            cwd=workspace_root,
-            timeout=300.0,
-        )
-        stdout_output = process.stdout or ""
-        stderr_output = process.stderr or ""
-
-        combined_output = stdout_output
-        if stderr_output.strip():
-            combined_output += f"\n\n--- Standard Error ---\n{stderr_output}"
-
-        if process.returncode != 0:
-            combined_output = (
-                f"OpenCode Agent exited with error code {process.returncode}.\nCommand output:\n{combined_output}"
-            )
-        return combined_output
-    except Exception as err:
-        return f"Failed to execute OpenCode Agent: {err!s}"
-
-
 async def run_opencode_agent_acp(
-    app_id: str, instruction: str, language: str = "zh", on_update: Callable[[str], None] = None
-) -> str:
+    app_id: str,
+    instruction: str,
+    language: str = "zh",
+    on_update: Callable[[str], None] = None,
+    *,
+    promote: bool = True,
+) -> str | OpenCodeStagedResult:
     """
     Spawns OpenCode agent in ACP mode, runs its loop, and streams the output/logs back via on_update callback.
     """
-    opencode_cmd = os.getenv("OPENCODE_COMMAND", "opencode")
-
-    # Resolve cmd suffix on Windows
-    if os.name == "nt" and opencode_cmd == "opencode":
+    opencode_command = os.getenv("OPENCODE_COMMAND", "opencode")
+    if os.name == "nt" and opencode_command == "opencode":
         resolved = shutil.which("opencode")
         if resolved:
-            opencode_cmd = resolved
+            opencode_command = resolved
+    try:
+        opencode_argv = _parse_command_argv(opencode_command)
+    except ValueError as exc:
+        raise OpenCodeACPInputError(f"Invalid OPENCODE_COMMAND: {exc!s}") from exc
 
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
-    target_dir = Path(apps_dir) / app_id
-
-    os.makedirs(target_dir, exist_ok=True)
-
-    client = FastAPIACPClient(workspace_root=target_dir, on_update_callback=on_update)
-    workspace_root = os.path.abspath(os.path.join(apps_dir, "..", ".."))
-    if not os.path.exists(os.path.join(workspace_root, "opencode.json")) and os.path.exists("opencode.json"):
-        workspace_root = os.path.abspath(".")
-
-    logger.info(f"Spawning OpenCode ACP agent: {opencode_cmd} acp inside {workspace_root}")
+    live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
+    client = FastAPIACPClient(workspace_root=staging_dir, on_update_callback=on_update)
+    session_id: str | None = None
+    proc: asyncio.subprocess.Process | None = None
+    retain_staging = False
 
     try:
-        async with spawn_agent_process(
-            client,
-            opencode_cmd,
-            "acp",
-            cwd=workspace_root,
-            env=_opencode_runtime_env(),
-        ) as (conn, proc):
-            await conn.initialize(
-                protocol_version=1,
-                client_capabilities=ClientCapabilities(
-                    fs=FileSystemCapabilities(read_text_file=True, write_text_file=True), terminal=True
-                ),
-            )
+        logger.info("Spawning OpenCode ACP agent for App %s inside staging directory", app_id)
+        try:
+            async with spawn_agent_process(
+                client,
+                opencode_argv[0],
+                *opencode_argv[1:],
+                "acp",
+                cwd=staging_dir,
+                env=_opencode_runtime_env(),
+                transport_kwargs={"shutdown_timeout": _PROCESS_TERMINATION_GRACE_SECONDS},
+            ) as (conn, spawned_proc):
+                proc = spawned_proc
+                await conn.initialize(
+                    protocol_version=1,
+                    client_capabilities=ClientCapabilities(
+                        fs=FileSystemCapabilities(read_text_file=True, write_text_file=True), terminal=True
+                    ),
+                )
 
-            session_resp = await conn.new_session(cwd=str(target_dir.absolute()))
-            session_id = session_resp.session_id
+                session_resp = await conn.new_session(cwd=str(staging_dir))
+                session_id = session_resp.session_id
 
-            active_acp_clients[session_id] = client
+                from backend.agent.prompts.manager import PromptManager
 
-            from backend.agent.prompts.manager import PromptManager
+                prompt_text = PromptManager().get_prompt(
+                    "opencode_system.md",
+                    app_id=app_id,
+                    target_dir=str(staging_dir),
+                    instruction=instruction,
+                    language=language,
+                )
 
-            pm = PromptManager()
-            prompt_file = "opencode_system.md"
-            prompt_text = pm.get_prompt(
-                prompt_file,
-                app_id=app_id,
-                target_dir=str(target_dir.absolute()),
-                instruction=instruction,
-                language=language,
-            )
+                try:
+                    opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
+                except ValueError as exc:
+                    raise OpenCodeACPInputError("OPENCODE_TIMEOUT must be a number") from exc
+                if opencode_timeout <= 0:
+                    raise OpenCodeACPInputError("OPENCODE_TIMEOUT must be positive")
 
-            opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
+                try:
+                    prompt_response = await asyncio.wait_for(
+                        conn.prompt(session_id=session_id, prompt=[text_block(prompt_text)]),
+                        timeout=opencode_timeout,
+                    )
+                except TimeoutError as exc:
+                    logger.warning("OpenCode ACP agent timed out after %s seconds for App %s", opencode_timeout, app_id)
+                    await _terminate_process(spawned_proc, process_group=True)
+                    raise OpenCodeACPTimeoutError(
+                        f"OpenCode ACP agent timed out after {opencode_timeout:g} seconds"
+                    ) from exc
+                except asyncio.CancelledError:
+                    await _terminate_process(spawned_proc, process_group=True)
+                    raise
+
+                if prompt_response.stop_reason != "end_turn":
+                    raise OpenCodeACPProtocolError(
+                        f"OpenCode ACP agent stopped before completion: {prompt_response.stop_reason}"
+                    )
+        except (OpenCodeACPError, asyncio.CancelledError):
+            raise
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise OpenCodeACPStartupError(f"Unable to start OpenCode ACP agent: {exc!s}") from exc
+        except Exception as exc:
+            raise OpenCodeACPProtocolError(f"OpenCode ACP protocol failed: {exc!s}") from exc
+
+        output = "".join(client.output_buffer)
+        staged_result = OpenCodeStagedResult(
+            output=output,
+            app_id=app_id,
+            staging_dir=staging_dir,
+            live_dir=live_dir,
+        )
+        validate_opencode_staging(staged_result)
+        if not promote:
+            retain_staging = True
+            return staged_result
+        promote_opencode_staging(staged_result)
+        return output
+    finally:
+        if proc is not None and proc.returncode is None:
             try:
-                await asyncio.wait_for(
-                    conn.prompt(session_id=session_id, prompt=[text_block(prompt_text)]), timeout=opencode_timeout
-                )
-            except TimeoutError:
-                timeout_minutes = int(opencode_timeout // 60)
-                logger.warning(f"OpenCode ACP agent timed out after {opencode_timeout} seconds for app {app_id}.")
-                client.output_buffer.append(
-                    f"\n⚠️ OpenCode Agent execution timed out after {timeout_minutes} minutes. The generated application files will be loaded from disk."
-                )
-            finally:
-                active_acp_clients.pop(session_id, None)
-
-            return "".join(client.output_buffer)
-
-    except Exception as e:
-        logger.error(f"Error running OpenCode ACP agent: {e}")
-        return f"Failed to execute OpenCode ACP: {e!s}"
+                await _terminate_process(proc, process_group=True)
+            except Exception:
+                logger.warning("Unable to terminate OpenCode ACP process during cleanup", exc_info=True)
+        if not retain_staging and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)

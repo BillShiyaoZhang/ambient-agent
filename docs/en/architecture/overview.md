@@ -1,88 +1,127 @@
-# System Overview Architecture
+# System Architecture Overview
 
-This document describes the high-level system architecture of Ambient Agent, focusing on how the React frontend and FastAPI backend communicate, and the data flows that govern dynamic widget layouts.
+Ambient Agent is a local-first Canvas workspace. The React frontend hosts chat, the Task Center, and dynamic Widgets. The FastAPI backend manages sessions, durable Runs, graph data, App artifacts, LLM calls, and external MCP/Agent runtimes.
 
-## System Architecture Modules (Summary-Detail Structure)
-
-### 1. High-Level Macro Overview (Summary)
-
-Shows the macro communication paths between the Frontend Canvas workspace, Backend Orchestrator, Storage layer, and External services:
+## 1. Current system boundary
 
 ```mermaid
-graph TB
-    Frontend["Frontend Canvas & Sandbox"] <-->|WebSocket: /ws/chat| Backend["Backend FastAPI Orchestrator"]
-    Frontend -->|HTTP POST: /api/graph/mutate| Backend
-    Frontend -->|"HTTP GET: /api/apps/{id}"| Backend
-    Backend <-->|SQLModel ORM| Data["Data & Storage (SQLite graph.db & Disk)"]
-    Backend <-->|JSON-RPC / HTTPS| External["External Integration (MCP / LLM)"]
+flowchart TB
+    subgraph Frontend[React client]
+        Chat[Chat and approval UI]
+        Tasks[Task Center / Run projection]
+        Canvas[Canvas and Widget runtime]
+    end
+
+    subgraph API[FastAPI ingress]
+        ChatWS[/ws/chat]
+        RunWS[/ws/runs replay stream]
+        REST[Sessions / Runs / Apps / Graph REST]
+    end
+
+    subgraph Runtime[Backend execution]
+        Coordinator[RunCoordinator]
+        Reducer[DurableAgentWorkflow v2]
+        Domain[AgentOrchestrator domain helpers]
+        Gateway[Tool Gateway]
+        Backend[BackendManager]
+        OpenCode[OpenCode ACP]
+    end
+
+    subgraph Storage[Workspace state]
+        Runs[(.ambient/runs.db)]
+        Sessions[(session/message/audit storage)]
+        Graph[(graph.db)]
+        Apps[(live Apps + sibling staging)]
+    end
+
+    subgraph External[External execution]
+        Models[LLM providers]
+        MCP[MCP stdio processes]
+        Agents[remote Agent endpoints]
+    end
+
+    Chat --> ChatWS
+    Tasks <--> RunWS
+    Canvas --> REST
+    ChatWS --> Coordinator
+    ChatWS --> Sessions
+    REST --> Coordinator
+    Coordinator --> Runs
+    Coordinator --> Reducer
+    Coordinator --> Backend
+    Reducer --> Gateway
+    Reducer --> Domain
+    Reducer --> OpenCode
+    Reducer --> Sessions
+    Reducer --> Graph
+    Gateway --> Graph
+    Backend --> MCP
+    Backend --> Agents
+    OpenCode --> Apps
+    Reducer --> Models
+    Domain --> Models
 ```
 
-### 2. Frontend Subsystem Details (Detail - Frontend)
+`RunStore + RunCoordinator` are the single durable control plane for chat `internal_agent`, capability, MCP tool/resource, and remote-Agent actions. `AgentOrchestrator` supplies only routing, Converse, and formatting domain helpers. WebSocket ingress submits commands, resolves durable interactions, and projects results; it does not execute a workflow or external side effect directly.
 
-Shows the coordination of frontend state, grid canvas workspace, and isolated widget container:
+## 2. Durable Run lifecycle
 
 ```mermaid
-graph TB
-    subgraph Frontend["Frontend (React 19 + TypeScript + Vite)"]
-        App["App.tsx<br/>(Main Coordinator)"] --> Canvas["DashboardCanvas.tsx<br/>(Canvas Workspace)"]
-        Canvas --> Sandbox["SandboxWidget.tsx<br/>(Sandbox Container)"]
-        App <--> WSClient["websocket.ts<br/>(WebSocket Client)"]
-    end
-    WSClient <-->|/ws/chat| BE["Backend Server"]
-    Sandbox -->|/api/graph/mutate| BE
-    Sandbox -->|"/api/apps/{id}"| BE
+sequenceDiagram
+    actor User
+    participant Client as Web / Widget
+    participant API as FastAPI
+    participant Store as RunStore
+    participant Worker as RunCoordinator
+    participant Adapter as reducer / MCP / Agent adapter
+
+    User->>Client: start action
+    Client->>API: POST /api/runs or compatibility invoke
+    API->>Store: create queued Run
+    Worker->>Store: claim + lease_epoch
+    Worker->>Adapter: execute one fenced step
+    Adapter-->>Worker: typed outcome
+    Worker->>Store: atomic step + state + status + events
+    Store-->>Client: replayable /ws/runs event
 ```
 
-### 3. Backend Subsystem Details (Detail - Backend)
+Runs in one session share a FIFO lane. `waiting_user` releases its worker slot but retains the lane. Interaction responses use a Run version to reject stale approvals, and the scheduler claims the resumed Run again.
 
-Shows the WebSocket ASGI entry point, lifecycle coordinator orchestrator, and dynamic code parser:
+Multi-intent requests preflight the complete sub-intent set before any write, then execute serially as a saga. A completed step is compensated automatically only when complete compensation data was stored; other uncertain effects enter `needs_attention`.
+
+## 3. Widget code lifecycle
+
+`DurableAgentWorkflow` drives Widget builds through explicit phases, while OpenCode uses staging and promotion:
 
 ```mermaid
-graph TB
-    subgraph Backend["Backend (FastAPI)"]
-        Main["main.py<br/>(Web & WS Entry)"] <--> Orchestrator["AgentOrchestrator<br/>(Orchestrator Lifecycle)"]
-        Orchestrator --> Parser["AgentParser<br/>(XML Widget Parser)"]
-        Orchestrator --> AppMgr["AppManager<br/>(Widget File Manager)"]
-        Main <--> BackendMgr["BackendManager<br/>(MCP Daemon & Security)"]
-    end
-    FE["Frontend WebSocket"] <-->|/ws/chat| Main
-    Orchestrator <-->|HTTPS| LLM["LLM Service"]
-    BackendMgr <-->|stdio| MCP["MCP Server"]
+flowchart LR
+    Intent[route: Widget create / modify] --> Plan[plan / wait_plan]
+    Plan --> Schema[align_schema / wait_schema]
+    Schema --> Stage[Create per-run staging App]
+    Stage --> ACP[OpenCode writes only staging]
+    ACP --> Verify[verify staging artifact + schema]
+    Verify -->|pass or explicit override| Promote[promote: marker + atomic live-App swap]
+    Verify -->|failure/rework| Preserve[Discard staging; preserve live App]
 ```
 
-### 4. Data Layer & External Integration (Detail - Data & Integration)
+Each staging artifact is tied to its Run checkpoint. Recovery uses the durable promotion marker to distinguish an already-published artifact from one still awaiting verification, while failure or cancellation cleans staging. Artifact validation checks the required file, size, UTF-8, and a default export, then compiles it through the same Babel pipeline as the frontend and performs a bounded module-load smoke test in a Node VM with dynamic code generation and host/network globals removed. Direct access to `window`, `document`, `fetch`, WebSocket, Worker, storage, dynamic import, or require fails closed. Schema verification is separate. This is still not a complete browser render smoke test or an OS-level sandbox.
 
-Shows how files are stored on disk, SQLModel mapping in SQLite, and stdio execution for MCP daemons:
+## 4. Data and communication
 
-```mermaid
-graph TB
-    subgraph Backend["Backend Core Services"]
-        AppMgr["AppManager"]
-        Main["main.py / WS"]
-        BackendMgr["BackendManager"]
-        Orchestrator["AgentOrchestrator"]
-    end
-    subgraph Data["Data & Storage Layer"]
-        SQLiteDB[("SQLite graph.db<br/>(Graph Storage)")]
-        DiskApps[("Local Filesystem<br/>(workspace/apps/{app_id}/*)")]
-    end
-    subgraph External["External Integration"]
-        LLM["LLM Service<br/>(Ollama / MiniMax / OpenAI)"]
-        MCPServer["MCP Servers<br/>(Stdio CLI subprocesses)"]
-    end
-    AppMgr <-->|Read/Write HTML, CSS, JS| DiskApps
-    Main <-->|SQLModel ORM| SQLiteDB
-    BackendMgr <-->|JSON-RPC 2.0 via Stdio| MCPServer
-    Orchestrator <-->|HTTPS Client httpx| LLM
-```
+- `/ws/chat`: chat commands, durable interaction responses, response projection for MCP tool/resource and Agent Runs, and graph-subscription control.
+- `/ws/runs?after_sequence=N`: versioned, replayable workspace Run events.
+- Runs REST: create, query, cancel, retry, reconcile effects, and resolve interactions.
+- Apps REST: read or manage live App artifacts.
+- Graph REST/WebSocket: write commands first enter the graph v2 Run; queries and subscriptions remain compatible.
 
-## Communication Methods
+The client replays declared read subscriptions only; it does not replay chat, approval, or tool commands after reconnect. Run-event clients use `stream_epoch + sequence` for reset/gap detection and `event_id` for deduplication.
 
-1.  **WebSockets** (`/ws/chat`): Provides bidirectional, real-time message broadcasting, canvas layout syncing, graph query subscription pushes, and MCP execution calls.
-2.  **REST HTTP API**: Handles file retrieval for card mounting (`GET /api/apps/{app_id}`), listing available apps, and transactional database modifications (`POST /api/graph/mutate`).
+Run event payloads are recursively redacted by sensitive key and size-bounded before storage; `redacted` records that data was hidden or truncated. Event and LLM-audit retention default to 30 days and are configured with `RUN_EVENT_RETENTION_DAYS` and `AGENT_AUDIT_RETENTION_DAYS` respectively.
 
-Graph query subscriptions are connection-lifecycle registrations. A Widget may register before the socket reaches `OPEN`; if it unmounts first, that registration is cancelled without emitting stale subscribe/unsubscribe traffic. The client replays only currently active registrations after connection or session reconnection. Conversation, approval, and tool-call commands are deliberately excluded from replay so disconnected actions cannot execute unexpectedly later.
+## 5. Security boundary notes
 
-## Sandboxing & Apps Architecture
-
-For detailed information on the decoupled architecture of Widgets (Apps) including UI, Controller, and Data layers, please see [Widget Apps Architecture](/en/architecture/apps.md). For details on the security sandbox and compiled scoping, see [Sandbox Isolation](/en/widgets/sandbox) and [ambient SDK Reference](/en/widgets/sdk).
+- Model-requested local tools pass through `ToolGateway` schema, effect, scope, approval, timeout, idempotency, and output controls. Converse currently exposes read-only tools.
+- MCP processes use exact argv, a restricted inherited environment, initialize/capability negotiation, call deadlines, bounded stdout/stderr, best-effort cancellation, and terminate→kill shutdown.
+- OpenCode validates App IDs, rejects traversal/symlinks, uses argv rather than a shell, bounds cwd/environment/output, and writes to staging.
+- A browser Widget's `new Function` provides module scoping and an ErrorBoundary, not hostile-code isolation. Strong isolation requires an iframe/Worker/separate origin or an OS sandbox.
+- MCP, ACP, and remote Agents keep protocol-specific adapters but are all governed by the RunCoordinator effect boundary; they are not Python ToolGateway calls. OpenCode still lacks enforced OS-level network isolation. A permission prompt must not be interpreted as a complete sandbox.

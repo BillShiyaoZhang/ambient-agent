@@ -1,318 +1,141 @@
-# Agent Harness Architecture
+# Agent Harness: One Durable Control Plane
 
-This document describes the Agent Harness layout and execution flows under `backend/agent/`.
+Chat, capability, MCP, and remote-Agent actions are all lifecycle-managed by `RunStore + RunCoordinator`. A WebSocket only persists input, submits Runs, resolves interactions, and projects durable events to clients; it no longer creates or owns an agent execution task.
 
-## 1. Component Relationships
-
-The harness decouples intent routing, workspace storage state, prompts formatting, and LLM requests.
+## 1. Component boundaries
 
 ```mermaid
-classDiagram
-    class WorkspaceStorage {
-        +workspace_dir: str
-        +get(model_class, obj_id) BaseModel
-        +add(obj) void
-        +commit() void
-        +refresh(obj) void
-        +get_sessions() List
-        +get_messages(session_id) List
-        +get_audit_logs() List
-        +delete_session(session_id) bool
-        +get_canvas_config() dict
-        +save_canvas_config(config) void
-    }
+flowchart TB
+    Client[Client command / approval / event subscription] --> Main[main.py: websocket_chat]
+    Main -->|submit internal_agent| Coordinator[run_service.py: RunCoordinator]
+    Main -->|resolve interaction| Store[run_service.py: RunStore]
+    Store -->|versioned events| Main
 
-    class AgentOrchestrator {
-        +db: WorkspaceStorage
-        +app_manager: AppManager
-        +context_manager: ContextManager
-        +run_opencode_agent_acp_fn: Callable
-        +handle_message(session_id, content, on_update) Tuple
-        -_classify_intent(content) IntentPlan
-        -_handle_widget_build(plan, session_id, on_update) Tuple
-        -_handle_widget_build_sub(plan, session_id, on_update, ...) Tuple
-        -_handle_graph_mutation(plan, session_id, on_update) Tuple
-        -_handle_graph_query(plan, session_id, on_update) Tuple
-        -_handle_plan_and_act(plan, session_id, on_update) Tuple
-        -_handle_multi_intent(plan, session_id, on_update) Tuple
-        -_handle_converse(plan, session_id, content, on_update) Tuple
-    }
+    Coordinator -->|claim + fenced step| Workflow[durable_workflow.py: DurableAgentWorkflow]
+    Workflow --> State[run_service.py: AgentRunState]
+    Workflow --> Context[run_context.py: RunContext]
+    Workflow --> Outcome[run_service.py: StepOutcome]
+    Outcome --> Commit[run_service.py: commit_step]
+    Commit --> Store
 
-    class IntentPlan {
-        +kind: IntentKind
-        +confidence: float
-        +rationale: str
-        +app_id: str
-        +instruction: str
-        +actions: List~dict~
-        +query: dict
-        +sub_intents: List~SubIntent~
-        +clarification_message: str
-        +clarification_options: List~dict~
-        +deprecated: bool
-        +to_dict() dict
-        +from_dict(data) IntentPlan
-        +from_tool_call_args(args) IntentPlan
-        +tool_schema() dict
-    }
-
-    class SubIntent {
-        +kind: SubIntentKind
-        +app_id: str
-        +instruction: str
-        +actions: List~dict~
-        +query: dict
-        +extend_schema_props: dict
-        +feedback: str
-        +to_dict() dict
-        +from_dict(data) SubIntent
-    }
-
-    class IntentKind {
-        <<enum>>
-        +WIDGET_CREATE
-        +WIDGET_MODIFY
-        +GRAPH_MUTATION
-        +GRAPH_QUERY
-        +PLAN_AND_ACT
-        +MULTI_INTENT
-        +CLARIFY
-        +CONVERSE
-    }
-
-    class SubIntentKind {
-        <<enum>>
-        +GRAPH_MUTATION
-        +GRAPH_QUERY
-        +WIDGET_CREATE
-        +WIDGET_MODIFY
-        +WIDGET_EXTEND_SCHEMA
-        +WIDGET_FIX_CODE
-        +WIDGET_REWRITE
-    }
-
-    class RouterContext {
-        +app_manifests: List~dict~
-        +graph_snapshot: GraphSnapshot
-        +session_recent: List~dict~
-        +build(app_manager, graph_db, session_messages) RouterContext
-        +render_for_prompt() str
-    }
-
-    class GraphSnapshot {
-        +type_counts: Dict
-        +recent_nodes_by_type: Dict
-        +schema_manifest: List~dict~
-        +node_count: int
-        +edge_count: int
-        +from_db(db, recent_per_type) GraphSnapshot
-    }
-
-    class IntentRouter {
-        +route(content, context) IntentPlan
-        +route_legacy(content, existing_apps) IntentPlan
-        +refine_sub_intents(plan, context) IntentPlan
-    }
-
-    class WidgetDAG {
-        +_nodes: Dict~str, TaskNode~
-        +_order: List~str~
-        +_dirty: Set~str~
-        +register(node) void
-        +dirty(*names) void
-        +idle() bool
-        +pending() List~str~
-        +step(ctx) TaskResult
-    }
-
-    class TaskNode {
-        +name: str
-        +run: Callable
-        +needs_outputs_from: Set~str~
-        +invalidates: Set~str~
-    }
-
-    class TaskResult {
-        +success: bool
-        +outputs: dict
-        +error: str
-        +ask_user: dict
-        +invalidates_if_redo: Set~str~
-    }
-
-    class VerificationDiff {
-        +unknown_props: List~UnknownProperty~
-        +type_mismatches: List~TypeMismatch~
-        +unknown_types: List~UnknownType~
-        +is_clean: bool
-        +to_markdown() str
-        +to_per_field_payload() List~dict~
-    }
-
-    class SchemaVerificationService {
-        +diff(app_id, widget_code, schemas) VerificationDiff
-        +verify(app_id, widget_code, schemas) str
-    }
-
-    class MutationTicketManager {
-        +record(session_id, forward_actions, snapshot_before) MutationTicket
-        +pin(session_id, ticket_id) bool
-        +rollback(session_id, ticket_id) List~dict~
-        +get(session_id, ticket_id) MutationTicket
-    }
-
-    class PlanExecutor {
-        <<abstract>>
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
-
-    class CodingPlanExecutor {
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
-
-    class MutationPlanExecutor {
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
-    class PlanPhaseResult {
-        +success: bool
-        +output: str
-        +error: str
-        +extra: dict
-    }
-
-    class AgentOrchestrator {
-        +db: WorkspaceStorage
-        +app_manager: AppManager
-        +context_manager: ContextManager
-        +run_opencode_agent_acp_fn: function
-        +handle_message(session_id: str, content: str, on_update: Callable) tuple
-        -_run_callback(callback: Callable, data: Any) void
-        -_handle_graph_mutation(plan, session_id, on_update) tuple
-        -_handle_graph_query(plan, session_id, on_update) tuple
-        -_handle_plan_and_act(plan, session_id, on_update) tuple
-        -_handle_multi_intent(plan, session_id, on_update) tuple
-        -_handle_converse(plan, session_id, content, on_update) tuple
-        -_handle_widget_build(plan, session_id, on_update) tuple
-    }
-
-    class AppManager {
-        +list_apps() List
-        +get_app_files(app_id) Dict
-        +create_or_update_app(app_id, title, html, css, js, kwargs) void
-        +get_manifest(app_id) AppManifest|None
-    }
-
-    class PromptManager {
-        +prompts_dir: Path
-        +env: Environment
-        +get_prompt(template_name, kwargs) str
-    }
-
-    ChatSession "1" --* "0..*" ChatMessage : contains
-    ContextManager --> AppManager : references
-    ContextManager --> ChatMessage : queries database
-    AgentOrchestrator --> ContextManager : constructs message history
-    AgentOrchestrator --> AppManager : references
-    AgentOrchestrator --> AgentParser : extracts XML widgets
-    AgentOrchestrator --> PromptManager : loads system prompt
-    AgentOrchestrator --> IntentRouter : classifies user intent (LLM #1)
-    AgentOrchestrator --> IntentRouter : refines sub_intents (LLM #2)
-    AgentOrchestrator --> PlanExecutor : dispatches to coding/mutation
-    AgentOrchestrator --> WidgetDAG : widget build pipeline
-    IntentRouter --> IntentPlan : returns structured plan
-    IntentRouter --> RouterContext : consumed
-    IntentPlan --> SubIntent : 0..* sub_intents
-    SubIntent --> SubIntentKind : kind enum
-    IntentPlan --> IntentKind : kind enum
-    RouterContext --> GraphSnapshot : embeds snapshot
-    IntentPlan --> IntentKind : kind is an enum value
-    PlanExecutor <|-- CodingPlanExecutor
-    PlanExecutor <|-- MutationPlanExecutor
-    MutationPlanExecutor --> MutationTicketManager : records rollback tickets
-    MutationTicketManager --> AgentOrchestrator : consumed in graph mutation paths
-    WidgetDAG --> TaskNode : 0..* nodes
-    TaskNode --> TaskResult : runs produce results
-    AgentOrchestrator --> SchemaVerificationService : structured diff (Direction A)
-    SchemaVerificationService --> VerificationDiff : returns
-    LLMService --> LLMAuditLog : writes prompt audit logs
-    LLMConfigStore --> ModelRunContext : resolves provider profiles
-    AgentOrchestrator --> ModelRunContext : uses primary/fast snapshots
-    ModelRunContext --> OpenCodeACP : injects selected model
+    Workflow --> Domain[harness.py: AgentOrchestrator]
+    Workflow --> Gateway[tools.py: ToolGateway]
+    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
 ```
 
-Each `handle_message()` run captures immutable primary and fast model snapshots. Top-level routing uses
-the fast model; refinement, planning, schema alignment, verification, and conversation use the primary
-model. Widget code generation injects that same primary model and its process-local endpoint/credentials
-into the OpenCode ACP subprocess through `OPENCODE_CONFIG_CONTENT`; nothing is written to project config.
-Changing a session model while a run is active therefore affects only the next request.
+Responsibilities:
 
-## 2. Message Processing Flow
+- `RunStore`: source of truth for Run state, step attempts, checkpoints, interactions, and versioned events.
+- `RunCoordinator`: queueing, session FIFO lanes, leases/heartbeats, orphan recovery, cancellation, and adapter dispatch.
+- `DurableAgentWorkflow`: version 2 chat reducer; each invocation advances exactly one phase and returns a typed `StepOutcome`.
+- `RunContext`: explicitly carries run/session/step/attempt/trace and frozen model IDs into every LLM and tool audit call.
+- `AgentOrchestrator`: retained routing, Converse, and formatting domain helpers; it no longer owns `/ws/chat` execution lifecycle.
+- `ToolGateway`, the MCP client, and OpenCode ACP: enforcement boundaries for local model tools, external JSON-RPC, and code generation respectively.
+
+## 2. Reducer protocol
 
 ```mermaid
-graph TD
-    User([User WebSocket Message]) --> WS[main.py: websocket_chat]
-    WS -->|Instantiate| Orch[harness.py: AgentOrchestrator]
-    WS -->|Call handle_message| Orch
+sequenceDiagram
+    participant WS as WebSocket/API
+    participant S as RunStore
+    participant C as RunCoordinator
+    participant W as DurableAgentWorkflow
 
-    Orch -->|1. Build Context| CtxBuild[router_context.py: RouterContext.build]
-    CtxBuild -->|app_manifests + GraphSnapshot| Router
-    Orch -->|2. Route LLM#1| Router[router.py: IntentRouter.route]
-    Router -->|function-calling| LLMR[LLM classify_intent]
-    LLMR -->|IntentPlan| Plan
-
-    Plan -->|kind=MULTI_INTENT / PLAN_AND_ACT| Refiner[router.py: refine_sub_intents LLM#2]
-    Refiner -->|refined sub_intents| PlanRefined
-
-    PlanRefined -->|widget_create / widget_modify| BuildFlow[Widget DAG Pipeline]
-    PlanRefined -->|graph_mutation| MutFlow[Graph Mutation]
-    PlanRefined -->|graph_query| QueryFlow[Graph Query]
-    PlanRefined -->|plan_and_act| PlanFlow[Plan and Act]
-    PlanRefined -->|multi_intent| MultiFlow[Multi Intent Dispatcher]
-    PlanRefined -->|clarify| ClarifyFlow[Clarify dropdown]
-    PlanRefined -->|converse| ConvFlow[Plain Dialogue]
-
-    subgraph BuildFlow [Widget DAG: 6 Task Nodes]
-        B1[plan]
-        B2[align_schemas]
-        B3[regen_code]
-        B4[verify]
-        B5[decode_user_intent]
-        B6[apply_user_actions]
-        B1 --> B2 --> B3 --> B4
-        B4 -.rework_code/schema/plan.-> B5
-        B5 --> B6
-        B6 -.invalidates regen_code + verify.-> B3
+    WS->>S: persist ChatMessage
+    WS->>C: submit_internal_agent(state v2)
+    C->>S: claim + lease_epoch
+    C->>S: begin_step_attempt(phase, epoch)
+    C->>W: reducer(run, AgentRunState)
+    W-->>C: Continue / Wait / Succeeded / Failed / Cancelled
+    C->>S: commit_step(state, outcome, epoch)
+    Note over S: step + checkpoint + interaction + status + events committed atomically
+    alt Wait
+        WS->>S: resolve(interaction, expected_run_version)
+        S->>S: persist response + queue Run
+    else Continue
+        S->>S: queue next phase
     end
-
-    subgraph MutFlow [Graph Mutation]
-        M1[MutationTicketManager.record]
-        M2[subscription_manager.broadcast_updates]
-        M1 --> M2
-    end
-
-    subgraph QueryFlow [Graph Query]
-        Q1[execute_graph_query]
-        Q2[Render text response]
-        Q1 --> Q2
-    end
-
-    subgraph PlanFlow [Plan and Act]
-        P1[MutationPlanExecutor.run_plan]
-        P2[Wait for approval]
-        P3[Apply actions]
-        P1 --> P2 --> P3
-    end
-
-    subgraph MultiFlow [Multi Intent Executor]
-        MI1[Select SubExecutor]
-        MI2[graph_mutation -> _handle_graph_mutation]
-        MI3[graph_query -> _handle_graph_query]
-        MI4[widget_* -> _handle_widget_build_sub]
-        MI1 --> MI2
-        MI1 --> MI3
-        MI1 --> MI4
-    end
-
-    Orch -->|Returns Tuple: message, widget| WS
-    WS -->|Broadcast final response| User
 ```
+
+`AgentRunState` stores workflow type/version, session, phase, attempt, intent, model snapshots, budget, artifact references, workflow data, pending interaction, summary reference, and last error. Every field must remain JSON serializable.
+
+Outcome semantics:
+
+- `Continue(next_phase)` checkpoints and requeues;
+- `Wait(interaction definition)` creates the pending interaction in the same transaction and releases the worker;
+- `Succeeded` stores result and artifacts;
+- `Failed` requeues according to `retryable` or fails; an unknown effect enters `needs_attention`;
+- `Cancelled` enters `cancelled` only when no unknown effect remains.
+
+Every commit must match `lease_owner + lease_epoch`. Cancellation, recovery, or a newer claim fences out a late callback.
+
+## 3. Version 2 workflows
+
+### Widget create / modify
+
+```mermaid
+stateDiagram-v2
+    [*] --> route
+    route --> plan: widget intent
+    plan --> wait_plan: proposal persisted
+    wait_plan --> align_schema: approve
+    wait_plan --> plan: refine
+    wait_plan --> failed: deny
+    align_schema --> wait_schema: proposal persisted
+    wait_schema --> stage_code: approve
+    wait_schema --> align_schema: refine
+    wait_schema --> plan: rework plan
+    wait_schema --> failed: deny
+    stage_code --> verify: retained staging artifact
+    verify --> promote: clean
+    verify --> wait_override: findings
+    wait_override --> promote: explicit approve
+    wait_override --> stage_code: rework code
+    wait_override --> align_schema: rework schema
+    wait_override --> plan: rework plan
+    promote --> done: atomic live-App swap
+```
+
+OpenCode runs with `promote=False` and returns `OpenCodeStagedResult`. `verify` reads staging only. `promote` revalidates the artifact, computes its hash, persists a promotion marker, commits the approved schema, and atomically replaces the live App. Recovery checks the marker and does not publish twice. Failure, rework, and cancellation discard staging and preserve the old live App.
+
+### Graph mutation
+
+```mermaid
+stateDiagram-v2
+    [*] --> graph_preflight
+    graph_preflight --> wait_graph_approval: normalized actions + preview
+    wait_graph_approval --> graph_commit: approve
+    wait_graph_approval --> failed: deny
+    graph_commit --> done: one SQLite transaction
+```
+
+Preflight performs no database write. Commit uses `apply_actions_atomic()` and creates both a rollback ticket and complete reverse actions. A `run_id + phase` Graph effect ledger returns the original result when a worker crashes after the Graph transaction but before the Run checkpoint, preventing duplicate writes. `/api/graph/mutate` and WebSocket rollback use the same reducer, with an explicit command recorded as a durable approval interaction. Multi-intent preflights the complete request first, then `multi_dispatch` advances it serially as a saga. A retryable current phase preserves prior effects and compensation data; only a terminal failure compensates in reverse and rewinds cursor/results to the saga start. Incomplete compensation or uncertain effects enter `needs_attention`.
+
+### Converse and read-only queries
+
+- `converse` uses a bounded tool loop: model iterations, tool-call count, total wall clock, each LLM timeout, assistant output size, and identical repeated calls are capped.
+- Converse currently exposes only `READ` tools with the `workspace:read` scope.
+- `graph_query` executes a read-only query and produces the final projection; `clarify` persists a clarification response and completes.
+
+## 4. Tool and Context boundaries
+
+`ToolRegistry` is the registration facade, and `ToolGateway` is the execution enforcement point for model-requested local tools. `ToolSpec` declares input/output schemas, effect, scope, approval, timeout, idempotency requirement, output bound, and sensitive fields. The gateway rejects unknown tools/arguments, scope violations, missing approval, missing idempotency keys, and reuse of a key with different arguments. Every invocation emits started/succeeded/failed/cancelled events with run/step/attempt/trace IDs and duration, and every result receives type and size validation. The production registry currently contains only READ tools; Graph/App writes use dedicated workflows with durable effect ledgers instead of a process-local tool cache or an unkillable worker thread.
+
+Capability, MCP, ACP, and HTTP adapters execute at the same `RunCoordinator` effect boundary and share lease fencing, durable approval, deadline, cancellation, and `needs_attention` semantics. HTTP Agents additionally have a total wall-clock deadline, request/response/event bounds, a bounded SSE decoder, and disabled environment-proxy inheritance. Remote effects default to manual recovery; a manifest string cannot replace proof of remote idempotency or reconciliation. Protocol-specific schemas, capabilities, and process policies remain enforced by their adapters; they do not masquerade as Python tools or bypass the durable Run control plane.
+
+The reducer constructs `RunContext` from the durable Run and checkpoint and passes it explicitly into routing, planning, schema alignment, verification, and Converse providers. `ContextManager` deterministically bounds recent-message count, per-message characters, artifact characters, and total prompt size. Messages outside the window become a deterministic checkpointed summary verified by `context_summary_ref=sha256:…`. LLM audit rows record prompt/model/tool-schema hashes and the hashes of retrieved artifacts. Trimming is character-based, while provider-reported token and cost usage enters the Run's total budget. Primary/fast models are snapshotted at submission, so recovery does not drift when the UI changes model settings mid-run.
+
+## 5. Events, cancellation, and retention
+
+The Run event envelope includes `event_id`, `sequence`, `schema_version`, `stream_epoch`, Run/session/step/attempt/trace identifiers, time, duration, model usage, `redacted`, and payload. Payloads are redacted by sensitive key and size-bounded before insertion; terminal events are retained for 30 days by default. The frontend maintains a replay cursor with `(stream_epoch, sequence)` and deduplicates by `event_id`.
+
+A same-session `waiting_user` Run releases its worker slot but retains the FIFO lane. Resolution checks `run_version` to reject duplicate or stale responses. Cancelling a running Run cancels the scheduler task and propagates into tool/MCP/ACP child calls; an uncertain external effect is never reported as safely cancelled.
+
+`needs_attention` cannot be changed directly to cancelled. `POST /api/runs/{id}/reconcile` must durably record `confirmed_not_committed`, `compensated`, or `confirmed_committed` before manual review closes. Promise-compatible calls store `projection_type + call_id` in Run correlation and include the call ID in idempotency identity, so reconnect handling can reconstruct response correlation from durable Runs/events.
+
+Plan, schema, verification, and MCP/Agent permission all use Run interactions rather than global Futures. OpenCode ACP executes only exact argv admitted by strict policy; an out-of-policy request fails closed instead of holding a worker on process-local approval.
+
+## 6. Deterministic evaluation
+
+`RunStoreTraceAdapter` derives `EvaluationTrace` from real Runs, step attempts, canonical events, and LLM audit records, including unsafe trajectory signals from unknown effects, policy violations, and unapproved effectful tools. Scripted CI scenarios execute through production `RunCoordinator + DurableAgentWorkflow`; reported metrics cover outcome/trajectory, success rate, unsafe action rate, tool calls, tokens, cost, latency, and recovery rate. Real-model scenarios remain separate and require at least three repetitions.

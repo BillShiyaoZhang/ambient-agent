@@ -157,7 +157,12 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
             <h4>{isZh ? "输入" : "Input"}</h4><pre>{JSON.stringify(selected.input, null, 2)}</pre>
             <footer>
               {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button onClick={() => perform(() => runService.cancel(selected.id))}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
-              {["failed", "cancelled", "needs_attention"].includes(selected.status) ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button> : null}
+              {["failed", "cancelled"].includes(selected.status) && !["unknown", "committed"].includes(selected.error?.effect_state || "") ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button> : null}
+              {selected.status === "needs_attention" ? <>
+                <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"))}>{isZh ? "确认未执行" : "Not committed"}</button>
+                <button onClick={() => perform(() => runService.reconcile(selected.id, "compensated"))}>{isZh ? "确认已补偿" : "Compensated"}</button>
+                <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_committed"))}>{isZh ? "确认已执行" : "Committed"}</button>
+              </> : null}
             </footer>
           </section>
         )}

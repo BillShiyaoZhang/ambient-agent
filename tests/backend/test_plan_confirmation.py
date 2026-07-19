@@ -1,10 +1,13 @@
-from unittest.mock import AsyncMock
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app, app_manager, get_db
 from backend.models import ChatSession
+from backend.opencode_service import OpenCodeStagedResult
+from backend.schema_diff import VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -48,15 +51,40 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
 
     monkeypatch.setattr("backend.plan_generation.PlanGenerationService.generate_plan", mock_generate_plan)
 
-    # 4. Mock ACP OpenCode agent call
-    mock_run_opencode = AsyncMock(return_value="OpenCode successfully ran")
+    # 4. Mock ACP OpenCode agent call while preserving the production staging contract.
+    async def mock_run_opencode(
+        app_id,
+        instruction,
+        language="zh",
+        on_update=None,
+        promote=True,
+    ):
+        assert instruction
+        assert language == "zh"
+        assert on_update is not None
+        assert promote is False
+        apps_dir = Path(app_manager.apps_dir)
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = apps_dir / f".{app_id}.staging-{uuid4().hex}"
+        staging_dir.mkdir()
+        (staging_dir / "controller.js").write_text(
+            "export default function App() { return ambient.html`<div>visual card</div>`; }",
+            encoding="utf-8",
+        )
+        return OpenCodeStagedResult(
+            output="OpenCode successfully ran",
+            app_id=app_id,
+            staging_dir=staging_dir,
+            live_dir=apps_dir / app_id,
+        )
+
     monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
 
     # Mock Schema Verification to pass
-    async def mock_verify(*args, **kwargs):
-        return "✅ Schema Verification PASSED"
+    async def mock_diff(*args, **kwargs):
+        return VerificationDiff()
 
-    monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.verify", mock_verify)
+    monkeypatch.setattr("backend.schema_verification.SchemaVerificationService.diff", mock_diff)
 
     def override_get_db():
         yield test_session
@@ -156,17 +184,28 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch):
             for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"]
         )
 
-        # Expect final reply and execution logs
-        reply_msg = websocket.receive_json()
-        assert reply_msg["type"] == "reply"
+        # Promotion emits both a durable App artifact and the final reply. Their
+        # projection order is not part of the public WebSocket contract.
+        tail = []
+        for _ in range(4):
+            event = websocket.receive_json()
+            if event.get("type") == "session_status_update" and event.get("status") == "idle":
+                status_idle = event
+                break
+            tail.append(event)
+        else:  # pragma: no cover - keeps a hung/malformed projection failure explicit
+            pytest.fail("workflow did not reach idle after promotion")
+
+        reply_msg = next(event for event in tail if event.get("type") == "reply")
         assert any(x in reply_msg["message"]["content"] for x in ["OpenCode Execution Log", "OpenCode 执行日志"])
         assert any(
             x in reply_msg["message"]["content"]
             for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"]
         )
+        widget_msg = next(event for event in tail if event.get("type") == "widget")
+        assert widget_msg["widget"]["id"] == "test-app"
 
         # Expect session status idle update
-        status_idle = websocket.receive_json()
         assert status_idle["type"] == "session_status_update"
         assert status_idle["status"] == "idle"
 

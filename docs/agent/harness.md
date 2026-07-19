@@ -1,195 +1,141 @@
-# Agent Harness 架构与执行流程
+# Agent Harness：单一持久控制平面
 
-本文档介绍了 `backend/agent/` 目录下重构后的 Agent Harness 框架的设计与执行序列。
+Chat、Capability、MCP 和远端 Agent action 都由 `RunStore + RunCoordinator` 管理生命周期。WebSocket 只负责持久化输入、提交 Run、resolve interaction 和把持久事件投影给客户端；它不再创建或持有 agent 执行 task。
 
-## 1. 组件关系图
-
-Agent Harness 实现了执行流、意图路由、上下文组装以及大模型通信之间的解耦。以下是各组件之间的关系：
+## 1. 组件边界
 
 ```mermaid
-graph TB
-    ChatSession -->|"contains"| ChatMessage
-    ContextManager -->|"references"| AppManager
-    ContextManager -->|"queries database"| ChatMessage
-    AgentOrchestrator -->|"constructs message history"| ContextManager
-    AgentOrchestrator -->|"references"| AppManager
-    AgentOrchestrator -->|"references"| WorkspaceStorage
-    AgentOrchestrator -->|"extracts XML widgets"| AgentParser
-    AgentOrchestrator -->|"loads system prompt"| PromptManager
-    AgentOrchestrator -->|"classifies user intent (LLM #1) & refines sub_intents (LLM #2)"| IntentRouter
-    AgentOrchestrator -->|"widget build pipeline"| WidgetDAG
-    AgentOrchestrator -->|"dispatches to coding/mutation"| PlanExecutor
-    AgentOrchestrator -->|"structured diff (Direction A)"| SchemaVerificationService
-    IntentRouter -->|"returns structured plan"| IntentPlan
-    IntentRouter -->|"consumed"| RouterContext
-    IntentPlan -->|"0..* sub_intents"| SubIntent
-    SubIntent -->|"kind enum"| SubIntentKind
-    IntentPlan -->|"kind enum"| IntentKind
-    RouterContext -->|"embeds snapshot"| GraphSnapshot
-    CodingPlanExecutor -->|"inherits"| PlanExecutor
-    MutationPlanExecutor -->|"inherits"| PlanExecutor
-    MutationPlanExecutor -->|"records rollback tickets"| MutationTicketManager
-    MutationTicketManager -->|"consumed in graph mutation paths"| AgentOrchestrator
-    WidgetDAG -->|"0..* nodes"| TaskNode
-    TaskNode -->|"runs produce results"| TaskResult
-    SchemaVerificationService -->|"returns"| VerificationDiff
-    LLMService -->|"writes prompt audit logs"| LLMAuditLog
-    LLMConfigStore -->|"resolves provider profiles"| ModelRunContext
-    AgentOrchestrator -->|"uses primary/fast snapshots"| ModelRunContext
-    ModelRunContext -->|"injects selected model"| OpenCodeACP
-    PlanExecutor -->|"returns"| PlanPhaseResult
+flowchart TB
+    Client[客户端命令 / 审批 / 事件订阅] --> Main[main.py: websocket_chat]
+    Main -->|submit internal_agent| Coordinator[run_service.py: RunCoordinator]
+    Main -->|resolve interaction| Store[run_service.py: RunStore]
+    Store -->|versioned events| Main
+
+    Coordinator -->|claim + fenced step| Workflow[durable_workflow.py: DurableAgentWorkflow]
+    Workflow --> State[run_service.py: AgentRunState]
+    Workflow --> Context[run_context.py: RunContext]
+    Workflow --> Outcome[run_service.py: StepOutcome]
+    Outcome --> Commit[run_service.py: commit_step]
+    Commit --> Store
+
+    Workflow --> Domain[harness.py: AgentOrchestrator]
+    Workflow --> Gateway[tools.py: ToolGateway]
+    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
 ```
 
-## 2. 消息执行逻辑流程图
+职责划分：
 
-下面的流程图展示了 `AgentOrchestrator.handle_message()` 在处理来自 WebSocket 的新消息时的详细执行顺序：
+- `RunStore`：Run state、step attempt、checkpoint、interaction 和 versioned event 的事实源。
+- `RunCoordinator`：排队、session FIFO lane、lease/heartbeat、orphan recovery、取消和 adapter 分派。
+- `DurableAgentWorkflow`：版本 2 的 chat reducer；每次调用只推进一个 phase，并返回 typed `StepOutcome`。
+- `RunContext`：每一步显式传递 run/session/step/attempt/trace 与冻结模型标识；LLM 和 Tool audit 不从占位 helper 猜测这些值。
+- `AgentOrchestrator`：保留部分路由、Converse 和格式化 domain helper；不再拥有 `/ws/chat` 的运行生命周期。
+- `ToolGateway`、MCP client 和 OpenCode ACP：分别强制本地模型工具、外部 JSON-RPC 和代码生成边界。
+
+## 2. Reducer 协议
 
 ```mermaid
-graph TD
-    User([用户 WebSocket 消息]) --> WS[main.py: websocket_chat]
-    WS -->|实例化| Orch[harness.py: AgentOrchestrator]
-    WS -->|调用 handle_message| Orch
+sequenceDiagram
+    participant WS as WebSocket/API
+    participant S as RunStore
+    participant C as RunCoordinator
+    participant W as DurableAgentWorkflow
 
-    Orch -->|1. 收集上下文| CtxBuild[router_context.py: RouterContext.build]
-    CtxBuild -->|app_manifests + GraphSnapshot| Router
-    Orch -->|2. 路由 LLM#1| Router[router.py: IntentRouter.route]
-    Router -->|function-calling| LLMR[LLM classify_intent]
-    LLMR -->|IntentPlan| Plan
-
-    Plan -->|kind=MULTI_INTENT / PLAN_AND_ACT| Refiner[router.py: refine_sub_intents LLM#2]
-    Refiner -->|refined sub_intents| PlanRefined
-
-    PlanRefined -->|widget_create / widget_modify| BuildFlow[widget DAG 流水线]
-    PlanRefined -->|graph_mutation| MutFlow[graph_mutation 直路]
-    PlanRefined -->|graph_query| QueryFlow[graph_query 直路]
-    PlanRefined -->|plan_and_act| PlanFlow[plan_and_act 通用流]
-    PlanRefined -->|multi_intent| MultiFlow[multi_intent 按 sub_intent 分发]
-    PlanRefined -->|clarify| ClarifyFlow[澄清回弹给用户]
-    PlanRefined -->|converse| ConvFlow[常规对话流]
-
-    %% Widget DAG (Direction B)
-    subgraph BuildFlow [Widget DAG: 6 个任务节点]
-        B1[plan 生成计划]
-        B2[align_schemas 数据库 Schema 对齐]
-        B3[regen_code OpenCode 生成代码]
-        B4[verify SchemaDiff 结构化校验]
-        B5[decode_user_intent 解读用户反馈]
-        B6[apply_user_actions 应用扩展/修复]
-        B1 --> B2 --> B3 --> B4
-        B4 -.rework_code/schema/plan.-> B5
-        B5 --> B6
-        B6 -.invalidates regen_code + verify.-> B3
+    WS->>S: persist ChatMessage
+    WS->>C: submit_internal_agent(state v2)
+    C->>S: claim + lease_epoch
+    C->>S: begin_step_attempt(phase, epoch)
+    C->>W: reducer(run, AgentRunState)
+    W-->>C: Continue / Wait / Succeeded / Failed / Cancelled
+    C->>S: commit_step(state, outcome, epoch)
+    Note over S: step + checkpoint + interaction + status + events atomically committed
+    alt Wait
+        WS->>S: resolve(interaction, expected_run_version)
+        S->>S: persist response + queue Run
+    else Continue
+        S->>S: queue next phase
     end
-
-    %% graph_mutation 流
-    subgraph MutFlow [graph mutation 直路]
-        M1[MutationTicketManager.record]
-        M2[subscription_manager.broadcast_updates]
-        M1 --> M2
-    end
-
-    %% graph_query 流
-    subgraph QueryFlow [graph query 直路]
-        Q1[execute_graph_query]
-        Q2[渲染文本回复]
-        Q1 --> Q2
-    end
-
-    %% plan_and_act 流
-    subgraph PlanFlow [plan_and_act 通用流]
-        P1[MutationPlanExecutor.run_plan]
-        P2[等待 plan_approval_request]
-        P3[批量执行 actions]
-        P1 --> P2 --> P3
-    end
-
-    %% multi_intent 流
-    subgraph MultiFlow [multi_intent 按 sub_intent 顺序执行]
-        MI1[对每个 sub_intent 选择 SubExecutor]
-        MI2[graph_mutation → _handle_graph_mutation]
-        MI3[graph_query → _handle_graph_query]
-        MI4[widget_* → _handle_widget_build_sub]
-        MI1 --> MI2
-        MI1 --> MI3
-        MI1 --> MI4
-    end
-
-    Orch -->|返回 Tuple: agent_msg, widget_to_send| WS
-    WS -->|最终应答消息| User
-    WS -->|若有 widget 数据| User
-    WS -->|mutation_preview / rollback 响应| User
 ```
 
-## 3. 关键变更（与之前版本对比）
+`AgentRunState` 保存 workflow type/version、session、phase、attempt、intent、模型快照、budget、artifact refs、workflow data、pending interaction、summary ref 和最后错误。所有字段必须可 JSON 序列化。
 
-### Direction A：结构化 Schema Diff
+Outcome 语义：
 
-`backend/schema_verification.py` 的 `verify()` 旧接口现在通过 `diff()` 提供
-**结构化输出**：`VerificationDiff` 对象，列出
-`unknown_props[]` / `type_mismatches[]` / `unknown_types[]`。
+- `Continue(next_phase)` 保存 checkpoint 后重新入队；
+- `Wait(interaction definition)` 在同一 transaction 中创建 pending interaction 并释放 worker；
+- `Succeeded` 保存 result 与 artifacts；
+- `Failed` 根据 `retryable` 重排队或失败；未知副作用进入 `needs_attention`；
+- `Cancelled` 只有确认没有未知副作用时才进入 `cancelled`。
 
-前端可以基于 `VerificationDiff.to_per_field_payload()` 渲染 per-field
-checkbox 列表，让用户逐字段确认是否要扩展 Schema。
+所有 commit 必须匹配 `lease_owner + lease_epoch`。取消、恢复或重新领取后，旧 callback 会被 fencing 拒绝。
 
-### Direction B：Widget DAG 运行时
+## 3. Version 2 workflow
 
-替换了 `while current_state != "done"` 状态机，引入 `WidgetDAG`（在
-`backend/agent/dag.py`），6 个任务节点：
+### Widget create / modify
 
-| 节点                 | 作用                                                      |
-| -------------------- | --------------------------------------------------------- |
-| `plan`               | 调 `PlanGenerationService` 生成计划，问用户审批           |
-| `align_schemas`      | 调 `SchemaAlignmentService` 对齐数据库 schema，问用户审批 |
-| `regen_code`         | 调 `run_opencode_agent_acp` 生成代码                      |
-| `verify`             | 调 `SchemaVerificationService.diff` 结构化校验            |
-| `decode_user_intent` | 解读用户 rework 反馈                                      |
-| `apply_user_actions` | 应用 schema 扩展 / 代码修复                               |
+```mermaid
+stateDiagram-v2
+    [*] --> route
+    route --> plan: widget intent
+    plan --> wait_plan: proposal persisted
+    wait_plan --> align_schema: approve
+    wait_plan --> plan: refine
+    wait_plan --> failed: deny
+    align_schema --> wait_schema: proposal persisted
+    wait_schema --> stage_code: approve
+    wait_schema --> align_schema: refine
+    wait_schema --> plan: rework plan
+    wait_schema --> failed: deny
+    stage_code --> verify: retained staging artifact
+    verify --> promote: clean
+    verify --> wait_override: findings
+    wait_override --> promote: explicit approve
+    wait_override --> stage_code: rework code
+    wait_override --> align_schema: rework schema
+    wait_override --> plan: rework plan
+    promote --> done: atomic live-App swap
+```
 
-节点的 `invalidates` 字段定义了"本节点重跑时哪些下游节点也要重 dirty"，
-所以下游节点自动跟随。
+OpenCode 使用 `promote=False` 生成 `OpenCodeStagedResult`。`verify` 只读 staging；`promote` 再次验证 artifact、计算 hash、持久 promotion marker、提交已批准的 Schema，并原子替换 live App。recovery 先检查 marker，不重复发布；失败、返工和取消会丢弃 staging，旧 live App 保持不变。
 
-### Direction D：Multi-Intent Router
+### Graph mutation
 
-`IntentKind` 新增 `MULTI_INTENT`；`SubIntent` 数据类 + `SubIntentKind` 枚举
-定义每条 sub-action。两层 LLM：
+```mermaid
+stateDiagram-v2
+    [*] --> graph_preflight
+    graph_preflight --> wait_graph_approval: normalized actions + preview
+    wait_graph_approval --> graph_commit: approve
+    wait_graph_approval --> failed: deny
+    graph_commit --> done: one SQLite transaction
+```
 
-1. `IntentRouter.route()` 用 `classify_intent` 函数 schema 调用 LLM #1
-   获取顶层 `kind` + `sub_intents[]`。
-2. 当 `kind ∈ {MULTI_INTENT, PLAN_AND_ACT}`，harness 调用
-   `IntentRouter.refine_sub_intents()`（LLM #2），用 `refine_sub_intent.md`
-   把 `sub_intents` 细化成具体 actions / extend_schema_props。
+preflight 不写数据库。commit 使用 `apply_actions_atomic()`，同时生成 rollback ticket/完整 reverse actions，并以 `run_id + phase` 写入 Graph effect ledger；worker 在 Graph transaction 提交后、Run checkpoint 前崩溃时，重试返回原结果而不会重复写。`/api/graph/mutate` 和 WebSocket rollback 也走这个 reducer，显式命令作为 durable approval interaction 记录。Multi-intent 先整体 preflight，再由 `multi_dispatch` 顺序作为 saga 推进；当前 phase 可重试时保留此前 effect 与 compensation，只有确定终止时才逆序补偿并把 cursor/results 回退到 saga 起点，避免报告已被撤销的结果。补偿不完整或效果未知时进入 `needs_attention`。
 
-每次 `handle_message()` 启动时固定会话主模型和快速模型快照。顶层意图路由使用快速模型；
-refine、计划、Schema、校验和最终对话使用主模型。会话在运行中切换模型只影响下一次请求。
-Widget 代码生成启动 OpenCode ACP 子进程时，会用进程级 `OPENCODE_CONFIG_CONTENT` 注入同一主模型
-及其临时凭据/端点；该配置不写入项目文件，也不会改变并行会话的模型。
+### Converse 与只读查询
 
-`AgentOrchestrator._handle_multi_intent` 按 `sub_intents` 顺序分发给
-各 SubExecutor。
+- `converse` 使用 bounded tool loop：限制模型迭代、工具调用数、总 wall clock、单次 LLM timeout、assistant 输出大小及相同调用重复次数。
+- 当前 Converse 只暴露 `READ` effect 工具和 `workspace:read` scope。
+- `graph_query` 直接执行只读查询并产生最终 projection；`clarify` 持久化澄清回复后结束。
 
-## 4. 目录结构说明
+## 4. Tool 与 Context 边界
 
-- [backend/agent/__init__.py](../../backend/agent/__init__.py): Python 包初始化文件。
-- [backend/agent/harness.py](../../backend/agent/harness.py): 实现核心编排器 `AgentOrchestrator`，负责串联整体生命周期。
-- [backend/agent/dag.py](../../backend/agent/dag.py): 轻量级 runtime DAG（plan/align_schemas/code/verify/decode/apply），由 harness 在 widget 路径上驱动。
-- [backend/agent/router.py](../../backend/agent/router.py): 实现意图路由 `IntentRouter`，两层 LLM（`route` + `refine_sub_intents`）。
-- [backend/agent/intent_plan.py](../../backend/agent/intent_plan.py): `IntentPlan` 与 `IntentKind` 枚举，新增 `SubIntent` + `SubIntentKind`；含 function-calling schema。
-- [backend/agent/plan_executor.py](../../backend/agent/plan_executor.py): 抽象 `PlanExecutor` 与 `CodingPlanExecutor` / `MutationPlanExecutor` 实现，对应 widget / graph mutation 流水线。
-- [backend/schema_diff.py](../../backend/schema_diff.py): 结构化 SchemaDiff 数据类 + JS 提取器（regex-first，括号配对）。
-- [backend/schema_verification.py](../../backend/schema_verification.py): 旧 `verify()` 接口保留（返回 markdown 文本），新增 `diff()` 返回结构化 `VerificationDiff`。
-- [backend/agent/providers.py](../../backend/agent/providers.py): 面向对象封装的大模型服务客户端。
-- [backend/agent/tools.py](../../backend/agent/tools.py): Hermes 风格的工具注册表。
-- [backend/router_context.py](../../backend/router_context.py): 收集路由所需的轻量级上下文。
-- [backend/mutation_tickets.py](../../backend/mutation_tickets.py): graph_mutation 撤销票。
+`ToolRegistry` 是注册 facade，`ToolGateway` 是模型请求本地工具的执行 enforcement point。`ToolSpec` 声明 input/output schema、effect、scope、approval、timeout、幂等要求、输出上限和敏感字段。Gateway 拒绝未知工具/参数、scope 越界、缺失审批或缺失幂等键；相同幂等键携带不同参数也会被拒绝。每次调用产生带 run/step/attempt/trace 和 duration 的 started/succeeded/failed/cancelled 事件，所有结果都做类型和大小检查。生产 registry 目前只注册 READ 工具；Graph/App 等写操作由带持久 effect ledger 的专用 workflow 执行，不依赖进程内 tool cache 或不可终止的工作线程。
 
-## 5. 测试覆盖
+Capability/MCP/ACP/HTTP adapter 由同一个 `RunCoordinator` effect boundary 执行，复用 lease fencing、持久审批、deadline、取消和 `needs_attention` 语义；协议专属的 schema/capability/进程 policy 仍由各 adapter 校验。HTTP Agent 另有总 wall-clock deadline、request/response/event 上限、有界 SSE decoder，并关闭环境代理继承。远端 effect 默认 manual recovery；manifest 的字符串声明不能替代远端幂等或 reconciliation 证明。它们不伪装成 Python tool，也不会绕过 durable Run 控制面。
 
-| 模块                      | 测试文件                                                | 测试数 |
-| ------------------------- | ------------------------------------------------------- | ------ |
-| Schema Diff               | `tests/backend/test_schema_diff.py`                     | 13     |
-| Widget DAG                | `tests/backend/test_dag.py`                             | 5      |
-| IntentPlan / SubIntent    | `tests/backend/test_intent_plan.py`                     | 10     |
-| Router（含 multi_intent） | `tests/backend/test_router.py` + `test_multi_intent.py` | 17     |
-| Harness / rework loops    | `tests/backend/test_rework_loops.py` 等                 | 12     |
+`RunContext` 由 reducer 从当前持久 Run 与 checkpoint 构造，并显式传给路由、计划、Schema、校验和 Converse provider。`ContextManager` 按稳定顺序限制近期消息数、单消息字符数、artifact 字符数和总 prompt；窗口外消息形成 checkpoint 内的确定性摘要，并用 `context_summary_ref=sha256:…` 校验恢复内容。LLM audit 记录 prompt/model/tool-schema hash 和实际读取的 artifact hash。当前裁剪是字符预算，provider 返回的 token/cost 则进入 Run 总预算。Run 的 primary/fast 模型在提交时快照，恢复后不会因 UI 中途切换模型而漂移。
 
-总计 **57 个核心单元/集成测试全部通过**（全量后端测试集共计 200+ 个测试全部通过）。
+## 5. 事件、取消与保留期
+
+Run event envelope 包含 `event_id`、`sequence`、`schema_version`、`stream_epoch`、Run/session/step/attempt/trace 标识、时间、duration、model usage、`redacted` 和 payload。payload 入库前按敏感键脱敏并做尺寸上限；终态 event 默认保留 30 天。前端以 `(stream_epoch, sequence)` 维护 replay cursor，以 `event_id` 去重。
+
+同一 session 的 `waiting_user` Run 释放 worker slot但保留 FIFO lane。resolve 使用 `run_version` 拒绝重复或迟到响应。Running 取消会取消 scheduler task，并向 tool/MCP/ACP 子调用传播；未知外部副作用不会被标成安全取消。
+
+`needs_attention` 不能直接改成 cancelled；`POST /api/runs/{id}/reconcile` 必须持久记录 `confirmed_not_committed`、`compensated` 或 `confirmed_committed` 后才能关闭人工审查。Promise 兼容调用把 `projection_type + call_id` 放入 Run correlation，并把 call ID 纳入 idempotency identity，重连后可由 durable Run/event 重建响应关联。
+
+Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction，不使用全局 Future。OpenCode ACP 只执行 strict policy 中的精确 argv；policy 外请求直接拒绝，不挂起 worker 等待进程内审批。
+
+## 6. 确定性评测
+
+`RunStoreTraceAdapter` 从真实 Run、step attempt、canonical event 和 LLM audit 生成 `EvaluationTrace`，并从未知 effect、policy violation 和未批准 effectful tool 等持久信号推导 unsafe trajectory。CI 的 scripted fake 场景走生产 `RunCoordinator + DurableAgentWorkflow`；指标同时包含 outcome/trajectory、成功率、unsafe action rate、tool calls、tokens、cost、latency 与恢复率。真实模型场景仍要求至少三次重复，且与确定性门禁分开运行。

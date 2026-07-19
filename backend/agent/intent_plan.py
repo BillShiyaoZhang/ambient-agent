@@ -6,8 +6,8 @@ from typing import Any
 class IntentKind(StrEnum):
     """Top-level routing decisions produced by IntentRouter.route (LLM #1).
 
-    Sub-intents within a multi-intent plan are dispatched individually to
-    SubExecutors (see ``backend/agent/sub_executors.py``).
+    Sub-intents within a multi-intent plan are preflighted and dispatched by
+    the versioned durable reducer.
     """
 
     WIDGET_CREATE = "widget_create"
@@ -36,9 +36,8 @@ class SubIntentKind(StrEnum):
 class SubIntent:
     """A single, focused action within a multi-intent plan.
 
-    Each SubIntent is executed by a matching SubExecutor (see
-    ``backend.agent.sub_executors``). Sub-intents are sequential: the
-    outputs of one become part of the context for the next.
+    Sub-intents are sequential saga steps: the durable reducer preflights the
+    complete list before the first effect, then checkpoints after each step.
     """
 
     kind: SubIntentKind
@@ -74,8 +73,8 @@ class SubIntent:
         kind_value = data.get("kind", "graph_mutation")
         try:
             kind = SubIntentKind(kind_value)
-        except ValueError:
-            kind = SubIntentKind.GRAPH_MUTATION
+        except ValueError as exc:
+            raise ValueError(f"Unknown sub-intent kind: {kind_value!r}") from exc
         return cls(
             kind=kind,
             app_id=data.get("app_id"),
@@ -153,7 +152,7 @@ class IntentPlan:
         try:
             kind = IntentKind(kind_value)
         except ValueError:
-            kind = IntentKind.CONVERSE
+            kind = IntentKind.CLARIFY
         subs_raw = data.get("sub_intents") or []
         subs = [SubIntent.from_dict(s) for s in subs_raw if isinstance(s, dict)]
         return cls(
@@ -165,7 +164,10 @@ class IntentPlan:
             actions=list(data.get("actions") or []),
             query=data.get("query"),
             sub_intents=subs,
-            clarification_message=str(data.get("clarification_message") or ""),
+            clarification_message=str(
+                data.get("clarification_message")
+                or ("The requested action could not be classified safely." if kind == IntentKind.CLARIFY else "")
+            ),
             clarification_options=list(data.get("clarification_options") or []),
             deprecated=bool(data.get("deprecated", False)),
         )

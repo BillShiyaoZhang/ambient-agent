@@ -18,7 +18,7 @@ import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
 import { mergeIncomingMessage } from "./lib/messages";
 import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
-import type { AmbientRun } from "./services/runs";
+import { runService, type AmbientRun } from "./services/runs";
 import {
   createProvider,
   deleteProvider,
@@ -485,9 +485,7 @@ function App() {
 
     loadSessionHistory();
 
-    // Connect WebSocket
-    const wsUrl = `ws://${window.location.hostname}:8000/ws/chat`;
-    wsService.connect(wsUrl, activeSessionId, (data) => {
+    const handleProjection = (data: any) => {
       if (data.type === "ack" || data.type === "reply") {
         if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
           setUnreadCount((count) => count + 1);
@@ -602,9 +600,34 @@ function App() {
           }
         });
       }
+    };
+
+    // /ws/chat is now the command/control socket. Durable reducer output is
+    // projected from the canonical replayable /ws/runs stream below.
+    const wsUrl = `ws://${window.location.hostname}:8000/ws/chat?projection=commands_only`;
+    wsService.connect(wsUrl, activeSessionId, handleProjection);
+    const projectedTypes = new Set([
+      "reply",
+      "widget",
+      "permission_request",
+      "schema_approval_request",
+      "plan_approval_request",
+      "verification_approval_request",
+      "mutation_preview",
+      "mutation_committed",
+    ]);
+    const unsubscribeRunEvents = runService.subscribe((event) => {
+      if (event.session_id !== activeSessionId) return;
+      const payload = event.payload;
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
+      const type = (payload as Record<string, unknown>).type;
+      if (typeof type === "string" && projectedTypes.has(type)) {
+        handleProjection(payload);
+      }
     });
 
     return () => {
+      unsubscribeRunEvents();
       wsService.disconnect();
     };
   }, [activeSessionId, language, refreshLLMConfiguration, saveCanvasConfig]);

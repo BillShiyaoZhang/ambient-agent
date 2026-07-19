@@ -337,10 +337,16 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           };
         },
         mutate: async (actions: any[]) => {
+          const invocationId = typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
           const res = await fetch(`${API_BASE}/api/graph/mutate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ actions })
+            body: JSON.stringify({
+              actions,
+              idempotency_key: `widget:${widget.id}:${invocationId}`
+            })
           });
           if (!res.ok) throw new Error("Failed to mutate graph");
           return res.json();

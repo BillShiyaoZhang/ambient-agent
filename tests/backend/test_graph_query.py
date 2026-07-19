@@ -67,6 +67,7 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
 
     # Create nodes first
     payload = {
+        "idempotency_key": "graph-endpoint-create-v1",
         "actions": [
             {
                 "action": "create_node",
@@ -94,6 +95,16 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     assert response.status_code == 200
     res_data = response.json()
     assert res_data["status"] == "success"
+    durable_run = main.run_store.get_run(res_data["run_id"], include_events=True)
+    assert durable_run["status"] == "succeeded"
+    assert durable_run["state"]["phase"] == "done"
+    assert any(event["type"] == "interaction_requested" for event in durable_run["events"])
+    assert any(event["type"] == "interaction_resolved" for event in durable_run["events"])
+
+    duplicate = client.post("/api/graph/mutate", json=payload).json()
+    assert duplicate["status"] == "success"
+    assert duplicate["run_id"] == res_data["run_id"]
+    assert duplicate["ticket_id"] == res_data["ticket_id"]
 
     # Query database to check if nodes and edge exist
     db = main.graph_db

@@ -1,0 +1,109 @@
+{
+  "stream_epoch": "epoch-golden-v1",
+  "events": [
+    {
+      "sequence": 1,
+      "event_id": "event-0001",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": null,
+      "attempt": null,
+      "trace_id": "trace-golden",
+      "type": "run_created",
+      "payload": {"status": "queued"},
+      "created_at": "2026-07-19T00:00:00Z"
+    },
+    {
+      "sequence": 2,
+      "event_id": "event-0002",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": null,
+      "attempt": null,
+      "trace_id": "trace-golden",
+      "type": "status_changed",
+      "payload": {"from": "queued", "to": "running", "version": 2, "lease_epoch": 1},
+      "created_at": "2026-07-19T00:00:01Z"
+    },
+    {
+      "sequence": 3,
+      "event_id": "event-0003",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": "route",
+      "attempt": 1,
+      "trace_id": "trace-golden",
+      "type": "step_started",
+      "payload": {"step_key": "route", "attempt": 1, "lease_epoch": 1},
+      "created_at": "2026-07-19T00:00:02Z"
+    },
+    {
+      "sequence": 4,
+      "event_id": "event-0004",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": "route",
+      "attempt": 1,
+      "trace_id": "trace-golden",
+      "type": "step_committed",
+      "payload": {
+        "step_key": "route",
+        "attempt": 1,
+        "lease_epoch": 1,
+        "run_version": 3,
+        "outcome": {"kind": "continue", "next_phase": "plan"}
+      },
+      "created_at": "2026-07-19T00:00:03Z"
+    },
+    {
+      "sequence": 5,
+      "event_id": "event-0005",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": "plan",
+      "attempt": 1,
+      "trace_id": "trace-golden",
+      "type": "interaction_requested",
+      "payload": {"interaction_id": "interaction-plan", "type": "plan_confirmation"},
+      "created_at": "2026-07-19T00:00:04Z"
+    },
+    {
+      "sequence": 6,
+      "event_id": "event-0006",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": "plan",
+      "attempt": 1,
+      "trace_id": "trace-golden",
+      "type": "interaction_resolved",
+      "payload": {"interaction_id": "interaction-plan", "run_version": 5, "status": "queued"},
+      "created_at": "2026-07-19T00:00:05Z"
+    },
+    {
+      "sequence": 7,
+      "event_id": "event-0007",
+      "schema_version": 1,
+      "stream_epoch": "epoch-golden-v1",
+      "run_id": "run-golden",
+      "session_id": "session-golden",
+      "step_id": null,
+      "attempt": null,
+      "trace_id": "trace-golden",
+      "type": "future_projection_hint",
+      "payload": {"opaque": true, "projection_version": 2},
+      "created_at": "2026-07-19T00:00:06Z"
+    }
+  ]
+}

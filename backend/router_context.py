@@ -66,6 +66,7 @@ class RouterContext:
     app_manifests: list[dict[str, Any]] = field(default_factory=list)
     graph_snapshot: GraphSnapshot = field(default_factory=GraphSnapshot)
     session_recent: list[dict[str, Any]] = field(default_factory=list)
+    session_summary: str | None = None
 
     @classmethod
     def build(
@@ -75,6 +76,7 @@ class RouterContext:
         session_messages: list[dict[str, Any]] | None = None,
         recent_messages_count: int = 5,
         recent_nodes_per_type: int = 5,
+        session_summary: str | None = None,
     ) -> "RouterContext":
         """Construct a RouterContext from live workspace state."""
         apps = app_manager.list_apps() or []
@@ -82,7 +84,12 @@ class RouterContext:
         msgs = session_messages or []
         # Keep last N messages (already ordered chronologically by caller)
         recent = list(msgs[-recent_messages_count:]) if recent_messages_count > 0 else []
-        return cls(app_manifests=apps, graph_snapshot=snap, session_recent=recent)
+        return cls(
+            app_manifests=apps,
+            graph_snapshot=snap,
+            session_recent=recent,
+            session_summary=session_summary,
+        )
 
     def render_for_prompt(
         self,
@@ -157,9 +164,11 @@ class RouterContext:
             else:
                 lines.append("- (none)")
 
-        if "history" in sections and self.session_recent:
+        if "history" in sections and (self.session_summary or self.session_recent):
             lines.append("")
             lines.append("## Recent Conversation")
+            if self.session_summary:
+                lines.append(f"- [durable summary] {self.session_summary[:2000]}")
             for m in self.session_recent:
                 role = m.get("role", "?")
                 content = (m.get("content") or "")[:200]

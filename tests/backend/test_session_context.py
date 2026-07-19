@@ -1,7 +1,7 @@
 import pytest
 
 from backend.app_manager import AppManager
-from backend.context_manager import ContextManager
+from backend.context_manager import ContextBudget, ContextManager
 from backend.models import ChatMessage, ChatSession
 from backend.workspace_storage import WorkspaceStorage
 
@@ -107,3 +107,29 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     system_content = "".join([m["content"] for m in system_msgs])
     assert "[Active App: weather-widget]" in system_content
     assert "console.log('weather');" in system_content
+
+
+def test_context_manager_builds_stable_summary_for_omitted_messages(db_session, temp_apps_dir):
+    db_session.add(ChatSession(id="session-summary", title="Summary Test"))
+    for index in range(6):
+        db_session.add(
+            ChatMessage(
+                session_id="session-summary",
+                role="user" if index % 2 == 0 else "agent",
+                content=f"historical message {index}",
+            )
+        )
+    db_session.commit()
+
+    manager = ContextManager(db_session=db_session, app_manager=AppManager())
+    limits = ContextBudget(max_messages=3, max_total_chars=4_000, max_artifact_chars=0)
+
+    first = manager.build_persistent_summary("session-summary", budget=limits)
+    second = manager.build_persistent_summary("session-summary", budget=limits)
+
+    assert first == second
+    assert first is not None
+    assert "3 earlier messages" in first
+    assert "historical message 0" in first
+    assert "historical message 2" in first
+    assert "historical message 3" not in first

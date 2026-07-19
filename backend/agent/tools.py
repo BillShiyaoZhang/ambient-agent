@@ -1,195 +1,464 @@
+from __future__ import annotations
+
+import asyncio
 import inspect
+import json
 import logging
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
+
+from pydantic import TypeAdapter, ValidationError
 
 logger = logging.getLogger("agent.tools")
 
 
-class ToolRegistry:
-    """
-    Hermes-inspired dynamic tool registration and execution manager.
-    Parses function signatures and docstrings to build OpenAPI function schemas.
-    """
+class ToolEffect(StrEnum):
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    EXECUTE = "execute"
+    NETWORK = "network"
 
-    def __init__(self):
-        self.tools: dict[str, Callable] = {}
-        self.schemas: dict[str, dict[str, Any]] = {}
 
-    def register(self, func: Callable) -> Callable:
-        name = func.__name__
-        self.tools[name] = func
-        self.schemas[name] = self._generate_schema(func)
-        logger.info(f"Registered tool: {name}")
-        return func
+class ApprovalPolicy(StrEnum):
+    NEVER = "never"
+    ALWAYS = "always"
 
-    def _generate_schema(self, func: Callable) -> dict[str, Any]:
-        name = func.__name__
-        sig = inspect.signature(func)
-        doc = func.__doc__ or ""
 
-        doc_lines = [line.strip() for line in doc.split("\n") if line.strip()]
-        description = doc_lines[0] if doc_lines else f"Execute tool function {func.__name__}"
+class ToolError(RuntimeError):
+    """Base error for failures enforced by the tool boundary."""
 
-        properties = {}
-        required = []
 
-        for param_name, param in sig.parameters.items():
-            # Filter out context parameters that should be injected by the harness
-            if param_name in ("self", "db_session", "session_id"):
-                continue
+class ToolPolicyError(ToolError):
+    pass
 
-            p_type = "string"
-            if param.annotation == int:
-                p_type = "integer"
-            elif param.annotation == float:
-                p_type = "number"
-            elif param.annotation == bool:
-                p_type = "boolean"
-            elif param.annotation in (list, list, list[str], list[Any]):
-                p_type = "array"
-            elif param.annotation in (dict, dict, dict[str, Any]):
-                p_type = "object"
 
-            # Extract description from subsequent docstring lines if match parameter name
-            param_desc = f"Parameter {param_name}"
-            for line in doc_lines[1:]:
-                if line.startswith(f":param {param_name}:") or line.startswith(f"{param_name}:"):
-                    parts = line.split(":", 2)
-                    if len(parts) >= 2:
-                        param_desc = parts[-1].strip()
-                        break
+class ToolValidationError(ToolError):
+    pass
 
-            properties[param_name] = {"type": p_type, "description": param_desc}
 
-            if param.default == inspect.Parameter.empty:
-                required.append(param_name)
+class ToolTimeoutError(ToolError):
+    pass
 
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    effect: ToolEffect = ToolEffect.READ
+    scopes: frozenset[str] = frozenset()
+    approval_policy: ApprovalPolicy = ApprovalPolicy.NEVER
+    timeout_s: float = 30.0
+    max_output_bytes: int = 64 * 1024
+    requires_idempotency: bool = False
+    sensitive_fields: frozenset[str] = frozenset()
+
+    def llm_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
-                "name": name,
-                "description": description,
-                "parameters": {"type": "object", "properties": properties, "required": required},
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
             },
         }
 
-    def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return list(self.schemas.values())
+
+@dataclass
+class ToolExecutionContext:
+    db_session: Any = None
+    session_id: str | None = None
+    run_id: str | None = None
+    step_id: str | None = None
+    attempt: int | None = None
+    trace_id: str | None = None
+    scopes: frozenset[str] = frozenset()
+    approved_effects: frozenset[ToolEffect] = frozenset()
+    idempotency_key: str | None = None
+    cancellation_event: asyncio.Event | None = None
+    on_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any] | None) -> ToolExecutionContext:
+        value = value or {}
+        approved: set[ToolEffect] = set()
+        for effect in value.get("approved_effects", ()):
+            approved.add(effect if isinstance(effect, ToolEffect) else ToolEffect(str(effect)))
+        return cls(
+            db_session=value.get("db_session"),
+            session_id=value.get("session_id"),
+            run_id=value.get("run_id"),
+            step_id=value.get("step_id"),
+            attempt=int(value["attempt"]) if value.get("attempt") is not None else None,
+            trace_id=str(value["trace_id"]) if value.get("trace_id") is not None else None,
+            scopes=frozenset(str(scope) for scope in value.get("scopes", ())),
+            approved_effects=frozenset(approved),
+            idempotency_key=value.get("idempotency_key"),
+            cancellation_event=value.get("cancellation_event"),
+            on_event=value.get("on_event"),
+        )
+
+
+@dataclass
+class _RegisteredTool:
+    func: Callable[..., Any]
+    spec: ToolSpec
+    public_parameters: dict[str, inspect.Parameter] = field(default_factory=dict)
+
+
+def _annotation_schema(annotation: Any) -> dict[str, Any]:
+    if annotation is inspect.Parameter.empty or annotation is inspect.Signature.empty:
+        return {}
+    try:
+        return TypeAdapter(annotation).json_schema()
+    except Exception:
+        return {}
+
+
+class ToolGateway:
+    """The single enforcement point for model-requested tool calls."""
+
+    def __init__(self) -> None:
+        self._tools: dict[str, _RegisteredTool] = {}
+        self._idempotency_results: dict[tuple[str, str], tuple[str, Any]] = {}
+
+    def add(self, func: Callable[..., Any], spec: ToolSpec) -> None:
+        signature = inspect.signature(func)
+        public_parameters = {
+            name: parameter
+            for name, parameter in signature.parameters.items()
+            if name not in {"self", "db_session", "session_id", "run_id", "step_id", "idempotency_key"}
+        }
+        self._tools[spec.name] = _RegisteredTool(func=func, spec=spec, public_parameters=public_parameters)
+
+    def remove(self, name: str) -> None:
+        self._tools.pop(name, None)
+
+    def spec(self, name: str) -> ToolSpec:
+        try:
+            return self._tools[name].spec
+        except KeyError as exc:
+            raise ToolValidationError(f"Tool '{name}' is not registered") from exc
+
+    def specs(
+        self,
+        *,
+        allowed_effects: set[ToolEffect] | None = None,
+        scopes: set[str] | None = None,
+    ) -> list[ToolSpec]:
+        result: list[ToolSpec] = []
+        available_scopes = scopes or set()
+        for item in self._tools.values():
+            spec = item.spec
+            if allowed_effects is not None and spec.effect not in allowed_effects:
+                continue
+            if spec.scopes and not spec.scopes.issubset(available_scopes):
+                continue
+            result.append(spec)
+        return result
+
+    async def _emit(self, context: ToolExecutionContext, payload: dict[str, Any]) -> None:
+        if context.on_event is None:
+            return
+        result = context.on_event(payload)
+        if inspect.isawaitable(result):
+            await result
+
+    @staticmethod
+    def _validate_arguments(item: _RegisteredTool, args: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(args, dict):
+            raise ToolValidationError("Tool arguments must be a JSON object")
+        unknown = sorted(set(args) - set(item.public_parameters))
+        if unknown:
+            raise ToolValidationError(f"Unexpected tool arguments: {', '.join(unknown)}")
+
+        validated: dict[str, Any] = {}
+        for name, parameter in item.public_parameters.items():
+            if name not in args:
+                if parameter.default is inspect.Parameter.empty:
+                    raise ToolValidationError(f"Missing required tool argument: {name}")
+                continue
+            value = args[name]
+            if parameter.annotation is not inspect.Parameter.empty:
+                try:
+                    value = TypeAdapter(parameter.annotation).validate_python(value)
+                except ValidationError as exc:
+                    raise ToolValidationError(f"Invalid tool argument '{name}': {exc}") from exc
+            validated[name] = value
+        return validated
+
+    async def execute(self, name: str, args: dict[str, Any], context: ToolExecutionContext) -> Any:
+        try:
+            item = self._tools[name]
+        except KeyError as exc:
+            raise ToolValidationError(f"Tool '{name}' is not registered") from exc
+        spec = item.spec
+
+        if spec.scopes and not spec.scopes.issubset(context.scopes):
+            raise ToolPolicyError(f"Tool '{name}' requires scopes: {sorted(spec.scopes)}")
+        if spec.approval_policy == ApprovalPolicy.ALWAYS and spec.effect not in context.approved_effects:
+            raise ToolPolicyError(f"Tool '{name}' requires explicit approval for effect '{spec.effect}'")
+        if spec.requires_idempotency and not context.idempotency_key:
+            raise ToolPolicyError(f"Tool '{name}' requires an idempotency key")
+        if context.cancellation_event is not None and context.cancellation_event.is_set():
+            raise asyncio.CancelledError
+
+        validated = self._validate_arguments(item, args)
+        cache_key = (name, context.idempotency_key or "")
+        canonical_args = json.dumps(validated, ensure_ascii=False, sort_keys=True, default=str)
+        if spec.requires_idempotency and cache_key in self._idempotency_results:
+            cached_args, cached_result = self._idempotency_results[cache_key]
+            if cached_args != canonical_args:
+                raise ToolPolicyError(f"Tool '{name}' idempotency key was reused with different arguments")
+            return cached_result
+        signature = inspect.signature(item.func)
+        injected = {
+            "db_session": context.db_session,
+            "session_id": context.session_id,
+            "run_id": context.run_id,
+            "step_id": context.step_id,
+            "idempotency_key": context.idempotency_key,
+        }
+        for parameter_name in signature.parameters:
+            if parameter_name in injected and injected[parameter_name] is not None:
+                validated[parameter_name] = injected[parameter_name]
+
+        redacted_args = {
+            key: "[REDACTED]" if key in spec.sensitive_fields else value for key, value in args.items()
+        }
+        await self._emit(
+            context,
+            {
+                "type": "tool_started",
+                "run_id": context.run_id,
+                "step_id": context.step_id,
+                "attempt": context.attempt,
+                "trace_id": context.trace_id,
+                "tool": name,
+                "effect": spec.effect,
+                "arguments": redacted_args,
+            },
+        )
+
+        started = time.monotonic()
+
+        async def invoke() -> Any:
+            if inspect.iscoroutinefunction(item.func):
+                return await item.func(**validated)
+            return await asyncio.to_thread(item.func, **validated)
+
+        try:
+            result = await asyncio.wait_for(invoke(), timeout=spec.timeout_s)
+        except TimeoutError as exc:
+            await self._emit(
+                context,
+                {
+                    "type": "tool_failed",
+                    "run_id": context.run_id,
+                    "step_id": context.step_id,
+                    "attempt": context.attempt,
+                    "trace_id": context.trace_id,
+                    "tool": name,
+                    "error": "timeout",
+                    "duration_ms": (time.monotonic() - started) * 1000,
+                },
+            )
+            raise ToolTimeoutError(f"Tool '{name}' exceeded {spec.timeout_s:g}s") from exc
+        except asyncio.CancelledError:
+            await self._emit(
+                context,
+                {
+                    "type": "tool_cancelled",
+                    "run_id": context.run_id,
+                    "step_id": context.step_id,
+                    "attempt": context.attempt,
+                    "trace_id": context.trace_id,
+                    "tool": name,
+                    "duration_ms": (time.monotonic() - started) * 1000,
+                },
+            )
+            raise
+        except Exception as exc:
+            await self._emit(
+                context,
+                {
+                    "type": "tool_failed",
+                    "run_id": context.run_id,
+                    "step_id": context.step_id,
+                    "attempt": context.attempt,
+                    "trace_id": context.trace_id,
+                    "tool": name,
+                    "error": type(exc).__name__,
+                    "duration_ms": (time.monotonic() - started) * 1000,
+                },
+            )
+            raise
+
+        try:
+            return_annotation = inspect.signature(item.func).return_annotation
+            if return_annotation is not inspect.Signature.empty:
+                result = TypeAdapter(return_annotation).validate_python(result)
+            encoded = json.dumps(result, ensure_ascii=False, default=str).encode("utf-8")
+            if len(encoded) > spec.max_output_bytes:
+                raise ToolValidationError(
+                    f"Tool '{name}' output exceeded {spec.max_output_bytes} bytes ({len(encoded)} bytes received)"
+                )
+        except (ValidationError, ToolValidationError) as exc:
+            await self._emit(
+                context,
+                {
+                    "type": "tool_failed",
+                    "run_id": context.run_id,
+                    "step_id": context.step_id,
+                    "attempt": context.attempt,
+                    "trace_id": context.trace_id,
+                    "tool": name,
+                    "error": "invalid_output",
+                    "duration_ms": (time.monotonic() - started) * 1000,
+                },
+            )
+            if isinstance(exc, ToolValidationError):
+                raise
+            raise ToolValidationError(f"Tool '{name}' returned an invalid result: {exc}") from exc
+        if spec.requires_idempotency:
+            self._idempotency_results[cache_key] = (canonical_args, result)
+        await self._emit(
+            context,
+            {
+                "type": "tool_succeeded",
+                "run_id": context.run_id,
+                "step_id": context.step_id,
+                "attempt": context.attempt,
+                "trace_id": context.trace_id,
+                "tool": name,
+                "output_bytes": len(encoded),
+                "duration_ms": (time.monotonic() - started) * 1000,
+            },
+        )
+        return result
+
+
+class ToolRegistry:
+    """Tool declaration facade backed by the policy-enforcing gateway."""
+
+    def __init__(self):
+        self.tools: dict[str, Callable[..., Any]] = {}
+        self.schemas: dict[str, dict[str, Any]] = {}
+        self.specs: dict[str, ToolSpec] = {}
+        self.gateway = ToolGateway()
+
+    def register(
+        self,
+        func: Callable[..., Any] | None = None,
+        *,
+        effect: ToolEffect = ToolEffect.READ,
+        scopes: set[str] | frozenset[str] = frozenset(),
+        approval_policy: ApprovalPolicy = ApprovalPolicy.NEVER,
+        timeout_s: float = 30.0,
+        max_output_bytes: int = 64 * 1024,
+        requires_idempotency: bool = False,
+        sensitive_fields: set[str] | frozenset[str] = frozenset(),
+    ) -> Callable[..., Any]:
+        def decorate(target: Callable[..., Any]) -> Callable[..., Any]:
+            name = target.__name__
+            signature = inspect.signature(target)
+            doc_lines = [line.strip() for line in (target.__doc__ or "").splitlines() if line.strip()]
+            description = doc_lines[0] if doc_lines else f"Execute tool function {name}"
+            properties: dict[str, Any] = {}
+            required: list[str] = []
+            for parameter_name, parameter in signature.parameters.items():
+                if parameter_name in {
+                    "self",
+                    "db_session",
+                    "session_id",
+                    "run_id",
+                    "step_id",
+                    "idempotency_key",
+                }:
+                    continue
+                schema = _annotation_schema(parameter.annotation)
+                schema.setdefault("type", "string")
+                parameter_description = f"Parameter {parameter_name}"
+                for line in doc_lines[1:]:
+                    if line.startswith(f":param {parameter_name}:") or line.startswith(f"{parameter_name}:"):
+                        parameter_description = line.split(":", 2)[-1].strip()
+                        break
+                schema["description"] = parameter_description
+                properties[parameter_name] = schema
+                if parameter.default is inspect.Parameter.empty:
+                    required.append(parameter_name)
+            input_schema = {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            }
+            spec = ToolSpec(
+                name=name,
+                description=description,
+                input_schema=input_schema,
+                output_schema=_annotation_schema(signature.return_annotation),
+                effect=effect,
+                scopes=frozenset(scopes),
+                approval_policy=approval_policy,
+                timeout_s=timeout_s,
+                max_output_bytes=max_output_bytes,
+                requires_idempotency=requires_idempotency,
+                sensitive_fields=frozenset(sensitive_fields),
+            )
+            self.tools[name] = target
+            self.specs[name] = spec
+            self.schemas[name] = spec.llm_schema()
+            self.gateway.add(target, spec)
+            logger.info("Registered tool %s (%s)", name, effect)
+            return target
+
+        return decorate(func) if func is not None else decorate
+
+    def unregister(self, name: str) -> None:
+        self.tools.pop(name, None)
+        self.schemas.pop(name, None)
+        self.specs.pop(name, None)
+        self.gateway.remove(name)
+
+    def get_tool_schemas(
+        self,
+        *,
+        allowed_effects: set[ToolEffect] | None = None,
+        scopes: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return [spec.llm_schema() for spec in self.gateway.specs(allowed_effects=allowed_effects, scopes=scopes)]
 
     async def execute(self, name: str, args: dict[str, Any], context: dict[str, Any] | None = None) -> Any:
-        if name not in self.tools:
-            raise ValueError(f"Tool '{name}' is not registered.")
-
-        func = self.tools[name]
-        sig = inspect.signature(func)
-        merged_args = {}
-
-        # Bind expected arguments
-        for param_name in sig.parameters:
-            if param_name in args:
-                merged_args[param_name] = args[param_name]
-            elif context and param_name in context:
-                merged_args[param_name] = context[param_name]
-
-        if inspect.iscoroutinefunction(func):
-            return await func(**merged_args)
-        else:
-            return func(**merged_args)
+        return await self.gateway.execute(name, args, ToolExecutionContext.from_mapping(context))
 
 
-# Instantiate a global registry for standard agent tools
 registry = ToolRegistry()
 
 
-# Example Tool definitions
-@registry.register
+@registry.register(scopes={"workspace:read"})
 def list_available_apps() -> list[str]:
-    """
-    Returns a list of IDs of all ambient widget applications currently configured on disk.
-    """
+    """Returns IDs of all widget applications configured in the workspace."""
     from backend.app_manager import AppManager
 
-    mgr = AppManager()
-    return [app["id"] for app in mgr.list_apps()]
+    return [app["id"] for app in AppManager().list_apps()]
 
 
-@registry.register
-def delete_widget_app(app_id: str) -> bool:
-    """
-    Deletes a widget application configuration from disk.
-    :param app_id: The ID of the widget application to delete.
-    """
-    from backend.app_manager import AppManager
-
-    mgr = AppManager()
-    return mgr.delete_app(app_id)
-
-
-@registry.register
+@registry.register(scopes={"workspace:read"})
 def query_graph(query_json: str) -> str:
+    """Query the workspace graph with a declarative JSON query.
+    :param query_json: The declarative graph query as JSON.
     """
-    Query the global Knowledge Graph database using a declarative query.
-    :param query_json: The declarative graph query in JSON string format.
-    """
-    import json
-
     from backend.graph_query_engine import execute_graph_query
     from backend.main import graph_db
 
     try:
         query = json.loads(query_json)
-        res = execute_graph_query(query, graph_db)
-        return json.dumps(res, ensure_ascii=False)
-    except Exception as e:
-        return f"Error executing query: {e!s}"
-
-
-@registry.register
-async def mutate_graph(actions_json: str) -> str:
-    """
-    Perform a batch of mutation actions on the global Knowledge Graph.
-    :param actions_json: The list of actions in JSON string format. Actions can be create_node, update_node_property, delete_node, create_edge, delete_edge.
-    """
-    import json
-
-    from backend.graph_subscription import subscription_manager
-    from backend.main import graph_db
-
-    try:
-        actions = json.loads(actions_json)
-        for action in actions:
-            act_type = action.get("action")
-            if act_type == "create_node":
-                graph_db.create_node(
-                    node_id=action.get("id"),
-                    node_type=action.get("type", "Generic"),
-                    properties=action.get("properties"),
-                )
-            elif act_type == "update_node_property":
-                graph_db.update_node_property(node_id=action.get("id"), properties=action.get("properties"))
-            elif act_type == "delete_node":
-                graph_db.delete_node(node_id=action.get("id"))
-            elif act_type == "create_edge":
-                graph_db.create_edge(
-                    from_id=action.get("from_id"),
-                    to_id=action.get("to_id"),
-                    edge_type=action.get("type"),
-                    properties=action.get("properties"),
-                )
-            elif act_type == "delete_edge":
-                graph_db.delete_edge(
-                    from_id=action.get("from_id"), to_id=action.get("to_id"), edge_type=action.get("type")
-                )
-
-        # Broadcast updates
-        async def send_ws(ws, payload):
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                pass
-
-        await subscription_manager.broadcast_updates(graph_db, send_ws)
-        return "success"
-    except Exception as e:
-        return f"Error: {e!s}"
+    except json.JSONDecodeError as exc:
+        raise ToolValidationError(f"query_json is not valid JSON: {exc}") from exc
+    return json.dumps(execute_graph_query(query, graph_db), ensure_ascii=False)

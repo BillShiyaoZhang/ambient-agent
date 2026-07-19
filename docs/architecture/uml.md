@@ -1,439 +1,178 @@
-# Ambient Agent Backend UML & Architecture
+# 后端 Runtime UML
 
-本项目后端使用 FastAPI + SQLModel (SQLite) 构建，支持多端 WebSocket 实时同步，并集成了动态沙箱 Widget 管理和 LLM 传输审计。
+本页描述 scheduler-owned chat、持久 reducer 和统一的副作用执行边界。图中的 Python 引用由 `scripts/verify_uml.py` 检查。
 
-## 1. 后端类图
-
-为了提高架构图在网页端的可读性，我们将复杂的后端类图拆分为系统宏观调用图与 5 个核心功能模块的详细类图。
-
-### 1.1 后端宏观关系图
-
-展示了后端各个服务与核心管理器的整体依赖与协作关系：
+## 1. 单一控制平面
 
 ```mermaid
-graph TB
+flowchart TB
+    Chat[浏览器 /ws/chat] --> Main[main.py: websocket_chat]
+    RunAPI[REST /api/runs 与 /api/run-interactions] --> Coordinator[run_service.py: RunCoordinator]
+    RunWS[浏览器 /ws/runs] <-->|versioned event replay| Store[run_service.py: RunStore]
 
+    Main -->|persist message / submit Run / resolve| Coordinator
+    Coordinator --> Store
+    Coordinator -->|internal_agent| Workflow[durable_workflow.py: DurableAgentWorkflow]
+    Workflow --> State[run_service.py: AgentRunState]
+    Workflow --> Outcome[run_service.py: StepOutcome]
+    Outcome --> Commit[run_service.py: commit_step]
+    Commit --> Store
 
-    AgentOrchestrator --> WorkspaceStorage
-    AgentOrchestrator --> AppManager
-    AgentOrchestrator --> IntentRouter
-    AgentOrchestrator --> PlanExecutor
-    AgentOrchestrator --> WidgetDAG
-    AgentOrchestrator --> BackendManager
+    Workflow --> Domain[harness.py: AgentOrchestrator]
+    Workflow --> Tools[tools.py: ToolGateway]
+    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
+    Coordinator --> Remote[backend_manager.py: handle_agent_message]
+
+    Store -->|Run events projected to session| Main
 ```
 
-### 1.2 存储与会话模块
+WebSocket 只创建轻量的提交/响应投影 bridge，不在连接 task 中执行 agent、MCP 或远端 Agent 副作用。`AgentOrchestrator` 被 reducer 复用为 domain helper，控制权在 `RunCoordinator`；浏览器断线不改变 Run 的事实状态。
 
-管理多会话对话历史、本地磁盘的 App Widget 源码持久化以及 SQLite 实体底层读写操作：
+## 2. 持久数据模型
 
 ```mermaid
-classDiagram
-    class ChatSession {
-        +id: str (PK)
-        +title: str
-        +model_selection: ModelSelection|None
-        +created_at: datetime
-        +updated_at: datetime
-    }
+erDiagram
+    RUNS ||--o{ RUN_STEPS : attempts
+    RUNS ||--o{ RUN_INTERACTIONS : waits_for
+    RUNS ||--o{ RUN_EVENTS : emits
+    RUNS ||--o{ RUNS : parent_or_retry
 
-    class ChatMessage {
-        +id: int (PK)
-        +session_id: str (FK)
-        +role: str
-        +sender: str
-        +content: str
-        +timestamp: datetime
+    RUNS {
+        string id PK
+        string status
+        json state_json
+        string workflow_type
+        int workflow_version
+        int version
+        string lease_owner
+        string lease_expires_at
+        int lease_epoch
+        json checkpoint_json
+        json result_json
+        json error_json
     }
-
-    class LLMAuditLog {
-        +id: int (PK)
-        +timestamp: datetime
-        +provider: str
-        +model: str
-        +prompt: str
-        +response: str
-        +stage: str
+    RUN_STEPS {
+        int id PK
+        string run_id FK
+        string step_key
+        int attempt
+        string status
+        json output_json
     }
-
-    class AppManager {
-        +apps_dir: str
-        +create_or_update_app(app_id: str, title: str, html: str, css: str, js: str, kwargs) void
-        +get_app_files(app_id: str) dict
-        +list_apps() List~dict~
-        +delete_app(app_id: str) bool
-        +get_manifest(app_id: str) AppManifest|None
+    RUN_INTERACTIONS {
+        string id PK
+        string run_id FK
+        string status
+        int run_version
+        json payload_json
+        json response_json
     }
-
-    class AppRecordStore {
-        +db_path: Path
-        +serialized() Iterator
-        +get(transaction, app_id) AppRecord
-        +put(transaction, app_id, created_at, updated_at) AppRecord
-        +delete(transaction, app_id) void
+    RUN_EVENTS {
+        int sequence PK
+        string event_id UK
+        int schema_version
+        string stream_epoch
+        string run_id FK
+        string session_id
+        string step_id
+        int attempt
+        string trace_id
+        float duration_ms
+        json model_usage_json
+        bool redacted
+        string type
+        json payload_json
     }
-
-    class WorkspaceStorage {
-        +workspace_dir: str
-        +sessions_dir: str
-        +apps_dir: str
-        +get(model_class, obj_id) BaseModel
-        +add(obj) void
-        +commit() void
-        +refresh(obj) void
-        +get_sessions() List
-        +get_messages(session_id) List
-        +get_audit_logs() List
-        +delete_session(session_id) bool
-        +get_canvas_config() dict
-        +save_canvas_config(config) void
-    }
-
-    class SessionTitleService {
-        +generate(session_id: str, first_message: str, language: str) str|None
-        +sanitize_title(raw_title: str, language: str) str
-    }
-
-    ChatSession "1" --* "0..*" ChatMessage : contains
-    AppManager --> AppRecordStore : persists lifecycle timestamps
-    SessionTitleService --> WorkspaceStorage : updates placeholder titles
-    SessionTitleService --> LLMService : generates concise title
 ```
 
-### 1.3 意图路由与上下文模块
-
-处理大语言模型输入提示词的剪枝合并，进行对话输入的多层意图路由与函数规划：
+## 3. Claim、执行与 fencing
 
 ```mermaid
-classDiagram
-    class ContextManager {
-        -db: WorkspaceStorage
-        -app_manager: AppManager
-        +build_llm_prompt(session_id: str) List~dict~
-        -_prune_message_content(content: str) str
-    }
+sequenceDiagram
+    participant WS as WebSocket/API
+    participant S as RunStore
+    participant C as RunCoordinator
+    participant W as DurableAgentWorkflow
+    participant X as 旧 callback
 
-    class PromptManager {
-        +prompts_dir: Path
-        +env: Environment
-        +get_prompt(template_name, kwargs) str
-    }
+    WS->>S: persist user message
+    WS->>C: submit_internal_agent(state v2)
+    C->>S: claim_next(worker, limits, session lane)
+    S-->>C: running Run + lease_epoch=E
+    C->>S: begin_step_attempt(phase, E)
+    C->>W: reducer(run, state)
+    W-->>C: typed StepOutcome
+    C->>S: commit_step(state, outcome, E)
+    S->>S: step + checkpoint + status + events in one transaction
 
-    class IntentRouter {
-        +route(content, context) IntentPlan
-        +route_legacy(content, existing_apps) IntentPlan
-        +refine_sub_intents(plan, context) IntentPlan
-    }
-
-    class RouterContext {
-        +app_manifests: List~dict~
-        +graph_snapshot: GraphSnapshot
-        +session_recent: List~dict~
-        +build(app_manager, graph_db, session_messages) RouterContext
-        +render_for_prompt() str
-    }
-
-    class GraphSnapshot {
-        +type_counts: Dict
-        +recent_nodes_by_type: Dict
-        +schema_manifest: List~dict~
-        +node_count: int
-        +edge_count: int
-        +from_db(db, recent_per_type) GraphSnapshot
-    }
-
-    class IntentPlan {
-        +kind: IntentKind
-        +confidence: float
-        +rationale: str
-        +app_id: str
-        +instruction: str
-        +actions: List~dict~
-        +query: dict
-        +sub_intents: List~SubIntent~
-        +clarification_message: str
-        +clarification_options: List~dict~
-        +deprecated: bool
-        +to_dict() dict
-        +from_dict(data) IntentPlan
-        +from_tool_call_args(args) IntentPlan
-        +tool_schema() dict
-    }
-
-    class SubIntent {
-        +kind: SubIntentKind
-        +app_id: str
-        +instruction: str
-        +actions: List~dict~
-        +query: dict
-        +extend_schema_props: dict
-        +feedback: str
-        +to_dict() dict
-        +from_dict(data) SubIntent
-    }
-
-    class IntentKind {
-        <<enum>>
-        +WIDGET_CREATE
-        +WIDGET_MODIFY
-        +GRAPH_MUTATION
-        +GRAPH_QUERY
-        +PLAN_AND_ACT
-        +MULTI_INTENT
-        +CLARIFY
-        +CONVERSE
-    }
-
-    class SubIntentKind {
-        <<enum>>
-        +GRAPH_MUTATION
-        +GRAPH_QUERY
-        +WIDGET_CREATE
-        +WIDGET_MODIFY
-        +WIDGET_EXTEND_SCHEMA
-        +WIDGET_FIX_CODE
-        +WIDGET_REWRITE
-    }
-
-    IntentRouter --> IntentPlan : returns structured plan
-    IntentRouter --> RouterContext : consumed
-    RouterContext --> GraphSnapshot : embeds snapshot
-    IntentPlan --> IntentKind : kind is an enum value
-    IntentPlan --> SubIntent : 0..* sub_intents
-    SubIntent --> SubIntentKind : kind is an enum value
+    Note over S: recovery/cancel/new claim changes ownership
+    X->>S: commit_step(..., old E)
+    S-->>X: StaleLeaseError
 ```
 
-### 1.4 Widget DAG 与 Schema 校验模块
+同一 session 的较早 Run 处于 `running`、`waiting_user`、`cancel_requested` 或 `needs_attention` 时，后续 Run 不能被 claim。`waiting_user` 释放 worker slot，但保留 session lane。
 
-由有向无环图运行环境驱动的卡片生命周期处理流程，以及对卡片代码的数据完整性验证：
+## 4. Version 2 workflow 状态
 
 ```mermaid
-classDiagram
-    class WidgetDAG {
-        +_nodes: Dict
-        +_order: List
-        +_dirty: Set
-        +register(node) void
-        +dirty(names) void
-        +idle() bool
-        +pending() List
-        +step(ctx) TaskResult
-    }
+flowchart TB
+    Route[route] --> Converse[converse bounded tool loop]
+    Route --> Query[graph_query]
+    Route --> GPre[graph_preflight]
+    GPre --> GWait[wait_graph_approval]
+    GWait -->|approve| GCommit[graph_commit]
+    GWait -->|deny| Failed[failed]
 
-    class TaskNode {
-        +name: str
-        +run: Callable
-        +needs_outputs_from: Set
-        +invalidates: Set
-    }
+    Route --> Plan[plan]
+    Plan --> WPlan[wait_plan]
+    WPlan -->|approve| Align[align_schema]
+    WPlan -->|refine| Plan
+    Align --> WSchema[wait_schema]
+    WSchema -->|approve| Stage[stage_code]
+    WSchema -->|refine| Align
+    WSchema -->|rework plan| Plan
+    Stage --> Verify[verify]
+    Verify -->|clean| Promote[promote]
+    Verify -->|findings| Override[wait_override]
+    Override -->|approve| Promote
+    Override -->|rework code| Stage
+    Override -->|rework schema| Align
+    Override -->|rework plan| Plan
+    Promote --> Success[succeeded]
 
-    class TaskResult {
-        +success: bool
-        +outputs: dict
-        +error: str
-        +ask_user: dict
-        +invalidates_if_redo: Set
-    }
-
-    class VerificationDiff {
-        +unknown_props: List
-        +type_mismatches: List
-        +unknown_types: List
-        +is_clean: bool
-        +to_markdown() str
-        +to_per_field_payload() List
-    }
-
-    class SchemaVerificationService {
-        +diff(app_id, widget_code, schemas) VerificationDiff
-        +verify(app_id, widget_code, schemas) str
-    }
-
-    WidgetDAG --> TaskNode : 0..* registered tasks
-    TaskNode --> TaskResult : runs produce results
-    SchemaVerificationService --> VerificationDiff : returns structured diff
+    Route --> Multi[multi_preflight]
+    Multi -->|whole plan valid| Saga[multi_dispatch saga]
+    Saga -->|next sub-intent| RouteSub[对应子流程]
+    RouteSub --> Saga
 ```
 
-### 1.5 执行计划与核心编排模块
+所有 wait phase 都先持久化 interaction 再返回 `Wait`。resolve 以 `expected_run_version` 检查并原子记录 response、关闭同 Run 其他 pending interaction、重新入队和追加 events。
 
-系统总控制器、动作执行执行器、数据库变更回撤管理器以及底层 LLM 服务提供者：
+## 5. Tool、MCP 与 OpenCode 边界
 
 ```mermaid
-classDiagram
-    class AgentOrchestrator {
-        +db: WorkspaceStorage
-        +app_manager: AppManager
-        +context_manager: ContextManager
-        +run_opencode_agent_acp_fn: function
-        +handle_message(session_id: str, content: str, on_update: Callable) tuple
-        -_run_callback(callback: Callable, data: Any) void
-        -_handle_graph_mutation(plan, session_id, on_update) tuple
-        -_handle_graph_query(plan, session_id, on_update) tuple
-        -_handle_plan_and_act(plan, session_id, on_update) tuple
-        -_handle_multi_intent(plan, session_id, on_update) tuple
-        -_handle_widget_build(plan, session_id, on_update) tuple
-    }
+flowchart LR
+    Model[模型 tool call] --> Registry[tools.py: ToolRegistry]
+    Registry --> Gateway[tools.py: ToolGateway]
+    Gateway -->|schema / effect / scope / approval / timeout / idempotency| LocalTool[本地 Python tool]
 
-    class PlanExecutor {
-        <<abstract>>
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
+    Run[持久 capability Run] --> Backend[backend_manager.py: BackendManager]
+    Backend --> MCP[backend_manager.py: StdioJsonRpcClient]
+    MCP -->|initialize / deadline / cancel / bounded I/O| Process[MCP 子进程]
 
-    class CodingPlanExecutor {
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
-
-    class MutationPlanExecutor {
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
-
-    class PlanPhaseResult {
-        +success: bool
-        +output: str
-        +error: str
-        +extra: dict
-    }
-
-    class MutationTicketManager {
-        +record(session_id, forward_actions, snapshot_before) MutationTicket
-        +pin(session_id, ticket_id) bool
-        +rollback(session_id, ticket_id) List~dict~
-        +get(session_id, ticket_id) MutationTicket
-    }
-
-    class LLMService {
-        +generate(selection: ResolvedModel, messages: List~dict~, tools: List~dict~|None) LLMResult
-    }
-
-    class LLMResult {
-        +text: str
-        +tool_calls: List~dict~|None
-        +usage: dict
-    }
-
-    class ModelSelection {
-        +provider_id: str
-        +model_id: str
-    }
-
-    class ModelRef {
-        +provider_id: str|None
-        +model_id: str|None
-        +display_name: str|None
-        +api_mode: str|None
-        +capabilities: ModelCapabilities
-        +source: str
-    }
-
-    class ProviderProfile {
-        +id: str
-        +name: str
-        +preset: str
-        +enabled: bool
-        +connection: dict
-        +credential_refs: dict
-        +models: List~ModelRef~
-    }
-
-    class LLMDefaults {
-        +default_model: ModelSelection|None
-        +fast_model: ModelSelection|None
-    }
-
-    class LLMConfigStore {
-        +list_providers() List~ProviderProfile~
-        +create_provider(profile, credentials) ProviderProfile
-        +update_provider(provider_id, changes, credentials) ProviderProfile
-        +delete_provider(provider_id) void
-        +get_settings() LLMDefaults
-        +update_settings(changes) LLMDefaults
-        +resolve(selection) ResolvedModel
-    }
-
-    ProviderProfile "1" *-- "many" ModelRef
-    LLMDefaults --> ModelSelection
-    LLMService --> LLMConfigStore : obtains connection credentials
-
-    PlanExecutor <|-- CodingPlanExecutor
-    PlanExecutor <|-- MutationPlanExecutor
-    MutationPlanExecutor --> MutationTicketManager : records rollback tickets
+    Stage[stage_code] --> Prepare[opencode_service.py: _prepare_staging_app]
+    Prepare --> ACP[opencode_service.py: run_opencode_agent_acp]
+    ACP --> Validate[opencode_service.py: validate_opencode_staging]
+    Validate --> Verify[verify reads staging]
+    Verify -->|pass / approved override| Marker[持久 promotion marker]
+    Marker --> Promote[opencode_service.py: promote_opencode_staging]
+    Verify -->|failure / rework / cancel| Discard[opencode_service.py: discard_opencode_staging]
+    Promote --> Live[Live App]
 ```
 
-### 1.6 外部集成与 MCP 模块
+`ToolGateway` 当前统一模型请求的本地 Python tools；Capability、MCP、远端 Agent 与 ACP 仍各自保留 adapter/permission policy。OpenCode 已有 path、argv、environment、output、process-group 和 staging 约束，但并非 OS 级网络/文件系统 sandbox。
 
-管理第三方模型上下文协议进程生命周期，并以 JSON-RPC 2.0 规范代理各种工具与资源请求：
+## 6. 事件与恢复边界
 
-```mermaid
-classDiagram
-    class StdioJsonRpcClient {
-        +command: list~str~
-        +args: list~str~
-        +env: dict~str, str~|None
-        +process: Process|None
-        +read_task: Task|None
-        +pending_requests: dict
-        +next_id: int
-        +lock: Lock
-        +start() void
-        -read_loop() void
-        +call(method: str, params: dict) Any
-        +stop() void
-    }
-
-    class BackendManager {
-        +workspace_dir: str
-        +permissions_file: Path
-        +mcp_clients: dict~str, StdioJsonRpcClient~
-        +pending_permissions: dict
-        +permissions: dict
-        -load_permissions() void
-        -save_permissions() void
-        +is_mcp_approved(app_id: str, command: list~str~, args: list~str~) bool
-        +approve_mcp(app_id: str, command: list~str~, args: list~str~) void
-        +is_agent_approved(app_id: str, agent_url: str) bool
-        +approve_agent(app_id: str, agent_url: str) void
-        +resolve_permission(request_id: str, approved: bool) void
-        +request_permission(app_id: str, permission_type: str, value: dict|str, send_ws_message_func: Callable) bool
-        +get_or_start_mcp_client(app_id: str, manifest: AppManifest, send_ws_message_func: Callable) StdioJsonRpcClient|None
-        +handle_agent_message(app_id: str, manifest: AppManifest, message: dict, send_ws_message_func: Callable) void
-        +shutdown() void
-    }
-
-    BackendManager --> StdioJsonRpcClient : manages MCP processes
-```
-
-## 2. 核心模块说明
-
-### 2.1 数据库实体层 (`models.py`)
-
-- **ChatSession**: 管理多端用户会话。
-- **ChatMessage**: 存储对话历史，支持 `user`, `agent`, `code`, `system` 等不同角色的消息归档。
-- **LLMAuditLog**: 记录发送给 LLM 接口的原始 Payload 与响应，供审计面板展示。
-
-### 2.2 服务与逻辑控制层
-
-- **AppManager (`app_manager.py`)**: 管理动态生成的小程序（Widget）。负责 Widget 代码文件在磁盘的读写、数据状态存储及文件路径寻址。
-- **ContextManager (`context_manager.py`)**: 负责将数据库中的对话上下文整合为 LLM 兼容的 Prompt。此层会自动剔除冗余代码段并动态注入当前运行中应用的最新源码，在控制 Token 大小的同时给 LLM 提供充分的运行环境上下文。
-- **AgentParser (`agent_parser.py`)**: 负责用正则表达式和 XML 解析器解析 LLM 返回文本流中携带的 `<ambient-widget>` 语法块，提取组件的 JS 逻辑代码。
-- **LLMConfigStore / LLMSelectionService**: 持久化脱敏 Provider Profile、独立秘密文件、全局默认/快速模型与会话级模型选择，并在一次 run 开始时生成不可变模型快照。
-- **LLMService (`llm_service.py`)**: 通过 LiteLLM 统一 Chat Completions / Responses 调用、工具调用和结构化错误，不执行跨 Provider 自动故障转移。
-- **RouterContext (`router_context.py`)**: 收集路由所需的轻量级上下文：已存在的 widgets、Graph 类型与节点摘要、近期对话。供 IntentRouter 在调用 LLM 时一并注入。
-- **GraphSnapshot**: RouterContext 嵌入的图状态摘要，用于让 LLM 意识到现有数据，避免重复创建。
-- **IntentPlan / IntentKind / SubIntent / SubIntentKind (`agent/intent_plan.py`)**: 用 `classify_intent` function-calling 协议引导 LLM 返回的结构化输出。`SubIntent` 是 `multi_intent` 顶层意图下的子动作列表。
-- **IntentRouter (`agent/router.py`)**: 两层 LLM 路由：
-  - `route()` 调用 LLM #1 获取顶层 `kind` + `sub_intents[]`
-  - `refine_sub_intents()` 在 `multi_intent` / `plan_and_act` 时调用 LLM #2 细化 sub_intents
-  - 失败时降级为 `converse`；widget_modify 重名检测必要时降级为 `clarify`
-- **WidgetDAG / TaskNode / TaskResult (`agent/dag.py`)**: 替换 widget 流水线的 `while current_state` 状态机。6 个任务节点：`plan`、`align_schemas`、`regen_code`、`verify`、`decode_user_intent`、`apply_user_actions`。节点的 `invalidates` 字段定义了"重跑时连带 dirty 哪些下游节点"。
-- **SchemaVerificationService / VerificationDiff (`schema_verification.py` + `schema_diff.py`)**: 替代旧的纯文本 Markdown 报告，输出结构化 `VerificationDiff`（含 `unknown_props[]` / `type_mismatches[]`），让前端能渲染 per-field checkbox UI。
-- **PlanExecutor / CodingPlanExecutor / MutationPlanExecutor (`agent/plan_executor.py`)**: 把"计划-审批-执行-校验"流水线抽象为策略类。`CodingPlanExecutor` 包装原有 widget 流；`MutationPlanExecutor` 在用户审批后批量执行 graph_mutation，并把每次调用登记为一个可撤销的 mutation ticket。
-- **MutationTicketManager (`mutation_tickets.py`)**: 为每次 graph_mutation 提供 60s 软默认 + 用户可星标为永久的撤销窗口。撤销逻辑使用 graph 数据库层新增的 `graph_mutation_history` 表。
-
-### 2.3 实时多端同步层 (`main.py` WebSocket)
-
-- 通过长连接管理不同的 Session 连接。
-- 一端发送消息时，服务端接收并广播给同一 `session_id` 的所有客户端，实现多端画布、对话气泡的强实时一致性同步。
-
-### 2.4 后端服务代理层 (`backend_manager.py`)
-
-- **StdioJsonRpcClient**: 负责通过 stdio 与外部启动的 MCP 命令行子进程进行 JSON-RPC 2.0 通信，提供异步的工具调用及资源读取接口。
-- **BackendManager**: 统筹协调外部服务连接。负责按需启动并缓存 MCP 子进程、与外部 Agent URL 执行 SSE 事件流式代理、管理以及持久化用户针对敏感后端操作（启动 MCP 命令或连接 Agent URL）的授权配置（存储在 `workspace/backend_permissions.json`）。
+Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/model usage/`redacted` 元数据；终态 event 默认保留 30 天。Graph effect ledger 防止 checkpoint 窗口重复写，App promotion marker 区分已发布与待发布 staging。只有完整补偿数据的 saga step 才自动回滚。

@@ -1,45 +1,33 @@
-# DAG 任务流水线
+# Durable phase pipeline
 
-在老版本中，卡片生成和变更的整个流程是通过在 `AgentOrchestrator.handle_message` 中使用一个冗长复杂的 `while current_state` 状态机来驱动的。
+> 该路径为旧文档链接保留。生产 harness 不再使用 WidgetDAG、SubExecutor 或 CodingPlanExecutor；唯一执行模型是 `RunCoordinator` 驱动的显式持久 phase reducer。
 
-新版架构中，该状态机被重构为更具扩展性与声明式的 **WidgetDAG（有向无环图任务流水线）** 运行环境。它的执行链条更加清晰，并原生支持基于依赖关系的“回溯污染（Invalidation）”重新执行。
+## 1. Phase 规则
 
-## 1. 任务流依赖与节点设计
-
-WidgetDAG 默认包含以下 6 个核心任务节点，执行顺序如下：
+`DurableAgentWorkflow` 每次只执行 `AgentRunState.phase` 指定的一步，并返回 `Continue`、`Wait`、`Succeeded`、`Failed` 或 `Cancelled`。`RunCoordinator` 用 `lease_owner + lease_epoch` 领取该步，`RunStore.commit_step()` 在同一 SQLite transaction 中提交 attempt、checkpoint、status 和 events。
 
 ```mermaid
-graph TD
-    decode["解析用户操作"] --> apply["应用变更"]
-    apply --> plan["制定计划"]
-    plan --> align["对齐数据库模型"]
-    align --> regen["生成/更新代码"]
-    regen --> verify["校验与测试"]
-
-    %% Invalidation paths
-    verify -.->|校验失败/需要返工| decode
+flowchart LR
+    Route[route] --> Plan[plan]
+    Plan --> WPlan[wait_plan]
+    WPlan --> Align[align_schema]
+    Align --> WSchema[wait_schema]
+    WSchema --> Stage[stage_code]
+    Stage --> Verify[verify]
+    Verify -->|pass / override| Promote[promote]
+    Verify -->|rework| Stage
+    Promote --> Done[succeeded]
 ```
 
-每个节点都可以通过 `invalidates` 集合定义其依赖关系。例如：
+等待用户时，workflow 先持久 interaction 再返回 `Wait`。`waiting_user` 释放 worker slot 但保留 session FIFO lane；resolve 通过 `run_version` 原子记录响应并重新入队。没有进程内审批 Future。
 
-- 如果 `plan` 节点被标记为脏并重新运行，它会自动污染并将下游的 `align_schemas`, `regen_code`, `verify` 全部重设为 **dirty（待执行）**。
+## 2. 副作用和恢复
 
-## 2. 节点职责与说明
+- Graph mutation 先 preflight，再以单 transaction 提交，并按 `run_id + phase` 记录 effect ledger。
+- Multi-intent 先整体 preflight，再顺序作为 saga 执行；只有完整 reverse data 的步骤才自动补偿。
+- App 代码只写 per-Run staging。验证通过后记录 promotion marker 并原子替换 live App；recovery 不重复发布。
+- 取消或失败时丢弃 staging。无法确认外部效果的 Run 进入 `needs_attention`，不报告假成功或假取消。
 
-| 节点名称               | 核心职责                                                                                                   |
-| :--------------------- | :--------------------------------------------------------------------------------------------------------- |
-| **decode_user_intent** | 解析用户的自然语言反馈，理解用户是希望调整卡片 UI、拓展数据字段，还是重写核心逻辑。                        |
-| **apply_user_actions** | 将用户明确的选择（如在 Schema 对齐界面勾选的新增字段）合并到当前的任务上下文状态中。                       |
-| **plan**               | 调大模型生成 Widget 的修改/新建顶层策略方案（例如确定要关联哪些图数据库类型）。                            |
-| **align_schemas**      | 对齐底层的 SQLite Schema 约束。如果涉及新的自定义属性类型，会在 `graph_schemas` 中做对应修改。             |
-| **regen_code**         | 核心编译节点。负责生成、修改 Widget 源码，并写入到磁盘文件（`controller.js`）。 |
-| **verify**             | 合规与安全校验。检查生成的组件代码语法是否合法、是否有脚本注入、以及字段是否与数据库对齐。                |
+## 3. 安全执行
 
-## 3. 异常回溯与用户交互
-
-当一个节点运行失败或需要用户做二次审批时：
-
-1.  节点会抛出 `TaskResult(success=False, ask_user=...)`，中断当前的 `WidgetDAG.step()` 轮询。
-2.  `AgentOrchestrator` 将通过 WebSocket 向前端推送审批请求（如 `AppPermissionModal` 权限弹窗，或 `MutationPreview` 图变更修改预览）。
-3.  用户在前端点击同意/拒绝后，前端把决定通过 WebSocket 送回后台。
-4.  调度中心执行 `WidgetDAG.handle_user_response()` 填充响应数据，并将目标下游节点标记为 `dirty`，继续执行下一轮 DAG `step()`。
+Converse 只暴露 phase 所需的最小 ToolSpec 集合。OpenCode 默认 strict，terminal 只允许 policy 中的精确 argv，不经 shell，并限制 cwd、环境、输出和进程组生命周期。policy 外请求 fail closed。

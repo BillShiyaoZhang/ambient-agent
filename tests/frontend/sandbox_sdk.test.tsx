@@ -148,15 +148,17 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     btn.click();
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8000/api/graph/mutate",
-        expect.objectContaining({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ actions }),
-        })
-      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
     });
+    const [url, request] = vi.mocked(global.fetch).mock.calls[0];
+    expect(url).toBe("http://localhost:8000/api/graph/mutate");
+    expect(request).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const payload = JSON.parse(String(request?.body));
+    expect(payload.actions).toEqual(actions);
+    expect(payload.idempotency_key).toMatch(/^widget:graph-widget-test:/);
   });
 
   it("should support ambient.mcp.callTool and resolve promise on WebSocket response", async () => {

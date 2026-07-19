@@ -1,7 +1,9 @@
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app, app_manager, get_db
+from backend.main import app, app_manager, get_db, run_store
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -48,7 +50,7 @@ def test_websocket_chat_flow(test_session, monkeypatch):
     client = TestClient(app)
 
     # Connect to WebSocket
-    with client.websocket_connect("/ws/chat") as websocket:
+    with client.websocket_connect("/ws/chat?session_id=websocket-chat") as websocket:
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
         # Send a chat message
@@ -68,6 +70,9 @@ def test_websocket_chat_flow(test_session, monkeypatch):
 
         # 2. Expect thinking indicator
         thinking = websocket.receive_json()
+        if thinking["type"] == "session_title_updated":
+            assert thinking["title"] == "Hello Agent"
+            thinking = websocket.receive_json()
         assert thinking["type"] == "reply"
         assert thinking["message"]["id"] == -1
         assert any(x in thinking["message"]["content"] for x in ["Thinking", "思考中"]), (
@@ -89,7 +94,7 @@ def test_websocket_chat_flow(test_session, monkeypatch):
     app.dependency_overrides.clear()
 
 
-def test_websocket_widget_trigger_flow(test_session, monkeypatch):
+def test_websocket_converse_rejects_unverified_inline_widget(test_session, monkeypatch):
     # Mock IntentRouter.route to bypass LLM classification in websocket test
     async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
         from backend.agent.intent_plan import IntentKind, IntentPlan
@@ -122,7 +127,7 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
 
-    with client.websocket_connect("/ws/chat") as websocket:
+    with client.websocket_connect("/ws/chat?session_id=websocket-inline-widget") as websocket:
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
         websocket.send_json({"sender": "user", "content": "Give me weather details"})
@@ -138,30 +143,27 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
 
         # 2. Expect thinking indicator
         thinking = websocket.receive_json()
+        if thinking["type"] == "session_title_updated":
+            thinking = websocket.receive_json()
         assert thinking["type"] == "reply"
         assert thinking["message"]["id"] == -1
         assert any(x in thinking["message"]["content"] for x in ["Thinking", "思考中"]), (
             f"Expected thinking indicator, got: {thinking['message']['content']}"
         )
 
-        # 3. Reply
-        reply = websocket.receive_json()
-        assert reply["type"] == "reply"
-        assert "weather widget" in reply["message"]["content"]
-        assert "<ambient-widget" not in reply["message"]["content"]  # XML block must be stripped!
-
-        # 4. Widget
-        widget_msg = websocket.receive_json()
-        assert widget_msg["type"] == "widget"
-        assert widget_msg["widget"]["id"] == "weather-card"
-        assert widget_msg["widget"]["title"] == "Local Weather"
-        assert "Beijing" in widget_msg["widget"]["js"]
+        # Converse is read-only: model-emitted widget markup must fail closed
+        # instead of publishing an artifact outside PLAN→STAGE→VERIFY→PROMOTE.
+        error = websocket.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "unverified_inline_artifact"
+        assert error["run_id"]
 
         # Expect session status idle update
         status_idle = websocket.receive_json()
         assert status_idle["type"] == "session_status_update"
         assert status_idle["status"] == "idle"
 
+    assert not (Path(test_session.apps_dir) / "weather-card").exists()
     app.dependency_overrides.clear()
 
 
@@ -203,22 +205,19 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
     # Retrieve backend_manager instance
     from backend.main import backend_manager
 
-    async def mock_get_or_start_mcp_client(app_id, manifest, send_ws_message_func):
-        # Trigger permission request to verify that flow works
-        approved = await backend_manager.request_permission(
+    async def mock_get_or_start_mcp_client(app_id, manifest, _send_ws_message_func):
+        # RunCoordinator has already persisted and resolved the approval before
+        # entering the transport adapter; there is no process-local Future.
+        assert backend_manager.is_mcp_identity_approved(
             app_id,
-            "mcp_spawn",
-            {"command": manifest.mcp_server["command"], "args": manifest.mcp_server["args"]},
-            send_ws_message_func,
+            backend_manager.mcp_permission_identity(manifest),
         )
-        if not approved:
-            raise Exception("Denied")
         return MockClient()
 
     monkeypatch.setattr(backend_manager, "get_or_start_mcp_client", mock_get_or_start_mcp_client)
 
     client = TestClient(app)
-    with client.websocket_connect("/ws/chat") as websocket:
+    with client.websocket_connect("/ws/chat?session_id=websocket-mcp") as websocket:
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
 
@@ -246,6 +245,14 @@ def test_websocket_mcp_call_flow(test_session, monkeypatch):
         call_res = websocket.receive_json()
         assert call_res["type"] == "mcp_call_response"
         assert call_res["call_id"] == "call-123"
+        assert call_res.get("error") is None, call_res
         assert call_res["result"] == {"echo": {"name": "test_tool", "arguments": {"x": 1}}}
+        durable_call = run_store.get_run(call_res["run_id"], include_events=True)
+        assert durable_call["correlation"] == {
+            "projection_type": "mcp_call_response",
+            "call_id": "call-123",
+            "app_id": "mcp-app",
+        }
+        assert durable_call["events"][0]["payload"]["correlation"]["call_id"] == "call-123"
 
     app.dependency_overrides.clear()
