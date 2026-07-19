@@ -34,6 +34,9 @@ graph TB
     TaskNode -->|"runs produce results"| TaskResult
     SchemaVerificationService -->|"returns"| VerificationDiff
     LLMService -->|"writes prompt audit logs"| LLMAuditLog
+    LLMConfigStore -->|"resolves provider profiles"| ModelRunContext
+    AgentOrchestrator -->|"uses primary/fast snapshots"| ModelRunContext
+    ModelRunContext -->|"injects selected model"| OpenCodeACP
     PlanExecutor -->|"returns"| PlanPhaseResult
 ```
 
@@ -155,6 +158,11 @@ checkbox 列表，让用户逐字段确认是否要扩展 Schema。
 2. 当 `kind ∈ {MULTI_INTENT, PLAN_AND_ACT}`，harness 调用
    `IntentRouter.refine_sub_intents()`（LLM #2），用 `refine_sub_intent.md`
    把 `sub_intents` 细化成具体 actions / extend_schema_props。
+
+每次 `handle_message()` 启动时固定会话主模型和快速模型快照。顶层意图路由使用快速模型；
+refine、计划、Schema、校验和最终对话使用主模型。会话在运行中切换模型只影响下一次请求。
+Widget 代码生成启动 OpenCode ACP 子进程时，会用进程级 `OPENCODE_CONFIG_CONTENT` 注入同一主模型
+及其临时凭据/端点；该配置不写入项目文件，也不会改变并行会话的模型。
 
 `AgentOrchestrator._handle_multi_intent` 按 `sub_intents` 顺序分发给
 各 SubExecutor。

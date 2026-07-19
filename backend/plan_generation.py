@@ -1,8 +1,9 @@
 import logging
-import os
 from typing import Any
 
 from backend.agent.providers import get_llm_provider
+from backend.llm_config import LLMConfigError
+from backend.llm_runtime import primary_selection, selection_ids
 
 logger = logging.getLogger("plan_generation")
 
@@ -33,8 +34,7 @@ Database Schema Context:
 
 Please write a brief implementation plan for this widget."""
 
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model_name = os.getenv("LLM_MODEL", "llama3")
+        provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
@@ -42,6 +42,8 @@ Please write a brief implementation plan for this widget."""
         try:
             raw_response = await provider.generate(messages, db_session=db_session)
             return raw_response.strip()
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate implementation plan: {e}")
             return (
@@ -83,8 +85,7 @@ User Feedback:
 
 Update and output the refined implementation plan."""
 
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model_name = os.getenv("LLM_MODEL", "llama3")
+        provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
@@ -92,6 +93,8 @@ Update and output the refined implementation plan."""
         try:
             raw_response = await provider.generate(messages, db_session=db_session)
             return raw_response.strip()
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"Failed to refine implementation plan: {e}")
             return current_plan

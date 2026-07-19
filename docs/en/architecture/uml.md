@@ -57,6 +57,7 @@ classDiagram
     class ChatSession {
         +id: str (PK)
         +title: str
+        +model_selection: ModelSelection|None
         +created_at: datetime
         +updated_at: datetime
     }
@@ -319,9 +320,57 @@ classDiagram
     }
 
     class LLMService {
-        +generate_agent_response(messages: List~dict~) str
-        +call_llm_api(provider: str, model: str, messages: List~dict~, tools: List~dict~|None) dict
+        +generate(selection: ResolvedModel, messages: List~dict~, tools: List~dict~|None) LLMResult
     }
+
+    class LLMResult {
+        +text: str
+        +tool_calls: List~dict~|None
+        +usage: dict
+    }
+
+    class ModelSelection {
+        +provider_id: str
+        +model_id: str
+    }
+
+    class ModelRef {
+        +provider_id: str|None
+        +model_id: str|None
+        +display_name: str|None
+        +api_mode: str|None
+        +capabilities: ModelCapabilities
+        +source: str
+    }
+
+    class ProviderProfile {
+        +id: str
+        +name: str
+        +preset: str
+        +enabled: bool
+        +connection: dict
+        +credential_refs: dict
+        +models: List~ModelRef~
+    }
+
+    class LLMDefaults {
+        +default_model: ModelSelection|None
+        +fast_model: ModelSelection|None
+    }
+
+    class LLMConfigStore {
+        +list_providers() List~ProviderProfile~
+        +create_provider(profile, credentials) ProviderProfile
+        +update_provider(provider_id, changes, credentials) ProviderProfile
+        +delete_provider(provider_id) void
+        +get_settings() LLMDefaults
+        +update_settings(changes) LLMDefaults
+        +resolve(selection) ResolvedModel
+    }
+
+    ProviderProfile "1" *-- "many" ModelRef
+    LLMDefaults --> ModelSelection
+    LLMService --> LLMConfigStore : obtains connection credentials
 
     PlanExecutor <|-- CodingPlanExecutor
     PlanExecutor <|-- MutationPlanExecutor

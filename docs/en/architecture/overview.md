@@ -81,6 +81,8 @@ graph TB
 1.  **WebSockets** (`/ws/chat`): Provides bidirectional, real-time message broadcasting, canvas layout syncing, graph query subscription pushes, and MCP execution calls.
 2.  **REST HTTP API**: Handles file retrieval for card mounting (`GET /api/apps/{app_id}`), listing available apps, and transactional database modifications (`POST /api/graph/mutate`).
 
+Graph query subscriptions are connection-lifecycle registrations. A Widget may register before the socket reaches `OPEN`; if it unmounts first, that registration is cancelled without emitting stale subscribe/unsubscribe traffic. The client replays only currently active registrations after connection or session reconnection. Conversation, approval, and tool-call commands are deliberately excluded from replay so disconnected actions cannot execute unexpectedly later.
+
 ## Sandboxing & Apps Architecture
 
 For detailed information on the decoupled architecture of Widgets (Apps) including UI, Controller, and Data layers, please see [Widget Apps Architecture](/en/architecture/apps.md). For details on the security sandbox and compiled scoping, see [Sandbox Isolation](/en/widgets/sandbox) and [ambient SDK Reference](/en/widgets/sdk).

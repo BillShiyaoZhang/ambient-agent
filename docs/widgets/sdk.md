@@ -20,7 +20,18 @@
 
 ### `ambient.minimize()`
 
-将当前全屏状态的 Widget 卡片恢复至其原本的网格大小。
+将当前最大化 Widget 恢复为可移动、可缩放的浮动窗口。
+
+### `ambient.theme`
+
+当前宿主主题的只读快照：
+
+```javascript
+ambient.theme.preference // "system" | "light" | "dark"
+ambient.theme.effective  // "light" | "dark"
+```
+
+主题变化会让 Widget React 根节点重新渲染。标准 `ambient.components` 自动使用新的语义色；自定义颜色可根据 `ambient.theme.effective` 自行切换。
 
 ## 2. 图数据库操作
 
@@ -80,7 +91,17 @@
   const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
   ```
 
-## 4. 内置 React 与 UI 支持
+## 4. 后台 Run
+
+- `ambient.runs.start(catalogId, actionId, input)`：创建持久后台 Run，立即返回 Run snapshot。
+- `ambient.runs.get(runId)`：读取 Run 当前状态、进度和结构化结果。
+- `ambient.runs.cancel(runId)`：请求协作式取消。
+- `ambient.runs.subscribe(runId, callback)`：订阅该 Run 的持久事件，返回取消订阅函数。
+- `ambient.capabilities.invoke(catalogId, input, actionId?)`：创建 Run 并等待 terminal result 的便捷封装。
+
+关闭 Widget 窗口只会移除订阅回调，不会取消 Run。
+
+## 5. 内置 React 与 UI 支持
 
 `ambient` 对象还暴露了 React 环境本身以及一套由 Tailwind CSS 渲染的优质 UI 组件库，Widget 无需自行导入或使用外部 CSS：
 

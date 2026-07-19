@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -13,8 +12,9 @@ logger = logging.getLogger("agent.providers")
 
 
 class BaseLLMProvider(ABC):
-    def __init__(self, model: str):
+    def __init__(self, model: str, provider_name: str = ""):
         self.model = model
+        self.provider_name = provider_name
 
     @abstractmethod
     async def generate(
@@ -139,13 +139,16 @@ class BaseLLMProvider(ABC):
 
 
 class OllamaProvider(BaseLLMProvider):
+    def __init__(self, model: str, provider_name: str = "ollama"):
+        super().__init__(model, provider_name)
+
     async def generate(
         self,
         messages: list[dict[str, str]],
         db_session: Session | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> str:
-        return await self._run_tool_loop("ollama", messages, db_session, tools)
+        return await self._run_tool_loop(self.provider_name, messages, db_session, tools)
 
 
 class CloudLLMProvider(BaseLLMProvider):
@@ -155,12 +158,10 @@ class CloudLLMProvider(BaseLLMProvider):
         db_session: Session | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> str:
-        provider_name = os.getenv("LLM_PROVIDER", "openai")
-        return await self._run_tool_loop(provider_name, messages, db_session, tools)
+        return await self._run_tool_loop(self.provider_name, messages, db_session, tools)
 
 
 def get_llm_provider(provider_name: str, model_name: str) -> BaseLLMProvider:
     if provider_name.lower() == "ollama":
-        return OllamaProvider(model=model_name)
-    else:
-        return CloudLLMProvider(model=model_name)
+        return OllamaProvider(model=model_name, provider_name=provider_name)
+    return CloudLLMProvider(model=model_name, provider_name=provider_name)

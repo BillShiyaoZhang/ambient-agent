@@ -5,6 +5,7 @@
 - **核心架构**
   - [系统概述](/architecture/overview.md)
   - [Widget 应用架构](/architecture/apps.md)
+  - [后台 Run 与 Runtime](/architecture/runs.md)
   - [类图设计](/architecture/uml.md)
   - [图数据库](/architecture/graph-db.md)
 
@@ -20,4 +21,5 @@
 
 - **集成与安全**
   - [工具集成 (MCP)](/integrations/mcp.md)
+  - [LLM Provider 与模型](/integrations/llm-providers.md)
   - [权限与安全审计](/integrations/permissions.md)

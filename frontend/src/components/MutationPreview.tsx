@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { SystemToast } from "./system/SystemUI";
 
 export interface MutationPreviewData {
   ticket_id: string;
@@ -28,14 +29,14 @@ export function MutationPreview({ preview, onRollback, onPin, onDismiss }: Mutat
       setSecondsLeft((prev) => (prev === null ? null : Math.max(0, prev - 1)));
     }, 1000);
     return () => clearInterval(interval);
-  }, [preview?.ticket_id]);
+  }, [preview]);
 
   if (!preview) return null;
 
   const canRollback = (secondsLeft ?? 0) > 0;
 
   return (
-    <div className="fixed bottom-4 right-4 z-[1000] bg-[#0b0b0e] border border-emerald-500/30 rounded-xl p-3 shadow-lg max-w-sm text-slate-100 font-sans text-xs">
+    <SystemToast tone="success" className="mutation-toast">
       <div className="flex items-start justify-between mb-2">
         <div>
           <div className="font-semibold text-emerald-400 mb-1 flex items-center gap-1.5">
@@ -72,6 +73,6 @@ export function MutationPreview({ preview, onRollback, onPin, onDismiss }: Mutat
           ✕
         </button>
       </div>
-    </div>
+    </SystemToast>
   );
 }

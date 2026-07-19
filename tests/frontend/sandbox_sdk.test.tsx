@@ -19,7 +19,7 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
   it("should inject ambient.graph.subscribe and trigger callback when update event is fired", async () => {
     let subIdCaptured = "";
     
-    vi.spyOn(wsService, "sendMessage").mockImplementation((msg: any) => {
+    const register = vi.spyOn(wsService, "registerPersistentMessage").mockImplementation((_key: string, msg: any) => {
       if (msg.type === "graph_subscribe") {
         subIdCaptured = msg.subscription_id;
       }
@@ -48,7 +48,8 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
 
     render(<SandboxWidget widget={mockWidget} />);
 
-    expect(wsService.sendMessage).toHaveBeenCalledWith(
+    expect(register).toHaveBeenCalledWith(
+      expect.stringMatching(/^graph:sub-/),
       expect.objectContaining({
         type: "graph_subscribe",
         query: { type: "Task" },
@@ -71,11 +72,12 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
 
   it("should unsubscribe correctly and send graph_unsubscribe message", async () => {
     let subIdCaptured = "";
-    vi.spyOn(wsService, "sendMessage").mockImplementation((msg: any) => {
+    vi.spyOn(wsService, "registerPersistentMessage").mockImplementation((_key: string, msg: any) => {
       if (msg.type === "graph_subscribe") {
         subIdCaptured = msg.subscription_id;
       }
     });
+    const unregister = vi.spyOn(wsService, "unregisterPersistentMessage").mockImplementation(() => {});
 
     const mockWidget: Widget = {
       id: "graph-widget-test",
@@ -102,7 +104,8 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const btn = screen.getByTestId("unsub-btn");
     btn.click();
 
-    expect(wsService.sendMessage).toHaveBeenCalledWith(
+    expect(unregister).toHaveBeenCalledWith(
+      `graph:${subIdCaptured}`,
       expect.objectContaining({
         type: "graph_unsubscribe",
         subscription_id: subIdCaptured,

@@ -235,7 +235,16 @@ classDiagram
     AgentOrchestrator --> SchemaVerificationService : structured diff (Direction A)
     SchemaVerificationService --> VerificationDiff : returns
     LLMService --> LLMAuditLog : writes prompt audit logs
+    LLMConfigStore --> ModelRunContext : resolves provider profiles
+    AgentOrchestrator --> ModelRunContext : uses primary/fast snapshots
+    ModelRunContext --> OpenCodeACP : injects selected model
 ```
+
+Each `handle_message()` run captures immutable primary and fast model snapshots. Top-level routing uses
+the fast model; refinement, planning, schema alignment, verification, and conversation use the primary
+model. Widget code generation injects that same primary model and its process-local endpoint/credentials
+into the OpenCode ACP subprocess through `OPENCODE_CONFIG_CONTENT`; nothing is written to project config.
+Changing a session model while a run is active therefore affects only the next request.
 
 ## 2. Message Processing Flow
 

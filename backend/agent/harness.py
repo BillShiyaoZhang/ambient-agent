@@ -37,6 +37,8 @@ from backend.agent_parser import parse_widget_from_text
 from backend.app_manager import AppManager
 from backend.context_manager import ContextManager
 from backend.models import ChatMessage, ChatSession
+from backend.llm_config import LLMConfigError
+from backend.llm_runtime import primary_selection, selection_ids
 from backend.opencode_service import run_opencode_agent_acp
 from backend.schema_diff import VerificationDiff
 
@@ -792,6 +794,32 @@ class AgentOrchestrator:
             plan=plan, session_id=session_id, content=content, language=language, on_update=on_update
         )
 
+    async def generate_capability_ui(
+        self,
+        session_id: str,
+        app_id: str,
+        instruction: str,
+        on_update: Callable[[Any], Any],
+    ) -> tuple[ChatMessage, dict[str, Any] | None]:
+        """Build a capability UI with a deterministic app id, bypassing intent guessing."""
+        db_session_obj = self.db.get(ChatSession, session_id)
+        if not db_session_obj:
+            db_session_obj = ChatSession(id=session_id, title="Active Chat")
+            self.db.add(db_session_obj)
+            self.db.commit()
+        return await self._handle_widget_build(
+            plan=IntentPlan(
+                kind=IntentKind.WIDGET_CREATE,
+                confidence=1.0,
+                rationale="explicit capability UI generation",
+                app_id=app_id,
+                instruction=instruction,
+            ),
+            session_id=session_id,
+            language=db_session_obj.language or "zh",
+            on_update=on_update,
+        )
+
     # ----- top-level handlers ----------------------------------------------
 
     async def _classify_intent(self, content: str, language: str = "zh") -> IntentPlan:
@@ -826,6 +854,8 @@ class AgentOrchestrator:
                     plan, router_context, db_session=self.db, language=language
                 )
             return plan
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"Intent classification failed: {e}")
             return IntentPlan(kind=IntentKind.CONVERSE, rationale="routing failed", instruction=content)
@@ -841,8 +871,7 @@ class AgentOrchestrator:
         is_zh = language == "zh"
         await self._run_callback(on_update, "🤔 思考中..." if is_zh else "🤔 Thinking...")
 
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model_name = os.getenv("LLM_MODEL", "llama3")
+        provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
 
         from backend.agent.prompts.manager import PromptManager

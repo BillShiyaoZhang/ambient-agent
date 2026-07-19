@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import type { Widget } from "./DashboardCanvas";
 import wsService from "../services/websocket";
+import { runService } from "../services/runs";
 import * as Babel from "@babel/standalone";
 import { ErrorBoundary } from "./ErrorBoundary";
 import htm from "htm";
 
 const html = htm.bind(React.createElement);
+const API_BASE = `http://${window.location.hostname}:8000`;
 
 // Pre-defined React components for ambient.components unified scheme
 const Column = ({ children, gap, padding, style, onClick, ...rest }: any) => {
@@ -52,16 +54,17 @@ const Card = ({ title, children, style, onClick, ...rest }: any) => {
     <div
       onClick={onClick}
       style={{
-        border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: "8px",
+        border: "1px solid var(--widget-border, rgba(255,255,255,0.08))",
+        borderRadius: "12px",
         padding: "16px",
-        backgroundColor: "rgba(30,41,59,0.3)",
+        color: "var(--widget-text, rgba(255,255,255,0.9))",
+        backgroundColor: "var(--widget-surface, rgba(30,41,59,0.3))",
         cursor: onClick ? "pointer" : undefined,
         ...style
       }}
       {...rest}
     >
-      {title && <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "12px", color: "rgba(255,255,255,0.9)", borderBottom: "1px solid rgba(255,255,255,0.06)", paddingBottom: "6px" }}>{title}</h3>}
+      {title && <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "12px", color: "var(--widget-text, rgba(255,255,255,0.9))", borderBottom: "1px solid var(--widget-border, rgba(255,255,255,0.06))", paddingBottom: "6px" }}>{title}</h3>}
       {children}
     </div>
   );
@@ -93,7 +96,7 @@ const Button = ({ label, variant, style, onClick, ...rest }: any) => {
         border: "none",
         fontWeight: "600",
         fontSize: "13px",
-        backgroundColor: variant === "danger" ? "#ef4444" : variant === "secondary" ? "#475569" : "#2563eb",
+        backgroundColor: variant === "danger" ? "#ef4444" : variant === "secondary" ? "var(--widget-control, #475569)" : "var(--accent, #2563eb)",
         color: "#ffffff",
         display: "inline-flex",
         alignItems: "center",
@@ -110,7 +113,7 @@ const Button = ({ label, variant, style, onClick, ...rest }: any) => {
 const TextField = ({ label, placeholder, value, onChange, onEnter, style, ...rest }: any) => {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "6px", ...style }}>
-      {label && <label style={{ fontSize: "12px", fontWeight: "500", color: "rgba(255,255,255,0.5)" }}>{label}</label>}
+      {label && <label style={{ fontSize: "12px", fontWeight: "500", color: "var(--widget-muted, rgba(255,255,255,0.5))" }}>{label}</label>}
       <input
         type="text"
         placeholder={placeholder}
@@ -124,9 +127,9 @@ const TextField = ({ label, placeholder, value, onChange, onEnter, style, ...res
         style={{
           padding: "8px 12px",
           borderRadius: "6px",
-          backgroundColor: "rgba(15,23,42,0.4)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          color: "#ffffff",
+          backgroundColor: "var(--widget-input, rgba(15,23,42,0.4))",
+          border: "1px solid var(--widget-border, rgba(255,255,255,0.08))",
+          color: "var(--widget-text, #ffffff)",
           fontSize: "13px",
           outline: "none",
           width: "100%"
@@ -147,7 +150,7 @@ const Checkbox = ({ label, checked, onChange, style, ...rest }: any) => {
         style={{ cursor: "pointer" }}
         {...rest}
       />
-      <span style={{ fontSize: "13px", color: "rgba(255,255,255,0.8)" }}>{label}</span>
+      <span style={{ fontSize: "13px", color: "var(--widget-text, rgba(255,255,255,0.8))" }}>{label}</span>
     </label>
   );
 };
@@ -163,8 +166,8 @@ const List = ({ items, itemStyle, onItemClick, style, ...rest }: any) => {
         const currentItemStyle = {
           padding: "8px 12px",
           borderRadius: "6px",
-          backgroundColor: "rgba(255,255,255,0.02)",
-          border: "1px solid rgba(255,255,255,0.03)",
+          backgroundColor: "var(--widget-surface-soft, rgba(255,255,255,0.02))",
+          border: "1px solid var(--widget-border, rgba(255,255,255,0.03))",
           fontSize: "13px",
           cursor: onItemClick ? "pointer" : "default",
           ...itemStyle
@@ -264,18 +267,6 @@ interface SandboxWidgetProps {
   onMinimize?: (id: string) => void;
 }
 
-// Global fetch cache to share API responses across all mounts and sandbox instances
-const globalFetchCache = new Map<string, { data: any; timestamp: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
-
-// --- SandboxWidget Prop Interface ---
-
-interface SandboxWidgetProps {
-  widget: Widget;
-  onFullscreen?: (id: string) => void;
-  onMinimize?: (id: string) => void;
-}
-
 export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   widget,
   onFullscreen,
@@ -289,7 +280,6 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     onMinimizeRef.current = onMinimize;
   }, [onFullscreen, onMinimize]);
 
-  const API_BASE = `http://${window.location.hostname}:8000`;
   const customListenersRef = useRef<{ event: string; handler: EventListener }[]>([]);
 
   const ambientProps = useMemo(() => {
@@ -310,6 +300,14 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           onMinimizeRef.current(widget.id);
         }
       },
+      theme: {
+        get preference() {
+          return document.documentElement.dataset.themePreference || "system";
+        },
+        get effective() {
+          return document.documentElement.dataset.theme || "dark";
+        },
+      },
       graph: {
         subscribe: (query: any, callback: (data: any) => void) => {
           const subId = `sub-${Math.random().toString(36).substring(2, 11)}`;
@@ -320,7 +318,8 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           window.addEventListener(eventName, handler);
           customListenersRef.current.push({ event: eventName, handler });
 
-          wsService.sendMessage({
+          const registrationKey = `graph:${subId}`;
+          wsService.registerPersistentMessage(registrationKey, {
             type: "graph_subscribe",
             subscription_id: subId,
             query: query
@@ -331,7 +330,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
             const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
             if (idx !== -1) customListenersRef.current.splice(idx, 1);
 
-            wsService.sendMessage({
+            wsService.unregisterPersistentMessage(registrationKey, {
               type: "graph_unsubscribe",
               subscription_id: subId
             });
@@ -346,6 +345,29 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           if (!res.ok) throw new Error("Failed to mutate graph");
           return res.json();
         }
+      },
+      capabilities: {
+        invoke: async (catalogId: string, input: any, actionId?: string) => {
+          const run = await runService.start(catalogId, actionId, input);
+          return runService.wait(run.id);
+        },
+      },
+      runs: {
+        start: (catalogId: string, actionId: string | undefined, input: any) => runService.start(catalogId, actionId, input),
+        get: (runId: string) => runService.get(runId),
+        cancel: (runId: string) => runService.cancel(runId),
+        subscribe: (runId: string, callback: (event: any) => void) => {
+          const handler = (event: Event) => callback((event as CustomEvent).detail);
+          const eventName = `ambient_run_event:${runId}`;
+          window.addEventListener(eventName, handler);
+          customListenersRef.current.push({ event: eventName, handler });
+          runService.connect();
+          return () => {
+            window.removeEventListener(eventName, handler);
+            const index = customListenersRef.current.findIndex((listener) => listener.event === eventName && listener.handler === handler);
+            if (index >= 0) customListenersRef.current.splice(index, 1);
+          };
+        },
       },
       mcp: {
         callTool: (name: string, args: any) => {
@@ -392,8 +414,9 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   }, [widget.id]);
 
   useEffect(() => {
+    const listeners = customListenersRef.current;
     return () => {
-      customListenersRef.current.forEach(({ event, handler }) => {
+      listeners.forEach(({ event, handler }) => {
         window.removeEventListener(event, handler);
       });
     };
@@ -436,7 +459,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     <div
       id={widget.id}
       data-testid={`sandbox-${widget.id}`}
-      className="w-full h-full text-white/90 overflow-auto"
+      className="ambient-widget-root w-full h-full overflow-auto"
     >
       {Component ? (
         <ErrorBoundary>

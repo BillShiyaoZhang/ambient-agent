@@ -17,7 +17,6 @@ tool call.
 
 import json
 import logging
-import os
 import re
 from typing import Any
 
@@ -29,6 +28,8 @@ from backend.agent.intent_plan import (
 )
 from backend.agent.prompts.manager import PromptManager
 from backend.llm_service import call_llm_api
+from backend.llm_config import LLMConfigError
+from backend.llm_runtime import fast_selection, primary_selection, selection_ids
 from backend.router_context import RouterContext
 
 logger = logging.getLogger("agent.router")
@@ -94,11 +95,12 @@ class IntentRouter:
 
         # 3. LLM-driven routing via function-calling.
         try:
+            runtime_provider, runtime_model = selection_ids(fast_selection())
             plan = await cls._route_with_llm(
                 content_stripped=content_stripped,
                 context=ctx,
-                provider_name=provider_name or os.getenv("LLM_PROVIDER", "ollama"),
-                model_name=model_name or os.getenv("LLM_MODEL", "llama3"),
+                provider_name=provider_name or runtime_provider,
+                model_name=model_name or runtime_model,
                 db_session=db_session,
                 override_system_prompt=override_system_prompt,
                 context_sections=sections,
@@ -107,6 +109,8 @@ class IntentRouter:
             )
             if plan is not None:
                 return plan
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.warning(f"LLM routing failed: {e}")
 
@@ -154,8 +158,9 @@ class IntentRouter:
         else:
             ctx = RouterContext()
 
-        provider_name = provider_name or os.getenv("LLM_PROVIDER", "ollama")
-        model_name = model_name or os.getenv("LLM_MODEL", "llama3")
+        runtime_provider, runtime_model = selection_ids(primary_selection())
+        provider_name = provider_name or runtime_provider
+        model_name = model_name or runtime_model
 
         prompt_manager = PromptManager()
         try:
@@ -167,6 +172,8 @@ class IntentRouter:
                 extra_context=json.dumps(extra_context or {}, ensure_ascii=False),
                 language=language,
             )
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.warning(f"Could not load refine_sub_intent.md prompt: {e}")
             return plan
@@ -191,6 +198,8 @@ class IntentRouter:
 
         try:
             response = await call_llm_api(provider_name, model_name, messages, tools)
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.warning(f"LLM #2 refine_sub_intents failed: {e}")
             return plan

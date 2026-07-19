@@ -5,6 +5,7 @@
 - **Core Architecture**
   - [System Overview](/en/architecture/overview.md)
   - [Widget Apps Architecture](/en/architecture/apps.md)
+  - [Background Runs and Runtimes](/en/architecture/runs.md)
   - [Class Diagrams](/en/architecture/uml.md)
   - [Graph Database (GraphDB)](/en/architecture/graph-db.md)
 
@@ -20,4 +21,5 @@
 
 - **Integrations & Security**
   - [MCP Tools Integration](/en/integrations/mcp.md)
+  - [LLM Providers and Models](/en/integrations/llm-providers.md)
   - [Permissions & Audit](/en/integrations/permissions.md)
