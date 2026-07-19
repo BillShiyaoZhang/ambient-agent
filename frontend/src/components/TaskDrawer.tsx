@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { runService, type AmbientRun, type RuntimeSnapshot } from "../services/runs";
+import { SystemDrawer, SystemIconButton } from "./system/SystemUI";
 import "./TaskDrawer.css";
 
 interface TaskDrawerProps {
@@ -95,12 +96,10 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   };
 
   return (
-    <div className={`task-drawer-layer ${open ? "is-open" : ""}`} aria-hidden={!open}>
-      <button className="task-drawer-scrim" onClick={onClose} tabIndex={open ? 0 : -1} aria-label={isZh ? "关闭任务" : "Close tasks"} />
-      <aside className="task-drawer" role="dialog" aria-modal="true" aria-label={isZh ? "任务中心" : "Task Center"}>
+    <SystemDrawer open={open} onClose={onClose} label={isZh ? "任务中心" : "Task Center"} className="task-drawer">
         <header>
           <div><h2>{isZh ? "任务中心" : "Task Center"}</h2><p>{isZh ? "后台工作与运行环境" : "Background work and runtimes"}</p></div>
-          <button onClick={onClose} aria-label={isZh ? "关闭" : "Close"}><X size={18} /></button>
+          <SystemIconButton onClick={onClose} label={isZh ? "关闭" : "Close"}><X size={18} /></SystemIconButton>
         </header>
         <nav>
           <button className={tab === "active" ? "is-active" : ""} onClick={() => setTab("active")}>{isZh ? "进行中" : "Active"}<span>{counts.active}</span></button>
@@ -162,7 +161,6 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
             </footer>
           </section>
         )}
-      </aside>
-    </div>
+    </SystemDrawer>
   );
 }

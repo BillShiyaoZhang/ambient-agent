@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from "react";
+import { RotateCw, X } from "lucide-react";
+import { SystemDrawer, SystemIconButton } from "./system/SystemUI";
 
 export interface AuditLogEntry {
   id: number;
@@ -41,17 +43,10 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
     }
   }, [isOpen]);
 
-  if (!isOpen) return null;
-
   return (
-    <div className="audit-overlay fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm">
-      {/* Click outside to close */}
-      <div className="flex-1" onClick={onClose} />
-
-      {/* Slide drawer */}
-      <div className="audit-panel w-[600px] max-w-full h-full glass border-l border-white/10 flex flex-col shadow-2xl animate-slide-in">
+    <SystemDrawer open={isOpen} onClose={onClose} label="Data Transmission Audit Log" className="audit-panel flex flex-col">
         {/* Header */}
-        <div className="p-6 border-b border-white/5 flex items-center justify-between bg-white/[0.01]">
+        <div className="p-5 border-b border-[var(--border-subtle)] flex items-center justify-between">
           <div>
             <h2 className="text-lg font-bold text-white tracking-wide">
               Data Transmission Audit Log
@@ -61,44 +56,14 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <button
+            <SystemIconButton
               onClick={fetchLogs}
               disabled={loading}
-              className="p-2 hover:bg-white/5 rounded-lg text-white/60 hover:text-white transition-colors disabled:opacity-50 cursor-pointer"
-              title="Refresh logs"
+              label="Refresh logs"
             >
-              <svg
-                className={`w-4 h-4 ${loading ? "animate-spin" : ""}`}
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5"
-                />
-              </svg>
-            </button>
-            <button
-              onClick={onClose}
-              className="p-2 hover:bg-white/5 rounded-lg text-white/60 hover:text-white transition-colors cursor-pointer"
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-            </button>
+              <RotateCw className={loading ? "animate-spin" : ""} size={17} />
+            </SystemIconButton>
+            <SystemIconButton onClick={onClose} label="Close audit log"><X size={18} /></SystemIconButton>
           </div>
         </div>
 
@@ -179,7 +144,6 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
             ))
           )}
         </div>
-      </div>
-    </div>
+    </SystemDrawer>
   );
 };

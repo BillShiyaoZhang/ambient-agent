@@ -12,6 +12,7 @@ import { MutationPreview, type MutationPreviewData } from "./components/Mutation
 import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
 import { TaskDrawer } from "./components/TaskDrawer";
+import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
 import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
 import { Languages, ListTodo, Moon, ShieldCheck, Sun } from "lucide-react";
@@ -696,6 +697,19 @@ function App() {
       onRunFullscreen={handleOpenApp}
       onRunCreated={() => setIsTaskDrawerOpen(true)}
       language={language}
+      headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
+        <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={() => setIsAuditOpen(true)}><ShieldCheck size={17} /></SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "切换为英文" : "Switch to Chinese"} onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
+        <label className="system-theme-select" aria-label={language === "zh" ? "主题" : "Theme"}>
+          {theme.effective === "dark" ? <Moon size={16} /> : <Sun size={16} />}
+          <select value={theme.preference} onChange={(event) => themeControllerRef.current!.setPreference(event.target.value as "system" | "light" | "dark")}>
+            <option value="system">{language === "zh" ? "跟随系统" : "System"}</option>
+            <option value="light">{language === "zh" ? "浅色" : "Light"}</option>
+            <option value="dark">{language === "zh" ? "深色" : "Dark"}</option>
+          </select>
+        </label>
+      </div>}
     />
   );
 
@@ -727,22 +741,6 @@ function App() {
           />
           {appCenter("overlay")}
         </>
-      )}
-
-      {canvasConfig.open_app_ids.length === 0 && (
-        <div className="home-controls" aria-label={language === "zh" ? "主页设置" : "Home settings"}>
-          <button onClick={() => setIsTaskDrawerOpen(true)} aria-label={language === "zh" ? "任务中心" : "Task Center"}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span>{taskCounts.active + taskCounts.attention}</span> : null}</button>
-          <button onClick={() => setIsAuditOpen(true)} aria-label={language === "zh" ? "审计日志" : "Audit log"}><ShieldCheck size={17} /></button>
-          <button onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")} aria-label={language === "zh" ? "切换为英文" : "Switch to Chinese"}><Languages size={17} /></button>
-          <label aria-label={language === "zh" ? "主题" : "Theme"}>
-            {theme.effective === "dark" ? <Moon size={16} /> : <Sun size={16} />}
-            <select value={theme.preference} onChange={(event) => themeControllerRef.current!.setPreference(event.target.value as "system" | "light" | "dark")}>
-              <option value="system">{language === "zh" ? "跟随系统" : "System"}</option>
-              <option value="light">{language === "zh" ? "浅色" : "Light"}</option>
-              <option value="dark">{language === "zh" ? "深色" : "Dark"}</option>
-            </select>
-          </label>
-        </div>
       )}
 
       <AgentChatOverlay
@@ -793,36 +791,28 @@ function App() {
 
       {/* 🛡️ OpenCode Permission Request Modal */}
       {pendingPermission && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md">
-          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-xl max-w-md w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
-            <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
-              🛡️ {language === "zh" ? "OpenCode 授权请求" : "OpenCode Permission Request"}
-            </h3>
-            <p className="text-slate-400 text-xs mb-4 leading-relaxed">
-              {language === "zh"
-                ? "OpenCode 正在请求执行以下敏感操作。请确认是否允许此操作："
-                : "OpenCode is requesting to execute the following sensitive action. Please confirm if you allow it:"}
-            </p>
-            <div className="bg-black/40 border border-white/5 rounded-lg p-3 mb-5 font-mono text-xs text-cyan-400 break-all select-all">
-              <span className="text-slate-500 font-sans block mb-1">【{language === "zh" ? "类型" : "Type"}: {pendingPermission.tool_call}】</span>
+        <SystemDialog open blocking size="compact" title={language === "zh" ? "OpenCode 授权请求" : "OpenCode Permission Request"} description={language === "zh" ? "OpenCode 正在请求执行敏感操作。请确认是否允许。" : "OpenCode is requesting a sensitive action. Confirm whether it is allowed."}>
+          <div className="system-dialog-body">
+            <div className="system-dialog-code">
+              <span className="system-dialog-code-label">【{language === "zh" ? "类型" : "Type"}: {pendingPermission.tool_call}】</span>
               {pendingPermission.details}
             </div>
-            <div className="flex items-center justify-end gap-3 font-medium">
+            <div className="system-dialog-actions">
               <button
                 onClick={() => handleResolvePermission(false)}
-                className="px-3.5 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors text-xs"
+                className="system-button is-danger"
               >
                 {language === "zh" ? "拒绝 (Deny)" : "Deny"}
               </button>
               <button
                 onClick={() => handleResolvePermission(true)}
-                className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
+                className="system-button is-primary"
               >
                 {language === "zh" ? "允许 (Allow)" : "Allow"}
               </button>
             </div>
           </div>
-        </div>
+        </SystemDialog>
       )}
 
       {/* 🛡️ Backend Agent/MCP Permission Request Modal */}
@@ -834,18 +824,8 @@ function App() {
 
       {/* 🧠 App 数据 Schema 智能对齐 Modal */}
       {pendingSchemaRequest && editedProposal && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md overflow-y-auto py-10">
-          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
-            <div>
-              <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2">
-                🧠 {language === "zh" ? "App 数据 Schema 对齐" : "App Schema Alignment"}
-              </h3>
-              <p className="text-slate-400 text-xs leading-relaxed">
-                {language === "zh"
-                  ? `为应用 ${pendingSchemaRequest.app_id} 规划最规范的全局关联与数据结构，消除数据碎片并确保多 Widget 协同。`
-                  : `Plan standard global relationships and data structures for app ${pendingSchemaRequest.app_id} to ensure widget collaboration.`}
-              </p>
-            </div>
+        <SystemDialog open blocking size="large" title={language === "zh" ? "App 数据 Schema 对齐" : "App Schema Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 规划全局关联与数据结构。` : `Plan global relationships and data structures for app ${pendingSchemaRequest.app_id}.`}>
+          <div className="system-dialog-body flex flex-col gap-4">
 
             {/* Reused Schemas list */}
             {editedProposal.reused_schemas.length > 0 && (
@@ -1058,23 +1038,13 @@ function App() {
               </div>
             </div>
           </div>
-        </div>
+        </SystemDialog>
       )}
 
       {/* 📝 App 开发计划 智能对齐 Modal */}
       {pendingPlanRequest && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md overflow-y-auto py-10">
-          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
-            <div>
-              <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2 font-sans">
-                📝 {language === "zh" ? "App 开发计划确认" : "App Development Plan Confirmation"}
-              </h3>
-              <p className="text-slate-400 text-xs leading-relaxed font-sans">
-                {language === "zh"
-                  ? `为应用 ${pendingPlanRequest.app_id} 确认最终开发方案。`
-                  : `Confirm the final development plan for app ${pendingPlanRequest.app_id}.`}
-              </p>
-            </div>
+        <SystemDialog open blocking size="large" title={language === "zh" ? "App 开发计划确认" : "App Development Plan Confirmation"} description={language === "zh" ? `为应用 ${pendingPlanRequest.app_id} 确认最终开发方案。` : `Confirm the final development plan for app ${pendingPlanRequest.app_id}.`}>
+          <div className="system-dialog-body flex flex-col gap-4">
 
             {/* Read-only Plan content */}
             <div className="border border-white/10 bg-white/[0.02] rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
@@ -1129,22 +1099,12 @@ function App() {
               </div>
             </div>
           </div>
-        </div>
+        </SystemDialog>
       )}
       {/* 🔍 Schema 校验警告与返工 Modal */}
       {pendingVerificationRequest && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/80 backdrop-blur-md overflow-y-auto py-10">
-          <div className="bg-[#0b0b0e] border border-white/10 p-6 rounded-2xl max-w-2xl w-full mx-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 text-white font-sans max-h-[85vh] overflow-y-auto flex flex-col gap-4">
-            <div>
-              <h3 className="text-base font-semibold text-white mb-1.5 flex items-center gap-2 font-sans">
-                ⚠️ {language === "zh" ? "Schema 校验未完全对齐" : "Schema Alignment Warning"}
-              </h3>
-              <p className="text-slate-400 text-xs leading-relaxed font-sans">
-                {language === "zh"
-                  ? `应用 ${pendingVerificationRequest.app_id} 的代码在 Graph DB 校验中发现不一致，请选择处理方式。`
-                  : `Discrepancies found in Graph DB validation for app ${pendingVerificationRequest.app_id}. Please choose action.`}
-              </p>
-            </div>
+        <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 校验未完全对齐" : "Schema Alignment Warning"} description={language === "zh" ? `应用 ${pendingVerificationRequest.app_id} 的代码在 Graph DB 校验中发现不一致，请选择处理方式。` : `Discrepancies found in Graph DB validation for app ${pendingVerificationRequest.app_id}. Choose an action.`}>
+          <div className="system-dialog-body flex flex-col gap-4">
 
             {/* Verification Report content */}
             <div className="border border-red-500/20 bg-red-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
@@ -1246,7 +1206,7 @@ function App() {
               </div>
             </div>
           </div>
-        </div>
+        </SystemDialog>
       )}
     </div>
   );

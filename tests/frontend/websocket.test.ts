@@ -66,4 +66,32 @@ describe("WebSocket Client Service", () => {
       JSON.stringify({ sender: "user", content: "test send" })
     );
   });
+
+  it("sends only persistent registrations that are still active when the socket opens", async () => {
+    const subscription = { type: "graph_subscribe", subscription_id: "sub-1", query: { type: "Task" } };
+    wsService.registerPersistentMessage("graph:sub-1", subscription);
+    wsService.registerPersistentMessage("graph:stale", { ...subscription, subscription_id: "stale" });
+
+    wsService.connect("ws://localhost:8000/ws/chat", () => {});
+    wsService.unregisterPersistentMessage("graph:stale", { type: "graph_unsubscribe", subscription_id: "stale" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(wsService.socket.send).toHaveBeenCalledTimes(1);
+    expect(wsService.socket.send).toHaveBeenCalledWith(JSON.stringify(subscription));
+    wsService.unregisterPersistentMessage("graph:sub-1");
+  });
+
+  it("replays active persistent registrations after reconnecting", async () => {
+    const subscription = { type: "graph_subscribe", subscription_id: "sub-reconnect", query: { type: "Task" } };
+    wsService.registerPersistentMessage("graph:sub-reconnect", subscription);
+    wsService.connect("ws://localhost:8000/ws/chat", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    wsService.connect("ws://localhost:8000/ws/chat", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(wsService.socket.send).toHaveBeenCalledTimes(1);
+    expect(wsService.socket.send).toHaveBeenCalledWith(JSON.stringify(subscription));
+    wsService.unregisterPersistentMessage("graph:sub-reconnect");
+  });
 });

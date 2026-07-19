@@ -1,19 +1,14 @@
-.task-drawer-layer { position: fixed; inset: 0; z-index: 240; pointer-events: none; }
-.task-drawer-layer.is-open { pointer-events: auto; }
-.task-drawer-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; opacity: 0; background: rgba(4,5,10,.3); backdrop-filter: blur(0); transition: .22s ease; }
-.task-drawer-layer.is-open .task-drawer-scrim { opacity: 1; backdrop-filter: blur(5px); }
-.task-drawer { position: absolute; top: 12px; right: 12px; bottom: 12px; display: flex; width: min(440px, calc(100vw - 24px)); flex-direction: column; overflow: hidden; border: 1px solid var(--glass-border-strong); border-radius: 24px; color: var(--text-primary); background: var(--popover-surface); box-shadow: var(--popover-shadow); backdrop-filter: blur(38px) saturate(165%); transform: translateX(calc(100% + 28px)); transition: transform .28s cubic-bezier(.2,.8,.2,1); }
-.task-drawer-layer.is-open .task-drawer { transform: translateX(0); }
+.task-drawer { display: flex; flex-direction: column; }
 .task-drawer > header { display: flex; align-items: center; justify-content: space-between; padding: 20px 20px 14px; }
 .task-drawer h2,.task-drawer h3,.task-drawer h4,.task-drawer p { margin: 0; }
 .task-drawer > header h2 { font-size: 18px; }
 .task-drawer > header p { margin-top: 2px; color: var(--text-muted); font-size: 11px; }
-.task-drawer > header button,.task-run-detail > header button { display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 10px; color: var(--text-secondary); background: var(--control-hover); cursor: pointer; }
+.task-drawer > header .system-icon-button,.task-run-detail > header button { flex: 0 0 auto; }
 .task-drawer > nav { display: flex; gap: 4px; padding: 0 16px 13px; border-bottom: 1px solid var(--glass-border); }
 .task-drawer > nav button { display: flex; align-items: center; gap: 5px; padding: 7px 9px; border: 0; border-radius: 9px; color: var(--text-muted); background: transparent; cursor: pointer; font-size: 11px; }
 .task-drawer > nav button.is-active { color: var(--text-primary); background: var(--control-hover); }
 .task-drawer > nav span { min-width: 17px; padding: 1px 4px; border-radius: 8px; color: white; background: var(--accent); font-size: 9px; text-align: center; }
-.task-drawer-error { display: flex; align-items: center; gap: 6px; margin: 9px 14px 0; padding: 8px; border: 1px solid rgba(239,68,68,.2); border-radius: 9px; color: #ef7777; background: rgba(239,68,68,.08); font-size: 10px; }
+.task-drawer-error { display: flex; align-items: center; gap: 6px; margin: 9px 14px 0; padding: 8px; border: 1px solid color-mix(in srgb,var(--danger),transparent 70%); border-radius: 9px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
 .task-drawer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 13px; }
 .task-run-group h3 { padding: 7px 7px 5px; color: var(--text-muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .task-run-row { position: relative; display: grid; width: 100%; grid-template-columns: 28px 1fr 18px; align-items: center; gap: 7px; overflow: hidden; padding: 10px 8px; border: 0; border-radius: 12px; color: var(--text-primary); background: transparent; cursor: pointer; text-align: left; }
@@ -25,13 +20,13 @@
 .task-run-row i { position: absolute; bottom: 0; left: 42px; height: 2px; max-width: calc(100% - 68px); border-radius: 3px; background: var(--accent); }
 .task-run-status { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 9px; color: var(--text-secondary); background: var(--control-hover); }
 .task-run-status.is-running svg { color: var(--accent); animation: task-spin 1s linear infinite; }
-.task-run-status.is-waiting_user,.task-run-status.is-needs_attention { color: #f59e0b; background: rgba(245,158,11,.1); }
+.task-run-status.is-waiting_user,.task-run-status.is-needs_attention { color: var(--warning); background: var(--warning-soft); }
 .task-drawer-empty { display: grid; height: 60%; place-items: center; align-content: center; gap: 8px; color: var(--text-muted); }
 .task-drawer-empty p { font-size: 11px; }
 .runtime-list article { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 8px; padding: 11px; border-bottom: 1px solid var(--glass-border); }
 .runtime-list strong { font-size: 11px; }
 .runtime-list button,.task-source-link,.task-run-detail footer button,.task-interaction button { display: inline-flex; align-items: center; gap: 5px; padding: 7px 9px; border: 1px solid var(--glass-border); border-radius: 9px; color: var(--text-secondary); background: var(--control-hover); cursor: pointer; font-size: 10px; }
-.task-run-detail { position: absolute; inset: 0; z-index: 2; overflow-y: auto; padding: 18px; color: var(--text-primary); background: var(--popover-surface); }
+.task-run-detail { position: absolute; inset: 0; z-index: 2; overflow-y: auto; padding: 18px; color: var(--text-primary); background: var(--surface-panel-solid); }
 .task-run-detail > header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
 .task-run-detail > header h3 { font-size: 15px; }
 .task-run-detail > header small { color: var(--text-muted); font-size: 10px; }
@@ -45,4 +40,3 @@
 .task-interaction button.is-primary { color: white; background: var(--accent); }
 .task-run-detail footer { display: flex; gap: 8px; margin-top: 20px; }
 @keyframes task-spin { to { transform: rotate(360deg); } }
-@media (max-width: 639px) { .task-drawer { inset: 0; width: 100%; border-radius: 0; } }

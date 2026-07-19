@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppWindow,
   ChevronDown,
+  Ellipsis,
   Grid2X2,
   Languages,
   ListTodo,
@@ -28,6 +29,8 @@ import {
   type SnapZone,
 } from "../lib/windowManager";
 import type { Widget } from "./DashboardCanvas";
+import { SystemIconButton, SystemPopover } from "./system/SystemUI";
+import { resolveChromeMode } from "./system/chromeLayout";
 import "./Workspace.css";
 
 interface AppWorkspaceProps {
@@ -63,24 +66,26 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   onThemeChange,
 }) => {
   const isZh = language === "zh";
-  const rootRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
   const [snapPreview, setSnapPreview] = useState<SnapZone | "maximize" | null>(null);
-  const [layoutOpen, setLayoutOpen] = useState(false);
-  const [themeOpen, setThemeOpen] = useState(false);
+  const [openMenu, setOpenMenu] = useState<"layout" | "theme" | "more" | null>(null);
+  const layoutTriggerRef = useRef<HTMLButtonElement>(null);
+  const themeTriggerRef = useRef<HTMLButtonElement>(null);
+  const moreTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    const root = rootRef.current;
-    if (!root) return;
+    const stage = stageRef.current;
+    if (!stage) return;
     if (typeof ResizeObserver === "undefined") {
-      setViewport({ width: root.clientWidth || window.innerWidth, height: root.clientHeight || window.innerHeight });
+      setViewport({ width: stage.clientWidth || window.innerWidth, height: stage.clientHeight || window.innerHeight });
       return;
     }
     const observer = new ResizeObserver(([entry]) => {
       setViewport({ width: entry.contentRect.width, height: entry.contentRect.height });
     });
-    observer.observe(root);
+    observer.observe(stage);
     return () => observer.disconnect();
   }, []);
 
@@ -90,6 +95,10 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
 
   const widgetMap = useMemo(() => new Map(widgets.map((widget) => [widget.id, widget])), [widgets]);
   const activeId = canvas.active_app_id ?? canvas.open_app_ids.at(-1) ?? null;
+  const activeWidget = activeId ? widgetMap.get(activeId) : undefined;
+  const activeState = activeId ? canvas.windows[activeId] : undefined;
+  const chromeMode = resolveChromeMode(viewport.width);
+  const chromeOwnsWindow = Boolean(activeId && (activeState?.mode === "maximized" || chromeMode === "mobile"));
 
   const updateCanvas = (next: CanvasConfigV3, persist = false) => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -224,7 +233,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
     const tiled = tileWindows(canvas.open_app_ids, preset, activeId);
     const windows = preset === "focus" ? { ...canvas.windows, ...tiled } : tiled;
     updateCanvas({ ...canvas, windows, active_app_id: activeId }, true);
-    setLayoutOpen(false);
+    setOpenMenu(null);
   };
 
   const previewStyle = snapPreview && snapPreview !== "maximize"
@@ -232,78 +241,107 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
     : snapPreview === "maximize" ? { x: 0, y: 0, width: 1, height: 1 } : null;
 
   return (
-    <div ref={rootRef} className="workspace-root" data-testid="app-workspace">
+    <div className="workspace-root" data-testid="app-workspace" data-chrome-mode={chromeMode}>
       <div className="workspace-wallpaper" />
-      {previewStyle && (
-        <div className="workspace-snap-preview" style={{
-          left: `${previewStyle.x * 100}%`, top: `${previewStyle.y * 100}%`,
-          width: `${previewStyle.width * 100}%`, height: `${previewStyle.height * 100}%`,
-        }} />
-      )}
+      <header className="workspace-system-chrome" data-testid="workspace-system-chrome">
+        <div className="workspace-chrome-leading">
+          {chromeOwnsWindow && activeId ? (
+            <div className="app-window-traffic is-system" aria-label={isZh ? "窗口控制" : "Window controls"}>
+              <SystemIconButton className="window-dot is-close" label={isZh ? "关闭应用" : "Close app"} tone="danger" onClick={() => closeWindow(activeId)}><X size={12} /></SystemIconButton>
+              {chromeMode !== "mobile" ? <SystemIconButton className="window-dot is-maximize" label={isZh ? "恢复窗口" : "Restore window"} onClick={() => toggleMaximize(activeId)}><Minimize2 size={12} /></SystemIconButton> : null}
+            </div>
+          ) : null}
+          <div className="workspace-active-title"><AppWindow size={15} /><span>{chromeOwnsWindow ? activeWidget?.title : (isZh ? "工作区" : "Workspace")}</span></div>
+        </div>
 
-      {canvas.open_app_ids.map((id, zIndex) => {
-        const widget = widgetMap.get(id);
-        const state = canvas.windows[id];
-        if (!widget || !state) return null;
-        const pixels = boundsToPixels(state.bounds, viewport);
-        const maximized = state.mode === "maximized";
-        return (
-          <section
-            key={id}
-            className={`app-window ${maximized ? "is-maximized" : ""} ${id === activeId ? "is-active" : ""}`}
-            data-window-id={id}
-            style={maximized ? { zIndex: zIndex + 2 } : {
-              zIndex: zIndex + 2,
-              width: pixels.width,
-              height: pixels.height,
-              transform: `translate3d(${pixels.x}px, ${pixels.y}px, 0)`,
-            }}
-            onPointerDown={() => focusWindow(id, false)}
-          >
-            <header className="app-window-titlebar" onPointerDown={(event) => beginMove(event, id)} onDoubleClick={() => toggleMaximize(id)}>
-              <div className="app-window-traffic" aria-label={isZh ? "窗口控制" : "Window controls"}>
-                <button className="is-close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow(id)} aria-label={isZh ? "关闭应用" : "Close app"}><X size={12} /></button>
-                <button onPointerDown={(event) => event.stopPropagation()} onClick={() => toggleMaximize(id)} aria-label={maximized ? (isZh ? "恢复窗口" : "Restore window") : (isZh ? "最大化" : "Maximize")}>{maximized ? <Minimize2 size={11} /> : <Maximize2 size={11} />}</button>
-              </div>
-              <div className="app-window-title"><AppWindow size={14} /><span>{widget.title}</span></div>
-              <div className="app-window-title-spacer" />
-            </header>
-            <div className="app-window-content">{renderWidgetContent(widget)}</div>
-            {!maximized && RESIZE_EDGES.map((edge) => (
-              <div key={edge} className={`app-window-resize resize-${edge}`} onPointerDown={(event) => beginResize(event, id, edge)} />
-            ))}
-          </section>
-        );
-      })}
+        <nav className="workspace-chrome-island" aria-label={isZh ? "工作区工具栏" : "Workspace toolbar"}>
+          <SystemIconButton label={isZh ? "打开应用中心" : "Open App Center"} onClick={onOpenAppStore}><Store size={18} /></SystemIconButton>
+          <SystemIconButton className="workspace-task-button" label={isZh ? "打开任务中心" : "Open Task Center"} onClick={onOpenTasks}><ListTodo size={18} />{taskCount > 0 && <span>{Math.min(taskCount, 99)}</span>}</SystemIconButton>
+          <div className="workspace-toolbar-divider" />
+          <div className="workspace-app-switcher">
+            {canvas.open_app_ids.map((id) => {
+              const widget = widgetMap.get(id);
+              return widget ? <SystemIconButton key={id} label={widget.title} selected={id === activeId} className={id === activeId ? "is-active" : ""} onClick={() => focusWindow(id, true)}><span>{widget.title.slice(0, 1).toUpperCase()}</span></SystemIconButton> : null;
+            })}
+          </div>
+        </nav>
 
-      <nav className="workspace-toolbar" aria-label={isZh ? "工作区工具栏" : "Workspace toolbar"}>
-        <button onClick={onOpenAppStore} aria-label={isZh ? "打开应用中心" : "Open App Center"}><Store size={18} /></button>
-        <button className="workspace-task-button" onClick={onOpenTasks} aria-label={isZh ? "打开任务中心" : "Open Task Center"}><ListTodo size={18} />{taskCount > 0 && <span>{taskCount}</span>}</button>
-        <div className="workspace-toolbar-divider" />
-        <div className="workspace-app-switcher">
-          {canvas.open_app_ids.map((id) => {
-            const widget = widgetMap.get(id);
-            return widget ? <button key={id} className={id === activeId ? "is-active" : ""} onClick={() => focusWindow(id, true)} title={widget.title}><span>{widget.title.slice(0, 1).toUpperCase()}</span></button> : null;
-          })}
+        <div className="workspace-chrome-trailing">
+          <div className="workspace-desktop-actions">
+            <div className="workspace-menu-anchor">
+              <SystemIconButton ref={layoutTriggerRef} label={isZh ? "布局" : "Layout"} onClick={() => setOpenMenu((value) => value === "layout" ? null : "layout")} aria-expanded={openMenu === "layout"}><Grid2X2 size={17} /><ChevronDown size={10} /></SystemIconButton>
+              <SystemPopover open={openMenu === "layout"} onClose={() => setOpenMenu(null)} triggerRef={layoutTriggerRef} label={isZh ? "布局" : "Layout"} className="layout-popover">
+                <button onClick={() => applyLayout("focus")}><PanelLeft size={15} />{isZh ? "聚焦当前 App" : "Focus current app"}</button>
+                <button onClick={() => applyLayout("side-by-side")}><Rows3 size={15} />{isZh ? "左右排列" : "Side by side"}</button>
+                <button onClick={() => applyLayout("grid")}><Grid2X2 size={15} />{isZh ? "自动网格" : "Adaptive grid"}</button>
+              </SystemPopover>
+            </div>
+            <SystemIconButton label={isZh ? "审计日志" : "Audit log"} onClick={onOpenAudit}><ShieldCheck size={17} /></SystemIconButton>
+            <SystemIconButton label={isZh ? "切换为英文" : "Switch to Chinese"} onClick={() => onLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
+            <div className="workspace-menu-anchor">
+              <SystemIconButton ref={themeTriggerRef} label={isZh ? "主题" : "Theme"} onClick={() => setOpenMenu((value) => value === "theme" ? null : "theme")} aria-expanded={openMenu === "theme"}>{theme.effective === "dark" ? <Moon size={17} /> : <Sun size={17} />}</SystemIconButton>
+              <SystemPopover open={openMenu === "theme"} onClose={() => setOpenMenu(null)} triggerRef={themeTriggerRef} label={isZh ? "主题" : "Theme"} className="theme-popover">
+                {(["system", "light", "dark"] as ThemePreference[]).map((preference) => <button key={preference} className={theme.preference === preference ? "is-selected" : ""} onClick={() => { onThemeChange(preference); setOpenMenu(null); }}>{preference === "system" ? (isZh ? "跟随系统" : "System") : preference === "light" ? (isZh ? "浅色" : "Light") : (isZh ? "深色" : "Dark")}</button>)}
+              </SystemPopover>
+            </div>
+          </div>
+          <div className="workspace-menu-anchor workspace-more-anchor">
+            <SystemIconButton ref={moreTriggerRef} label={isZh ? "更多" : "More"} onClick={() => setOpenMenu((value) => value === "more" ? null : "more")} aria-expanded={openMenu === "more"}><Ellipsis size={19} /></SystemIconButton>
+            <SystemPopover open={openMenu === "more"} onClose={() => setOpenMenu(null)} triggerRef={moreTriggerRef} label={isZh ? "更多工作区操作" : "More workspace actions"} className="workspace-more-popover">
+              <button className="mobile-only-action" onClick={() => { onOpenAppStore(); setOpenMenu(null); }}><Store size={15} />{isZh ? "应用中心" : "App Center"}</button>
+              <button className="mobile-only-action" onClick={() => { onOpenTasks(); setOpenMenu(null); }}><ListTodo size={15} />{isZh ? "任务中心" : "Task Center"}</button>
+              <button onClick={() => applyLayout("focus")}><PanelLeft size={15} />{isZh ? "聚焦当前 App" : "Focus current app"}</button>
+              <button onClick={() => { onOpenAudit(); setOpenMenu(null); }}><ShieldCheck size={15} />{isZh ? "审计日志" : "Audit log"}</button>
+              <button onClick={() => { onLanguageChange(language === "zh" ? "en" : "zh"); setOpenMenu(null); }}><Languages size={15} />{isZh ? "切换为英文" : "Switch to Chinese"}</button>
+              {(["system", "light", "dark"] as ThemePreference[]).map((preference) => <button key={preference} className={theme.preference === preference ? "is-selected" : ""} onClick={() => { onThemeChange(preference); setOpenMenu(null); }}>{preference === "system" ? (isZh ? "跟随系统主题" : "System theme") : preference === "light" ? (isZh ? "浅色主题" : "Light theme") : (isZh ? "深色主题" : "Dark theme")}</button>)}
+            </SystemPopover>
+          </div>
         </div>
-        <div className="workspace-toolbar-divider" />
-        <div className="workspace-menu-anchor">
-          <button onClick={() => setLayoutOpen((value) => !value)} aria-expanded={layoutOpen} aria-label={isZh ? "布局" : "Layout"}><Grid2X2 size={17} /><ChevronDown size={11} /></button>
-          {layoutOpen && <div className="workspace-popover layout-popover">
-            <button onClick={() => applyLayout("focus")}><PanelLeft size={15} />{isZh ? "聚焦当前 App" : "Focus current app"}</button>
-            <button onClick={() => applyLayout("side-by-side")}><Rows3 size={15} />{isZh ? "左右排列" : "Side by side"}</button>
-            <button onClick={() => applyLayout("grid")}><Grid2X2 size={15} />{isZh ? "自动网格" : "Adaptive grid"}</button>
-          </div>}
-        </div>
-        <button onClick={onOpenAudit} aria-label={isZh ? "审计日志" : "Audit log"}><ShieldCheck size={17} /></button>
-        <button onClick={() => onLanguageChange(language === "zh" ? "en" : "zh")} aria-label={isZh ? "切换为英文" : "Switch to Chinese"}><Languages size={17} /></button>
-        <div className="workspace-menu-anchor">
-          <button onClick={() => setThemeOpen((value) => !value)} aria-expanded={themeOpen} aria-label={isZh ? "主题" : "Theme"}>{theme.effective === "dark" ? <Moon size={17} /> : <Sun size={17} />}</button>
-          {themeOpen && <div className="workspace-popover theme-popover">
-            {(["system", "light", "dark"] as ThemePreference[]).map((preference) => <button key={preference} className={theme.preference === preference ? "is-selected" : ""} onClick={() => { onThemeChange(preference); setThemeOpen(false); }}>{preference === "system" ? (isZh ? "跟随系统" : "System") : preference === "light" ? (isZh ? "浅色" : "Light") : (isZh ? "深色" : "Dark")}</button>)}
-          </div>}
-        </div>
-      </nav>
+      </header>
+
+      <div ref={stageRef} className="workspace-stage" data-testid="workspace-stage">
+        {previewStyle && (
+          <div className="workspace-snap-preview" style={{
+            left: `${previewStyle.x * 100}%`, top: `${previewStyle.y * 100}%`,
+            width: `${previewStyle.width * 100}%`, height: `${previewStyle.height * 100}%`,
+          }} />
+        )}
+        {canvas.open_app_ids.map((id, zIndex) => {
+          const widget = widgetMap.get(id);
+          const state = canvas.windows[id];
+          if (!widget || !state) return null;
+          const pixels = boundsToPixels(state.bounds, viewport);
+          const maximized = state.mode === "maximized";
+          const localTitlebar = !maximized && chromeMode !== "mobile";
+          return (
+            <section
+              key={id}
+              className={`app-window ${maximized ? "is-maximized" : ""} ${id === activeId ? "is-active" : ""}`}
+              data-window-id={id}
+              style={maximized ? { zIndex: zIndex + 2 } : {
+                zIndex: zIndex + 2,
+                width: pixels.width,
+                height: pixels.height,
+                transform: `translate3d(${pixels.x}px, ${pixels.y}px, 0)`,
+              }}
+              onPointerDown={() => focusWindow(id, false)}
+            >
+              {localTitlebar ? <header data-testid={`window-titlebar-${id}`} className="app-window-titlebar" onPointerDown={(event) => beginMove(event, id)} onDoubleClick={() => toggleMaximize(id)}>
+                <div className="app-window-traffic" aria-label={isZh ? "窗口控制" : "Window controls"}>
+                  <button className="window-dot is-close" data-tooltip={isZh ? "关闭应用" : "Close app"} onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow(id)} aria-label={isZh ? "关闭应用" : "Close app"}><X size={12} /></button>
+                  <button className="window-dot is-maximize" data-tooltip={isZh ? "最大化" : "Maximize"} onPointerDown={(event) => event.stopPropagation()} onClick={() => toggleMaximize(id)} aria-label={isZh ? "最大化" : "Maximize"}><Maximize2 size={11} /></button>
+                </div>
+                <div className="app-window-title"><AppWindow size={14} /><span>{widget.title}</span></div>
+                <div className="app-window-title-spacer" />
+              </header> : null}
+              <div className="app-window-content">{renderWidgetContent(widget)}</div>
+              {!maximized && chromeMode !== "mobile" && RESIZE_EDGES.map((edge) => (
+                <div key={edge} className={`app-window-resize resize-${edge}`} onPointerDown={(event) => beginResize(event, id, edge)} />
+              ))}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 };

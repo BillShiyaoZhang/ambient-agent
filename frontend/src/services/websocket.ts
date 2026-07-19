@@ -1,6 +1,7 @@
 class WebSocketService {
   private socket: WebSocket | null = null;
   private onMessageCallback: ((data: any) => void) | null = null;
+  private persistentMessages = new Map<string, any>();
 
   connect(
     url: string,
@@ -20,17 +21,24 @@ class WebSocketService {
       wsUrl = `${url}?session_id=${sessionIdOrOnMessage}`;
     }
 
-    this.socket = new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl);
+    this.socket = socket;
 
-    this.socket.onopen = () => {
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
       console.log("Connected to Ambient Agent WebSocket server.");
+      this.persistentMessages.forEach((message) => {
+        socket.send(JSON.stringify(message));
+      });
     };
 
-    this.socket.onclose = () => {
+    socket.onclose = () => {
+      if (this.socket !== socket) return;
       console.log("Disconnected from Ambient Agent WebSocket server.");
     };
 
-    this.socket.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (this.socket !== socket) return;
       try {
         const data = JSON.parse(event.data);
         if (this.onMessageCallback) {
@@ -41,9 +49,24 @@ class WebSocketService {
       }
     };
 
-    this.socket.onerror = (error) => {
+    socket.onerror = (error) => {
+      if (this.socket !== socket) return;
       console.error("WebSocket error:", error);
     };
+  }
+
+  registerPersistentMessage(key: string, message: any) {
+    this.persistentMessages.set(key, message);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(message));
+    }
+  }
+
+  unregisterPersistentMessage(key: string, finalMessage?: any) {
+    const existed = this.persistentMessages.delete(key);
+    if (existed && finalMessage && this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(finalMessage));
+    }
   }
 
   sendMessage(message: any) {
@@ -60,8 +83,9 @@ class WebSocketService {
 
   disconnect() {
     if (this.socket) {
-      this.socket.close();
+      const socket = this.socket;
       this.socket = null;
+      socket.close();
     }
   }
 }

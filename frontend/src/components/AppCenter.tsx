@@ -43,6 +43,7 @@ import {
   X,
 } from "lucide-react";
 import wsService from "../services/websocket";
+import { SystemIconButton } from "./system/SystemUI";
 import "./AppCenter.css";
 
 export type CatalogKind = "generated_app" | "skill" | "mcp";
@@ -101,6 +102,7 @@ interface AppCenterProps {
   onRunFullscreen: (id: string) => void;
   onRunCreated?: (run: { id: string }) => void;
   language?: "zh" | "en";
+  headerActions?: React.ReactNode;
 }
 
 type FilterKind = "all" | CatalogKind;
@@ -264,6 +266,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   onRunFullscreen,
   onRunCreated,
   language = "zh",
+  headerActions,
 }) => {
   const isZh = language === "zh";
   const [store, setStore] = useState<AppStoreState | null>(null);
@@ -655,7 +658,10 @@ export const AppCenter: React.FC<AppCenterProps> = ({
           />
           <kbd>⌘ K</kbd>
         </div>
-        {mode !== "home" && <button className="app-center-close" onClick={onClose} aria-label={isZh ? "关闭" : "Close"}><X size={21} /></button>}
+        <div className="app-center-header-actions">
+          {headerActions}
+          {mode !== "home" && <SystemIconButton className="app-center-close" label={isZh ? "关闭" : "Close"} onClick={onClose}><X size={19} /></SystemIconButton>}
+        </div>
       </header>
 
       <nav className="app-center-filters" aria-label={isZh ? "应用类型" : "App types"}>

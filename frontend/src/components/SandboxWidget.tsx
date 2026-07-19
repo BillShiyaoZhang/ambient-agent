@@ -318,7 +318,8 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           window.addEventListener(eventName, handler);
           customListenersRef.current.push({ event: eventName, handler });
 
-          wsService.sendMessage({
+          const registrationKey = `graph:${subId}`;
+          wsService.registerPersistentMessage(registrationKey, {
             type: "graph_subscribe",
             subscription_id: subId,
             query: query
@@ -329,7 +330,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
             const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
             if (idx !== -1) customListenersRef.current.splice(idx, 1);
 
-            wsService.sendMessage({
+            wsService.unregisterPersistentMessage(registrationKey, {
               type: "graph_unsubscribe",
               subscription_id: subId
             });
@@ -413,8 +414,9 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   }, [widget.id]);
 
   useEffect(() => {
+    const listeners = customListenersRef.current;
     return () => {
-      customListenersRef.current.forEach(({ event, handler }) => {
+      listeners.forEach(({ event, handler }) => {
         window.removeEventListener(event, handler);
       });
     };
