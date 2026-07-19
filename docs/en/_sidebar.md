@@ -21,4 +21,5 @@
 
 - **Integrations & Security**
   - [MCP Tools Integration](/en/integrations/mcp.md)
+  - [LLM Providers and Models](/en/integrations/llm-providers.md)
   - [Permissions & Audit](/en/integrations/permissions.md)

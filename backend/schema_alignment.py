@@ -5,6 +5,8 @@ from typing import Any
 
 from backend.agent.providers import get_llm_provider
 from backend.graph_db import GraphDatabase
+from backend.llm_config import LLMConfigError
+from backend.llm_runtime import primary_selection, selection_ids
 
 logger = logging.getLogger("schema_alignment")
 
@@ -86,10 +88,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 """
 
         # 2. Call LLM
-        import os
-
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model_name = os.getenv("LLM_MODEL", "llama3")
+        provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
@@ -126,6 +125,8 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
             return proposal
 
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate or parse schema alignment: {e}. Raw response: {raw_response}")
             # Safe fallback: assume no schemas to reuse or create, just let it proceed
@@ -207,10 +208,7 @@ The user provided the following natural language FEEDBACK for modifications:
 Apply the adjustments requested in the feedback and output the updated JSON schema proposal.
 """
 
-        import os
-
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model_name = os.getenv("LLM_MODEL", "llama3")
+        provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
@@ -237,6 +235,8 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
             if "new_schemas" not in proposal:
                 proposal["new_schemas"] = []
             return proposal
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"Failed to refine schema alignment: {e}. Raw response: {raw_response}")
             return current_proposal

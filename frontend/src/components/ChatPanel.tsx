@@ -89,7 +89,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         ) : (
           messages.map((msg, index) => (
             <div
-              key={msg.id || index}
+              key={`${msg.id ?? "local"}:${msg.sender}:${msg.timestamp ?? ""}:${index}`}
               className={`flex flex-col ${
                 msg.sender === "user" ? "items-end" : "items-start"
               }`}

@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { History, LoaderCircle, MessageCircle, Plus, Send, Trash2, X } from "lucide-react";
 import type { Message } from "./ChatPanel";
 import type { Session } from "./SessionSidebar";
+import type { LLMProvider, ModelSelection } from "../services/llm";
+import { ModelPicker } from "./LLMSettings";
 import { SystemIconButton, SystemPopover } from "./system/SystemUI";
 import "./Workspace.css";
 
@@ -19,11 +21,16 @@ interface AgentChatOverlayProps {
   onSelectSession: (id: string) => void;
   onCreateSession: () => void;
   onDeleteSession: (id: string) => void;
+  providers?: LLMProvider[];
+  modelSelection?: ModelSelection | null;
+  onModelChange?: (selection: ModelSelection) => void;
+  onManageModels?: () => void;
 }
 
 export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
   open, unreadCount, messages, sessions, activeSessionId, runningSessions, isConnected, language,
   onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession,
+  providers = [], modelSelection = null, onModelChange, onManageModels,
 }) => {
   const isZh = language === "zh";
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -69,10 +76,14 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
           </div>
         </header>
         <div className="agent-chat-messages">
-          {messages.length === 0 ? <div className="agent-chat-empty"><span><MessageCircle size={22} /></span><strong>{isZh ? "需要我做什么？" : "What can I help with?"}</strong><p>{isZh ? "我可以创建 App、整理信息，或协助你操作当前工作区。" : "I can create apps, organize information, or help with your workspace."}</p></div> : messages.map((message, index) => <div key={message.id ?? index} className={`agent-message ${message.sender === "user" ? "is-user" : "is-agent"}`}><div>{message.content}</div><span>{message.sender === "user" ? (isZh ? "你" : "You") : "Ambient"}</span></div>)}
+          {messages.length === 0 ? <div className="agent-chat-empty"><span><MessageCircle size={22} /></span><strong>{isZh ? "需要我做什么？" : "What can I help with?"}</strong><p>{isZh ? "我可以创建 App、整理信息，或协助你操作当前工作区。" : "I can create apps, organize information, or help with your workspace."}</p></div> : messages.map((message, index) => <div key={`${message.id ?? "local"}:${message.sender}:${message.timestamp ?? ""}:${index}`} className={`agent-message ${message.sender === "user" ? "is-user" : "is-agent"}`}><div>{message.content}</div><span>{message.sender === "user" ? (isZh ? "你" : "You") : "Ambient"}</span></div>)}
           <div ref={endRef} />
         </div>
         <form className="agent-chat-composer" onSubmit={submit}>
+          <div className="agent-chat-model-row">
+            <ModelPicker providers={providers} value={modelSelection} onChange={(selection) => onModelChange?.(selection)} onManage={onManageModels} language={language} disabled={!onModelChange} />
+            {runningSessions.includes(activeSessionId ?? "") ? <span>{isZh ? "切换将从下次请求生效" : "Changes apply to the next request"}</span> : null}
+          </div>
           <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={isZh ? "向 Ambient 发送消息…" : "Message Ambient…"} rows={1} />
           <SystemIconButton className="agent-chat-send" type="submit" disabled={!input.trim() || !isConnected} label={isZh ? "发送" : "Send"} tone="accent"><Send size={16} /></SystemIconButton>
         </form>

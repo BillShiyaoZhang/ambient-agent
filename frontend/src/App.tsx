@@ -12,13 +12,42 @@ import { MutationPreview, type MutationPreviewData } from "./components/Mutation
 import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
 import { TaskDrawer } from "./components/TaskDrawer";
+import { LLMSettingsDialog } from "./components/LLMSettings";
 import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
 import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
-import { Languages, ListTodo, Moon, ShieldCheck, Sun } from "lucide-react";
+import { mergeIncomingMessage } from "./lib/messages";
+import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
 import type { AmbientRun } from "./services/runs";
+import {
+  createProvider,
+  deleteProvider,
+  discoverProviderModels,
+  loadLLMConfiguration,
+  testProviderConnection,
+  updateLLMSettings,
+  updateProvider,
+  updateSessionModel,
+  type LLMProvider,
+  type LLMSettings,
+  type ModelSelection,
+  type ProviderPreset,
+} from "./services/llm";
 
 const API_BASE = `http://${window.location.hostname}:8000`;
+
+function localizedLLMError(code: string, language: "zh" | "en"): string {
+  const messages: Record<string, [string, string]> = {
+    llm_configuration_required: ["请先在“模型与 Provider”中完成配置。", "Configure a model and provider before sending a request."],
+    llm_auth_failed: ["Provider 鉴权失败，请检查凭据。", "Provider authentication failed. Check the credentials."],
+    llm_rate_limited: ["Provider 已限流，请稍后重试。", "The provider rate limit was reached. Try again later."],
+    llm_timeout: ["模型请求超时，请检查端点或超时设置。", "The model request timed out. Check the endpoint or timeout setting."],
+    llm_model_not_found: ["Provider 找不到所选模型。", "The selected model was not found by the provider."],
+    llm_capability_unsupported: ["所选模型不兼容 Agent 工具调用。", "The selected model is not compatible with agent tool calls."],
+  };
+  const pair = messages[code] ?? ["模型请求失败，请检查 Provider 设置。", "The model request failed. Check provider settings."];
+  return pair[language === "zh" ? 0 : 1];
+}
 
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -26,6 +55,10 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [widgets, setWidgets] = useState<Widget[]>([]);
   const [canvasConfig, setCanvasConfig] = useState<CanvasConfigV3>(() => ({ ...EMPTY_CANVAS, windows: {} }));
+  const [llmCatalog, setLLMCatalog] = useState<ProviderPreset[]>([]);
+  const [llmProviders, setLLMProviders] = useState<LLMProvider[]>([]);
+  const [llmSettings, setLLMSettings] = useState<LLMSettings>({ default_model: null, fast_model: null });
+  const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -74,6 +107,17 @@ function App() {
       });
     } catch (err) {
       console.error("Error saving canvas configuration:", err);
+    }
+  }, []);
+
+  const refreshLLMConfiguration = useCallback(async () => {
+    try {
+      const configuration = await loadLLMConfiguration(API_BASE);
+      setLLMCatalog(configuration.catalog);
+      setLLMProviders(configuration.providers);
+      setLLMSettings(configuration.settings);
+    } catch (error) {
+      console.error("Error loading LLM configuration:", error);
     }
   }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
@@ -380,6 +424,7 @@ function App() {
 
   useEffect(() => {
     fetchSessions();
+    void refreshLLMConfiguration();
 
     // Check connection state every second
     const interval = setInterval(() => {
@@ -390,7 +435,9 @@ function App() {
       clearInterval(interval);
       wsService.disconnect();
     };
-  }, []);
+    // Session bootstrap is intentionally mount-only; subsequent refreshes are explicit.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshLLMConfiguration]);
 
   useEffect(() => {
     const loadCanvasConfig = async () => {
@@ -445,19 +492,7 @@ function App() {
         if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
           setUnreadCount((count) => count + 1);
         }
-        setMessages((prev) => {
-          const isRealReply = data.message.id !== undefined && data.message.id !== -1;
-          const cleanPrev = isRealReply ? prev.filter((m) => m.id !== -1) : prev;
-          if (data.message.id === -1) {
-            const tempIndex = cleanPrev.map((m) => m.id).lastIndexOf(-1);
-            if (tempIndex !== -1) {
-              const newMsgs = [...cleanPrev];
-              newMsgs[tempIndex] = data.message;
-              return newMsgs;
-            }
-          }
-          return [...cleanPrev, data.message];
-        });
+        setMessages((prev) => mergeIncomingMessage(prev, data.message));
       } else if (data.type === "widget") {
         // Add or update widget in state
         setWidgets((prev) => {
@@ -533,6 +568,18 @@ function App() {
         setRunningSessions(data.active_session_ids);
       } else if (data.type === "session_title_updated") {
         setSessions((previous) => previous.map((session) => session.id === data.session_id ? { ...session, title: data.title } : session));
+      } else if (data.type === "session_model_updated") {
+        setSessions((previous) => previous.map((session) => session.id === data.session_id ? { ...session, model_selection: data.model_selection } : session));
+      } else if (data.type === "llm_error") {
+        setMessages((previous) => [...previous, {
+          sender: "agent",
+          content: localizedLLMError(data.code, language),
+          timestamp: new Date().toISOString(),
+        }]);
+        if (data.action === "open_llm_settings" || data.code === "llm_configuration_required") {
+          setIsLLMSettingsOpen(true);
+          void refreshLLMConfiguration();
+        }
       } else if (data.type === "mutation_preview") {
         setMutationPreview({
           ticket_id: data.ticket_id,
@@ -560,7 +607,7 @@ function App() {
     return () => {
       wsService.disconnect();
     };
-  }, [activeSessionId, saveCanvasConfig]);
+  }, [activeSessionId, language, refreshLLMConfiguration, saveCanvasConfig]);
 
   const handleCreateSession = async () => {
     const newId = Math.random().toString(36).substring(2, 15);
@@ -664,6 +711,19 @@ function App() {
     setLanguage(selected?.language === "en" ? "en" : "zh");
   };
 
+  const handleSessionModelChange = async (selection: ModelSelection) => {
+    if (!activeSessionId) return;
+    try {
+      await updateSessionModel(API_BASE, activeSessionId, selection);
+      setSessions((previous) => previous.map((session) => session.id === activeSessionId
+        ? { ...session, model_selection: selection }
+        : session));
+    } catch (error) {
+      console.error("Error updating session model:", error);
+      setIsLLMSettingsOpen(true);
+    }
+  };
+
   const setAppWindowMode = (id: string, mode: "maximized" | "floating") => {
     setCanvasConfig((previous) => {
       const current = previous.windows[id];
@@ -700,6 +760,7 @@ function App() {
       headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
         <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
         <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={() => setIsAuditOpen(true)}><ShieldCheck size={17} /></SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "模型与 Provider" : "Models & Providers"} onClick={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}><Settings2 size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "切换为英文" : "Switch to Chinese"} onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
         <label className="system-theme-select" aria-label={language === "zh" ? "主题" : "Theme"}>
           {theme.effective === "dark" ? <Moon size={16} /> : <Sun size={16} />}
@@ -732,6 +793,7 @@ function App() {
             )}
             onOpenAudit={() => setIsAuditOpen(true)}
             onOpenTasks={() => setIsTaskDrawerOpen(true)}
+            onOpenLLMSettings={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
             taskCount={taskCounts.active + taskCounts.attention}
             onOpenAppStore={() => setIsAppStoreOpen(true)}
             language={language}
@@ -757,6 +819,26 @@ function App() {
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
+        providers={llmProviders}
+        modelSelection={sessions.find((session) => session.id === activeSessionId)?.model_selection ?? llmSettings.default_model}
+        onModelChange={handleSessionModelChange}
+        onManageModels={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
+      />
+
+      <LLMSettingsDialog
+        open={isLLMSettingsOpen}
+        language={language}
+        catalog={llmCatalog}
+        providers={llmProviders}
+        settings={llmSettings}
+        onClose={() => setIsLLMSettingsOpen(false)}
+        onRefresh={refreshLLMConfiguration}
+        onCreateProvider={(profile, credentials) => createProvider(API_BASE, profile, credentials)}
+        onUpdateProvider={(providerId, profile, credentials) => updateProvider(API_BASE, providerId, profile, credentials)}
+        onDeleteProvider={(providerId) => deleteProvider(API_BASE, providerId)}
+        onDiscoverModels={(providerId) => discoverProviderModels(API_BASE, providerId)}
+        onTestProvider={(providerId, modelId, mode) => testProviderConnection(API_BASE, providerId, modelId, mode)}
+        onUpdateSettings={(patch) => updateLLMSettings(API_BASE, patch)}
       />
 
       {/* Audit Log Panel Overlay */}

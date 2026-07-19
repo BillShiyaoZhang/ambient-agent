@@ -2,11 +2,14 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
+from backend.llm_config import ModelSelection
+
 
 class ChatSession(BaseModel):
     id: str
     title: str
     language: str = "zh"
+    model_selection: ModelSelection | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

@@ -1,10 +1,11 @@
 import json
-import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import backend.llm_service
+from backend.llm_config import LLMConfigStore, ModelSelection
+from backend.llm_runtime import fast_selection, selection_ids
 from backend.models import ChatSession, LLMAuditLog
 from backend.workspace_storage import WorkspaceStorage
 
@@ -30,9 +31,11 @@ class SessionTitleService:
         self,
         storage: WorkspaceStorage,
         llm_call: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        config_store: LLMConfigStore | None = None,
     ) -> None:
         self.storage = storage
         self.llm_call = llm_call or backend.llm_service.call_llm_api
+        self.config_store = config_store
 
     @staticmethod
     def sanitize_title(raw_title: str, language: str) -> str:
@@ -53,8 +56,15 @@ class SessionTitleService:
             {"role": "system", "content": instruction},
             {"role": "user", "content": first_message[:2000]},
         ]
-        provider = os.getenv("LLM_PROVIDER", "ollama")
-        model = os.getenv("LLM_MODEL", "llama3")
+        if self.config_store:
+            primary = chat_session.model_selection
+            if primary is None:
+                default_data = self.config_store.get_settings().get("default_model")
+                primary = ModelSelection.model_validate(default_data) if default_data else None
+            resolved = self.config_store.resolve_fast(primary)
+            provider, model = resolved.provider_id, resolved.model_id
+        else:
+            provider, model = selection_ids(fast_selection())
         response = await self.llm_call(provider, model, messages)
         raw_title = response.get("content", "") if isinstance(response, dict) else str(response)
         title = sanitize_title(raw_title, language)

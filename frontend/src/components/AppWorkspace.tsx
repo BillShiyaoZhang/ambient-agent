@@ -13,6 +13,7 @@ import {
   Rows3,
   ShieldCheck,
   Store,
+  Settings2,
   Sun,
   X,
 } from "lucide-react";
@@ -41,6 +42,7 @@ interface AppWorkspaceProps {
   onOpenAppStore: () => void;
   onOpenAudit: () => void;
   onOpenTasks?: () => void;
+  onOpenLLMSettings?: () => void;
   taskCount?: number;
   language: "zh" | "en";
   onLanguageChange: (language: "zh" | "en") => void;
@@ -59,6 +61,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   onOpenAppStore,
   onOpenAudit,
   onOpenTasks = () => {},
+  onOpenLLMSettings = () => {},
   taskCount = 0,
   language,
   onLanguageChange,
@@ -277,6 +280,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
               </SystemPopover>
             </div>
             <SystemIconButton label={isZh ? "审计日志" : "Audit log"} onClick={onOpenAudit}><ShieldCheck size={17} /></SystemIconButton>
+            <SystemIconButton label={isZh ? "模型与 Provider" : "Models & Providers"} onClick={onOpenLLMSettings}><Settings2 size={17} /></SystemIconButton>
             <SystemIconButton label={isZh ? "切换为英文" : "Switch to Chinese"} onClick={() => onLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
             <div className="workspace-menu-anchor">
               <SystemIconButton ref={themeTriggerRef} label={isZh ? "主题" : "Theme"} onClick={() => setOpenMenu((value) => value === "theme" ? null : "theme")} aria-expanded={openMenu === "theme"}>{theme.effective === "dark" ? <Moon size={17} /> : <Sun size={17} />}</SystemIconButton>
@@ -292,6 +296,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
               <button className="mobile-only-action" onClick={() => { onOpenTasks(); setOpenMenu(null); }}><ListTodo size={15} />{isZh ? "任务中心" : "Task Center"}</button>
               <button onClick={() => applyLayout("focus")}><PanelLeft size={15} />{isZh ? "聚焦当前 App" : "Focus current app"}</button>
               <button onClick={() => { onOpenAudit(); setOpenMenu(null); }}><ShieldCheck size={15} />{isZh ? "审计日志" : "Audit log"}</button>
+              <button onClick={() => { onOpenLLMSettings(); setOpenMenu(null); }}><Settings2 size={15} />{isZh ? "模型与 Provider" : "Models & Providers"}</button>
               <button onClick={() => { onLanguageChange(language === "zh" ? "en" : "zh"); setOpenMenu(null); }}><Languages size={15} />{isZh ? "切换为英文" : "Switch to Chinese"}</button>
               {(["system", "light", "dark"] as ThemePreference[]).map((preference) => <button key={preference} className={theme.preference === preference ? "is-selected" : ""} onClick={() => { onThemeChange(preference); setOpenMenu(null); }}>{preference === "system" ? (isZh ? "跟随系统主题" : "System theme") : preference === "light" ? (isZh ? "浅色主题" : "Light theme") : (isZh ? "深色主题" : "Dark theme")}</button>)}
             </SystemPopover>

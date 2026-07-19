@@ -97,7 +97,7 @@ This benchmark evaluates **A2UI** (declarative layout specifications) against **
 
 - **Execution Date**: 2026-07-16
 - **Benchmark Run Dir**: `{RUN_DIR}`
-- **LLM Judge Model**: `{os.getenv("LLM_PROVIDER", "openai")}/{os.getenv("LLM_MODEL", "gpt-4o")}`
+- **LLM Judge Model**: `{os.getenv("EVALUATION_LLM_PROVIDER", "openai")}/{os.getenv("EVALUATION_LLM_MODEL", "gpt-4o")}`
 
 ---
 

@@ -3,6 +3,8 @@ import logging
 from typing import Any
 
 from backend.agent.providers import get_llm_provider
+from backend.llm_config import LLMConfigError
+from backend.llm_runtime import primary_selection, selection_ids
 from backend.schema_diff import (
     SchemaExtractor,
     VerificationDiff,
@@ -57,10 +59,7 @@ class SchemaVerificationService:
         )
         user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source[:8000]}\n```"
 
-        import os
-
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model_name = os.getenv("LLM_MODEL", "llama3")
+        provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
         try:
             raw = await provider.generate(
@@ -109,6 +108,8 @@ class SchemaVerificationService:
                     )
                 )
             return diff
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"LLM fallback for diff also failed: {e}")
             return VerificationDiff()
@@ -129,6 +130,8 @@ class SchemaVerificationService:
                 db_session=db_session,
             )
             return diff.to_markdown()
+        except LLMConfigError:
+            raise
         except Exception as e:
             logger.error(f"verify() failed: {e}")
             return "⚠️ Schema Verification Failed: Could not contact verification model service."

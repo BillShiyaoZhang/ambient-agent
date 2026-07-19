@@ -1,5 +1,6 @@
 import React from "react";
 import { getTranslation } from "../services/i18n";
+import type { ModelSelection } from "../services/llm";
 
 export interface Session {
   id: string;
@@ -7,6 +8,7 @@ export interface Session {
   created_at: string;
   updated_at: string;
   language?: string;
+  model_selection?: ModelSelection | null;
 }
 
 interface SessionSidebarProps {

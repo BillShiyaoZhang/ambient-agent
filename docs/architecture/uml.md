@@ -31,6 +31,7 @@ classDiagram
     class ChatSession {
         +id: str (PK)
         +title: str
+        +model_selection: ModelSelection|None
         +created_at: datetime
         +updated_at: datetime
     }
@@ -300,9 +301,57 @@ classDiagram
     }
 
     class LLMService {
-        +generate_agent_response(messages: List~dict~) str
-        +call_llm_api(provider: str, model: str, messages: List~dict~, tools: List~dict~|None) dict
+        +generate(selection: ResolvedModel, messages: List~dict~, tools: List~dict~|None) LLMResult
     }
+
+    class LLMResult {
+        +text: str
+        +tool_calls: List~dict~|None
+        +usage: dict
+    }
+
+    class ModelSelection {
+        +provider_id: str
+        +model_id: str
+    }
+
+    class ModelRef {
+        +provider_id: str|None
+        +model_id: str|None
+        +display_name: str|None
+        +api_mode: str|None
+        +capabilities: ModelCapabilities
+        +source: str
+    }
+
+    class ProviderProfile {
+        +id: str
+        +name: str
+        +preset: str
+        +enabled: bool
+        +connection: dict
+        +credential_refs: dict
+        +models: List~ModelRef~
+    }
+
+    class LLMDefaults {
+        +default_model: ModelSelection|None
+        +fast_model: ModelSelection|None
+    }
+
+    class LLMConfigStore {
+        +list_providers() List~ProviderProfile~
+        +create_provider(profile, credentials) ProviderProfile
+        +update_provider(provider_id, changes, credentials) ProviderProfile
+        +delete_provider(provider_id) void
+        +get_settings() LLMDefaults
+        +update_settings(changes) LLMDefaults
+        +resolve(selection) ResolvedModel
+    }
+
+    ProviderProfile "1" *-- "many" ModelRef
+    LLMDefaults --> ModelSelection
+    LLMService --> LLMConfigStore : obtains connection credentials
 
     PlanExecutor <|-- CodingPlanExecutor
     PlanExecutor <|-- MutationPlanExecutor
@@ -365,7 +414,8 @@ classDiagram
 - **AppManager (`app_manager.py`)**: 管理动态生成的小程序（Widget）。负责 Widget 代码文件在磁盘的读写、数据状态存储及文件路径寻址。
 - **ContextManager (`context_manager.py`)**: 负责将数据库中的对话上下文整合为 LLM 兼容的 Prompt。此层会自动剔除冗余代码段并动态注入当前运行中应用的最新源码，在控制 Token 大小的同时给 LLM 提供充分的运行环境上下文。
 - **AgentParser (`agent_parser.py`)**: 负责用正则表达式和 XML 解析器解析 LLM 返回文本流中携带的 `<ambient-widget>` 语法块，提取组件的 JS 逻辑代码。
-- **LLMService (`llm_service.py`)**: 提供统一的大模型请求接口（支持本地 Ollama 与 OpenAI/MiniMax 兼容接口），并自动将请求原始数据记录至 `LLMAuditLog` 审计数据库。
+- **LLMConfigStore / LLMSelectionService**: 持久化脱敏 Provider Profile、独立秘密文件、全局默认/快速模型与会话级模型选择，并在一次 run 开始时生成不可变模型快照。
+- **LLMService (`llm_service.py`)**: 通过 LiteLLM 统一 Chat Completions / Responses 调用、工具调用和结构化错误，不执行跨 Provider 自动故障转移。
 - **RouterContext (`router_context.py`)**: 收集路由所需的轻量级上下文：已存在的 widgets、Graph 类型与节点摘要、近期对话。供 IntentRouter 在调用 LLM 时一并注入。
 - **GraphSnapshot**: RouterContext 嵌入的图状态摘要，用于让 LLM 意识到现有数据，避免重复创建。
 - **IntentPlan / IntentKind / SubIntent / SubIntentKind (`agent/intent_plan.py`)**: 用 `classify_intent` function-calling 协议引导 LLM 返回的结构化输出。`SubIntent` 是 `multi_intent` 顶层意图下的子动作列表。

@@ -40,13 +40,14 @@ git clone <repository-url>
 cd ambient-agent
 ```
 
-### 2. 配置环境变量
+### 2. 配置运行环境
 
 将根目录下的 `.env.example` 复制为 `.env`：
 ```bash
 cp .env.example .env
 ```
-打开 `.env` 文件，根据您的需要填入 LLM 配置（如 MiniMax、Ollama 等 API 的 API Key 或 URL）。
+`.env` 仅用于 OpenCode 等进程级运行参数。启动 Ambient Agent 后，请从“模型与 Provider”设置页添加
+OpenAI、Anthropic、MiniMax、Ollama 或其他 LLM 连接并选择默认模型；密钥不会写入 `.env`。
 
 ---
 

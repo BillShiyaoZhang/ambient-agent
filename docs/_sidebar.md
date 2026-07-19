@@ -21,4 +21,5 @@
 
 - **集成与安全**
   - [工具集成 (MCP)](/integrations/mcp.md)
+  - [LLM Provider 与模型](/integrations/llm-providers.md)
   - [权限与安全审计](/integrations/permissions.md)

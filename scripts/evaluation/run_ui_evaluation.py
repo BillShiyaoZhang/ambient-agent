@@ -370,8 +370,8 @@ async def run_scenario(scenario):
 
 async def judge_llm(scenario_data):
     # Retrieve configured provider
-    provider_name = os.getenv("LLM_PROVIDER", "openai")
-    model_name = os.getenv("LLM_MODEL", "gpt-4o")
+    provider_name = os.getenv("EVALUATION_LLM_PROVIDER", "openai")
+    model_name = os.getenv("EVALUATION_LLM_MODEL", "gpt-4o")
     provider = get_llm_provider(provider_name, model_name)
 
     sc_id = scenario_data["scenario_id"]
@@ -487,7 +487,7 @@ This benchmark evaluates **A2UI** (declarative layout specifications) against **
 
 - **Execution Date**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 - **Benchmark Run Dir**: `{RUN_DIR}`
-- **LLM Judge Model**: `{os.getenv("LLM_PROVIDER", "openai")}/{os.getenv("LLM_MODEL", "gpt-4o")}`
+- **LLM Judge Model**: `{os.getenv("EVALUATION_LLM_PROVIDER", "openai")}/{os.getenv("EVALUATION_LLM_MODEL", "gpt-4o")}`
 
 ---
 

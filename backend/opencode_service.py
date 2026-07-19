@@ -35,6 +35,87 @@ logger = logging.getLogger("opencode_service")
 active_acp_clients: dict[str, "FastAPIACPClient"] = {}
 
 
+_OPENCODE_NPM_BY_PRESET = {
+    "openai": "@ai-sdk/openai",
+    "openai_responses": "@ai-sdk/openai",
+    "anthropic": "@ai-sdk/anthropic",
+    "anthropic_compatible": "@ai-sdk/anthropic",
+    "gemini": "@ai-sdk/google",
+    "vertex_ai": "@ai-sdk/google-vertex",
+    "xai": "@ai-sdk/xai",
+    "mistral": "@ai-sdk/mistral",
+    "cohere": "@ai-sdk/cohere",
+    "azure": "@ai-sdk/azure",
+    "bedrock": "@ai-sdk/amazon-bedrock",
+}
+
+
+def _opencode_runtime_env() -> dict[str, str]:
+    """Build a process-local OpenCode override from the active run snapshot."""
+    from backend.llm_runtime import primary_selection
+    from backend.llm_service import get_default_llm_store
+
+    selection = primary_selection()
+    if selection is None:
+        return {}
+    resolved = get_default_llm_store().resolve(selection)
+    provider_key = f"ambient-{resolved.provider_id}"
+    npm = _OPENCODE_NPM_BY_PRESET.get(resolved.preset, "@ai-sdk/openai-compatible")
+    options: dict[str, Any] = {}
+    if resolved.credentials.get("api_key"):
+        options["apiKey"] = resolved.credentials["api_key"]
+    if resolved.connection.get("base_url"):
+        base_url = str(resolved.connection["base_url"]).rstrip("/")
+        if resolved.preset == "ollama" and not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        options["baseURL"] = base_url
+    headers = resolved.connection.get("headers")
+    if isinstance(headers, dict):
+        options["headers"] = dict(headers)
+    if resolved.credentials.get("secret_headers"):
+        try:
+            secret_headers = json.loads(resolved.credentials["secret_headers"])
+            if isinstance(secret_headers, dict):
+                options["headers"] = {**options.get("headers", {}), **secret_headers}
+        except (TypeError, json.JSONDecodeError):
+            pass
+    if resolved.connection.get("timeout") is not None:
+        options["timeout"] = float(resolved.connection["timeout"]) * 1000
+
+    try:
+        inline_config = json.loads(os.getenv("OPENCODE_CONFIG_CONTENT", "{}"))
+        if not isinstance(inline_config, dict):
+            inline_config = {}
+    except json.JSONDecodeError:
+        inline_config = {}
+    providers = inline_config.get("provider")
+    if not isinstance(providers, dict):
+        providers = {}
+    providers[provider_key] = {
+        "npm": npm,
+        "name": resolved.provider_name,
+        "options": options,
+        "models": {resolved.model_id: {"name": resolved.model_id}},
+    }
+    inline_config["provider"] = providers
+    inline_config["model"] = f"{provider_key}/{resolved.model_id}"
+
+    environment = {"OPENCODE_CONFIG_CONTENT": json.dumps(inline_config, ensure_ascii=False)}
+    credential_env_names = {
+        "aws_access_key_id": "AWS_ACCESS_KEY_ID",
+        "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+        "aws_session_token": "AWS_SESSION_TOKEN",
+    }
+    for credential, env_name in credential_env_names.items():
+        if resolved.credentials.get(credential):
+            environment[env_name] = resolved.credentials[credential]
+    if resolved.connection.get("region"):
+        environment["AWS_REGION"] = str(resolved.connection["region"])
+    if resolved.connection.get("profile"):
+        environment["AWS_PROFILE"] = str(resolved.connection["profile"])
+    return environment
+
+
 class PermissionPolicyManager:
     def __init__(self, config_path: str = None):
         if config_path is None:
@@ -544,7 +625,13 @@ async def run_opencode_agent_acp(
     logger.info(f"Spawning OpenCode ACP agent: {opencode_cmd} acp inside {workspace_root}")
 
     try:
-        async with spawn_agent_process(client, opencode_cmd, "acp", cwd=workspace_root) as (conn, proc):
+        async with spawn_agent_process(
+            client,
+            opencode_cmd,
+            "acp",
+            cwd=workspace_root,
+            env=_opencode_runtime_env(),
+        ) as (conn, proc):
             await conn.initialize(
                 protocol_version=1,
                 client_capabilities=ClientCapabilities(

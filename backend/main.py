@@ -16,6 +16,10 @@ from backend.agent.harness import AgentOrchestrator
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.models import ChatMessage, ChatSession
+from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
+from backend.llm_discovery import discover_models, test_provider
+from backend.llm_runtime import use_model_selections
+from backend.llm_service import set_default_llm_store
 from backend.opencode_service import run_opencode_agent_acp
 from backend.run_service import RunCoordinator, RunStore
 from backend.session_title import SessionTitleService, is_placeholder_title
@@ -60,6 +64,8 @@ app_manager = AppManager()
 # Initialize workspace storage
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
+llm_config_store = LLMConfigStore(WORKSPACE_DIR)
+set_default_llm_store(llm_config_store)
 app_store = AppStoreService(WORKSPACE_DIR, app_manager)
 
 from backend.graph_db import GraphDatabase
@@ -123,6 +129,38 @@ class SessionUpdateLanguage(BaseModel):
     language: str
 
 
+class ProviderCreateRequest(BaseModel):
+    profile: dict[str, Any]
+    credentials: dict[str, Any] = {}
+
+
+class ProviderUpdateRequest(BaseModel):
+    profile: dict[str, Any] = {}
+    credentials: dict[str, Any] | None = None
+
+
+class LLMSettingsUpdateRequest(BaseModel):
+    default_model: ModelSelection | None = None
+    fast_model: ModelSelection | None = None
+
+
+class ProviderTestRequest(BaseModel):
+    model_id: str | None = None
+    mode: str = "connection"
+
+
+def _llm_error_status(code: str) -> int:
+    return {
+        "llm_auth_failed": 401,
+        "llm_model_not_found": 404,
+        "llm_rate_limited": 429,
+        "llm_timeout": 504,
+        "llm_provider_error": 502,
+        "llm_provider_in_use": 409,
+        "llm_model_in_use": 409,
+    }.get(code, 422)
+
+
 @app.get("/api/sessions")
 async def get_sessions(session: WorkspaceStorage = Depends(get_db)):
     return session.get_sessions()
@@ -151,9 +189,119 @@ async def update_session_language(
     return db_sess
 
 
+@app.put("/api/sessions/{session_id}/model")
+async def update_session_model(
+    session_id: str, data: ModelSelection, session: WorkspaceStorage = Depends(get_db)
+):
+    try:
+        llm_config_store.resolve(data)
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+    db_sess = session.get(ChatSession, session_id)
+    if not db_sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    db_sess.model_selection = data
+    session.add(db_sess)
+    session.commit()
+    payload = {"type": "session_model_updated", "session_id": session_id, "model_selection": data.model_dump()}
+    await broadcast_global(payload)
+    return payload
+
+
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, session: WorkspaceStorage = Depends(get_db)):
     return session.get_messages(session_id)
+
+
+# --- LLM Provider Registry endpoints ---
+
+
+@app.get("/api/llm/catalog")
+async def get_llm_catalog():
+    return llm_config_store.catalog()
+
+
+@app.get("/api/llm/providers")
+async def get_llm_providers():
+    return llm_config_store.list_providers()
+
+
+@app.post("/api/llm/providers", status_code=201)
+async def create_llm_provider(data: ProviderCreateRequest):
+    try:
+        return llm_config_store.create_provider(data.profile, data.credentials)
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.patch("/api/llm/providers/{provider_id}")
+async def update_llm_provider(
+    provider_id: str,
+    data: ProviderUpdateRequest,
+    session: WorkspaceStorage = Depends(get_db),
+):
+    try:
+        if "models" in data.profile:
+            existing = llm_config_store.get_provider(provider_id)
+            next_ids = {str(item.get("id")) for item in (data.profile.get("models") or [])}
+            removed_ids = {model.id for model in existing.models} - next_ids
+            if any(
+                chat.model_selection
+                and chat.model_selection.provider_id == provider_id
+                and chat.model_selection.model_id in removed_ids
+                for chat in session.get_sessions()
+            ):
+                raise LLMConfigError("Model is referenced by a session", code="llm_model_in_use")
+        return llm_config_store.update_provider(provider_id, data.profile, data.credentials)
+    except LLMConfigError as exc:
+        status = 404 if exc.code == "llm_provider_not_found" else 409 if exc.code == "llm_model_in_use" else 422
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.delete("/api/llm/providers/{provider_id}")
+async def delete_llm_provider(provider_id: str, session: WorkspaceStorage = Depends(get_db)):
+    if any(
+        chat.model_selection and chat.model_selection.provider_id == provider_id for chat in session.get_sessions()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "llm_provider_in_use", "message": "Provider is referenced by a session"},
+        )
+    try:
+        llm_config_store.delete_provider(provider_id)
+    except LLMConfigError as exc:
+        status = 409 if exc.code == "llm_provider_in_use" else 404
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
+    return {"status": "ok"}
+
+
+@app.post("/api/llm/providers/{provider_id}/discover-models")
+async def discover_llm_provider_models(provider_id: str):
+    try:
+        return {"models": await discover_models(llm_config_store, provider_id)}
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.post("/api/llm/providers/{provider_id}/test")
+async def test_llm_provider(provider_id: str, data: ProviderTestRequest):
+    try:
+        return await test_provider(llm_config_store, provider_id, data.model_id, test_tools=data.mode == "tools")
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.get("/api/llm/settings")
+async def get_llm_settings():
+    return llm_config_store.get_settings()
+
+
+@app.patch("/api/llm/settings")
+async def update_llm_settings(data: LLMSettingsUpdateRequest):
+    try:
+        return llm_config_store.update_settings(data.model_dump(exclude_unset=True))
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -504,7 +652,7 @@ async def websocket_chat(
     orchestrator = AgentOrchestrator(
         db_session=session, app_manager=app_manager, run_opencode_agent_acp_fn=run_opencode_agent_acp
     )
-    title_service = SessionTitleService(session)
+    title_service = SessionTitleService(session, config_store=llm_config_store)
 
     def start_title_generation(content: str) -> None:
         if session_id in session_title_tasks or not is_placeholder_title(db_session_obj.title):
@@ -604,9 +752,11 @@ async def websocket_chat(
             user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
             session.add(user_msg)
 
-            # Update session's updated_at timestamp
-            db_session_obj.updated_at = datetime.now(UTC)
-            session.add(db_session_obj)
+            # Reload before every run so a model change from another client is not
+            # overwritten by the session object captured when the socket opened.
+            current_session = session.get(ChatSession, session_id) or db_session_obj
+            current_session.updated_at = datetime.now(UTC)
+            session.add(current_session)
             session.commit()
             session.refresh(user_msg)
 
@@ -628,10 +778,23 @@ async def websocket_chat(
             active_running_sessions.add(session_id)
             await broadcast_global({"type": "session_status_update", "session_id": session_id, "status": "running"})
 
-            # Delegate execution to orchestrator
-            agent_msg, widget_to_send = await orchestrator.handle_message(
-                session_id=session_id, content=content_str, on_update=run_update
-            )
+            # Resolve once when the run starts. Context variables keep concurrent
+            # sessions isolated and ensure UI changes affect only the next run.
+            settings = llm_config_store.get_settings()
+            primary_data = current_session.model_selection or settings.get("default_model")
+            if not primary_data:
+                raise LLMConfigError(
+                    "Configure a default model before starting a task",
+                    code="llm_configuration_required",
+                )
+            primary_snapshot = ModelSelection.model_validate(primary_data)
+            fast_snapshot = ModelSelection.model_validate(settings.get("fast_model") or primary_snapshot)
+            llm_config_store.resolve(primary_snapshot)
+            llm_config_store.resolve(fast_snapshot)
+            with use_model_selections(primary_snapshot, fast_snapshot):
+                agent_msg, widget_to_send = await orchestrator.handle_message(
+                    session_id=session_id, content=content_str, on_update=run_update
+                )
 
             # Send the final agent explanation/execution log back to client
             await send_to_session(
@@ -676,6 +839,25 @@ async def websocket_chat(
                 run_store.finish_step(run["id"], "agent_orchestration", status="cancelled")
                 run_store.transition(run["id"], "cancelled", summary="Cancelled")
             raise
+        except LLMConfigError as e:
+            error_payload = {
+                "type": "llm_error",
+                "code": e.code,
+                "message": str(e),
+                "action": "open_llm_settings",
+            }
+            await send_to_session(session_id, error_payload)
+            current = run_store.get_run(run["id"])
+            if current and current["status"] not in {"succeeded", "failed", "cancelled"}:
+                run_store.finish_step(run["id"], "agent_orchestration", error_payload, status="failed")
+                if current["status"] == "waiting_user":
+                    run_store.transition(run["id"], "running", summary="LLM configuration required")
+                run_store.transition(
+                    run["id"],
+                    "failed",
+                    summary="LLM configuration required",
+                    error={"code": e.code, "message": str(e)},
+                )
         except Exception as e:
             print("Error in process_user_message:", e)
             current = run_store.get_run(run["id"])
