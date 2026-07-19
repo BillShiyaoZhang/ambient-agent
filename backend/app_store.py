@@ -36,10 +36,43 @@ class CapabilityInvocation(BaseModel):
         return self
 
 
+class CapabilityAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    result_schema: dict[str, Any] = Field(default_factory=dict)
+    invocation: CapabilityInvocation
+    recovery: Literal["manual", "restart_safe"] = "manual"
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not _CAPABILITY_ID_RE.fullmatch(value):
+            raise ValueError("action id must contain lowercase letters, numbers, dots, underscores, or hyphens")
+        return value
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 120:
+            raise ValueError("action title must be between 1 and 120 characters")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return value.strip()[:2000]
+
+
 class CapabilityManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    manifest_version: Literal[1] = 1
+    manifest_version: Literal[1, 2] = 1
     id: str
     kind: Literal["skill", "mcp"]
     provider: str
@@ -50,7 +83,35 @@ class CapabilityManifest(BaseModel):
     icon: str | None = None
     accent: str | None = None
     input_schema: dict[str, Any] = Field(default_factory=dict)
-    invocation: CapabilityInvocation
+    invocation: CapabilityInvocation | None = None
+    actions: list[CapabilityAction] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_contract_version(self) -> "CapabilityManifest":
+        if self.manifest_version == 1 and self.invocation is None:
+            raise ValueError("manifest v1 requires invocation")
+        if self.manifest_version == 2 and not self.actions:
+            raise ValueError("manifest v2 requires at least one action")
+        action_ids = [action.id for action in self.actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError("action ids must be unique")
+        return self
+
+    def normalized_actions(self) -> list[CapabilityAction]:
+        if self.actions:
+            return list(self.actions)
+        assert self.invocation is not None
+        return [
+            CapabilityAction(
+                id="run",
+                title=self.title,
+                description=self.description,
+                input_schema=self.input_schema,
+                result_schema={},
+                invocation=self.invocation,
+                recovery="manual",
+            )
+        ]
 
     @field_validator("id")
     @classmethod
@@ -126,6 +187,8 @@ class GeneratedAppProvider:
                 "icon": None,
                 "accent": None,
                 "ui_app_id": app["id"],
+                "launch_mode": "ui",
+                "actions": [],
                 "status": "ready",
                 "created_at": app.get("created_at"),
                 "updated_at": app.get("updated_at"),
@@ -264,7 +327,12 @@ class AppStoreService:
             ready = bool(bound_app_id and self.app_manager.get_manifest(bound_app_id))
             if bound_app_id and not ready:
                 bound_app_id = None
-            status = "generating" if catalog_id in self.generating_ids else ("ready" if ready else "needs_ui")
+            # V1 keeps its historical status for API compatibility, but is still
+            # directly launchable through the normalized default action. V2
+            # headless capabilities are first-class ready apps.
+            status = "generating" if catalog_id in self.generating_ids else (
+                "ready" if ready or manifest.manifest_version == 2 else "needs_ui"
+            )
             result.append(
                 {
                     "catalog_id": catalog_id,
@@ -277,7 +345,9 @@ class AppStoreService:
                     "icon": manifest.icon,
                     "accent": manifest.accent,
                     "input_schema": manifest.input_schema,
+                    "actions": [action.model_dump(exclude_none=True) for action in manifest.normalized_actions()],
                     "ui_app_id": bound_app_id,
+                    "launch_mode": "ui" if ready else "actions",
                     "status": status,
                 }
             )
@@ -291,6 +361,12 @@ class AppStoreService:
 
     def get_catalog_item(self, catalog_id: str) -> dict[str, Any] | None:
         return next((item for item in self.list_catalog_items() if item["catalog_id"] == catalog_id), None)
+
+    def get_action(self, catalog_id: str, action_id: str) -> CapabilityAction | None:
+        manifest = self.get_capability(catalog_id)
+        if manifest is None:
+            return None
+        return next((action for action in manifest.normalized_actions() if action.id == action_id), None)
 
     @staticmethod
     def _normalize_layout(layout: dict[str, Any], valid_item_ids: set[str]) -> dict[str, Any]:

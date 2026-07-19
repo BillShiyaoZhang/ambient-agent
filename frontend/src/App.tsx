@@ -11,9 +11,11 @@ import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
 import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
+import { TaskDrawer } from "./components/TaskDrawer";
 import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
-import { Languages, Moon, ShieldCheck, Sun } from "lucide-react";
+import { Languages, ListTodo, Moon, ShieldCheck, Sun } from "lucide-react";
+import type { AmbientRun } from "./services/runs";
 
 const API_BASE = `http://${window.location.hostname}:8000`;
 
@@ -75,6 +77,8 @@ function App() {
   }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
+  const [isTaskDrawerOpen, setIsTaskDrawerOpen] = useState(false);
+  const [taskCounts, setTaskCounts] = useState({ active: 0, attention: 0 });
   
   interface PermissionRequest {
     request_id: string;
@@ -690,6 +694,7 @@ function App() {
       onPinWidget={handleOpenApp}
       onUnpinWidget={handleRemoveWidget}
       onRunFullscreen={handleOpenApp}
+      onRunCreated={() => setIsTaskDrawerOpen(true)}
       language={language}
     />
   );
@@ -712,6 +717,8 @@ function App() {
               </ErrorBoundary>
             )}
             onOpenAudit={() => setIsAuditOpen(true)}
+            onOpenTasks={() => setIsTaskDrawerOpen(true)}
+            taskCount={taskCounts.active + taskCounts.attention}
             onOpenAppStore={() => setIsAppStoreOpen(true)}
             language={language}
             onLanguageChange={handleLanguageChange}
@@ -724,6 +731,7 @@ function App() {
 
       {canvasConfig.open_app_ids.length === 0 && (
         <div className="home-controls" aria-label={language === "zh" ? "主页设置" : "Home settings"}>
+          <button onClick={() => setIsTaskDrawerOpen(true)} aria-label={language === "zh" ? "任务中心" : "Task Center"}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span>{taskCounts.active + taskCounts.attention}</span> : null}</button>
           <button onClick={() => setIsAuditOpen(true)} aria-label={language === "zh" ? "审计日志" : "Audit log"}><ShieldCheck size={17} /></button>
           <button onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")} aria-label={language === "zh" ? "切换为英文" : "Switch to Chinese"}><Languages size={17} /></button>
           <label aria-label={language === "zh" ? "主题" : "Theme"}>
@@ -755,6 +763,19 @@ function App() {
 
       {/* Audit Log Panel Overlay */}
       <AuditLogPanel isOpen={isAuditOpen} onClose={() => setIsAuditOpen(false)} />
+      <TaskDrawer
+        open={isTaskDrawerOpen}
+        language={language}
+        onClose={() => setIsTaskDrawerOpen(false)}
+        onCountsChange={setTaskCounts}
+        onOpenSource={(run: AmbientRun) => {
+          if (run.source_type === "chat" && run.source_id) {
+            handleSelectSession(run.source_id);
+            handleChatOpenChange(true);
+            setIsTaskDrawerOpen(false);
+          }
+        }}
+      />
 
       {/* 🧮 Mutation preview / rollback */}
       <MutationPreview

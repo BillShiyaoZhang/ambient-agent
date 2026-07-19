@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Grid2X2,
   Languages,
+  ListTodo,
   Maximize2,
   Minimize2,
   Moon,
@@ -36,6 +37,8 @@ interface AppWorkspaceProps {
   renderWidgetContent: (widget: Widget) => React.ReactNode;
   onOpenAppStore: () => void;
   onOpenAudit: () => void;
+  onOpenTasks?: () => void;
+  taskCount?: number;
   language: "zh" | "en";
   onLanguageChange: (language: "zh" | "en") => void;
   theme: ThemeSnapshot;
@@ -52,6 +55,8 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   renderWidgetContent,
   onOpenAppStore,
   onOpenAudit,
+  onOpenTasks = () => {},
+  taskCount = 0,
   language,
   onLanguageChange,
   theme,
@@ -273,6 +278,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
 
       <nav className="workspace-toolbar" aria-label={isZh ? "工作区工具栏" : "Workspace toolbar"}>
         <button onClick={onOpenAppStore} aria-label={isZh ? "打开应用中心" : "Open App Center"}><Store size={18} /></button>
+        <button className="workspace-task-button" onClick={onOpenTasks} aria-label={isZh ? "打开任务中心" : "Open Task Center"}><ListTodo size={18} />{taskCount > 0 && <span>{taskCount}</span>}</button>
         <div className="workspace-toolbar-divider" />
         <div className="workspace-app-switcher">
           {canvas.open_app_ids.map((id) => {

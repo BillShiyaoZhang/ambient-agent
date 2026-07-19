@@ -169,6 +169,17 @@
 .app-center-tags span { padding: 5px 8px; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; color: rgba(233,234,246,.5); background: rgba(255,255,255,.035); font-size: 9px; }
 .app-center-primary { display: flex; width: 100%; align-items: center; justify-content: center; gap: 8px; margin-top: 24px; padding: 12px 16px; border: 1px solid rgba(255,255,255,.16); border-radius: 13px; color: white; background: linear-gradient(135deg, #735ce8, #9677f0); box-shadow: 0 12px 30px rgba(106,79,215,.25), inset 0 1px rgba(255,255,255,.22); cursor: pointer; font-weight: 650; }
 .app-center-primary:disabled { opacity: .6; cursor: wait; }
+.app-center-secondary { width: 100%; margin-top: 8px; padding: 10px; border: 1px solid rgba(255,255,255,.1); border-radius: 11px; color: rgba(245,246,255,.65); background: transparent; cursor: pointer; }
+.app-center-actions { margin-top: 22px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.08); }
+.app-center-actions h3 { margin: 0 0 5px; font-size: 14px; }
+.app-center-actions > p { margin: 0 0 12px; color: rgba(227,230,243,.52); font-size: 11px; }
+.app-center-action-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }
+.app-center-action-tabs button { padding: 6px 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; color: rgba(255,255,255,.58); background: transparent; cursor: pointer; font-size: 10px; }
+.app-center-action-tabs button.is-active { color: white; background: rgba(124,92,255,.25); }
+.app-center-actions label { display: grid; gap: 5px; margin: 10px 0; color: rgba(235,237,248,.62); font-size: 10px; }
+.app-center-actions input:not([type="checkbox"]),.app-center-actions select { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; outline: 0; color: white; background: rgba(0,0,0,.2); }
+.app-center-actions input:focus,.app-center-actions select:focus { border-color: rgba(168,151,255,.55); }
+.app-center-action-error { color: #ff8c88 !important; }
 
 .app-center-menu-scrim { position: fixed; inset: 0; z-index: 30; }
 .app-center-menu { position: absolute; width: 230px; padding: 7px; border: 1px solid rgba(255,255,255,.13); border-radius: 16px; background: rgba(27,28,40,.94); box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 0 1px rgba(255,255,255,.08); backdrop-filter: blur(26px); animation: app-center-menu .16s ease; }

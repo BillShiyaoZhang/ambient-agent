@@ -48,6 +48,19 @@ import "./AppCenter.css";
 export type CatalogKind = "generated_app" | "skill" | "mcp";
 export type CatalogStatus = "ready" | "needs_ui" | "generating" | "unavailable";
 
+export interface CatalogAction {
+  id: string;
+  title: string;
+  description?: string;
+  input_schema: {
+    type?: string;
+    required?: string[];
+    properties?: Record<string, { type?: string; title?: string; description?: string; default?: unknown; enum?: unknown[] }>;
+  };
+  result_schema?: Record<string, unknown>;
+  recovery?: "manual" | "restart_safe";
+}
+
 export interface CatalogItem {
   catalog_id: string;
   kind: CatalogKind;
@@ -59,6 +72,8 @@ export interface CatalogItem {
   icon?: string | null;
   accent?: string | null;
   ui_app_id?: string | null;
+  launch_mode?: "ui" | "actions";
+  actions?: CatalogAction[];
   status: CatalogStatus;
 }
 
@@ -84,6 +99,7 @@ interface AppCenterProps {
   onPinWidget: (id: string) => void;
   onUnpinWidget: (id: string) => void;
   onRunFullscreen: (id: string) => void;
+  onRunCreated?: (run: { id: string }) => void;
   language?: "zh" | "en";
 }
 
@@ -119,7 +135,7 @@ function AppIcon({ item, compact = false }: { item: CatalogItem; compact?: boole
       <div className="app-center-icon-shine" />
       <ItemGlyph item={item} size={compact ? 24 : 36} />
       {item.status === "generating" && <LoaderCircle className="app-center-icon-spinner" size={20} />}
-      {item.status === "needs_ui" && <Sparkles className="app-center-icon-badge" size={16} />}
+      {item.status === "needs_ui" && item.launch_mode !== "actions" && <Sparkles className="app-center-icon-badge" size={16} />}
     </div>
   );
 }
@@ -205,7 +221,7 @@ function AppTileView({
         {item ? <AppIcon item={item} /> : folder ? <FolderIcon folder={folder} items={folderItems} /> : null}
       </span>
       <span className="app-center-tile-title">{title}</span>
-      {item?.status === "needs_ui" && (
+      {item?.status === "needs_ui" && item.launch_mode !== "actions" && (
         <span className="app-center-tile-status">{isZh ? "需要界面" : "Needs UI"}</span>
       )}
     </button>
@@ -246,6 +262,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   onPinWidget,
   onUnpinWidget,
   onRunFullscreen,
+  onRunCreated,
   language = "zh",
 }) => {
   const isZh = language === "zh";
@@ -261,6 +278,10 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ itemId: string; x: number; y: number } | null>(null);
   const [pageCapacity, setPageCapacity] = useState(24);
+  const [selectedActionId, setSelectedActionId] = useState<string | null>(null);
+  const [actionInput, setActionInput] = useState<Record<string, unknown>>({});
+  const [actionError, setActionError] = useState("");
+  const [actionSubmitting, setActionSubmitting] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const overRef = useRef<{ id: string | null; since: number }>({ id: null, since: 0 });
   const pageFlipRef = useRef(0);
@@ -374,6 +395,41 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       return;
     }
     setDetailsId(item.catalog_id);
+    const action = item.actions?.[0];
+    setSelectedActionId(action?.id ?? null);
+    setActionInput(Object.fromEntries(Object.entries(action?.input_schema.properties || {}).map(([key, schema]) => [key, schema.default ?? (schema.type === "boolean" ? false : "")])));
+  };
+
+  const selectAction = (action: CatalogAction) => {
+    setSelectedActionId(action.id);
+    setActionError("");
+    setActionInput(Object.fromEntries(Object.entries(action.input_schema.properties || {}).map(([key, schema]) => [key, schema.default ?? (schema.type === "boolean" ? false : "")])));
+  };
+
+  const submitAction = async (item: CatalogItem, action: CatalogAction) => {
+    setActionSubmitting(true);
+    setActionError("");
+    try {
+      const normalized = Object.fromEntries(Object.entries(actionInput).map(([key, value]) => {
+        const type = action.input_schema.properties?.[key]?.type;
+        if (type === "number" || type === "integer") return [key, value === "" ? null : Number(value)];
+        return [key, value];
+      }));
+      const response = await fetch(`${API_BASE}/api/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ catalog_id: item.catalog_id, action_id: action.id, input: normalized, source: { type: "user", id: "app-center" } }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+      setDetailsId(null);
+      onClose();
+      onRunCreated?.(payload);
+    } catch (submitError) {
+      setActionError(submitError instanceof Error ? submitError.message : String(submitError));
+    } finally {
+      setActionSubmitting(false);
+    }
   };
 
   const requestGeneration = (item: CatalogItem) => {
@@ -547,6 +603,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
 
   const openFolder = openFolderId ? foldersById.get(openFolderId) : undefined;
   const detailsItem = detailsId ? itemsById.get(detailsId) : undefined;
+  const selectedAction = detailsItem?.actions?.find((action) => action.id === selectedActionId) ?? detailsItem?.actions?.[0];
   const menuItem = menu ? itemsById.get(menu.itemId) : undefined;
   const activeItem = activeId ? itemsById.get(activeId) : undefined;
   const activeFolder = activeId?.startsWith("folder:") ? foldersById.get(activeId.slice(7)) : undefined;
@@ -699,6 +756,29 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             {detailsItem.tags.length > 0 && <div className="app-center-tags">{detailsItem.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
             {detailsItem.ui_app_id ? (
               <button className="app-center-primary" onClick={() => activateItem(detailsItem)}><Play size={17} />{isZh ? "打开应用" : "Open app"}</button>
+            ) : detailsItem.launch_mode === "actions" && selectedAction ? (
+              <div className="app-center-actions">
+                {(detailsItem.actions?.length || 0) > 1 && <div className="app-center-action-tabs">{detailsItem.actions?.map((action) => <button key={action.id} className={selectedAction.id === action.id ? "is-active" : ""} onClick={() => selectAction(action)}>{action.title}</button>)}</div>}
+                <h3>{selectedAction.title}</h3>
+                {selectedAction.description && <p>{selectedAction.description}</p>}
+                {Object.entries(selectedAction.input_schema.properties || {}).map(([key, schema]) => (
+                  <label key={key}>
+                    <span>{schema.title || key}{selectedAction.input_schema.required?.includes(key) ? " *" : ""}</span>
+                    {schema.enum ? (
+                      <select value={String(actionInput[key] ?? "")} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.value }))}>
+                        <option value="">—</option>{schema.enum.map((value) => <option key={String(value)} value={String(value)}>{String(value)}</option>)}
+                      </select>
+                    ) : schema.type === "boolean" ? (
+                      <input type="checkbox" checked={Boolean(actionInput[key])} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.checked }))} />
+                    ) : (
+                      <input type={schema.type === "number" || schema.type === "integer" ? "number" : "text"} value={String(actionInput[key] ?? "")} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.value }))} placeholder={schema.description} />
+                    )}
+                  </label>
+                ))}
+                {actionError && <p className="app-center-action-error">{actionError}</p>}
+                <button className="app-center-primary" onClick={() => void submitAction(detailsItem, selectedAction)} disabled={actionSubmitting}>{actionSubmitting ? <LoaderCircle className="animate-spin" size={17} /> : <Play size={17} />}{isZh ? "后台运行" : "Run in background"}</button>
+                <button className="app-center-secondary" onClick={() => requestGeneration(detailsItem)}>{isZh ? "生成可视化界面" : "Generate visual interface"}</button>
+              </div>
             ) : (
               <button className="app-center-primary" onClick={() => requestGeneration(detailsItem)} disabled={detailsItem.status === "generating"}>{detailsItem.status === "generating" ? <LoaderCircle className="animate-spin" size={17} /> : <WandSparkles size={17} />}{isZh ? "生成专属界面" : "Generate interface"}</button>
             )}

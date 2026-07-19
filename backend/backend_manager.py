@@ -106,6 +106,7 @@ class BackendManager:
         self.mcp_clients: dict[str, StdioJsonRpcClient] = {}
         self.pending_permissions: dict[str, asyncio.Future] = {}
         self.permissions: dict[str, Any] = {}
+        self.agent_runtimes: dict[str, dict[str, Any]] = {}
         self._load_permissions()
 
     def _load_permissions(self):
@@ -226,19 +227,56 @@ class BackendManager:
                 raise Exception("Permission denied to connect to Agent")
             self.approve_agent(app_id, agent_url)
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream("POST", agent_url, json=message, timeout=60.0) as response:
-                if response.status_code != 200:
-                    logger.error(f"Agent URL returned status {response.status_code}")
-                    return
+        self.agent_runtimes[app_id] = {
+            "id": app_id,
+            "type": "http_agent",
+            "managed": False,
+            "status": "connecting",
+            "endpoint": agent_url,
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream("POST", agent_url, json=message, timeout=60.0) as response:
+                    if response.status_code != 200:
+                        self.agent_runtimes[app_id]["status"] = "unhealthy"
+                        logger.error(f"Agent URL returned status {response.status_code}")
+                        raise RuntimeError(f"Agent returned HTTP {response.status_code}")
+                    self.agent_runtimes[app_id]["status"] = "healthy"
+                    async for line in response.aiter_lines():
+                        if line.startswith("data:"):
+                            try:
+                                event_data = json.loads(line[5:].strip())
+                                await send_ws_message_func({"type": "ag_ui_event", "app_id": app_id, "event": event_data})
+                            except Exception as e:
+                                logger.error(f"Error parsing agent SSE event: {e}")
+        except Exception:
+            self.agent_runtimes[app_id]["status"] = "unhealthy"
+            raise
 
-                async for line in response.aiter_lines():
-                    if line.startswith("data:"):
-                        try:
-                            event_data = json.loads(line[5:].strip())
-                            await send_ws_message_func({"type": "ag_ui_event", "app_id": app_id, "event": event_data})
-                        except Exception as e:
-                            logger.error(f"Error parsing agent SSE event: {e}")
+    def list_runtimes(self) -> list[dict[str, Any]]:
+        runtimes: list[dict[str, Any]] = []
+        for app_id, client in sorted(self.mcp_clients.items()):
+            running = bool(client.process and client.process.returncode is None)
+            runtimes.append(
+                {
+                    "id": app_id,
+                    "type": "mcp",
+                    "managed": True,
+                    "status": "healthy" if running else "stopped",
+                    "pid": client.process.pid if running and client.process else None,
+                }
+            )
+        runtimes.extend(self.agent_runtimes.values())
+        runtimes.append({"id": "internal:agent", "type": "internal", "managed": False, "status": "healthy"})
+        return runtimes
+
+    async def stop_runtime(self, runtime_id: str) -> bool:
+        client = self.mcp_clients.get(runtime_id)
+        if client is None:
+            return False
+        await client.stop()
+        self.mcp_clients.pop(runtime_id, None)
+        return True
 
     async def shutdown(self):
         for client in self.mcp_clients.values():

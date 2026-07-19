@@ -17,6 +17,7 @@ from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import run_opencode_agent_acp
+from backend.run_service import RunCoordinator, RunStore
 from backend.session_title import SessionTitleService, is_placeholder_title
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 
@@ -73,13 +74,17 @@ def get_db():
 from backend.backend_manager import BackendManager
 
 backend_manager = BackendManager()
+run_store = RunStore(WORKSPACE_DIR)
+run_coordinator = RunCoordinator(run_store, app_store, app_manager, backend_manager)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Perform automated migration from db.sqlite3 and backend/apps to workspace
     migrate_old_data(WORKSPACE_DIR)
+    await run_coordinator.start()
     yield
+    await run_coordinator.shutdown()
     await backend_manager.shutdown()
 
 
@@ -191,6 +196,160 @@ class AppStoreLayoutUpdate(BaseModel):
     folders: list[dict[str, Any]]
 
 
+class RunCreate(BaseModel):
+    catalog_id: str
+    action_id: str | None = None
+    input: Any = None
+    source: dict[str, Any] | None = None
+    idempotency_key: str | None = None
+    parent_run_id: str | None = None
+
+
+class RunInteractionResolve(BaseModel):
+    response: Any
+
+
+@app.post("/api/runs", status_code=202)
+async def create_run(data: RunCreate):
+    source = data.source or {}
+    try:
+        action_id = data.action_id
+        if action_id is None:
+            capability = app_store.get_capability(data.catalog_id)
+            if capability is None:
+                raise KeyError("Capability not found")
+            action_id = capability.normalized_actions()[0].id
+        return run_coordinator.submit(
+            data.catalog_id,
+            action_id,
+            {} if data.input is None else data.input,
+            source_type=str(source.get("type", "user")),
+            source_id=str(source["id"]) if source.get("id") is not None else None,
+            idempotency_key=data.idempotency_key,
+            parent_run_id=data.parent_run_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/runs")
+async def list_runs(status: str | None = None, owner_id: str | None = None, limit: int = 100, offset: int = 0):
+    return run_store.list_runs(status=status, owner_id=owner_id, limit=limit, offset=offset)
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    run = run_store.get_run(run_id, include_events=True)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    try:
+        return run_coordinator.cancel(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+
+
+@app.post("/api/runs/{run_id}/retry", status_code=202)
+async def retry_run(run_id: str):
+    try:
+        return run_coordinator.retry(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/run-interactions/{interaction_id}/resolve")
+async def resolve_run_interaction(interaction_id: str, data: RunInteractionResolve):
+    try:
+        interaction = run_store.get_interaction(interaction_id)
+        if interaction is None:
+            raise KeyError(interaction_id)
+        payload = interaction.get("payload") or {}
+        response = data.response if isinstance(data.response, dict) else {"approved": bool(data.response)}
+        approved = response.get("approved", False)
+        nested_request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+        request_type = payload.get("type") or nested_request.get("type")
+        if request_type == "plan_approval_request":
+            from backend.agent.harness import active_plan_requests
+
+            future = active_plan_requests.get(interaction_id)
+            if future and not future.done():
+                action = "refine" if approved == "refine" else "approve" if approved else "deny"
+                value = response.get("plan", payload.get("plan", ""))
+                if action == "refine":
+                    value = {"plan": value, "feedback": response.get("feedback", "")}
+                future.set_result((action, value))
+        elif request_type == "schema_approval_request":
+            from backend.agent.harness import active_schema_requests
+
+            future = active_schema_requests.get(interaction_id)
+            if future and not future.done():
+                action = str(approved) if isinstance(approved, str) else "approve" if approved else "deny"
+                future.set_result((action, response.get("proposal", payload.get("proposal", {}))))
+        elif request_type == "verification_approval_request":
+            from backend.agent.harness import active_verification_requests
+
+            future = active_verification_requests.get(interaction_id)
+            if future and not future.done():
+                action = approved if isinstance(approved, str) else "approve" if approved else "deny"
+                future.set_result((action, {"feedback": response.get("feedback", "")}))
+        elif request_type == "backend_permission_request":
+            backend_manager.resolve_permission(interaction_id, bool(approved))
+        elif request_type == "permission_request":
+            from backend.opencode_service import active_acp_clients
+
+            for client in active_acp_clients.values():
+                if interaction_id in client.pending_permissions:
+                    client.resolve_permission(interaction_id, bool(approved))
+                    break
+        return run_coordinator.resolve_interaction(interaction_id, response)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Interaction not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/runtimes")
+async def list_runtimes():
+    return backend_manager.list_runtimes()
+
+
+@app.post("/api/runtimes/{runtime_id}/stop")
+async def stop_runtime(runtime_id: str):
+    if run_store.has_active_runtime(runtime_id):
+        raise HTTPException(status_code=409, detail="Runtime has active runs")
+    if not await backend_manager.stop_runtime(runtime_id):
+        raise HTTPException(status_code=404, detail="Managed runtime not found")
+    return {"status": "stopped", "runtime_id": runtime_id}
+
+
+@app.websocket("/ws/runs")
+async def websocket_runs(websocket: WebSocket, after_sequence: int = 0):
+    await websocket.accept()
+    sequence = max(0, after_sequence)
+    idle_ticks = 0
+    try:
+        while True:
+            events = run_store.events_after(sequence)
+            for event in events:
+                sequence = max(sequence, int(event["sequence"]))
+                await websocket.send_json({"type": "run_event", "event": event})
+            idle_ticks += 1
+            if idle_ticks >= 40:
+                await websocket.send_json({"type": "run_heartbeat", "sequence": sequence})
+                idle_ticks = 0
+            await asyncio.sleep(0.5)
+    except (WebSocketDisconnect, RuntimeError):
+        return
+
+
 @app.get("/api/app-store")
 async def get_app_store():
     return app_store.get_state()
@@ -223,6 +382,9 @@ async def delete_capability_ui(catalog_id: str):
         raise HTTPException(status_code=404, detail="Capability not found")
     app_id = app_store.unbind_ui(catalog_id)
     if app_id:
+        if run_store.has_active_owner(f"app:{app_id}") or run_store.has_active_runtime(app_id):
+            app_store.bind_ui(catalog_id, app_id)
+            raise HTTPException(status_code=409, detail="Generated UI has active runs")
         app_manager.delete_app(app_id)
         app_store.on_app_deleted(app_id)
     return {"status": "ok", "catalog_id": catalog_id}
@@ -230,6 +392,8 @@ async def delete_capability_ui(catalog_id: str):
 
 @app.delete("/api/capabilities/{catalog_id}")
 async def unregister_capability(catalog_id: str):
+    if run_store.has_active_owner(catalog_id):
+        raise HTTPException(status_code=409, detail="Capability has active runs")
     if app_store.delete_capability(catalog_id):
         return {"status": "ok"}
     raise HTTPException(status_code=404, detail="Capability not found")
@@ -253,6 +417,8 @@ async def get_app_files(app_id: str):
 
 @app.delete("/api/apps/{app_id}")
 async def delete_app(app_id: str):
+    if run_store.has_active_owner(f"app:{app_id}") or run_store.has_active_runtime(app_id):
+        raise HTTPException(status_code=409, detail="App has active runs")
     try:
         success = app_manager.delete_app(app_id)
     except ValueError as exc:
@@ -388,7 +554,52 @@ async def websocket_chat(
             pass
 
     async def process_user_message(content_str: str, sender_str: str):
+        run = run_coordinator.create_external_run(
+            owner_id=f"ambient-agent:{session_id}",
+            action_id="chat",
+            title="Agent task",
+            source_type="chat",
+            source_id=session_id,
+            input_data={"content": content_str, "sender": sender_str},
+        )
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            run_coordinator.bind_external_task(run["id"], current_task)
+
+        async def run_update(data: Any):
+            event_type = data.get("type", "agent_update") if isinstance(data, dict) else "agent_update"
+            run_store.append_event(run["id"], event_type, data)
+            if isinstance(data, dict) and event_type in (
+                "schema_approval_request",
+                "permission_request",
+                "plan_approval_request",
+                "verification_approval_request",
+            ):
+                request_id = data.get("request_id")
+                if request_id:
+                    checkpoint_step = {
+                        "plan_approval_request": "plan",
+                        "schema_approval_request": "schema_alignment",
+                        "permission_request": "execution_permission",
+                        "verification_approval_request": "verification",
+                    }[event_type]
+                    if run_store.begin_step(run["id"], checkpoint_step):
+                        run_store.finish_step(run["id"], checkpoint_step, {"request_id": request_id, "payload": data})
+                    run_store.create_interaction(
+                        run["id"], event_type.removesuffix("_request"), "Agent needs your input", data, request_id
+                    )
+                    current = run_store.get_run(run["id"])
+                    if current and current["status"] == "running":
+                        run_store.transition(run["id"], "waiting_user", summary="Waiting for your input")
+            await send_ws_update(data)
+
         try:
+            while run_coordinator.claim_external(run["id"]) is None:
+                current = run_store.get_run(run["id"])
+                if current is None or current["status"] == "cancelled":
+                    return
+                await asyncio.sleep(0.05)
+            run_store.begin_step(run["id"], "agent_orchestration")
             # Save user message to database (committed immediately so we get the ID for ack)
             user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
             session.add(user_msg)
@@ -419,7 +630,7 @@ async def websocket_chat(
 
             # Delegate execution to orchestrator
             agent_msg, widget_to_send = await orchestrator.handle_message(
-                session_id=session_id, content=content_str, on_update=send_ws_update
+                session_id=session_id, content=content_str, on_update=run_update
             )
 
             # Send the final agent explanation/execution log back to client
@@ -443,8 +654,38 @@ async def websocket_chat(
                     await send_to_session(session_id, {"type": "widget", "widget": widget_to_send})
                 except Exception:
                     pass
+            current = run_store.get_run(run["id"])
+            if current and current["status"] == "cancel_requested":
+                run_store.finish_step(run["id"], "agent_orchestration", status="cancelled")
+                run_store.transition(run["id"], "cancelled", summary="Cancelled")
+            elif current and current["status"] not in {"succeeded", "failed", "cancelled"}:
+                if current["status"] == "waiting_user":
+                    run_store.transition(run["id"], "running", summary="Finishing")
+                result = {"message": agent_msg.content, "app_id": widget_to_send.get("id") if widget_to_send else None}
+                run_store.finish_step(run["id"], "agent_orchestration", result)
+                run_store.transition(
+                    run["id"],
+                    "succeeded",
+                    summary="Agent task completed",
+                    result=result,
+                    artifacts=[{"type": "app", "id": widget_to_send.get("id")}] if widget_to_send else [],
+                )
+        except asyncio.CancelledError:
+            current = run_store.get_run(run["id"])
+            if current and current["status"] == "cancel_requested":
+                run_store.finish_step(run["id"], "agent_orchestration", status="cancelled")
+                run_store.transition(run["id"], "cancelled", summary="Cancelled")
+            raise
         except Exception as e:
             print("Error in process_user_message:", e)
+            current = run_store.get_run(run["id"])
+            if current and current["status"] not in {"succeeded", "failed", "cancelled"}:
+                run_store.finish_step(run["id"], "agent_orchestration", {"message": str(e)}, status="failed")
+                if current["status"] == "waiting_user":
+                    run_store.transition(run["id"], "running", summary="Agent task failed")
+                run_store.transition(
+                    run["id"], "failed", summary="Agent task failed", error={"message": str(e)}
+                )
         finally:
             # Clean up pending requests, latest status, and active session flag
             pending_requests.pop(session_id, None)
@@ -483,24 +724,30 @@ async def websocket_chat(
 
     async def run_mcp_call(app_id, manifest, tool_name, arguments, call_id):
         try:
-
-            async def send_ws_payload(payload):
-                if payload.get("type") == "backend_permission_request":
-                    req_id = payload.get("request_id")
-                    if req_id:
-                        if session_id not in pending_requests:
-                            pending_requests[session_id] = {}
-                        pending_requests[session_id][req_id] = payload
+            async def mirror_event(payload: dict[str, Any]):
                 await websocket.send_json(payload)
 
-            client = await backend_manager.get_or_start_mcp_client(
-                app_id=app_id, manifest=manifest, send_ws_message_func=send_ws_payload
+            run = run_coordinator.submit_direct_mcp(
+                app_id,
+                tool_name,
+                arguments,
+                source_type="app",
+                source_id=app_id,
+                event_callback=mirror_event,
             )
-            if client:
-                result = await client.call("tools/call", {"name": tool_name, "arguments": arguments})
+            completed = await run_coordinator.wait_terminal(run["id"])
+            if completed["status"] == "succeeded":
                 await websocket.send_json(
-                    {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "result": result}
+                    {
+                        "type": "mcp_call_response",
+                        "app_id": app_id,
+                        "call_id": call_id,
+                        "run_id": run["id"],
+                        "result": completed.get("result"),
+                    }
                 )
+            else:
+                raise RuntimeError((completed.get("error") or {}).get("message", completed["status"]))
         except Exception as e:
             await websocket.send_json(
                 {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
@@ -531,50 +778,30 @@ async def websocket_chat(
                 {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
             )
 
-    async def run_capability_invoke(catalog_id: str, input_data: Any, call_id: str):
+    async def run_capability_invoke(catalog_id: str, input_data: Any, call_id: str, action_id: str | None = None):
         try:
             capability = app_store.get_capability(catalog_id)
             if capability is None:
                 raise ValueError("Capability does not expose an invocation adapter")
-            invocation = capability.invocation
-            manifest = app_manager.get_manifest(invocation.app_id)
-            if manifest is None:
-                raise ValueError("Capability invocation target is unavailable")
-
-            async def send_ws_payload(payload):
-                if payload.get("type") == "backend_permission_request":
-                    req_id = payload.get("request_id")
-                    if req_id:
-                        pending_requests.setdefault(session_id, {})[req_id] = payload
-                await websocket.send_json(payload)
-
-            if invocation.type == "mcp_tool":
-                client = await backend_manager.get_or_start_mcp_client(
-                    app_id=invocation.app_id,
-                    manifest=manifest,
-                    send_ws_message_func=send_ws_payload,
-                )
-                if client is None:
-                    raise ValueError("MCP capability is unavailable")
-                arguments = input_data if isinstance(input_data, dict) else {"input": input_data}
-                result = await client.call(
-                    "tools/call", {"name": invocation.tool_name, "arguments": arguments}
-                )
-            else:
-                message = input_data if isinstance(input_data, dict) else {"content": input_data}
-                await backend_manager.handle_agent_message(
-                    app_id=invocation.app_id,
-                    manifest=manifest,
-                    message=message,
-                    send_ws_message_func=send_ws_payload,
-                )
-                result = {"status": "completed"}
+            actions = capability.normalized_actions()
+            selected_action = action_id or actions[0].id
+            run = run_coordinator.submit(
+                catalog_id,
+                selected_action,
+                input_data if isinstance(input_data, dict) else {"input": input_data},
+                source_type="app",
+                source_id=session_id,
+            )
+            completed = await run_coordinator.wait_terminal(run["id"])
+            if completed["status"] != "succeeded":
+                raise RuntimeError((completed.get("error") or {}).get("message", completed["status"]))
             await websocket.send_json(
                 {
                     "type": "capability_call_response",
                     "catalog_id": catalog_id,
                     "call_id": call_id,
-                    "result": result,
+                    "run_id": run["id"],
+                    "result": completed.get("result"),
                 }
             )
         except Exception as exc:
@@ -663,6 +890,8 @@ async def websocket_chat(
                             pending_requests.pop(sess_id, None)
 
                 backend_manager.resolve_permission(request_id, approved)
+                if run_store.get_interaction(request_id):
+                    run_coordinator.resolve_interaction(request_id, {"approved": approved})
             elif msg_type == "ag_ui_message":
                 app_id = data.get("app_id")
                 agent_msg_content = data.get("message", {})
@@ -687,7 +916,10 @@ async def websocket_chat(
             elif msg_type == "capability_invoke":
                 asyncio.create_task(
                     run_capability_invoke(
-                        data.get("catalog_id", ""), data.get("input", {}), data.get("call_id", "")
+                        data.get("catalog_id", ""),
+                        data.get("input", {}),
+                        data.get("call_id", ""),
+                        data.get("action_id"),
                     )
                 )
             elif msg_type == "generate_capability_ui":
@@ -712,6 +944,8 @@ async def websocket_chat(
                         resolved = True
                 if not resolved:
                     print(f"Warning: permission request {request_id} not found in active clients.")
+                if run_store.get_interaction(request_id):
+                    run_coordinator.resolve_interaction(request_id, {"approved": approved})
             elif msg_type == "schema_approval_response":
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")
@@ -743,6 +977,10 @@ async def websocket_chat(
                 fut = active_schema_requests.get(request_id)
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
+                if run_store.get_interaction(request_id):
+                    run_coordinator.resolve_interaction(
+                        request_id, {"approved": approved_status, "proposal": proposal, "feedback": feedback}
+                    )
             elif msg_type == "plan_approval_response":
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")
@@ -771,6 +1009,10 @@ async def websocket_chat(
                 fut = active_plan_requests.get(request_id)
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
+                if run_store.get_interaction(request_id):
+                    run_coordinator.resolve_interaction(
+                        request_id, {"approved": approved_status, "plan": plan, "feedback": feedback}
+                    )
             elif msg_type == "verification_approval_response":
                 request_id = data.get("request_id")
                 approved_status = data.get("approved")  # "approve", "rework_code", "rework_schema", "rework_plan"
@@ -791,6 +1033,10 @@ async def websocket_chat(
                 fut = active_verification_requests.get(request_id)
                 if fut and not fut.done():
                     fut.set_result((action, response_data))
+                if run_store.get_interaction(request_id):
+                    run_coordinator.resolve_interaction(
+                        request_id, {"approved": approved_status, "feedback": feedback}
+                    )
             elif msg_type == "graph_subscribe":
                 sub_id = data.get("subscription_id")
                 query = data.get("query", {})

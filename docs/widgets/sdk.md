@@ -91,7 +91,17 @@ ambient.theme.effective  // "light" | "dark"
   const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
   ```
 
-## 4. 内置 React 与 UI 支持
+## 4. 后台 Run
+
+- `ambient.runs.start(catalogId, actionId, input)`：创建持久后台 Run，立即返回 Run snapshot。
+- `ambient.runs.get(runId)`：读取 Run 当前状态、进度和结构化结果。
+- `ambient.runs.cancel(runId)`：请求协作式取消。
+- `ambient.runs.subscribe(runId, callback)`：订阅该 Run 的持久事件，返回取消订阅函数。
+- `ambient.capabilities.invoke(catalogId, input, actionId?)`：创建 Run 并等待 terminal result 的便捷封装。
+
+关闭 Widget 窗口只会移除订阅回调，不会取消 Run。
+
+## 5. 内置 React 与 UI 支持
 
 `ambient` 对象还暴露了 React 环境本身以及一套由 Tailwind CSS 渲染的优质 UI 组件库，Widget 无需自行导入或使用外部 CSS：
 

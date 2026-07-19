@@ -145,3 +145,41 @@ def test_capability_manifest_rejects_remote_icons_and_unknown_runtime_fields():
         capability(icon="https://example.com/icon.png")
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         CapabilityManifest.model_validate({**capability().model_dump(), "command": ["secret"]})
+
+
+def test_v2_capability_exposes_headless_actions_as_ready(app_store):
+    service, _ = app_store
+    manifest = CapabilityManifest.model_validate(
+        {
+            "manifest_version": 2,
+            "id": "calendar-tools",
+            "kind": "mcp",
+            "provider": "Acme",
+            "title": "Calendar Tools",
+            "actions": [
+                {
+                    "id": "create-event",
+                    "title": "Create Event",
+                    "input_schema": {"type": "object", "required": ["title"]},
+                    "result_schema": {"type": "object"},
+                    "invocation": {"type": "mcp_tool", "app_id": "calendar-backend", "tool_name": "create_event"},
+                    "recovery": "manual",
+                }
+            ],
+        }
+    )
+
+    item = service.register_capability(manifest)
+
+    assert item["status"] == "ready"
+    assert item["launch_mode"] == "actions"
+    assert item["actions"][0]["id"] == "create-event"
+    assert service.get_action(item["catalog_id"], "create-event").invocation.tool_name == "create_event"
+
+
+def test_v1_capability_normalizes_to_default_run_action():
+    manifest = capability()
+    action = manifest.normalized_actions()[0]
+    assert action.id == "run"
+    assert action.input_schema == {"type": "object"}
+    assert action.invocation.tool_name == "events"

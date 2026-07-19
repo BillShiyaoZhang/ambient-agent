@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import type { Widget } from "./DashboardCanvas";
 import wsService from "../services/websocket";
+import { runService } from "../services/runs";
 import * as Babel from "@babel/standalone";
 import { ErrorBoundary } from "./ErrorBoundary";
 import htm from "htm";
 
 const html = htm.bind(React.createElement);
+const API_BASE = `http://${window.location.hostname}:8000`;
 
 // Pre-defined React components for ambient.components unified scheme
 const Column = ({ children, gap, padding, style, onClick, ...rest }: any) => {
@@ -278,7 +280,6 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     onMinimizeRef.current = onMinimize;
   }, [onFullscreen, onMinimize]);
 
-  const API_BASE = `http://${window.location.hostname}:8000`;
   const customListenersRef = useRef<{ event: string; handler: EventListener }[]>([]);
 
   const ambientProps = useMemo(() => {
@@ -345,29 +346,26 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
         }
       },
       capabilities: {
-        invoke: (catalogId: string, input: any) => {
-          return new Promise((resolve, reject) => {
-            const callId = `cap-${Math.random().toString(36).substring(2, 11)}`;
-            const eventName = `capability_call_response:${catalogId}:${callId}`;
-            const handler = (e: Event) => {
-              window.removeEventListener(eventName, handler);
-              const idx = customListenersRef.current.findIndex(
-                l => l.event === eventName && l.handler === handler
-              );
-              if (idx !== -1) customListenersRef.current.splice(idx, 1);
-              const response = (e as CustomEvent).detail;
-              if (response.error) reject(new Error(response.error));
-              else resolve(response.result);
-            };
-            window.addEventListener(eventName, handler);
-            customListenersRef.current.push({ event: eventName, handler });
-            wsService.sendMessage({
-              type: "capability_invoke",
-              catalog_id: catalogId,
-              call_id: callId,
-              input,
-            });
-          });
+        invoke: async (catalogId: string, input: any, actionId?: string) => {
+          const run = await runService.start(catalogId, actionId, input);
+          return runService.wait(run.id);
+        },
+      },
+      runs: {
+        start: (catalogId: string, actionId: string | undefined, input: any) => runService.start(catalogId, actionId, input),
+        get: (runId: string) => runService.get(runId),
+        cancel: (runId: string) => runService.cancel(runId),
+        subscribe: (runId: string, callback: (event: any) => void) => {
+          const handler = (event: Event) => callback((event as CustomEvent).detail);
+          const eventName = `ambient_run_event:${runId}`;
+          window.addEventListener(eventName, handler);
+          customListenersRef.current.push({ event: eventName, handler });
+          runService.connect();
+          return () => {
+            window.removeEventListener(eventName, handler);
+            const index = customListenersRef.current.findIndex((listener) => listener.event === eventName && listener.handler === handler);
+            if (index >= 0) customListenersRef.current.splice(index, 1);
+          };
         },
       },
       mcp: {

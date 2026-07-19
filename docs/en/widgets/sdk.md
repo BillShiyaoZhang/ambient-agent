@@ -29,7 +29,17 @@ The `ambient` object injected in the widget's JS environment exposes API namespa
   const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
   ```
 
-## 4. Built-in React & UI Support
+## 4. Background Runs (`ambient.runs`)
+
+- `ambient.runs.start(catalogId, actionId, input)`: Starts a durable background Run and returns its snapshot.
+- `ambient.runs.get(runId)`: Reads current status, progress, and structured result.
+- `ambient.runs.cancel(runId)`: Requests cooperative cancellation.
+- `ambient.runs.subscribe(runId, callback)`: Subscribes to durable events and returns an unsubscribe function.
+- `ambient.capabilities.invoke(catalogId, input, actionId?)`: Convenience wrapper that starts a Run and waits for its terminal result.
+
+Closing a Widget removes its local listeners but does not cancel the Run.
+
+## 5. Built-in React & UI Support
 
 The `ambient` object exposes the React environment itself as well as a pre-built styled component library powered by Tailwind CSS:
 

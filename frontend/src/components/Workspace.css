@@ -21,6 +21,8 @@
 .workspace-toolbar { position: absolute; z-index: 100; top: 12px; left: 50%; display: flex; height: 44px; max-width: calc(100% - 32px); align-items: center; gap: 3px; padding: 5px; border: 1px solid var(--glass-border-strong); border-radius: 16px; background: var(--toolbar-surface); box-shadow: var(--toolbar-shadow); backdrop-filter: blur(30px) saturate(165%); transform: translateX(-50%); }
 .workspace-toolbar button,.agent-chat-actions button { display: inline-flex; height: 34px; min-width: 34px; align-items: center; justify-content: center; gap: 2px; padding: 0 8px; border: 0; border-radius: 10px; color: var(--text-secondary); background: transparent; cursor: pointer; transition: color .16s ease, background .16s ease, transform .16s ease; }
 .workspace-toolbar button:hover,.workspace-toolbar button:focus-visible,.agent-chat-actions button:hover,.agent-chat-actions button:focus-visible { color: var(--text-primary); background: var(--control-hover); }
+.workspace-task-button { position: relative; }
+.workspace-task-button > span { position: absolute; top: -3px; right: -3px; display: grid; min-width: 16px; height: 16px; padding: 0 4px; place-items: center; border: 2px solid var(--toolbar-surface); border-radius: 9px; color: white; background: var(--accent); font-size: 8px; font-weight: 750; }
 .workspace-toolbar-divider { width: 1px; height: 20px; margin: 0 3px; background: var(--glass-border); }
 .workspace-app-switcher { display: flex; gap: 3px; overflow-x: auto; scrollbar-width: none; }
 .workspace-app-switcher button { padding: 0 4px; }

@@ -5,6 +5,7 @@
 - **核心架构**
   - [系统概述](/architecture/overview.md)
   - [Widget 应用架构](/architecture/apps.md)
+  - [后台 Run 与 Runtime](/architecture/runs.md)
   - [类图设计](/architecture/uml.md)
   - [图数据库](/architecture/graph-db.md)
 
