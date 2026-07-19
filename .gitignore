@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -101,8 +101,8 @@ env/
 active_node/
 bin/
 include/
-lib/
-lib64/
+/lib/
+/lib64/
 share/
 pyvenv.cfg
 
