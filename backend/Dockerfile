@@ -20,6 +20,8 @@ WORKDIR /app
 
 # Install system dependencies and uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libstdc++6 \
     sqlite3 \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv

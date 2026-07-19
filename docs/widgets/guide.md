@@ -69,7 +69,7 @@ export default function TaskList({ ambient }) {
 
 ## 4. 生成与发布检查
 
-OpenCode 创建或修改应用时在 Run 专属 staging 目录写入 `controller.js`。发布前依次检查：
+用户选择的 OpenCode 或 Codex 创建或修改应用时，会在 Run 专属 staging 目录写入 `controller.js`。Coding Agent 选择在 Run 启动时固定。发布前依次检查：
 
 1. 路径、文件大小、UTF-8 和默认导出；
 2. Node 侧模块/语法和禁止 host capability 规则；

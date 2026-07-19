@@ -47,7 +47,7 @@ class SubIntent:
     query: dict[str, Any] | None = None  # for graph_query
     # For widget_extend_schema: {node_type: {prop_name: type_string}}
     extend_schema_props: dict[str, dict[str, str]] | None = None
-    # For widget_fix_code: free-text feedback used by OpenCode regen
+    # For widget_fix_code: free-text feedback used by coding-agent regeneration
     feedback: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

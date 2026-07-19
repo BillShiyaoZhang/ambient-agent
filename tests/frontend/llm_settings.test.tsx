@@ -97,4 +97,27 @@ describe("LLM provider settings", () => {
 
     await waitFor(() => expect(testProvider).toHaveBeenCalledWith("openai-main", "gpt-b"));
   });
+
+  it("lets users select an available coding agent and disables missing CLIs", async () => {
+    const updateCodingAgent = vi.fn().mockResolvedValue({ default_agent: "codex" });
+    render(<LLMSettingsDialog
+      open
+      language="en"
+      catalog={[]}
+      providers={providers}
+      settings={{ default_model: null, fast_model: null }}
+      codingAgents={[
+        { id: "opencode", name: "OpenCode", description: "ACP agent", auth_hint: "Uses provider credentials.", auth_mode: "run_model", uses_run_model: true, available: false, command_env: "OPENCODE_COMMAND", execution_target: "container", authenticated: null, version: "", status_detail: "" },
+        { id: "codex", name: "Codex", description: "Host Codex agent", auth_hint: "Uses the host Codex subscription.", auth_mode: "codex_native", uses_run_model: false, available: true, command_env: "CODEX_HOST_COMMAND", execution_target: "host", authenticated: true, version: "codex-cli 1.0", status_detail: "Logged in" },
+      ]}
+      codingAgentSettings={{ default_agent: "opencode" }}
+      onClose={vi.fn()}
+      onRefresh={vi.fn().mockResolvedValue(undefined)}
+      onUpdateCodingAgent={updateCodingAgent}
+    />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /^Codex/ }));
+    await waitFor(() => expect(updateCodingAgent).toHaveBeenCalledWith({ default_agent: "codex" }));
+    expect(screen.getByRole("radio", { name: /^OpenCode/ }).hasAttribute("disabled")).toBe(true);
+  });
 });

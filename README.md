@@ -11,7 +11,8 @@ Ambient Agent 是一个开源、自托管、以应用工作区为核心的个人
 - 动态 Widget：`controller.js` 默认导出 React 组件，生成产物先 staging、校验，再原子发布。
 - Schema-first Graph：Widget 与 Agent 通过后端校验的 Graph API 共享 Task、Event、Note 及扩展数据。
 - Provider Registry：在 UI 中配置本地或云端模型、默认/快速模型和会话覆盖。
-- 后端权限与审计：Tool Gateway、MCP、OpenCode、mutation interaction 和 LLM audit。
+- 可选 Coding Agent：可在前端选择 OpenCode（ACP）或本机 Codex Bridge，每个 Run 固定选择并在隔离 staging 中生成代码。
+- 后端权限与审计：Tool Gateway、MCP、Coding Agent、mutation interaction 和 LLM audit。
 
 `SandboxWidget` 不是执行不受信任 JavaScript 的强安全沙箱。Widget controller 与宿主页同 realm 执行，只应加载可信工作区代码。
 
@@ -22,7 +23,15 @@ cp .env.example .env
 docker compose up --build
 ```
 
-打开 `http://localhost:5173`，然后在“模型与 Provider”中添加连接并选择默认模型。`.env` 只保存 OpenCode 等进程级参数；Provider 密钥保存在 Git 忽略的 `workspace/llm/secrets.json`。
+打开 `http://localhost:5173`，然后在“模型与 Provider”中添加连接、选择默认模型与 Coding Agent。`.env` 只保存 Coding Agent 等进程级参数；Provider 密钥保存在 Git 忽略的 `workspace/llm/secrets.json`。
+
+如需使用 Codex，在 `.env` 的 `CODEX_HOST_BRIDGE_TOKEN` 中写入 `openssl rand -hex 32` 生成的随机值，并在本机（不是 Docker 容器）启动：
+
+```bash
+uv run python -m scripts.codex_host_bridge
+```
+
+Bridge 复用本机 `codex login` 的登录与 ChatGPT 订阅。Docker 镜像不安装 Codex，也不保存 Codex 凭据。
 
 开发模式：
 
@@ -62,7 +71,7 @@ npm --prefix frontend run build
 
 Ambient Agent is an open-source, self-hosted personal AI assistant built around an app-first workspace. It combines chat, durable background Runs, graph data, and React/HTM Widgets in one desktop-style interface.
 
-Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged and verified Widget publication, schema-first Graph data, UI-configured local or cloud LLM providers, and backend enforcement for tools, MCP, OpenCode, mutations, and audit records.
+Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged and verified Widget publication, schema-first Graph data, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, and backend enforcement for tools, MCP, mutations, and audit records.
 
 `SandboxWidget` is not a strong sandbox for untrusted JavaScript. Widget controllers execute in the host page realm and should only load trusted workspace code.
 
@@ -74,6 +83,8 @@ docker compose up --build
 ```
 
 Open `http://localhost:5173`, add a connection in “Models & Providers,” and select a default model. See the [English documentation](docs/en/guide/introduction.md) for architecture, development, and security details.
+
+OpenCode and Codex are both available as Widget coding backends. Select one in “Models & Providers.” Codex runs only on the host through the authenticated local bridge, reuses the host CLI login/ChatGPT subscription, and never receives the Ambient Agent LLM provider key or selected model. The Docker image neither installs Codex nor stores its credentials.
 
 ## License
 

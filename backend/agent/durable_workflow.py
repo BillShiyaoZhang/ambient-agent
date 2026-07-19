@@ -27,11 +27,11 @@ from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_runtime import use_model_selections
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import (
-    OpenCodeStagedResult,
-    discard_opencode_staging,
-    promote_opencode_staging,
-    validate_opencode_promotion,
-    validate_opencode_staging,
+    CodingAgentStagedResult,
+    discard_coding_agent_staging as discard_opencode_staging,
+    promote_coding_agent_staging as promote_opencode_staging,
+    validate_coding_agent_promotion as validate_opencode_promotion,
+    validate_coding_agent_staging as validate_opencode_staging,
 )
 from backend.plan_generation import PlanGenerationService
 from backend.run_service import (
@@ -52,7 +52,7 @@ from backend.workspace_storage import WorkspaceStorage
 logger = logging.getLogger("agent.durable_workflow")
 
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
-OpenCodeRunner = Callable[..., Awaitable[Any]]
+CodingAgentRunner = Callable[..., Awaitable[Any]]
 
 
 class DurableAgentWorkflow:
@@ -87,7 +87,8 @@ class DurableAgentWorkflow:
         app_manager: AppManager,
         graph_db: GraphDatabase,
         llm_config_store: LLMConfigStore | Callable[[], LLMConfigStore],
-        opencode_runner: OpenCodeRunner,
+        coding_agent_runner: CodingAgentRunner | None = None,
+        opencode_runner: CodingAgentRunner | None = None,
         event_sink: EventSink | None = None,
     ) -> None:
         self.workspace_dir = workspace_dir
@@ -95,7 +96,12 @@ class DurableAgentWorkflow:
         self.app_manager = app_manager
         self.graph_db = graph_db
         self.llm_config_store = llm_config_store
-        self.opencode_runner = opencode_runner
+        self.coding_agent_runner = coding_agent_runner or opencode_runner
+        if self.coding_agent_runner is None:
+            raise ValueError("A coding-agent runner is required")
+        # Compatibility for test hosts and extensions that still reference the
+        # pre-registry attribute directly.
+        self.opencode_runner = self.coding_agent_runner
         self.event_sink = event_sink
         self._event_buffer: ContextVar[list[PendingRunEvent] | None] = ContextVar(
             "durable_agent_event_buffer",
@@ -1138,28 +1144,36 @@ class DurableAgentWorkflow:
         if state.data.get("code_feedback"):
             instruction += f"\n\n[VERIFICATION FEEDBACK]\n{state.data['code_feedback']}"
         language = str(state.data.get("language") or "zh")
+        coding_agent = str(state.model_snapshot.get("coding_agent") or "opencode")
+        coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"
         await self._emit(
             run,
-            "🛠️ 正在启动 OpenCode 开发者智能体并生成隔离 staging App..."
+            f"🛠️ 正在启动 {coding_agent_name} 开发者智能体并生成隔离 staging App..."
             if language == "zh"
-            else "🛠️ Starting the OpenCode agent in an isolated staging App...",
+            else f"🛠️ Starting the {coding_agent_name} agent in an isolated staging App...",
         )
 
         kwargs: dict[str, Any] = {"language": language, "on_update": lambda payload: self._emit(run, payload)}
         try:
-            supports_promote = "promote" in inspect.signature(self.opencode_runner).parameters
+            runner_parameters = inspect.signature(self.coding_agent_runner).parameters
+            supports_promote = "promote" in runner_parameters
+            supports_coding_agent = "coding_agent" in runner_parameters
         except (TypeError, ValueError):
             supports_promote = True
+            supports_coding_agent = True
         if supports_promote:
             kwargs["promote"] = False
-        generated = await self.opencode_runner(intent.app_id, instruction, **kwargs)
-        if isinstance(generated, OpenCodeStagedResult):
+        if supports_coding_agent:
+            kwargs["coding_agent"] = coding_agent
+        generated = await self.coding_agent_runner(intent.app_id, instruction, **kwargs)
+        if isinstance(generated, CodingAgentStagedResult):
             validate_opencode_staging(generated)
             state.data["staged_app"] = {
                 "output": generated.output[-64_000:],
                 "app_id": generated.app_id,
                 "staging_dir": str(generated.staging_dir),
                 "live_dir": str(generated.live_dir),
+                "coding_agent": coding_agent,
             }
         elif isinstance(generated, str) and not supports_promote:
             # Compatibility for injected legacy test runners. Production always
@@ -1170,14 +1184,14 @@ class DurableAgentWorkflow:
                 "legacy_promoted": True,
             }
         else:
-            raise WorkflowError("OpenCode did not return a staged artifact", code="staged_artifact_missing")
+            raise WorkflowError("Coding agent did not return a staged artifact", code="staged_artifact_missing")
         return Continue(next_phase="verify", summary="Staged App generated")
 
     @staticmethod
-    def _staged_result(data: dict[str, Any]) -> OpenCodeStagedResult:
+    def _staged_result(data: dict[str, Any]) -> CodingAgentStagedResult:
         if not isinstance(data, dict) or data.get("legacy_promoted"):
             raise WorkflowError("No retained staging artifact is available", code="staged_artifact_missing")
-        return OpenCodeStagedResult(
+        return CodingAgentStagedResult(
             output=str(data.get("output") or ""),
             app_id=str(data["app_id"]),
             staging_dir=Path(str(data["staging_dir"])),
@@ -1288,7 +1302,7 @@ class DurableAgentWorkflow:
         staged = state.data.get("staged_app") or {}
         schema_effect_key = f"agent-run:{run['id']}:schema_promote"
         schema_change: dict[str, Any] | None = None
-        staged_result: OpenCodeStagedResult | None = None
+        staged_result: CodingAgentStagedResult | None = None
         recovered_controller: Path | None = None
         if not staged.get("legacy_promoted"):
             staged_result = self._staged_result(staged)
@@ -1345,7 +1359,9 @@ class DurableAgentWorkflow:
             )
         report = str(state.data.get("verification_report") or "Explicit verification override approved")
         output = str(staged.get("output") or "")
-        content = f"OpenCode Execution Log:\n\n```\n{output}\n```\n\n### 🔍 Database Schema Verification Report\n\n{report}"
+        coding_agent = str(staged.get("coding_agent") or state.model_snapshot.get("coding_agent") or "opencode")
+        coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"
+        content = f"{coding_agent_name} Execution Log:\n\n```\n{output}\n```\n\n### 🔍 Database Schema Verification Report\n\n{report}"
 
         from backend.agent_parser import serialize_widget_to_text
 

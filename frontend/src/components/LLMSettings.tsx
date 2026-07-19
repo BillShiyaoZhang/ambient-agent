@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, LoaderCircle, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Code2, LoaderCircle, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, X } from "lucide-react";
 import type { LLMModel, LLMProvider, LLMSettings, ModelSelection, ProviderPreset } from "../services/llm";
+import type { CodingAgentDefinition, CodingAgentSettings } from "../services/codingAgents";
 import { SystemDialog, SystemIconButton } from "./system/SystemUI";
 import "./LLMSettings.css";
 
@@ -61,6 +62,8 @@ interface LLMSettingsDialogProps {
   catalog: ProviderPreset[];
   providers: LLMProvider[];
   settings: LLMSettings;
+  codingAgents?: CodingAgentDefinition[];
+  codingAgentSettings?: CodingAgentSettings;
   onClose: () => void;
   onRefresh: () => void | Promise<void>;
   onCreateProvider?: (profile: Record<string, unknown>, credentials: Record<string, unknown>) => Promise<unknown>;
@@ -69,12 +72,23 @@ interface LLMSettingsDialogProps {
   onDiscoverModels?: (providerId: string) => Promise<unknown>;
   onTestProvider?: (providerId: string, modelId?: string, mode?: "connection" | "tools") => Promise<unknown>;
   onUpdateSettings?: (patch: Partial<LLMSettings>) => Promise<unknown>;
+  onUpdateCodingAgent?: (patch: Partial<CodingAgentSettings>) => Promise<unknown>;
 }
 
 type Notice = { tone: "success" | "error"; text: string } | null;
 
 export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
-  const { open, language, catalog, providers, settings, onClose, onRefresh } = props;
+  const {
+    open,
+    language,
+    catalog,
+    providers,
+    settings,
+    codingAgents = [],
+    codingAgentSettings = { default_agent: "opencode" },
+    onClose,
+    onRefresh,
+  } = props;
   const isZh = language === "zh";
   const [adding, setAdding] = useState(false);
   const [presetId, setPresetId] = useState(catalog[0]?.id ?? "openai");
@@ -208,6 +222,39 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
         </div>
         <p>{isZh ? "快速模型未配置时使用当前会话主模型。运行中切换只影响下一次请求。" : "When unset, the fast model follows the session model. Changes during a run apply to the next request."}</p>
       </section>
+
+      {codingAgents.length ? <section className="coding-agent-settings" aria-labelledby="coding-agent-settings-title">
+        <div className="coding-agent-heading">
+          <span className="coding-agent-icon"><Code2 size={17} /></span>
+          <div><strong id="coding-agent-settings-title">{isZh ? "Coding Agent" : "Coding agent"}</strong><p>{isZh ? "选择负责生成和修改 Widget 代码的后端。设置会在新 Run 启动时固定。" : "Choose the backend that generates and edits Widget code. The choice is snapshotted when a new run starts."}</p></div>
+        </div>
+        <div className="coding-agent-options" role="radiogroup" aria-label={isZh ? "选择 Coding Agent" : "Select coding agent"}>
+          {codingAgents.map((agent) => {
+            const selected = codingAgentSettings.default_agent === agent.id;
+            const ready = agent.available && agent.authenticated !== false;
+            const status = agent.id === "codex"
+              ? !agent.available
+                ? (isZh ? "Bridge 未连接" : "Bridge offline")
+                : agent.authenticated
+                  ? (isZh ? "本机已登录" : "Host signed in")
+                  : (isZh ? "本机未登录" : "Host sign-in needed")
+              : agent.available ? (isZh ? "CLI 已安装" : "CLI found") : (isZh ? "CLI 未安装" : "CLI missing");
+            return <button
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              className={selected ? "is-selected" : ""}
+              disabled={!ready || !props.onUpdateCodingAgent || busy === "coding-agent"}
+              key={agent.id}
+              onClick={() => void run("coding-agent", () => props.onUpdateCodingAgent!({ default_agent: agent.id }), isZh ? `已切换到 ${agent.name}` : `Switched to ${agent.name}`)}
+            >
+              <span className="coding-agent-radio" aria-hidden="true" />
+              <span className="coding-agent-copy"><strong>{agent.name}</strong><small>{isZh ? (agent.id === "codex" ? "本机 Codex Bridge · workspace-write 沙箱" : "ACP · 使用当前 Run 模型") : agent.description}</small><em>{isZh && agent.id === "codex" ? "复用本机 Codex 登录与订阅，不接收全局 LLM Provider 凭据。" : isZh ? "使用当前 Run 的模型与 Provider 凭据。" : agent.auth_hint}</em></span>
+              <span className={`coding-agent-status ${ready ? "is-available" : ""}`}>{status}</span>
+            </button>;
+          })}
+        </div>
+      </section> : null}
 
       {adding && preset ? <form className="llm-add-form" onSubmit={submitProvider}>
         <div className="llm-form-heading"><strong>{isZh ? "新增 Provider" : "New provider"}</strong><span>{isZh ? "自定义端点可能让服务端访问本地或内网地址。" : "Custom endpoints can let the server access local or private-network addresses."}</span></div>

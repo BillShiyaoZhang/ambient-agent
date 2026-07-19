@@ -69,7 +69,7 @@ export default function TaskList({ ambient }) {
 
 ## 4. Generation and publication checks
 
-When OpenCode creates or modifies an app, it writes `controller.js` into a Run-specific staging directory. Publication checks, in order:
+When the selected OpenCode or Codex backend creates or modifies an app, it writes `controller.js` into a Run-specific staging directory. The coding-agent choice is snapshotted when the Run starts. Publication checks, in order:
 
 1. path, file size, UTF-8, and default export;
 2. Node-side module/syntax and forbidden host-capability rules;

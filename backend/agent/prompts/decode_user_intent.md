@@ -12,7 +12,7 @@ The output must be a JSON object (no surrounding prose) with this shape:
 {
   "intent_kind": "widget_extend_schema" | "widget_fix_code" | "widget_rewrite",
   "extend_schema_props": { "Event": { "category": "string", "color": "string" } },
-  "feedback": "free-text instruction to OpenCode (for widget_fix_code / widget_rewrite)",
+  "feedback": "free-text instruction to the coding agent (for widget_fix_code / widget_rewrite)",
   "rationale": "one-sentence reason"
 }
 ```

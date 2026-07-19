@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Docker Desktop; or local Python 3.11–3.13, `uv`, Node.js, and npm.
+- Docker Desktop; or local Python 3.11–3.13, `uv`, Node.js, and npm. The host Codex bridge also requires local Python and `uv`.
 - VS Code with the Dev Containers extension when using the development container.
 
 ## Option 1: Docker Compose
@@ -16,7 +16,16 @@ docker compose up --build
 
 Open `http://localhost:5173`. The backend API is available at `http://localhost:8000`.
 
-`.env` contains process-level settings such as OpenCode configuration. Configure LLM providers, credentials, and default models in the app's “Models & Providers” UI. Credentials are stored in the Git-ignored `workspace/llm/secrets.json`, not in `.env`.
+`.env` contains process-level settings such as coding-agent commands and timeouts. Configure LLM providers, credentials, default models, and the OpenCode/Codex choice in the app's “Models & Providers” UI. Provider credentials are stored in the Git-ignored `workspace/llm/secrets.json`, not in `.env`.
+
+Codex is not installed in the Docker container. To reuse the host Codex login and ChatGPT subscription:
+
+1. Confirm that `codex login status` succeeds on the host.
+2. Run `openssl rand -hex 32` and put the result in `.env` as `CODEX_HOST_BRIDGE_TOKEN`.
+3. From the repository root, start `uv run python -m scripts.codex_host_bridge` and keep it running.
+4. Start Docker Compose and select Codex in the UI; its card reports the host bridge and login status.
+
+The bridge listens only on `127.0.0.1:8765` by default, requires a bearer token, and accepts only randomized staging directories created by the backend under the shared `workspace/apps` directory. No Codex credentials are stored in the container.
 
 ## Option 2: Dev Container
 

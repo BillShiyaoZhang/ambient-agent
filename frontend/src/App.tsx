@@ -20,6 +20,12 @@ import { mergeIncomingMessage } from "./lib/messages";
 import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
+  loadCodingAgentConfiguration,
+  updateCodingAgentSettings,
+  type CodingAgentDefinition,
+  type CodingAgentSettings,
+} from "./services/codingAgents";
+import {
   createProvider,
   deleteProvider,
   discoverProviderModels,
@@ -58,6 +64,8 @@ function App() {
   const [llmCatalog, setLLMCatalog] = useState<ProviderPreset[]>([]);
   const [llmProviders, setLLMProviders] = useState<LLMProvider[]>([]);
   const [llmSettings, setLLMSettings] = useState<LLMSettings>({ default_model: null, fast_model: null });
+  const [codingAgents, setCodingAgents] = useState<CodingAgentDefinition[]>([]);
+  const [codingAgentSettings, setCodingAgentSettings] = useState<CodingAgentSettings>({ default_agent: "opencode" });
   const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
@@ -112,10 +120,15 @@ function App() {
 
   const refreshLLMConfiguration = useCallback(async () => {
     try {
-      const configuration = await loadLLMConfiguration(API_BASE);
-      setLLMCatalog(configuration.catalog);
-      setLLMProviders(configuration.providers);
-      setLLMSettings(configuration.settings);
+      const [llmConfiguration, codingAgentConfiguration] = await Promise.all([
+        loadLLMConfiguration(API_BASE),
+        loadCodingAgentConfiguration(API_BASE),
+      ]);
+      setLLMCatalog(llmConfiguration.catalog);
+      setLLMProviders(llmConfiguration.providers);
+      setLLMSettings(llmConfiguration.settings);
+      setCodingAgents(codingAgentConfiguration.agents);
+      setCodingAgentSettings(codingAgentConfiguration.settings);
     } catch (error) {
       console.error("Error loading LLM configuration:", error);
     }
@@ -854,6 +867,8 @@ function App() {
         catalog={llmCatalog}
         providers={llmProviders}
         settings={llmSettings}
+        codingAgents={codingAgents}
+        codingAgentSettings={codingAgentSettings}
         onClose={() => setIsLLMSettingsOpen(false)}
         onRefresh={refreshLLMConfiguration}
         onCreateProvider={(profile, credentials) => createProvider(API_BASE, profile, credentials)}
@@ -862,6 +877,7 @@ function App() {
         onDiscoverModels={(providerId) => discoverProviderModels(API_BASE, providerId)}
         onTestProvider={(providerId, modelId, mode) => testProviderConnection(API_BASE, providerId, modelId, mode)}
         onUpdateSettings={(patch) => updateLLMSettings(API_BASE, patch)}
+        onUpdateCodingAgent={(patch) => updateCodingAgentSettings(API_BASE, patch)}
       />
 
       {/* Audit Log Panel Overlay */}

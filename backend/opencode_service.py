@@ -325,13 +325,13 @@ def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]
     except (OSError, RuntimeError) as exc:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
-        raise OpenCodeACPStartupError(f"Unable to prepare OpenCode staging directory: {exc!s}") from exc
+        raise OpenCodeACPStartupError(f"Unable to prepare coding-agent staging directory: {exc!s}") from exc
 
 
 def _validate_staged_app(staging_dir: Path) -> None:
     controller_path = _resolve_in_workspace("controller.js", staging_dir)
     if not controller_path.is_file():
-        raise OpenCodeArtifactError("OpenCode did not produce the required controller.js artifact")
+        raise OpenCodeArtifactError("Coding agent did not produce the required controller.js artifact")
     try:
         raw = controller_path.read_bytes()
     except OSError as exc:
@@ -484,6 +484,15 @@ def discard_opencode_staging(result: OpenCodeStagedResult) -> None:
     _, staging_dir = _validated_staging_handle(result, require_exists=False)
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
+
+
+# Provider-neutral names for the shared staging contract. The OpenCode names
+# remain public compatibility aliases for existing extensions and checkpoints.
+CodingAgentStagedResult = OpenCodeStagedResult
+validate_coding_agent_staging = validate_opencode_staging
+promote_coding_agent_staging = promote_opencode_staging
+validate_coding_agent_promotion = validate_opencode_promotion
+discard_coding_agent_staging = discard_opencode_staging
 
 
 def cleanup_orphaned_opencode_staging(

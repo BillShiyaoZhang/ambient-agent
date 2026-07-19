@@ -18,6 +18,11 @@ from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
+from backend.coding_agent import (
+    CodingAgentConfigError,
+    CodingAgentConfigStore,
+    run_coding_agent,
+)
 from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
@@ -78,6 +83,7 @@ app_manager = AppManager()
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
 llm_config_store = LLMConfigStore(WORKSPACE_DIR)
+coding_agent_config_store = CodingAgentConfigStore(WORKSPACE_DIR)
 set_default_llm_store(llm_config_store)
 app_store = AppStoreService(WORKSPACE_DIR, app_manager)
 
@@ -97,21 +103,31 @@ run_store = RunStore(WORKSPACE_DIR)
 run_coordinator = RunCoordinator(run_store, app_store, app_manager, backend_manager)
 
 
-async def _run_opencode_staged(
+async def _run_coding_agent_staged(
     app_id: str,
     instruction: str,
     language: str = "zh",
     on_update: Any = None,
     promote: bool = True,
+    coding_agent: str | None = None,
 ):
-    # Resolve the module global at call time so test/local hosts can inject a
-    # deterministic runner without rebuilding the durable reducer.
-    return await run_opencode_agent_acp(
+    selected = coding_agent or coding_agent_config_store.get_settings()["default_agent"]
+    # Keep the long-standing module injection point for local hosts and tests.
+    if selected == "opencode":
+        return await run_opencode_agent_acp(
+            app_id,
+            instruction,
+            language=language,
+            on_update=on_update,
+            promote=promote,
+        )
+    return await run_coding_agent(
         app_id,
         instruction,
         language=language,
         on_update=on_update,
         promote=promote,
+        coding_agent=selected,
     )
 
 
@@ -121,7 +137,7 @@ durable_agent_workflow = DurableAgentWorkflow(
     app_manager=app_manager,
     graph_db=graph_db,
     llm_config_store=lambda: llm_config_store,
-    opencode_runner=_run_opencode_staged,
+    coding_agent_runner=_run_coding_agent_staged,
     event_sink=send_legacy_run_projection,
 )
 run_coordinator.register_internal_agent_executor(durable_agent_workflow)
@@ -141,6 +157,7 @@ def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
     return {
         "primary": primary.model_dump(mode="json"),
         "fast": fast.model_dump(mode="json"),
+        "coding_agent": coding_agent_config_store.get_settings()["default_agent"],
     }
 
 
@@ -318,6 +335,10 @@ class LLMSettingsUpdateRequest(BaseModel):
     fast_model: ModelSelection | None = None
 
 
+class CodingAgentSettingsUpdateRequest(BaseModel):
+    default_agent: str
+
+
 class ProviderTestRequest(BaseModel):
     model_id: str | None = None
     mode: str = "connection"
@@ -386,6 +407,22 @@ async def get_session_messages(session_id: str, session: WorkspaceStorage = Depe
 
 
 # --- LLM Provider Registry endpoints ---
+
+
+@app.get("/api/coding-agents")
+async def get_coding_agents():
+    return {
+        "agents": await coding_agent_config_store.runtime_catalog(),
+        "settings": coding_agent_config_store.get_settings(),
+    }
+
+
+@app.patch("/api/coding-agents/settings")
+async def update_coding_agent_settings(data: CodingAgentSettingsUpdateRequest):
+    try:
+        return coding_agent_config_store.update_settings(data.model_dump())
+    except CodingAgentConfigError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @app.get("/api/llm/catalog")

@@ -2,7 +2,7 @@
 
 ## 环境要求
 
-- Docker Desktop；或本机 Python 3.11–3.13、`uv`、Node.js 和 npm。
+- Docker Desktop；或本机 Python 3.11–3.13、`uv`、Node.js 和 npm。使用本机 Codex Bridge 时也需要本机 Python 与 `uv`。
 - 使用 Dev Container 开发时，还需要 VS Code 与 Dev Containers 扩展。
 
 ## 方式一：Docker Compose
@@ -16,7 +16,16 @@ docker compose up --build
 
 打开 `http://localhost:5173`。后端 API 位于 `http://localhost:8000`。
 
-`.env` 只保存 OpenCode 等进程级参数。LLM Provider、密钥和默认模型在应用的“模型与 Provider”界面配置；密钥写入被 Git 忽略的 `workspace/llm/secrets.json`，不会写入 `.env`。
+`.env` 只保存 Coding Agent 等进程级参数。LLM Provider、密钥、默认模型和 OpenCode/Codex 选择在应用的“模型与 Provider”界面配置；密钥写入被 Git 忽略的 `workspace/llm/secrets.json`，不会写入 `.env`。
+
+Codex 不安装在 Docker 容器中。要复用本机 Codex 登录和 ChatGPT 订阅：
+
+1. 确认本机 `codex login status` 已登录。
+2. 运行 `openssl rand -hex 32`，把结果填入 `.env` 的 `CODEX_HOST_BRIDGE_TOKEN`。
+3. 在仓库根目录启动 `uv run python -m scripts.codex_host_bridge`，并保持该进程运行。
+4. 启动 Docker Compose，然后在前端选择 Codex；卡片会显示本机 Bridge 与登录状态。
+
+Bridge 默认仅监听 `127.0.0.1:8765`，使用 Bearer token 鉴权，并且只接受后端创建在共享 `workspace/apps` 下的随机 staging 目录。容器内不保存 Codex 凭据。
 
 ## 方式二：Dev Container
 
