@@ -13,8 +13,8 @@ flowchart TB
     end
 
     subgraph API[FastAPI 接入层]
-        ChatWS[/ws/chat]
-        RunWS[/ws/runs replay stream]
+        ChatWS([/ws/chat])
+        RunWS([/ws/runs replay stream])
         REST[Sessions / Runs / Apps / Graph REST]
     end
 
