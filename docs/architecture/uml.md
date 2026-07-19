@@ -176,3 +176,32 @@ flowchart LR
 ## 6. 事件与恢复边界
 
 Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/model usage/`redacted` 元数据；终态 event 默认保留 30 天。Graph effect ledger 防止 checkpoint 窗口重复写，App promotion marker 区分已发布与待发布 staging。只有完整补偿数据的 saga step 才自动回滚。
+
+## 7. 规范本体与 KG 存储边界
+
+```mermaid
+classDiagram
+    class GraphDatabase {
+        +list_schemas()
+        +preflight_actions(actions)
+        +apply_actions_atomic(actions)
+        +apply_schema_proposal_atomic(proposal)
+    }
+    class Neo4jGraphDatabase {
+        +from_env(workspace_dir)
+        +migrate_from_sqlite(path)
+    }
+    class OntologyEntity {
+        +id: str
+        +ontology_iri: str
+        +equivalent_to: tuple
+        +subclass_of: str
+        +properties: dict
+        +abstract: bool
+    }
+
+    GraphDatabase <|-- Neo4jGraphDatabase
+    Neo4jGraphDatabase --> OntologyEntity
+```
+
+`create_graph_database()` 是运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。两种 adapter 执行同一 `ambient-context` 本体契约；未知实体、抽象实体和未知属性都不能写入 record。

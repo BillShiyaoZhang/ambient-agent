@@ -107,10 +107,10 @@ stateDiagram-v2
     graph_preflight --> wait_graph_approval: normalized actions + preview
     wait_graph_approval --> graph_commit: approve
     wait_graph_approval --> failed: deny
-    graph_commit --> done: one SQLite transaction
+    graph_commit --> done: one Neo4j transaction
 ```
 
-Preflight performs no database write. Commit uses `apply_actions_atomic()` and creates both a rollback ticket and complete reverse actions. A `run_id + phase` Graph effect ledger returns the original result when a worker crashes after the Graph transaction but before the Run checkpoint, preventing duplicate writes. `/api/graph/mutate` and WebSocket rollback use the same reducer, with an explicit command recorded as a durable approval interaction. Multi-intent preflights the complete request first, then `multi_dispatch` advances it serially as a saga. A retryable current phase preserves prior effects and compensation data; only a terminal failure compensates in reverse and rewinds cursor/results to the saga start. Incomplete compensation or uncertain effects enter `needs_attention`.
+Preflight performs no database write and first verifies that every record entity exists in the single `ambient-context` ontology. Commit uses `apply_actions_atomic()` to store context records/edges, a rollback ticket, complete reverse actions, and the `run_id + phase` Graph effect ledger in one Neo4j transaction. If a worker crashes after that transaction but before the Run checkpoint, retry returns the original result rather than duplicating writes. `/api/graph/mutate` and WebSocket rollback use the same reducer, with an explicit command recorded as a durable approval interaction. Multi-intent preflights the complete request first, then `multi_dispatch` advances it serially as a saga. A retryable current phase preserves prior effects and compensation data; only a terminal failure compensates in reverse and rewinds cursor/results to the saga start. Incomplete compensation or uncertain effects enter `needs_attention`.
 
 ### Converse and read-only queries
 

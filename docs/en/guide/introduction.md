@@ -11,7 +11,7 @@ A normal chat interface works well for one-off answers but poorly for tasks that
 - **Durable Agent Runs**: Runs, steps, interactions, and events are stored in `workspace/.ambient/runs.db`. Tasks can be cancelled, retried, and reclaimed after a process restart.
 - **App workspace**: Windows can float, maximize, snap, resize, switch, and use layout presets. The backend persists the Canvas V3 configuration.
 - **Dynamic Widgets**: The primary Widget artifact is a `controller.js` file that exports a React component. Chat output transports it inside `<ambient-widget>`; app create or modify flows generate and verify it in staging before atomic publication.
-- **Shared graph data**: Widgets and the Agent read and write `workspace/graph.db` through schema-validated Graph APIs.
+- **Shared graph data**: Widgets and the Agent read and write user-context facts in the canonical Neo4j knowledge graph through ontology-validated Graph APIs.
 - **Model and tool integrations**: Providers, default models, and per-session models are configured in the UI. The Agent can reach external capabilities through the Tool Gateway, MCP, or OpenCode.
 - **Audit and confirmation**: LLM requests are written to the workspace audit log. Backend policy, interactions, and persistent effect records govern effectful flows.
 

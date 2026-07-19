@@ -16,8 +16,8 @@ def test_execute_graph_query(tmp_path):
     # Setup graph data
     db.create_node(node_id="t1", node_type="Task", properties={"title": "Task 1", "status": "pending"})
     db.create_node(node_id="t2", node_type="Task", properties={"title": "Task 2", "status": "completed"})
-    db.create_node(node_id="e1", node_type="CalendarEvent", properties={"summary": "Meeting 1"})
-    db.create_node(node_id="e2", node_type="CalendarEvent", properties={"summary": "Meeting 2"})
+    db.create_node(node_id="e1", node_type="Event", properties={"title": "Meeting 1"})
+    db.create_node(node_id="e2", node_type="Event", properties={"title": "Meeting 2"})
 
     db.create_edge(from_id="t1", to_id="e1", edge_type="ASSOCIATED_WITH", properties={"p1": "v1"})
     db.create_edge(from_id="t2", to_id="e2", edge_type="ASSOCIATED_WITH")
@@ -39,7 +39,7 @@ def test_execute_graph_query(tmp_path):
     q3 = {
         "type": "Task",
         "properties": {"status": "pending"},
-        "include": [{"relation": "ASSOCIATED_WITH", "target_type": "CalendarEvent"}],
+        "include": [{"relation": "ASSOCIATED_WITH", "target_type": "Event"}],
     }
     res3 = execute_graph_query(q3, db)
     assert len(res3) == 1
@@ -50,7 +50,7 @@ def test_execute_graph_query(tmp_path):
     assert rel["edge_type"] == "ASSOCIATED_WITH"
     assert rel["properties"]["p1"] == "v1"
     assert rel["target"]["id"] == "e1"
-    assert rel["target"]["properties"]["summary"] == "Meeting 1"
+    assert rel["target"]["properties"]["title"] == "Meeting 1"
 
 
 def test_graph_mutation_endpoint(tmp_path, monkeypatch):
@@ -67,7 +67,7 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
 
     # Create nodes first
     payload = {
-        "idempotency_key": "graph-endpoint-create-v1",
+        "idempotency_key": f"graph-endpoint-create-v1:{tmp_path}",
         "actions": [
             {
                 "action": "create_node",
@@ -78,8 +78,8 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
             {
                 "action": "create_node",
                 "id": "e-mut-1",
-                "type": "CalendarEvent",
-                "properties": {"summary": "Event Mut 1"},
+                "type": "Event",
+                "properties": {"title": "Event Mut 1"},
             },
             {
                 "action": "create_edge",

@@ -6,6 +6,7 @@
 
 ```text
 ambient-agent/
+├── .devcontainer/          # 开发工作区镜像及 Neo4j sidecar 编排
 ├── backend/               # FastAPI、Agent、持久 Run、Graph、应用与集成
 │   └── agent/             # 路由、reducer、工具、Provider、Prompt 与评测
 ├── frontend/              # React 19 + TypeScript + Vite 工作区
@@ -20,7 +21,7 @@ ambient-agent/
 ├── tests/frontend/        # Vitest + Testing Library 前端测试
 ├── forward/               # 设计方向和实施计划，不是运行时代码
 ├── workspace/             # 本地运行数据，Git 忽略
-├── docker-compose.yml     # backend + frontend 本地编排
+├── docker-compose.yml     # Neo4j + backend + frontend 本地编排
 └── pyproject.toml         # Python 版本、依赖与 Ruff 配置
 ```
 
@@ -60,7 +61,7 @@ workspace/
 ├── sessions/<id>.json       # 会话元数据与消息
 ├── canvas.json               # Canvas V3 窗口配置
 ├── audit_logs.jsonl          # LLM 审计记录
-├── graph.db                  # schema、节点、边、effect、mutation history
+├── graph.db                  # SQLite 测试适配器 / 可选 Neo4j 迁移源
 ├── llm/config.json           # Provider profile 与模型选择（不含秘密）
 ├── llm/secrets.json          # Provider 凭据
 ├── apps/<app-id>/            # manifest.json、controller.js、README.md
@@ -68,7 +69,7 @@ workspace/
 └── .ambient/runs.db          # Runs、steps、events、interactions
 ```
 
-`workspace/` 是本地状态，不应提交到 Git。旧的 `db.sqlite3`、`backend/apps/` 和 `graph.json` 只在启动迁移或兼容代码中出现，不是当前写入接口。
+`workspace/` 是本地状态，不应提交到 Git。部署环境的规范本体与上下文图保存在 Neo4j；App 私有运行态数据仍位于 `workspace/apps/<app-id>/`。旧的 `db.sqlite3`、`backend/apps/` 和 `graph.json` 只在启动迁移或兼容代码中出现，不是当前写入接口。
 
 ## 常见改动入口
 

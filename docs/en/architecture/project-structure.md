@@ -6,6 +6,7 @@ This page explains the responsibility of each top-level directory and where a ch
 
 ```text
 ambient-agent/
+├── .devcontainer/          # Development workspace image and Neo4j sidecar orchestration
 ├── backend/               # FastAPI, Agent, durable Runs, Graph, apps, integrations
 │   └── agent/             # Routing, reducer, tools, providers, prompts, evaluation
 ├── frontend/              # React 19 + TypeScript + Vite workspace
@@ -20,7 +21,7 @@ ambient-agent/
 ├── tests/frontend/        # Vitest + Testing Library frontend tests
 ├── forward/               # Design direction and implementation plans, not runtime code
 ├── workspace/             # Local runtime data, ignored by Git
-├── docker-compose.yml     # Local backend + frontend orchestration
+├── docker-compose.yml     # Local Neo4j + backend + frontend orchestration
 └── pyproject.toml         # Python versions, dependencies, and Ruff configuration
 ```
 
@@ -60,7 +61,7 @@ workspace/
 ├── sessions/<id>.json       # Session metadata and messages
 ├── canvas.json               # Canvas V3 window configuration
 ├── audit_logs.jsonl          # LLM audit records
-├── graph.db                  # Schemas, nodes, edges, effects, mutation history
+├── graph.db                  # SQLite test adapter / opt-in Neo4j migration source
 ├── llm/config.json           # Provider profiles and selections, without secrets
 ├── llm/secrets.json          # Provider credentials
 ├── apps/<app-id>/            # manifest.json, controller.js, README.md
@@ -68,7 +69,7 @@ workspace/
 └── .ambient/runs.db          # Runs, steps, events, interactions
 ```
 
-`workspace/` is local state and must not be committed. The old `db.sqlite3`, `backend/apps/`, and `graph.json` appear only in startup migration or compatibility code; they are not current write interfaces.
+`workspace/` is local state and must not be committed. The deployed canonical ontology and context graph live in Neo4j; App-private runtime state remains under `workspace/apps/<app-id>/`. The old `db.sqlite3`, `backend/apps/`, and `graph.json` appear only in startup migration or compatibility code; they are not current write interfaces.
 
 ## Common change entry points
 

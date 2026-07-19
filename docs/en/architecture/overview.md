@@ -8,13 +8,13 @@ flowchart LR
     Browser <-->|Chat / Graph / Run WebSockets| API
     API --> Workspace[Session, Canvas, audit files]
     API --> RunStore[.ambient/runs.db]
-    API --> Graph[graph.db]
+    API --> Graph[Neo4j canonical KG]
     API --> Apps[workspace/apps]
     API --> LLM[LLM provider]
     API --> External[MCP / coding agent / local tools]
 ```
 
-`backend/main.py` is the assembly point. It creates `WorkspaceStorage`, `LLMConfigStore`, `GraphDatabase`, `AppManager`, `AppStoreService`, `RunStore`, `RunCoordinator`, and `DurableAgentWorkflow`. During application startup it resumes runnable tasks and cleans up stale staging artifacts.
+`backend/main.py` is the assembly point. It creates `WorkspaceStorage`, `LLMConfigStore`, the configured graph adapter, `AppManager`, `AppStoreService`, `RunStore`, `RunCoordinator`, and `DurableAgentWorkflow`. During application startup it resumes runnable tasks and cleans up stale staging artifacts.
 
 ## 2. How a user request executes
 
@@ -50,13 +50,14 @@ The frontend fetches an app from `/api/apps/{id}`. `SandboxWidget` transpiles th
 | `/ws/runs` | Recoverable stream with sequence, event ID, and stream epoch |
 | `workspace/sessions/*.json` | Sessions and messages |
 | `workspace/.ambient/runs.db` | Runs, steps, interactions, and canonical events |
-| `workspace/graph.db` | Schemas, nodes, edges, effects, and mutation history |
+| Neo4j | Canonical ontology entities, context records, graph edges, effects, and mutation history |
+| `workspace/graph.db` | Explicit SQLite test adapter and opt-in migration source only |
 
 ## 5. Security and consistency principles
 
 - Provider secrets are not returned to the frontend and live in a Git-ignored workspace file.
 - Codex runs only through a bearer-token-authenticated host bridge and reuses the host CLI login/ChatGPT subscription. The Docker image neither installs Codex nor stores its credentials, and the backend does not pass the Ambient Agent provider secret or Run model into the Codex process. The bridge accepts only backend-created randomized staging directories under the shared `workspace/apps` directory.
-- Graph mutations must pass schema preflight and commit atomically in a SQLite transaction.
+- Graph mutations must pass canonical-ontology preflight and commit atomically in one Neo4j transaction.
 - MCP, tool, and coding-agent authorization and sandbox policy are enforced by the backend. Omitting a frontend API is not authorization.
 - Effectful durable steps use effect/idempotency records, interactions, and fencing to avoid duplicate commits during recovery or concurrency.
 - Run events are a versioned contract; the frontend preserves unknown events for forward compatibility.

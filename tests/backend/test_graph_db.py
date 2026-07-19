@@ -19,7 +19,7 @@ def test_graph_db_crud(tmp_path):
     assert node1["properties"]["title"] == "Buy groceries"
 
     node2 = db.create_node(
-        node_id="event-1", node_type="CalendarEvent", properties={"summary": "Shopping trip", "time": "2026-07-12"}
+        node_id="event-1", node_type="Event", properties={"title": "Shopping trip", "start_time": "2026-07-12"}
     )
     assert node2["id"] == "event-1"
 
@@ -65,7 +65,7 @@ def test_graph_db_crud(tmp_path):
 
     # 6. Test direct edge deletion
     # Create another connection
-    node3 = db2.create_node(node_id="user-1", node_type="User", properties={"name": "Alice"})
+    node3 = db2.create_node(node_id="user-1", node_type="Person", properties={"name": "Alice"})
     edge2 = db2.create_edge(from_id="user-1", to_id="event-1", edge_type="ATTENDING")
     assert len(db2.get_edges("user-1")) == 1
 

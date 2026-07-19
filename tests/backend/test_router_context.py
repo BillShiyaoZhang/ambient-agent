@@ -17,13 +17,13 @@ def test_graph_snapshot_type_counts(tmp_path):
     db = _make_db(tmp_path)
     db.create_node(node_id="t1", node_type="Task", properties={"title": "T1", "status": "pending"})
     db.create_node(node_id="t2", node_type="Task", properties={"title": "T2", "status": "completed"})
-    db.create_node(node_id="e1", node_type="CalendarEvent", properties={"summary": "E1"})
+    db.create_node(node_id="e1", node_type="Event", properties={"title": "E1"})
 
     snap = GraphSnapshot.from_db(db, recent_per_type=5)
 
     assert "Task" in snap.type_counts
     assert snap.type_counts["Task"] == 2
-    assert snap.type_counts["CalendarEvent"] == 1
+    assert snap.type_counts["Event"] == 1
     assert snap.node_count == 3
 
 

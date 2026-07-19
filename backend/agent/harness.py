@@ -92,10 +92,10 @@ class AgentOrchestrator:
     async def _classify_intent(self, content: str, session_id: str, language: str = "zh") -> IntentPlan:
         router_context = None
         try:
-            from backend.graph_db import GraphDatabase
+            from backend.graph_db import create_graph_database
             from backend.router_context import RouterContext
 
-            graph_db = GraphDatabase(os.getenv("WORKSPACE_DIR", "workspace"))
+            graph_db = create_graph_database(os.getenv("WORKSPACE_DIR", "workspace"))
             session_messages = [
                 {"role": message.role, "content": message.content}
                 for message in self.db.get_messages(session_id)

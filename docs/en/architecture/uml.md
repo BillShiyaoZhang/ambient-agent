@@ -176,3 +176,32 @@ flowchart LR
 ## 6. Event and recovery boundaries
 
 Run event payloads are redacted and bounded before insertion, while the envelope records duration, model usage, and `redacted` metadata; terminal events are retained for 30 days by default. A Graph effect ledger closes the checkpoint window against duplicate writes, and an App promotion marker distinguishes published artifacts from staging awaiting publication. Only saga steps with complete compensation data are rolled back automatically.
+
+## 7. Canonical ontology and KG storage boundary
+
+```mermaid
+classDiagram
+    class GraphDatabase {
+        +list_schemas()
+        +preflight_actions(actions)
+        +apply_actions_atomic(actions)
+        +apply_schema_proposal_atomic(proposal)
+    }
+    class Neo4jGraphDatabase {
+        +from_env(workspace_dir)
+        +migrate_from_sqlite(path)
+    }
+    class OntologyEntity {
+        +id: str
+        +ontology_iri: str
+        +equivalent_to: tuple
+        +subclass_of: str
+        +properties: dict
+        +abstract: bool
+    }
+
+    GraphDatabase <|-- Neo4jGraphDatabase
+    Neo4jGraphDatabase --> OntologyEntity
+```
+
+`create_graph_database()` is the runtime factory: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. Both adapters enforce the same `ambient-context` ontology contract; unknown entities, abstract entities, and unknown properties cannot be written as records.

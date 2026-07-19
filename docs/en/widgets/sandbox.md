@@ -23,7 +23,7 @@ The injected parameters reduce direct coupling to host implementation details, b
 Host-state operations must be revalidated by the backend. Never trust a Widget-supplied `app_id`, tool name, schema, or permission claim:
 
 - capability and MCP tool calls execute as durable Runs;
-- Graph actions are preflighted and committed in a backend SQLite transaction;
+- Graph actions are preflighted against the canonical ontology and committed in a backend Neo4j transaction;
 - local model tools pass through Tool Gateway;
 - MCP and OpenCode enforce their own permission, path, argv, environment, and lifecycle policies.
 

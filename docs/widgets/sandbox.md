@@ -23,7 +23,7 @@ runScript(exportsObj, React, ambientProps);
 涉及宿主状态的操作必须在后端重新校验，不能信任 Widget 传入的 `app_id`、tool name、schema 或 permission 声明：
 
 - capability 与 MCP tool 通过持久 Run 执行；
-- Graph action 在后端预检并用 SQLite transaction 提交；
+- Graph action 在后端针对规范本体预检，并用 Neo4j transaction 提交；
 - 模型本地 tools 经过 Tool Gateway；
 - MCP/OpenCode 使用各自的 permission、path、argv、environment 和 lifecycle policy。
 

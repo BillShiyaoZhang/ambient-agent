@@ -8,13 +8,13 @@ flowchart LR
     Browser <-->|聊天 / Graph / Run WebSocket| API
     API --> Workspace[会话、Canvas、审计文件]
     API --> RunStore[.ambient/runs.db]
-    API --> Graph[graph.db]
+    API --> Graph[Neo4j 规范 KG]
     API --> Apps[workspace/apps]
     API --> LLM[LLM Provider]
     API --> External[MCP / Coding Agent / 本地工具]
 ```
 
-`backend/main.py` 是装配点。它创建 `WorkspaceStorage`、`LLMConfigStore`、`GraphDatabase`、`AppManager`、`AppStoreService`、`RunStore`、`RunCoordinator` 和 `DurableAgentWorkflow`，并在应用生命周期中恢复可运行任务与清理遗留 staging。
+`backend/main.py` 是装配点。它创建 `WorkspaceStorage`、`LLMConfigStore`、配置指定的 graph adapter、`AppManager`、`AppStoreService`、`RunStore`、`RunCoordinator` 和 `DurableAgentWorkflow`，并在应用生命周期中恢复可运行任务与清理遗留 staging。
 
 ## 2. 用户请求如何执行
 
@@ -50,13 +50,14 @@ Widget 有两条进入路径：
 | `/ws/runs` | 带 sequence、event ID 和 stream epoch 的可恢复事件流 |
 | `workspace/sessions/*.json` | 会话与消息 |
 | `workspace/.ambient/runs.db` | Run、step、interaction 和 canonical event |
-| `workspace/graph.db` | schema、节点、边、effect 和 mutation history |
+| Neo4j | 规范本体实体、上下文 record、graph edge、effect 和 mutation history |
+| `workspace/graph.db` | 仅用于显式 SQLite 测试适配器和按需迁移源 |
 
 ## 5. 安全与一致性原则
 
 - Provider 密钥不返回给前端，凭据文件位于 Git 忽略的工作区。
 - Codex 只通过带 Bearer token 的本机 Bridge 运行，复用本机 CLI 登录/ChatGPT 订阅；Docker 镜像不安装 Codex、不保存其凭据，后端也不会把 Ambient Agent Provider 密钥或 Run 模型传给 Codex 进程。Bridge 只接受共享 `workspace/apps` 下由后端创建的随机 staging 目录。
-- Graph mutation 必须通过 schema 预检，并在 SQLite transaction 中原子提交。
+- Graph mutation 必须通过规范本体预检，并在一个 Neo4j transaction 中原子提交。
 - MCP、工具和 Coding Agent 的授权与沙箱策略在后端执行；前端不注入 API 不能替代授权。
 - 有副作用的 durable step 使用 effect/idempotency 记录、interaction 和 fencing，避免恢复或并发造成重复提交。
 - Run event 是版本化契约；前端保留未知事件以兼容未来版本。

@@ -7,6 +7,17 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+from backend.ontology import (
+    ONTOLOGY_ID,
+    ONTOLOGY_VERSION,
+    PREBUILT_ONTOLOGY,
+    USER_CONTEXT_SCOPE,
+    LEGACY_ENTITY_ALIASES,
+    coerce_entity_properties,
+    validate_correspondences,
+    validate_property_definition,
+)
+
 
 class GraphDatabase:
     def __init__(self, workspace_dir: str | None = None):
@@ -37,11 +48,18 @@ class GraphDatabase:
 
     def load(self) -> None:
         """
-        Initializes SQLite tables, sets up default schemas,
+        Initializes the SQLite compatibility adapter and canonical ontology,
         and performs legacy migration from graph.json if it exists.
         """
         with self.get_conn() as conn:
             # 1. Create tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS graph_ontologies (
+                    id TEXT PRIMARY KEY,
+                    version TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS graph_schemas (
                     id TEXT PRIMARY KEY,
@@ -49,9 +67,31 @@ class GraphDatabase:
                     description TEXT,
                     properties TEXT, -- JSON string: { "field": "type" }
                     is_core INTEGER DEFAULT 0,
+                    ontology_id TEXT NOT NULL DEFAULT 'ambient-context',
+                    ontology_iri TEXT,
+                    source TEXT,
+                    equivalent_to TEXT NOT NULL DEFAULT '[]',
+                    subclass_of TEXT,
+                    abstract INTEGER DEFAULT 0,
+                    data_scope TEXT NOT NULL DEFAULT 'user_context',
                     created_at TEXT NOT NULL
                 )
             """)
+            existing_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(graph_schemas)").fetchall()
+            }
+            ontology_columns = {
+                "ontology_id": "TEXT NOT NULL DEFAULT 'ambient-context'",
+                "ontology_iri": "TEXT",
+                "source": "TEXT",
+                "equivalent_to": "TEXT NOT NULL DEFAULT '[]'",
+                "subclass_of": "TEXT",
+                "abstract": "INTEGER DEFAULT 0",
+                "data_scope": "TEXT NOT NULL DEFAULT 'user_context'",
+            }
+            for column, definition in ontology_columns.items():
+                if column not in existing_columns:
+                    conn.execute(f"ALTER TABLE graph_schemas ADD COLUMN {column} {definition}")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS graph_nodes (
                     id TEXT PRIMARY KEY,
@@ -98,45 +138,91 @@ class GraphDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_to ON graph_edges(to_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_history_session ON graph_mutation_history(session_id)")
+            conn.execute(
+                "INSERT OR IGNORE INTO graph_ontologies(id,version,created_at) VALUES(?,?,?)",
+                (ONTOLOGY_ID, ONTOLOGY_VERSION, datetime.now(UTC).isoformat()),
+            )
 
         # 3. Seed core schemas
         self._seed_core_schemas()
 
-        # 4. Migrate legacy graph.json if present
+        # 4. Align records written by the former permissive SQLite contract
+        self._align_existing_sqlite_records()
+
+        # 5. Migrate legacy graph.json if present
         self._migrate_legacy_data()
 
     def _seed_core_schemas(self) -> None:
-        core_schemas = {
-            "Task": {
-                "name": "Task",
-                "description": "Represents a todo item or actionable task",
-                "properties": {"title": "string", "description": "string", "status": "string", "due_date": "string"},
-            },
-            "Event": {
-                "name": "Event",
-                "description": "Represents a calendar entry or scheduled block of time",
-                "properties": {
-                    "title": "string",
-                    "description": "string",
-                    "start_time": "string",
-                    "end_time": "string",
-                    "location": "string",
-                },
-            },
-            "Note": {
-                "name": "Note",
-                "description": "Represents a freeform text note or document chunk",
-                "properties": {"title": "string", "content": "string", "tags": "string"},
-            },
-        }
-        for schema_id, info in core_schemas.items():
+        for entity in PREBUILT_ONTOLOGY:
             self.register_schema(
-                schema_id=schema_id,
-                name=info["name"],
-                description=info["description"],
-                properties=info["properties"],
-                is_core=True,
+                schema_id=entity.id,
+                name=entity.name,
+                description=entity.description,
+                properties=entity.properties,
+                is_core=entity.is_core,
+                ontology_iri=entity.ontology_iri,
+                source=entity.source,
+                equivalent_to=list(entity.equivalent_to),
+                subclass_of=entity.subclass_of,
+                abstract=entity.abstract,
+                data_scope=entity.data_scope,
             )
+
+    def _align_existing_sqlite_records(self) -> None:
+        definitions: dict[str, dict[str, str]] = {}
+        updates: list[tuple[str, str, str]] = []
+        with self.get_conn() as conn:
+            rows = conn.execute("SELECT id,type,properties FROM graph_nodes").fetchall()
+            for row in rows:
+                original_type = str(row["type"] or "LegacyRecord")
+                node_type, property_aliases = LEGACY_ENTITY_ALIASES.get(original_type, (original_type, {}))
+                properties = json.loads(row["properties"] or "{}")
+                for old_key, new_key in property_aliases.items():
+                    if old_key in properties:
+                        properties.setdefault(new_key, properties[old_key])
+                        properties.pop(old_key, None)
+
+                existing = self.get_schema(node_type)
+                if existing is not None and existing.get("abstract"):
+                    node_type = f"Legacy{node_type}Record"
+                inferred = definitions.setdefault(node_type, {})
+                for key, value in properties.items():
+                    if key != "namespace":
+                        inferred.setdefault(key, self._infer_property_type(value))
+                if node_type != original_type or properties != json.loads(row["properties"] or "{}"):
+                    updates.append((node_type, json.dumps(properties), row["id"]))
+
+            for node_type, properties_json, node_id in updates:
+                conn.execute(
+                    "UPDATE graph_nodes SET type=?, properties=? WHERE id=?",
+                    (node_type, properties_json, node_id),
+                )
+
+        for node_type, inferred in definitions.items():
+            existing = self.get_schema(node_type)
+            if existing is None:
+                self.register_schema(
+                    node_type,
+                    node_type,
+                    "Entity inferred while aligning the legacy SQLite knowledge graph",
+                    inferred,
+                    source="legacy-sqlite",
+                    ontology_iri=f"urn:ambient:legacy:{node_type}",
+                )
+                continue
+            if set(inferred) - set(existing["properties"]):
+                self.register_schema(
+                    node_type,
+                    existing["name"],
+                    existing["description"],
+                    {**existing["properties"], **inferred},
+                    existing["is_core"],
+                    ontology_iri=existing["ontology_iri"],
+                    source=existing["source"],
+                    equivalent_to=existing["equivalent_to"],
+                    subclass_of=existing["subclass_of"],
+                    abstract=existing["abstract"],
+                )
 
     def _migrate_legacy_data(self) -> None:
         if not os.path.exists(self.legacy_filepath):
@@ -149,32 +235,53 @@ class GraphDatabase:
 
             legacy_nodes = data.get("nodes", {})
             legacy_edges = data.get("edges", [])
+            definitions: dict[str, dict[str, str]] = {}
+            for node in legacy_nodes.values():
+                node_type = str(node.get("type") or "LegacyRecord")
+                properties = node.get("properties") or {}
+                inferred = definitions.setdefault(node_type, {})
+                for key, value in properties.items():
+                    if key != "namespace":
+                        inferred.setdefault(key, self._infer_property_type(value))
 
-            with self.get_conn() as conn:
-                # Migrate nodes
-                for node_id, node in legacy_nodes.items():
-                    conn.execute(
-                        "INSERT OR IGNORE INTO graph_nodes (id, type, properties, namespace, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            node_id,
-                            node.get("type", "Generic"),
-                            json.dumps(node.get("properties", {})),
-                            node.get("properties", {}).get("namespace"),
-                            datetime.now(UTC).isoformat(),
-                        ),
+            for node_type, inferred in definitions.items():
+                existing = self.get_schema(node_type)
+                if existing is None:
+                    self.register_schema(
+                        node_type,
+                        node_type,
+                        "Entity inferred during graph.json migration",
+                        inferred,
+                        source="legacy-graph-json",
+                        ontology_iri=f"urn:ambient:legacy:{node_type}",
                     )
-                # Migrate edges
-                for edge in legacy_edges:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO graph_edges (from_id, to_id, type, properties, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            edge.get("from_id"),
-                            edge.get("to_id"),
-                            edge.get("type"),
-                            json.dumps(edge.get("properties", {})),
-                            datetime.now(UTC).isoformat(),
-                        ),
+                elif set(inferred) - set(existing["properties"]):
+                    self.register_schema(
+                        node_type,
+                        existing["name"],
+                        existing["description"],
+                        {**existing["properties"], **inferred},
+                        existing["is_core"],
+                        ontology_iri=existing["ontology_iri"],
+                        source=existing["source"],
+                        equivalent_to=existing["equivalent_to"],
+                        subclass_of=existing["subclass_of"],
+                        abstract=existing["abstract"],
                     )
+
+            for node_id, node in legacy_nodes.items():
+                self.create_node(
+                    node_id=str(node_id),
+                    node_type=str(node.get("type") or "LegacyRecord"),
+                    properties=node.get("properties") or {},
+                )
+            for edge in legacy_edges:
+                self.create_edge(
+                    from_id=str(edge.get("from_id") or ""),
+                    to_id=str(edge.get("to_id") or ""),
+                    edge_type=str(edge.get("type") or ""),
+                    properties=edge.get("properties") or {},
+                )
 
             # Backup old file to avoid re-migration
             backup_path = self.legacy_filepath + ".backup"
@@ -185,20 +292,69 @@ class GraphDatabase:
         except Exception as e:
             print(f"[GraphDB] Error migrating legacy JSON graph: {e}")
 
+    @staticmethod
+    def _infer_property_type(value: Any) -> str:
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        return "string"
+
     # --- Schema APIs ---
 
     def register_schema(
-        self, schema_id: str, name: str, description: str, properties: dict[str, str], is_core: bool = False
+        self,
+        schema_id: str,
+        name: str,
+        description: str,
+        properties: dict[str, str],
+        is_core: bool = False,
+        *,
+        ontology_iri: str | None = None,
+        source: str = "ambient-context",
+        equivalent_to: list[str] | tuple[str, ...] | None = None,
+        subclass_of: str | None = "Thing",
+        abstract: bool = False,
+        data_scope: str = USER_CONTEXT_SCOPE,
     ) -> dict[str, Any]:
+        if not isinstance(schema_id, str) or not schema_id.strip():
+            raise ValueError("Ontology entity id must be a non-empty string")
+        schema_id = schema_id.strip()
+        properties = validate_property_definition(properties, entity_id=schema_id)
+        existing = self.get_schema(schema_id)
+        if existing is not None:
+            properties = self._merge_entity_properties(schema_id, existing["properties"], properties)
+            is_core = is_core or existing["is_core"]
+        correspondences = validate_correspondences(equivalent_to, entity_id=schema_id)
+        if data_scope != USER_CONTEXT_SCOPE:
+            raise ValueError(f"Ontology entity '{schema_id}' has non-context data_scope '{data_scope}'")
+        if subclass_of == schema_id:
+            raise ValueError(f"Ontology entity '{schema_id}' cannot be its own parent")
+        if subclass_of is not None and subclass_of != "Thing" and self.get_schema(subclass_of) is None:
+            raise ValueError(f"Ontology entity '{schema_id}' references missing parent '{subclass_of}'")
+        ontology_iri = ontology_iri or f"urn:ambient:ontology:{schema_id}"
         with self.get_conn() as conn:
             conn.execute(
                 """
-                INSERT INTO graph_schemas (id, name, description, properties, is_core, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO graph_schemas (
+                    id, name, description, properties, is_core, ontology_id,
+                    ontology_iri, source, equivalent_to, subclass_of, abstract,
+                    data_scope, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
-                    properties=excluded.properties
+                    properties=excluded.properties,
+                    ontology_id=excluded.ontology_id,
+                    ontology_iri=excluded.ontology_iri,
+                    source=excluded.source,
+                    equivalent_to=excluded.equivalent_to,
+                    subclass_of=excluded.subclass_of,
+                    abstract=excluded.abstract,
+                    data_scope=excluded.data_scope
                 """,
                 (
                     schema_id,
@@ -206,15 +362,38 @@ class GraphDatabase:
                     description,
                     json.dumps(properties),
                     1 if is_core else 0,
+                    ONTOLOGY_ID,
+                    ontology_iri,
+                    source,
+                    json.dumps(correspondences),
+                    subclass_of,
+                    1 if abstract else 0,
+                    data_scope,
                     datetime.now(UTC).isoformat(),
                 ),
             )
-        return {"id": schema_id, "name": name, "description": description, "properties": properties, "is_core": is_core}
+        return {
+            "id": schema_id,
+            "name": name,
+            "description": description,
+            "properties": properties,
+            "is_core": is_core,
+            "ontology_id": ONTOLOGY_ID,
+            "ontology_iri": ontology_iri,
+            "source": source,
+            "equivalent_to": correspondences,
+            "subclass_of": subclass_of,
+            "abstract": abstract,
+            "data_scope": data_scope,
+        }
 
     def get_schema(self, schema_id: str) -> dict[str, Any] | None:
         with self.get_conn() as conn:
             row = conn.execute(
-                "SELECT id, name, description, properties, is_core FROM graph_schemas WHERE id = ?", (schema_id,)
+                """SELECT id, name, description, properties, is_core, ontology_id,
+                          ontology_iri, source, equivalent_to, subclass_of, abstract, data_scope
+                   FROM graph_schemas WHERE id = ?""",
+                (schema_id,),
             ).fetchone()
             if row:
                 return {
@@ -223,12 +402,23 @@ class GraphDatabase:
                     "description": row["description"],
                     "properties": json.loads(row["properties"]),
                     "is_core": bool(row["is_core"]),
+                    "ontology_id": row["ontology_id"],
+                    "ontology_iri": row["ontology_iri"],
+                    "source": row["source"],
+                    "equivalent_to": json.loads(row["equivalent_to"] or "[]"),
+                    "subclass_of": row["subclass_of"],
+                    "abstract": bool(row["abstract"]),
+                    "data_scope": row["data_scope"],
                 }
         return None
 
     def list_schemas(self) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
-            rows = conn.execute("SELECT id, name, description, properties, is_core FROM graph_schemas").fetchall()
+            rows = conn.execute(
+                """SELECT id, name, description, properties, is_core, ontology_id,
+                          ontology_iri, source, equivalent_to, subclass_of, abstract, data_scope
+                   FROM graph_schemas ORDER BY id"""
+            ).fetchall()
             return [
                 {
                     "id": row["id"],
@@ -236,6 +426,13 @@ class GraphDatabase:
                     "description": row["description"],
                     "properties": json.loads(row["properties"]),
                     "is_core": bool(row["is_core"]),
+                    "ontology_id": row["ontology_id"],
+                    "ontology_iri": row["ontology_iri"],
+                    "source": row["source"],
+                    "equivalent_to": json.loads(row["equivalent_to"] or "[]"),
+                    "subclass_of": row["subclass_of"],
+                    "abstract": bool(row["abstract"]),
+                    "data_scope": row["data_scope"],
                 }
                 for row in rows
             ]
@@ -244,37 +441,9 @@ class GraphDatabase:
 
     def validate_properties(self, node_type: str, properties: dict[str, Any]) -> dict[str, Any]:
         schema = self.get_schema(node_type)
-        if not schema:
-            return properties
-
-        schema_props = schema.get("properties", {})
-        validated_props = dict(properties)
-
-        for k, v in properties.items():
-            if k in schema_props:
-                expected_type = schema_props[k].lower()
-                if expected_type == "string" and not isinstance(v, str):
-                    validated_props[k] = str(v)
-                elif expected_type == "integer":
-                    try:
-                        validated_props[k] = int(v)
-                    except (ValueError, TypeError):
-                        raise ValueError(f"Property '{k}' on node type '{node_type}' must be an integer, got: {v}")
-                elif expected_type == "number":
-                    try:
-                        validated_props[k] = float(v)
-                    except (ValueError, TypeError):
-                        raise ValueError(f"Property '{k}' on node type '{node_type}' must be a number, got: {v}")
-                elif expected_type == "boolean":
-                    if isinstance(v, bool):
-                        validated_props[k] = v
-                    elif str(v).lower() in ["true", "1", "yes"]:
-                        validated_props[k] = True
-                    elif str(v).lower() in ["false", "0", "no"]:
-                        validated_props[k] = False
-                    else:
-                        raise ValueError(f"Property '{k}' on node type '{node_type}' must be a boolean, got: {v}")
-        return validated_props
+        if schema is None:
+            raise ValueError(f"Entity '{node_type}' is not registered in ontology '{ONTOLOGY_ID}'")
+        return coerce_entity_properties(schema, properties)
 
     # --- Node APIs ---
 
@@ -317,7 +486,12 @@ class GraphDatabase:
         with self.get_conn() as conn:
             row = conn.execute("SELECT id, type, properties FROM graph_nodes WHERE id = ?", (node_id,)).fetchone()
             if row:
-                return {"id": row["id"], "type": row["type"], "properties": json.loads(row["properties"])}
+                return {
+                    "id": row["id"],
+                    "type": row["type"],
+                    "ontology_entity_id": row["type"],
+                    "properties": json.loads(row["properties"]),
+                }
         return None
 
     def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
@@ -446,35 +620,23 @@ class GraphDatabase:
     def _validate_properties_in_conn(
         conn: sqlite3.Connection, node_type: str, properties: dict[str, Any]
     ) -> dict[str, Any]:
-        row = conn.execute("SELECT properties FROM graph_schemas WHERE id=?", (node_type,)).fetchone()
+        row = conn.execute(
+            """SELECT id, properties, ontology_id, abstract, data_scope
+               FROM graph_schemas WHERE id=?""",
+            (node_type,),
+        ).fetchone()
         if row is None:
-            return dict(properties)
-        schema_props = json.loads(row["properties"] or "{}")
-        validated = dict(properties)
-        for key, value in properties.items():
-            expected = str(schema_props.get(key, "")).lower()
-            if expected == "string" and not isinstance(value, str):
-                validated[key] = str(value)
-            elif expected == "integer":
-                try:
-                    validated[key] = int(value)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"Property '{key}' on node type '{node_type}' must be an integer") from exc
-            elif expected == "number":
-                try:
-                    validated[key] = float(value)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"Property '{key}' on node type '{node_type}' must be a number") from exc
-            elif expected == "boolean":
-                if isinstance(value, bool):
-                    validated[key] = value
-                elif str(value).lower() in {"true", "1", "yes"}:
-                    validated[key] = True
-                elif str(value).lower() in {"false", "0", "no"}:
-                    validated[key] = False
-                else:
-                    raise ValueError(f"Property '{key}' on node type '{node_type}' must be a boolean")
-        return validated
+            raise ValueError(f"Entity '{node_type}' is not registered in ontology '{ONTOLOGY_ID}'")
+        return coerce_entity_properties(
+            {
+                "id": row["id"],
+                "properties": json.loads(row["properties"] or "{}"),
+                "ontology_id": row["ontology_id"],
+                "abstract": bool(row["abstract"]),
+                "data_scope": row["data_scope"],
+            },
+            properties,
+        )
 
     def apply_actions_atomic(
         self,
@@ -775,7 +937,10 @@ class GraphDatabase:
             raise ValueError("Every graph mutation action must be an object")
         normalized: list[dict[str, Any]] = []
         with self.get_conn() as conn:
-            nodes = {row["id"] for row in conn.execute("SELECT id FROM graph_nodes").fetchall()}
+            nodes = {
+                row["id"]: {"type": row["type"], "properties": json.loads(row["properties"] or "{}")}
+                for row in conn.execute("SELECT id,type,properties FROM graph_nodes").fetchall()
+            }
             edges = {
                 (row["from_id"], row["to_id"], row["type"])
                 for row in conn.execute("SELECT from_id,to_id,type FROM graph_edges").fetchall()
@@ -794,23 +959,33 @@ class GraphDatabase:
                     if not isinstance(properties, dict):
                         raise ValueError("create_node.properties must be an object")
                     validated = self._validate_properties_in_conn(conn, node_type, properties)
-                    nodes.add(node_id)
+                    nodes[node_id] = {"type": node_type, "properties": validated}
                     normalized.append(
                         {"action": kind, "id": node_id, "type": node_type, "properties": validated}
                     )
                 elif kind == "update_node_property":
                     node_id = self._required_text(action, "id")
-                    if node_id not in nodes:
+                    node = nodes.get(node_id)
+                    if node is None:
                         raise ValueError(f"Node with ID '{node_id}' does not exist")
                     properties = action.get("properties") or {}
                     if not isinstance(properties, dict):
                         raise ValueError("update_node_property.properties must be an object")
-                    normalized.append({"action": kind, "id": node_id, "properties": properties})
+                    merged = {**node["properties"], **properties}
+                    validated = self._validate_properties_in_conn(conn, node["type"], merged)
+                    nodes[node_id] = {"type": node["type"], "properties": validated}
+                    normalized.append(
+                        {
+                            "action": kind,
+                            "id": node_id,
+                            "properties": {key: validated[key] for key in properties},
+                        }
+                    )
                 elif kind == "delete_node":
                     node_id = self._required_text(action, "id")
                     if node_id not in nodes:
                         raise ValueError(f"Node with ID '{node_id}' does not exist")
-                    nodes.remove(node_id)
+                    nodes.pop(node_id)
                     edges = {edge for edge in edges if edge[0] != node_id and edge[1] != node_id}
                     normalized.append({"action": kind, "id": node_id})
                 elif kind in {"create_edge", "delete_edge"}:
@@ -849,38 +1024,74 @@ class GraphDatabase:
     def _normalize_schema_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(proposal, dict):
             raise ValueError("Schema proposal must be an object")
-        allowed_types = {"string", "integer", "number", "boolean"}
         normalized: dict[str, list[dict[str, Any]]] = {"reused_schemas": [], "new_schemas": []}
         for item in proposal.get("reused_schemas", []) or []:
             if not isinstance(item, dict):
                 raise ValueError("reused_schemas entries must be objects")
             schema_id = GraphDatabase._required_text(item, "id")
-            extension = item.get("extended_properties") or {}
-            if not isinstance(extension, dict) or any(
-                not isinstance(key, str) or value not in allowed_types for key, value in extension.items()
-            ):
-                raise ValueError(f"Schema '{schema_id}' has invalid extended_properties")
+            extension = validate_property_definition(item.get("extended_properties") or {}, entity_id=schema_id)
+            data_scope = item.get("data_scope", USER_CONTEXT_SCOPE)
+            if data_scope != USER_CONTEXT_SCOPE:
+                raise ValueError(f"Ontology entity '{schema_id}' has non-context data_scope '{data_scope}'")
             normalized["reused_schemas"].append(
-                {**item, "id": schema_id, "extended_properties": dict(extension)}
+                {**item, "id": schema_id, "extended_properties": dict(extension), "data_scope": data_scope}
             )
         for item in proposal.get("new_schemas", []) or []:
             if not isinstance(item, dict):
                 raise ValueError("new_schemas entries must be objects")
             schema_id = GraphDatabase._required_text(item, "id")
-            properties = item.get("properties") or {}
-            if not isinstance(properties, dict) or any(
-                not isinstance(key, str) or value not in allowed_types for key, value in properties.items()
-            ):
-                raise ValueError(f"Schema '{schema_id}' has invalid properties")
+            properties = validate_property_definition(item.get("properties") or {}, entity_id=schema_id)
+            data_scope = item.get("data_scope", USER_CONTEXT_SCOPE)
+            if data_scope != USER_CONTEXT_SCOPE:
+                raise ValueError(f"Ontology entity '{schema_id}' has non-context data_scope '{data_scope}'")
+            subclass_of = item.get("subclass_of", "Thing")
+            if subclass_of is not None and (not isinstance(subclass_of, str) or not subclass_of.strip()):
+                raise ValueError(f"Ontology entity '{schema_id}' has invalid subclass_of")
+            subclass_of = subclass_of.strip() if isinstance(subclass_of, str) else None
+            if subclass_of == schema_id:
+                raise ValueError(f"Ontology entity '{schema_id}' cannot be its own parent")
+            ontology_iri = item.get("ontology_iri") or f"urn:ambient:ontology:{schema_id}"
+            if not isinstance(ontology_iri, str) or not ontology_iri.strip():
+                raise ValueError(f"Ontology entity '{schema_id}' has invalid ontology_iri")
+            equivalent_to = validate_correspondences(item.get("equivalent_to"), entity_id=schema_id)
             normalized["new_schemas"].append(
                 {
                     "id": schema_id,
                     "name": str(item.get("name") or schema_id),
                     "description": str(item.get("description") or ""),
                     "properties": dict(properties),
+                    "ontology_id": ONTOLOGY_ID,
+                    "ontology_iri": ontology_iri.strip(),
+                    "source": str(item.get("source") or "ambient-context"),
+                    "equivalent_to": equivalent_to,
+                    "subclass_of": subclass_of,
+                    "abstract": bool(item.get("abstract", False)),
+                    "data_scope": data_scope,
                 }
             )
         return normalized
+
+    @staticmethod
+    def _merge_entity_properties(
+        entity_id: str,
+        current: dict[str, str],
+        extension: dict[str, str],
+    ) -> dict[str, str]:
+        for key, value in extension.items():
+            if key in current and current[key] != value:
+                raise ValueError(
+                    f"Ontology entity '{entity_id}' cannot change property '{key}' "
+                    f"from '{current[key]}' to '{value}'"
+                )
+        return {**current, **extension}
+
+    def _validate_proposal_parents(self, normalized: dict[str, list[dict[str, Any]]]) -> None:
+        available = {schema["id"] for schema in self.list_schemas()}
+        available.update(item["id"] for item in normalized["new_schemas"])
+        for item in normalized["new_schemas"]:
+            parent = item.get("subclass_of")
+            if parent is not None and parent not in available:
+                raise ValueError(f"Ontology entity '{item['id']}' references missing parent '{parent}'")
 
     def effective_schemas(self, proposal: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Return the schema inventory with an approved, uncommitted proposal overlaid."""
@@ -889,15 +1100,19 @@ class GraphDatabase:
         if proposal is None:
             return list(schemas.values())
         normalized = self._normalize_schema_proposal(proposal)
+        self._validate_proposal_parents(normalized)
         for item in normalized["reused_schemas"]:
             schema = schemas.get(item["id"])
             if schema is None:
                 raise ValueError(f"Reused schema '{item['id']}' does not exist")
-            schema["properties"] = {
-                **(schema.get("properties") or {}),
-                **item["extended_properties"],
-            }
+            schema["properties"] = self._merge_entity_properties(
+                item["id"], schema.get("properties") or {}, item["extended_properties"]
+            )
         for item in normalized["new_schemas"]:
+            if item["id"] in schemas:
+                raise ValueError(
+                    f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead"
+                )
             schemas[item["id"]] = {**item, "is_core": False}
         return [schemas[key] for key in sorted(schemas)]
 
@@ -910,6 +1125,7 @@ class GraphDatabase:
         """Apply an approved schema proposal in one transaction and return its undo snapshot."""
 
         normalized = self._normalize_schema_proposal(proposal)
+        self._validate_proposal_parents(normalized)
         canonical_input = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         input_hash = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
         snapshot: dict[str, Any] = {}
@@ -925,6 +1141,14 @@ class GraphDatabase:
                     if existing_effect["input_hash"] != input_hash:
                         raise ValueError("Schema idempotency key was reused with a different proposal")
                     return json.loads(existing_effect["result_json"])
+            for item in normalized["new_schemas"]:
+                existing_schema = conn.execute(
+                    "SELECT id FROM graph_schemas WHERE id=?", (item["id"],)
+                ).fetchone()
+                if existing_schema is not None:
+                    raise ValueError(
+                        f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead"
+                    )
             for item in [*normalized["reused_schemas"], *normalized["new_schemas"]]:
                 schema_id = item["id"]
                 row = conn.execute("SELECT * FROM graph_schemas WHERE id=?", (schema_id,)).fetchone()
@@ -933,22 +1157,36 @@ class GraphDatabase:
                 row = conn.execute("SELECT * FROM graph_schemas WHERE id=?", (item["id"],)).fetchone()
                 if row is None:
                     raise ValueError(f"Reused schema '{item['id']}' does not exist")
-                properties = {**json.loads(row["properties"] or "{}"), **item["extended_properties"]}
+                properties = self._merge_entity_properties(
+                    item["id"], json.loads(row["properties"] or "{}"), item["extended_properties"]
+                )
                 conn.execute(
                     "UPDATE graph_schemas SET properties=? WHERE id=?",
                     (json.dumps(properties), item["id"]),
                 )
             for item in normalized["new_schemas"]:
                 conn.execute(
-                    """INSERT INTO graph_schemas(id,name,description,properties,is_core,created_at)
-                       VALUES(?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET
+                    """INSERT INTO graph_schemas(
+                           id,name,description,properties,is_core,ontology_id,ontology_iri,
+                           source,equivalent_to,subclass_of,abstract,data_scope,created_at
+                       ) VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                        name=excluded.name, description=excluded.description,
-                       properties=excluded.properties""",
+                       properties=excluded.properties, ontology_id=excluded.ontology_id,
+                       ontology_iri=excluded.ontology_iri, source=excluded.source,
+                       equivalent_to=excluded.equivalent_to, subclass_of=excluded.subclass_of,
+                       abstract=excluded.abstract, data_scope=excluded.data_scope""",
                     (
                         item["id"],
                         item["name"],
                         item["description"],
                         json.dumps(item["properties"]),
+                        ONTOLOGY_ID,
+                        item["ontology_iri"],
+                        item["source"],
+                        json.dumps(item["equivalent_to"]),
+                        item["subclass_of"],
+                        1 if item["abstract"] else 0,
+                        item["data_scope"],
                         now,
                     ),
                 )
@@ -977,17 +1215,29 @@ class GraphDatabase:
                     conn.execute("DELETE FROM graph_schemas WHERE id=?", (schema_id,))
                     continue
                 conn.execute(
-                    """INSERT INTO graph_schemas(id,name,description,properties,is_core,created_at)
-                       VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    """INSERT INTO graph_schemas(
+                           id,name,description,properties,is_core,ontology_id,ontology_iri,
+                           source,equivalent_to,subclass_of,abstract,data_scope,created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                        name=excluded.name, description=excluded.description,
                        properties=excluded.properties, is_core=excluded.is_core,
-                       created_at=excluded.created_at""",
+                       ontology_id=excluded.ontology_id, ontology_iri=excluded.ontology_iri,
+                       source=excluded.source, equivalent_to=excluded.equivalent_to,
+                       subclass_of=excluded.subclass_of, abstract=excluded.abstract,
+                       data_scope=excluded.data_scope, created_at=excluded.created_at""",
                     (
                         old["id"],
                         old["name"],
                         old["description"],
                         old["properties"],
                         old["is_core"],
+                        old.get("ontology_id", ONTOLOGY_ID),
+                        old.get("ontology_iri"),
+                        old.get("source"),
+                        old.get("equivalent_to", "[]"),
+                        old.get("subclass_of"),
+                        old.get("abstract", 0),
+                        old.get("data_scope", USER_CONTEXT_SCOPE),
                         old["created_at"],
                     ),
                 )
@@ -1005,7 +1255,12 @@ class GraphDatabase:
         with self.get_conn() as conn:
             rows = conn.execute("SELECT id, type, properties FROM graph_nodes").fetchall()
             return {
-                row["id"]: {"id": row["id"], "type": row["type"], "properties": json.loads(row["properties"])}
+                row["id"]: {
+                    "id": row["id"],
+                    "type": row["type"],
+                    "ontology_entity_id": row["type"],
+                    "properties": json.loads(row["properties"]),
+                }
                 for row in rows
             }
 
@@ -1136,3 +1391,17 @@ class GraphDatabase:
 
 # Module-level convenience: callers construct their own manager per session/db.
 # See ``backend.mutation_tickets.MutationTicketManager``.
+
+
+def create_graph_database(workspace_dir: str | None = None) -> GraphDatabase:
+    """Build the configured graph adapter without importing Neo4j for SQLite-only tests."""
+
+    configured = os.getenv("GRAPH_DATABASE_BACKEND")
+    backend = (configured or ("neo4j" if os.getenv("NEO4J_URI") else "sqlite")).strip().lower()
+    if backend == "sqlite":
+        return GraphDatabase(workspace_dir)
+    if backend == "neo4j":
+        from backend.neo4j_graph_db import Neo4jGraphDatabase
+
+        return Neo4jGraphDatabase.from_env(workspace_dir)
+    raise ValueError("GRAPH_DATABASE_BACKEND must be either 'neo4j' or 'sqlite'")

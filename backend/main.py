@@ -87,9 +87,9 @@ coding_agent_config_store = CodingAgentConfigStore(WORKSPACE_DIR)
 set_default_llm_store(llm_config_store)
 app_store = AppStoreService(WORKSPACE_DIR, app_manager)
 
-from backend.graph_db import GraphDatabase
+from backend.graph_db import create_graph_database
 
-graph_db = GraphDatabase(WORKSPACE_DIR)
+graph_db = create_graph_database(WORKSPACE_DIR)
 
 
 def get_db():

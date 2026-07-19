@@ -1,54 +1,92 @@
-# 图数据库
+# 规范本体与知识图谱
 
-`GraphDatabase` 使用 `workspace/graph.db`（SQLite + WAL）保存 Widget 与 Agent 共享的结构化数据。`graph.json` 仅用于一次性旧数据迁移，迁移后会改名为备份。
+知识图谱只保存有助于 Agent 理解用户上下文的事实。Neo4j 是主要运行时后端；`workspace/graph.db` 仅保留为隔离测试和一次性迁移使用的本地 SQLite 兼容适配器，不再是部署环境的知识图谱后端。
 
-## 1. 表与职责
+## 1. 唯一本体
 
-| 表 | 主键 | 职责 |
-| --- | --- | --- |
-| `graph_schemas` | `id` | schema 名称、描述、属性类型与 core 标记 |
-| `graph_nodes` | `id` | 节点类型、JSON properties、namespace、时间戳 |
-| `graph_edges` | `(from_id, to_id, type)` | 有向关系与 JSON properties |
-| `graph_mutation_history` | `id` | 正向/反向 action、执行前快照、pin/consume 状态 |
-| `graph_effects` | `idempotency_key` | action 输入 hash 与已提交结果，防止重复副作用 |
+每个 workspace 恰好有一个本体：`ambient-context`。App 所看到的 schema 是这个规范本体中的实体，不是 App 自己拥有的一套独立 schema。每个实体都包含：
 
-内置 core schema 为：
+- 稳定的 `id`、名称、描述和属性类型；
+- 表明词汇来源的 `ontology_iri` 与 `source`；
+- 用于和成熟外部本体对齐的零到多个 `equivalent_to` 对应关系；
+- `ambient-context` 内可选的 `subclass_of` 父实体；
+- `is_core` 与 `abstract` 生命周期标记。
 
-- `Task`: `title`, `description`, `status`, `due_date`（均为 string）；
-- `Event`: `title`, `description`, `start_time`, `end_time`, `location`（均为 string）；
-- `Note`: `title`, `content`, `tags`（均为 string）。
+预置本体从 Schema.org 概念出发，包含抽象根实体 `Thing`，以及常见的用户上下文实体：`Task`、`Event`、`Note`、`Person`、`Organization`、`Project`、`Document`、`Place`、`Message` 和 `SoftwareApplication`。语义相符时，App 必须复用这些实体。
 
-应用可以提议扩展 schema，但 core schema 不能通过普通删除流程移除。
+本体增长是增量且原子的：
 
-## 2. 查询
+1. 扩展已有实体的属性；或
+2. 向 `ambient-context` 添加实体，并可记录外部 `ontology_iri`/`equivalent_to` 映射和规范的 `subclass_of` 父实体。
 
-Widget 使用 `ambient.graph.subscribe(query, callback)` 注册实时查询。后端的 `GraphSubscriptionManager` 保存订阅，在 mutation 后重新执行查询并推送变化。取消订阅函数会注销 WebSocket 持久消息与浏览器监听器。
+其他词汇中的实体不能被安装成第二套、未连接的本体。父实体不存在、实例化抽象实体、使用未注册实体 ID、属性类型不支持或写入未知属性都会被拒绝。普通流程不能移除 core 实体。
 
-Agent 只读查询经 `graph_query_engine.execute_graph_query` 执行。路由前的 `RouterContext` 会创建有上限的 `GraphSnapshot`，避免把整个数据库放入 Prompt。
+## 2. 知识图谱模型
 
-## 3. Mutation
+```mermaid
+erDiagram
+    ONTOLOGY ||--|{ ONTOLOGY_ENTITY : contains
+    ONTOLOGY_ENTITY ||--o{ CONTEXT_RECORD : classifies
+    CONTEXT_RECORD ||--o{ GRAPH_EDGE : source
+    CONTEXT_RECORD ||--o{ GRAPH_EDGE : target
 
-公开 action 为：
+    ONTOLOGY {
+        string id PK
+        string version
+    }
+    ONTOLOGY_ENTITY {
+        string id PK
+        string ontology_iri
+        string source
+        json equivalent_to
+        string subclass_of
+        json properties
+        bool abstract
+    }
+    CONTEXT_RECORD {
+        string id PK
+        string entity_id FK
+        json properties
+        string namespace
+    }
+    GRAPH_EDGE {
+        string from_id FK
+        string to_id FK
+        string type
+        json properties
+    }
+```
 
-- `create_node`
-- `update_node_property`
-- `delete_node`
-- `create_edge`
-- `delete_edge`
+每个 `ContextRecord` 恰好通过一条 `INSTANCE_OF` 关系归类到一个已注册的 `OntologyEntity`；系统不会为每种类型创建动态 Neo4j label。固定 label 模型避免动态拼接 Cypher，并显式表达“一个记录只能属于一个实体”的约束。只有实体和属性都通过校验后才能 upsert 记录。Edge 的端点必须已经存在，或在同一 mutation batch 中先创建。
 
-`preflight_actions` 先解析临时节点依赖、检查端点与 schema 类型；`apply_actions_atomic` 在一个 transaction 中提交整批 action，并生成反向 action。任一 action 失败会回滚整批操作。
+Neo4j 还保存内部 effect 与 rollback 元数据，使 graph mutation 和幂等结果在同一个 ACID transaction 中提交。这些元数据节点属于基础设施状态，不会出现在知识图谱查询结果中。
 
-Widget 的 HTTP mutation 自动携带 `widget:<app-id>:<uuid>` idempotency key。Durable workflow 使用自己的稳定 effect key。相同 key 配相同输入返回已提交结果；相同 key 配不同输入会报错。
+## 3. 数据放置
 
-## 4. Schema 验证与回滚
+KG 只接受 `user_context` 数据。用户的任务、会议、项目、联系人或文档引用能提升跨 App 理解，因此属于 KG。
 
-Widget 创建/修改流程从 `controller.js` 提取 subscribe、query 和 mutate 使用，生成 `VerificationDiff`。缺失类型或属性通过 schema proposal 与用户确认处理；批准的 schema 变更和应用发布都有恢复快照。
+仅为了让 App 持续运行的数据——缓存、同步 cursor、UI 状态、job checkpoint、凭据和 provider 原始 payload——必须放在该 App 的 workspace 目录中。如果“这份数据存在”本身对上下文有价值，KG 可以保存一个带 URI 与摘要的 `Document` 或类似 `SoftwareApplication` 的引用，但不能复制私有 payload。非上下文 scope 的 schema proposal 会被拒绝。
 
-Mutation history 保存 forward/reverse actions。`MutationTicketManager` 可以展示预览、回滚、pin 或 consume ticket；回滚本身也经过后端检查。内部 `replace_node` 与 `restore_node` 只用于反向操作，不属于公开 Widget action。
+## 4. 查询与 Mutation
 
-## 5. 约束
+Widget 使用 `ambient.graph.subscribe(query, callback)` 注册实时查询。后端保存订阅，在 mutation 后重新执行有界查询并推送变化。Agent 只读查询通过 `graph_query_engine.execute_graph_query` 执行；`RouterContext` 生成有上限的快照，不把整张图塞进 prompt。
 
-- 所有公开节点写入必须符合已注册 schema 的属性名和类型。
-- Edge 端点必须存在，或在同一批 action 中先创建。
-- 前端声明和 manifest 的 `schema_refs` 只提供上下文，不是授权；最终校验始终在后端。
-- 不要直接写 SQLite，也不要生成已弃用的 `ambient.model` 或 `graph.json` 接口。
+公开 mutation action 为 `create_node`、`update_node_property`、`delete_node`、`create_edge` 和 `delete_edge`。`preflight_actions` 在不写库的情况下校验整个 batch；`apply_actions_atomic` 在一个 Neo4j transaction 中提交 batch、reverse actions、rollback ticket 和 effect ledger。相同幂等 key 携带相同输入时返回原结果，携带不同输入时会被拒绝。
+
+Widget 声明和 manifest `schema_refs` 只提供上下文，不构成授权，最终以后端本体校验为准。若请求的数据没有合适实体，schema alignment 流程必须先增长本体并获得批准，随后 record mutation 才能通过。
+
+## 5. 配置与迁移
+
+部署环境由 backend factory 选择 `GRAPH_DATABASE_BACKEND=neo4j`，并读取 `NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD` 与 `NEO4J_DATABASE`。根目录 Docker Compose 会启动 Neo4j 并为 backend 完成配置；Dev Container 的 Compose 配置也会启动隔离的 Neo4j sidecar，并通过容器网络连接开发工作区。`GRAPH_DATABASE_BACKEND=sqlite` 是显式的本地/测试适配器。
+
+设置 `GRAPH_MIGRATE_SQLITE=1` 后，系统会一次性导入已有的 `workspace/graph.db`。Importer 会先校验或注册旧实体定义，再导入记录与关系，并在 Neo4j 写入 migration marker，保证重启幂等。作为可恢复的数据源，原 SQLite 文件不会被删除。
+
+## 6. 验收标准
+
+- 新后端只暴露一个预置本体及其 core 实体清单。
+- 未知或抽象的实体 ID 不能用于 record。
+- 每个已存 context record 都恰好解析到一个本体实体。
+- 获批的属性扩展/新实体原子生效，并始终对齐到 `ambient-context`。
+- runtime-only schema proposal 会被拒绝，App 私有状态不会被复制到 KG。
+- Neo4j mutation 失败时，record、edge、history 与 effect entry 一起回滚。
+- SQLite 到 Neo4j 的迁移需显式开启、可重复执行且不会删除源文件。

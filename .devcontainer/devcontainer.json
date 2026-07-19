@@ -1,8 +1,10 @@
 {
   "name": "Ambient Agent Developer Environment",
-  "build": {
-    "dockerfile": "Dockerfile"
-  },
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "runServices": ["workspace", "neo4j"],
+  "workspaceFolder": "/workspaces/ambient-agent",
+  "shutdownAction": "stopCompose",
   "customizations": {
     "vscode": {
       "settings": {
@@ -33,7 +35,25 @@
       ]
     }
   },
-  "forwardPorts": [8000, 5173, 5174],
+  "forwardPorts": [8000, 5173, 5174, "neo4j:7474", "neo4j:7687"],
+  "portsAttributes": {
+    "8000": {
+      "label": "Ambient Agent API"
+    },
+    "5173": {
+      "label": "Ambient Agent"
+    },
+    "5174": {
+      "label": "Ambient Agent Docs"
+    },
+    "neo4j:7474": {
+      "label": "Neo4j Browser"
+    },
+    "neo4j:7687": {
+      "label": "Neo4j Bolt",
+      "onAutoForward": "silent"
+    }
+  },
   "postCreateCommand": "uv sync && cd frontend && npm install && cd ../docs && npm install",
   "remoteUser": "root"
 }

@@ -112,6 +112,8 @@ export default function App() {
 ---
 
 # 2. Database Schema and Types Constraints (CRITICAL)
-- **Schema Type Constraint**: Your JS database writes and reads must strictly match the types and fields documented in the system database schema. Key names, string vs integer vs boolean types must match exactly.
+- **Canonical Ontology Constraint**: Every KG record must use exactly one registered entity from the `ambient-context` ontology. Reuse an existing entity when its meaning matches; never invent an unapproved type in widget code.
+- **Schema Type Constraint**: Your JS database writes and reads must strictly match the fields and types documented for that ontology entity. Unknown properties must be added through the approved ontology-growth flow first.
+- **Data Placement Constraint**: Put only user-context facts in `ambient.graph`. App-only caches, sync cursors, UI state, credentials, job checkpoints, and raw provider payloads must stay in the App directory. A context-useful URI/summary reference may be stored instead of the private payload.
 - **DO NOT use ambient.model**: Do NOT use `ambient.model.get()`, `ambient.model.set()`, or `ambient.model.onChange()`. These are deprecated. Use `ambient.graph.subscribe` and `ambient.graph.mutate` exclusively.
 {% endraw %}

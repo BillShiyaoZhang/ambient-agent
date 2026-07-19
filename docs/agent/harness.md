@@ -107,10 +107,10 @@ stateDiagram-v2
     graph_preflight --> wait_graph_approval: normalized actions + preview
     wait_graph_approval --> graph_commit: approve
     wait_graph_approval --> failed: deny
-    graph_commit --> done: one SQLite transaction
+    graph_commit --> done: one Neo4j transaction
 ```
 
-preflight 不写数据库。commit 使用 `apply_actions_atomic()`，同时生成 rollback ticket/完整 reverse actions，并以 `run_id + phase` 写入 Graph effect ledger；worker 在 Graph transaction 提交后、Run checkpoint 前崩溃时，重试返回原结果而不会重复写。`/api/graph/mutate` 和 WebSocket rollback 也走这个 reducer，显式命令作为 durable approval interaction 记录。Multi-intent 先整体 preflight，再由 `multi_dispatch` 顺序作为 saga 推进；当前 phase 可重试时保留此前 effect 与 compensation，只有确定终止时才逆序补偿并把 cursor/results 回退到 saga 起点，避免报告已被撤销的结果。补偿不完整或效果未知时进入 `needs_attention`。
+preflight 不写数据库，并先确认每个 record 的 entity 已存在于唯一的 `ambient-context` 本体。commit 使用 `apply_actions_atomic()`，在一个 Neo4j transaction 中同时提交 context record/edge、rollback ticket、完整 reverse actions，并以 `run_id + phase` 写入 Graph effect ledger；worker 在 Graph transaction 提交后、Run checkpoint 前崩溃时，重试返回原结果而不会重复写。`/api/graph/mutate` 和 WebSocket rollback 也走这个 reducer，显式命令作为 durable approval interaction 记录。Multi-intent 先整体 preflight，再由 `multi_dispatch` 顺序作为 saga 推进；当前 phase 可重试时保留此前 effect 与 compensation，只有确定终止时才逆序补偿并把 cursor/results 回退到 saga 起点，避免报告已被撤销的结果。补偿不完整或效果未知时进入 `needs_attention`。
 
 ### Converse 与只读查询
 

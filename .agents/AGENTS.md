@@ -29,14 +29,15 @@ All feature work, behavior changes, API changes, schema changes, and bug fixes M
 - **Determinism and isolation**: Tests must not depend on execution order, production workspace data, local model availability, wall-clock timing, or a developer's environment. Use fixtures, temporary directories, stable IDs, and explicit async synchronization.
 - **Completion rule**: A task is incomplete until its new tests pass, existing tests remain green, and the documented acceptance criteria are satisfied.
 
-## 3. App Data Layer & SQLite Schema Alignment Rules
+## 3. App Data Layer & Canonical Ontology Rules
 
-- **Database Backend**: The system uses SQLite (`graph.db`) inside the workspace for graph storage. Do NOT use the legacy file-based JSON `graph.json` interface except for backward-compatible `save()` backups in test scripts.
-- **Strict Schema Enforcement**:
-  - All nodes and edges written to the database must conform to registered schema types and structures defined in the `graph_schemas` table (managed in `backend/graph_db.py`).
-  - Core schemas are `Task`, `Event`, and `Note`. Applications can register custom schemas.
+- **Database Backend**: Production/deployment knowledge-graph storage uses Neo4j. SQLite `graph.db` remains only as an explicit isolated-test adapter and one-time migration source. Do NOT use the legacy `graph.json` interface except for backward-compatible test exports/imports.
+- **Strict Ontology Enforcement**:
+  - Every context record must be classified by exactly one registered entity in the single `ambient-context` ontology. Unknown/abstract entities and unknown properties are rejected; grow the ontology before writing them.
+  - Core entities include `Thing`, `Task`, `Event`, `Note`, `Person`, `Organization`, `Project`, `Document`, `Place`, `Message`, and `SoftwareApplication`. Applications reuse or add aligned canonical entities rather than installing disconnected schemas.
+  - Only user-context facts belong in the KG. App caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay under the App workspace directory.
 - **Coding Guidelines (Widget JavaScript)**:
-  - Widgets must only read/write database properties conforming to verified schema property names and value types (e.g. String, Integer, Boolean, Number).
+  - Widgets must only read/write properties conforming to verified ontology entity names and value types (e.g. String, Integer, Boolean, Number).
   - Do NOT generate or use the deprecated `ambient.model` APIs. Always use `ambient.graph.subscribe` and `ambient.graph.mutate`.
 - **Testing Verification**:
   - Run `PYTHONPATH=. uv run pytest` after any updates affecting Graph Database, Query Engine, Schema Alignment, or WebSocket endpoints to verify compliance and prevent regression.

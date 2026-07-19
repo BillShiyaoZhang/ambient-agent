@@ -17,6 +17,11 @@ import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
 import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
 import { mergeIncomingMessage } from "./lib/messages";
+import {
+  createCustomOntologyEntity,
+  parseEquivalentOntologyIris,
+  type OntologyProposalEntity,
+} from "./lib/ontology";
 import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
@@ -171,13 +176,9 @@ function App() {
       id: string;
       reason: string;
       extended_properties: Record<string, string>;
+      data_scope?: "user_context";
     }>;
-    new_schemas: Array<{
-      id: string;
-      name: string;
-      description: string;
-      properties: Record<string, string>;
-    }>;
+    new_schemas: OntologyProposalEntity[];
   }
   interface SchemaApprovalRequest {
     request_id: string;
@@ -359,13 +360,29 @@ function App() {
     setEditedProposal(updated);
   };
 
-  const handleUpdateNewSchemaMeta = (schemaIndex: number, field: "name" | "description" | "id", val: string) => {
+  const handleUpdateNewSchemaMeta = (
+    schemaIndex: number,
+    field: "name" | "description" | "id" | "subclass_of" | "ontology_iri",
+    val: string,
+  ) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
+    const schema = updated.new_schemas[schemaIndex];
+    const previousId = schema.id;
     updated.new_schemas[schemaIndex][field] = val;
     if (field === "id") {
-      updated.new_schemas[schemaIndex].name = val.replace(/([A-Z])/g, ' $1').trim();
+      schema.name = val.replace(/([A-Z])/g, ' $1').trim();
+      if (schema.ontology_iri === `urn:ambient:ontology:${previousId}`) {
+        schema.ontology_iri = `urn:ambient:ontology:${val}`;
+      }
     }
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateEquivalentOntologyIris = (schemaIndex: number, value: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    updated.new_schemas[schemaIndex].equivalent_to = parseEquivalentOntologyIris(value);
     setEditedProposal(updated);
   };
 
@@ -379,18 +396,7 @@ function App() {
   const handleAddNewSchema = () => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
-    let counter = 1;
-    let newId = `CustomEntity${counter}`;
-    while (updated.new_schemas.some(s => s.id === newId)) {
-      counter++;
-      newId = `CustomEntity${counter}`;
-    }
-    updated.new_schemas.push({
-      id: newId,
-      name: `Custom Entity ${counter}`,
-      description: "Custom entity registered by user",
-      properties: { "title": "string" }
-    });
+    updated.new_schemas.push(createCustomOntologyEntity(updated.new_schemas.map((schema) => schema.id)));
     setEditedProposal(updated);
   };
 
@@ -943,16 +949,16 @@ function App() {
       />
 
 
-      {/* 🧠 App 数据 Schema 智能对齐 Modal */}
+      {/* 🧠 Canonical ontology alignment modal */}
       {pendingSchemaRequest && editedProposal && (
-        <SystemDialog open blocking size="large" title={language === "zh" ? "App 数据 Schema 对齐" : "App Schema Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 规划全局关联与数据结构。` : `Plan global relationships and data structures for app ${pendingSchemaRequest.app_id}.`}>
+        <SystemDialog open blocking size="large" title={language === "zh" ? "规范本体对齐" : "Canonical Ontology Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 对齐唯一的 ambient-context 本体；这里只保存用户上下文。` : `Align app ${pendingSchemaRequest.app_id} to the single ambient-context ontology; only user context belongs here.`}>
           <div className="system-dialog-body flex flex-col gap-4">
 
             {/* Reused Schemas list */}
             {editedProposal.reused_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
                 <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
-                  🔄 {language === "zh" ? "复用全局核心 Schema (推荐公共共享)" : "Reuse Global Core Schema (Recommended for Shared Data)"}
+                  🔄 {language === "zh" ? "复用规范本体实体（推荐）" : "Reuse Canonical Ontology Entity (Recommended)"}
                 </h4>
                 {editedProposal.reused_schemas.map((rs, sIdx) => (
                   <div key={rs.id} className="border border-cyan-500/20 bg-cyan-950/10 rounded-xl p-4 flex flex-col gap-3">
@@ -1018,11 +1024,11 @@ function App() {
               </div>
             )}
 
-            {/* New Schemas list */}
+            {/* New canonical ontology entities */}
             {editedProposal.new_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
                 <h4 className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
-                  ✨ {language === "zh" ? "注册全新 Schema (本应用特有概念)" : "Register New Schema (App-specific Concept)"}
+                  ✨ {language === "zh" ? "增长规范本体（全新概念）" : "Grow Canonical Ontology (New Concept)"}
                 </h4>
                 {editedProposal.new_schemas.map((ns, sIdx) => (
                   <div key={sIdx} className="border border-indigo-500/20 bg-indigo-950/10 rounded-xl p-4 flex flex-col gap-3">
@@ -1032,13 +1038,13 @@ function App() {
                         value={ns.id}
                         onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "id", e.target.value)}
                         className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-indigo-500 font-mono font-bold"
-                        placeholder="Schema ID (例: Pomodoro)"
+                        placeholder={language === "zh" ? "实体 ID（例如 Habit）" : "Entity ID (for example Habit)"}
                       />
                       <button
                         onClick={() => handleRemoveNewSchema(sIdx)}
                         className="text-red-400 hover:text-red-300 text-xs ml-auto"
                       >
-                        {language === "zh" ? "删除此实体" : "Delete Schema"}
+                        {language === "zh" ? "删除此实体" : "Delete Entity"}
                       </button>
                     </div>
 
@@ -1047,8 +1053,44 @@ function App() {
                       value={ns.description}
                       onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "description", e.target.value)}
                       className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-slate-300 placeholder-slate-500 w-full focus:outline-none focus:border-indigo-500"
-                      placeholder={language === "zh" ? "实体说明" : "Schema Description"}
+                      placeholder={language === "zh" ? "实体说明" : "Entity Description"}
                     />
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <label className="flex flex-col gap-1 text-[10px] text-slate-500 uppercase tracking-wide">
+                        {language === "zh" ? "父实体" : "Parent Entity"}
+                        <input
+                          type="text"
+                          value={ns.subclass_of || "Thing"}
+                          onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "subclass_of", e.target.value)}
+                          className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs normal-case text-slate-300 focus:outline-none focus:border-indigo-500"
+                          placeholder="Thing"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-[10px] text-slate-500 uppercase tracking-wide">
+                        {language === "zh" ? "规范 IRI" : "Canonical IRI"}
+                        <input
+                          type="text"
+                          value={ns.ontology_iri || `urn:ambient:ontology:${ns.id}`}
+                          onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "ontology_iri", e.target.value)}
+                          className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs normal-case text-slate-300 focus:outline-none focus:border-indigo-500"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="flex flex-col gap-1 text-[10px] text-slate-500 uppercase tracking-wide">
+                      {language === "zh" ? "等价外部 IRI（逗号分隔，可选）" : "Equivalent External IRIs (comma-separated, optional)"}
+                      <input
+                        type="text"
+                        value={(ns.equivalent_to || []).join(", ")}
+                        onChange={(e) => handleUpdateEquivalentOntologyIris(sIdx, e.target.value)}
+                        className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs normal-case text-slate-300 focus:outline-none focus:border-indigo-500"
+                        placeholder="https://schema.org/Action"
+                      />
+                    </label>
+                    <span className="self-start rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
+                      data_scope: user_context
+                    </span>
 
                     {/* Properties List */}
                     <div className="flex flex-col gap-2">
@@ -1106,7 +1148,7 @@ function App() {
             {/* 💬 自然语言微调反馈输入 */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
-                💬 {language === "zh" ? "使用自然语言调整 Schema 定义 (可选):" : "Adjust Schema via Natural Language (Optional):"}
+                💬 {language === "zh" ? "使用自然语言调整本体定义（可选）：" : "Adjust Ontology via Natural Language (Optional):"}
               </span>
               <textarea
                 value={schemaFeedback}
@@ -1126,7 +1168,7 @@ function App() {
                 onClick={handleAddNewSchema}
                 className="px-3 py-1.5 rounded-lg border border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10 transition-colors text-xs"
               >
-                + {language === "zh" ? "添加全新自定义 Schema" : "Add New Custom Schema"}
+                  + {language === "zh" ? "添加新的本体实体" : "Add Ontology Entity"}
               </button>
               
               <div className="flex items-center gap-3 ml-auto">
@@ -1147,7 +1189,7 @@ function App() {
                     onClick={() => handleResolveSchemaRequest("refine", schemaFeedback)}
                     className="px-4 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-500/30 text-indigo-300 text-xs transition-colors"
                   >
-                    {language === "zh" ? "调整 Schema (Refine)" : "Refine"}
+                    {language === "zh" ? "调整本体 (Refine)" : "Refine"}
                   </button>
                 )}
                 <button

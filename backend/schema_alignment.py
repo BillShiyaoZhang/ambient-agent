@@ -40,14 +40,16 @@ class SchemaAlignmentService:
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
         is_zh = language == "zh"
-        system_prompt = f"""You are a Graph Database Schema Alignment Architect.
-Your task is to analyze a request to build a widget application and match its data storage requirements against our existing Graph Database Schemas.
+        system_prompt = f"""You are a Canonical Ontology Alignment Architect.
+Your task is to analyze a widget request and match only its user-context facts against the single `ambient-context` ontology.
 
 ### Guidelines:
-1. **Reusability First**: If the application needs to store standard concepts like tasks, to-do lists, calendar events, notes, contacts, or documents, you MUST reuse the existing core schemas (e.g. 'Task', 'Event', 'Note') rather than creating duplicate concepts (e.g., do NOT create 'TodoItem' if 'Task' is suitable, do NOT create 'WorkoutSession' if it can be represented as an 'Event' with extended properties).
-2. **Property Extensions**: If you reuse an existing schema, you can propose extra custom fields under 'extended_properties'.
-3. **New Schemas**: Propose new schemas only if the concept is entirely new and does not overlap with any existing schemas.
-4. **Supported Data Types**: Property fields must use one of these types: "string", "integer", "number", "boolean".
+1. **One Ontology**: Every proposed entity belongs to `ambient-context`; never create an App-owned or disconnected ontology.
+2. **Context Data Only**: Do not propose entities or properties for caches, sync cursors, UI state, credentials, job checkpoints, or raw provider payloads. Those belong in the App directory. A URI/summary reference may be modeled only when it improves understanding of the user's context.
+3. **Reusability First**: If the application needs standard concepts like tasks, to-do lists, calendar events, notes, people, organizations, projects, places, messages, documents, or App data references, you MUST reuse the corresponding core entity (including `SoftwareApplication` for App references) rather than creating a duplicate.
+4. **Property Extensions**: If you reuse an existing entity, propose extra context fields under `extended_properties`.
+5. **New Entities**: Propose a new entity only if the concept is genuinely new. Attach it to an existing `subclass_of` parent (normally `Thing`) and provide established external `equivalent_to` IRIs when available.
+6. **Supported Data Types**: Property fields must use one of: "string", "integer", "number", "boolean".
 
 IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
 
@@ -60,7 +62,8 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "reason": "To represent individual items on the checklist",
       "extended_properties": {{
         "difficulty_level": "string"
-      }}
+      }},
+      "data_scope": "user_context"
     }}
   ],
   "new_schemas": [
@@ -71,7 +74,11 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "properties": {{
         "duration_minutes": "integer",
         "completed": "boolean"
-      }}
+      }},
+      "subclass_of": "Thing",
+      "ontology_iri": "https://example.org/PomodoroSession",
+      "equivalent_to": ["https://schema.org/Action"],
+      "data_scope": "user_context"
     }}
   ]
 }}
@@ -166,13 +173,15 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
         is_zh = language == "zh"
-        system_prompt = f"""You are a Graph Database Schema Alignment Architect.
-Your task is to refine an existing database schema proposal based on direct natural language feedback from the user.
+        system_prompt = f"""You are a Canonical Ontology Alignment Architect.
+Your task is to refine an `ambient-context` ontology proposal based on direct natural language feedback from the user.
 
 ### Guidelines:
 1. Maintain existing schema selections unless the user's feedback specifically requests modifications to them.
 2. Property fields must use one of these types: "string", "integer", "number", "boolean".
 3. Implement exactly what the user requests in their feedback.
+4. Keep all entities in the single canonical ontology and preserve `subclass_of`/`equivalent_to` alignments.
+5. Never model App-only runtime data; caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay in the App directory.
 
 IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
 
@@ -185,7 +194,8 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "reason": "To represent individual items on the checklist",
       "extended_properties": {{
         "difficulty_level": "string"
-      }}
+      }},
+      "data_scope": "user_context"
     }}
   ],
   "new_schemas": [
@@ -196,7 +206,11 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "properties": {{
         "duration_minutes": "integer",
         "completed": "boolean"
-      }}
+      }},
+      "subclass_of": "Thing",
+      "ontology_iri": "https://example.org/PomodoroSession",
+      "equivalent_to": ["https://schema.org/Action"],
+      "data_scope": "user_context"
     }}
   ]
 }}

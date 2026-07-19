@@ -76,11 +76,11 @@ def test_intent_plan_from_tool_call_args():
         "kind": "graph_query",
         "confidence": 0.81,
         "rationale": "user asked what's on calendar",
-        "query": {"type": "CalendarEvent"},
+        "query": {"type": "Event"},
     }
     p = IntentPlan.from_tool_call_args(args)
     assert p.kind == IntentKind.GRAPH_QUERY
-    assert p.query == {"type": "CalendarEvent"}
+    assert p.query == {"type": "Event"}
 
 
 def test_intent_plan_clarify_payload():

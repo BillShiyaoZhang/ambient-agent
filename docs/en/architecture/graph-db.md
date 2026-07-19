@@ -1,54 +1,92 @@
-# Graph Database
+# Canonical Ontology and Knowledge Graph
 
-`GraphDatabase` stores structured data shared by Widgets and the Agent in `workspace/graph.db` (SQLite + WAL). `graph.json` exists only for one-time legacy migration and is renamed to a backup afterward.
+The knowledge graph stores only facts that help the Agent understand the user's context. Neo4j is the primary runtime backend. `workspace/graph.db` remains a local SQLite compatibility adapter for isolated tests and one-time migration; it is not the deployed knowledge-graph backend.
 
-## 1. Tables and responsibilities
+## 1. One ontology
 
-| Table | Primary key | Responsibility |
-| --- | --- | --- |
-| `graph_schemas` | `id` | Schema name, description, property types, and core flag |
-| `graph_nodes` | `id` | Node type, JSON properties, namespace, and timestamp |
-| `graph_edges` | `(from_id, to_id, type)` | Directed relationship and JSON properties |
-| `graph_mutation_history` | `id` | Forward/reverse actions, pre-state snapshot, pin/consume state |
-| `graph_effects` | `idempotency_key` | Action input hash and committed result to prevent duplicate effects |
+The workspace has exactly one ontology, `ambient-context`. A schema exposed to Apps is an ontology entity in that canonical ontology, not an independent App-owned schema. Every entity has:
 
-Built-in core schemas are:
+- a stable `id`, name, description, and property types;
+- an `ontology_iri` and `source` identifying the vocabulary it came from;
+- zero or more `equivalent_to` correspondences for alignment with an established external ontology;
+- an optional `subclass_of` parent in `ambient-context`;
+- `is_core` and `abstract` lifecycle flags.
 
-- `Task`: `title`, `description`, `status`, and `due_date`, all strings;
-- `Event`: `title`, `description`, `start_time`, `end_time`, and `location`, all strings;
-- `Note`: `title`, `content`, and `tags`, all strings.
+The pre-built ontology starts from Schema.org concepts and contains an abstract `Thing` root plus common user-context entities: `Task`, `Event`, `Note`, `Person`, `Organization`, `Project`, `Document`, `Place`, `Message`, and `SoftwareApplication`. Existing Apps must reuse these entities when their meaning matches.
 
-Apps may propose schema extensions, but ordinary deletion flows cannot remove core schemas.
+Ontology growth is additive and atomic:
 
-## 2. Queries
+1. extend properties on an existing entity; or
+2. add an entity to `ambient-context`, optionally recording an external `ontology_iri`/`equivalent_to` mapping and a canonical `subclass_of` parent.
 
-Widgets register live queries with `ambient.graph.subscribe(query, callback)`. The backend `GraphSubscriptionManager` retains subscriptions, reruns queries after mutations, and pushes changes. The returned unsubscribe function removes both the persistent WebSocket message and browser listener.
+An entity from another vocabulary is never installed as a second, disconnected ontology. Missing parents, attempts to instantiate an abstract entity, unregistered entity IDs, unsupported property types, and unknown properties are rejected. Core entities cannot be removed by ordinary flows.
 
-Agent read-only queries execute through `graph_query_engine.execute_graph_query`. Before routing, `RouterContext` creates a bounded `GraphSnapshot` so the entire database is not placed in the prompt.
+## 2. Knowledge-graph model
 
-## 3. Mutations
+```mermaid
+erDiagram
+    ONTOLOGY ||--|{ ONTOLOGY_ENTITY : contains
+    ONTOLOGY_ENTITY ||--o{ CONTEXT_RECORD : classifies
+    CONTEXT_RECORD ||--o{ GRAPH_EDGE : source
+    CONTEXT_RECORD ||--o{ GRAPH_EDGE : target
 
-Public actions are:
+    ONTOLOGY {
+        string id PK
+        string version
+    }
+    ONTOLOGY_ENTITY {
+        string id PK
+        string ontology_iri
+        string source
+        json equivalent_to
+        string subclass_of
+        json properties
+        bool abstract
+    }
+    CONTEXT_RECORD {
+        string id PK
+        string entity_id FK
+        json properties
+        string namespace
+    }
+    GRAPH_EDGE {
+        string from_id FK
+        string to_id FK
+        string type
+        json properties
+    }
+```
 
-- `create_node`
-- `update_node_property`
-- `delete_node`
-- `create_edge`
-- `delete_edge`
+Each `ContextRecord` has exactly one `INSTANCE_OF` relationship to one registered `OntologyEntity`; it does not acquire one Neo4j label per type. This fixed-label model avoids dynamic Cypher and makes the one-entity invariant explicit. A record is upserted only after its entity and properties validate. Edge endpoints must already exist or be created earlier in the same mutation batch.
 
-`preflight_actions` resolves temporary node dependencies and checks endpoints and schema types. `apply_actions_atomic` commits the whole action batch in one transaction and creates reverse actions. Any action failure rolls back the entire batch.
+Neo4j also stores internal effect and rollback metadata so a graph mutation and its idempotency result commit in the same ACID transaction. Those metadata nodes are infrastructure state and are excluded from knowledge-graph queries.
 
-Widget HTTP mutations automatically include a `widget:<app-id>:<uuid>` idempotency key. The durable workflow uses its own stable effect keys. The same key with the same input returns the committed result; the same key with different input is rejected.
+## 3. Data placement
 
-## 4. Schema verification and rollback
+The KG accepts only `user_context` data. Facts such as a user's task, meeting, project, contact, or document reference belong in the KG because they improve cross-App understanding.
 
-Widget create/modify flows extract subscribe, query, and mutate usage from `controller.js` to produce a `VerificationDiff`. Missing types or properties are handled through a schema proposal and user confirmation. Approved schema changes and app publication both retain recovery snapshots.
+Data needed only to keep an App running—cache entries, sync cursors, UI state, job checkpoints, credentials, and provider payloads—belongs under that App's workspace directory. If its existence is useful context, the KG may contain a `Document` or `SoftwareApplication`-style reference with a URI and summary, but not the private payload. Schema proposals with a non-context data scope are rejected.
 
-Mutation history stores forward and reverse actions. `MutationTicketManager` can present a preview, roll back, pin, or consume a ticket; rollback is itself checked by the backend. Internal `replace_node` and `restore_node` operations are only for reverse actions and are not public Widget actions.
+## 4. Queries and mutations
 
-## 5. Constraints
+Widgets register live queries with `ambient.graph.subscribe(query, callback)`. The backend retains subscriptions, reruns bounded queries after mutations, and pushes changes. Agent read-only queries execute through `graph_query_engine.execute_graph_query`; `RouterContext` creates a bounded snapshot rather than placing the whole graph in a prompt.
 
-- Every public node write must match registered schema property names and types.
-- Edge endpoints must exist or be created earlier in the same action batch.
-- Frontend declarations and manifest `schema_refs` provide context, not authorization; the backend performs final validation.
-- Do not write SQLite directly or generate the deprecated `ambient.model` or `graph.json` interfaces.
+Public mutation actions are `create_node`, `update_node_property`, `delete_node`, `create_edge`, and `delete_edge`. `preflight_actions` validates the complete batch without writing. `apply_actions_atomic` commits the batch, reverse actions, rollback ticket, and effect-ledger entry in one Neo4j transaction. A repeated idempotency key with identical input returns the original result; reusing it with different input is rejected.
+
+Widget declarations and manifest `schema_refs` provide context, not authorization. Backend ontology validation is final. If a requested record has no suitable entity, the schema-alignment flow must grow the ontology and receive approval before the record mutation can pass.
+
+## 5. Configuration and migration
+
+The backend factory selects `GRAPH_DATABASE_BACKEND=neo4j` for deployment and reads `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE`. The root Docker Compose stack provisions Neo4j and configures the backend accordingly; the Dev Container Compose configuration also provisions an isolated Neo4j sidecar and connects the development workspace over the container network. `GRAPH_DATABASE_BACKEND=sqlite` is the explicit local/test adapter.
+
+Setting `GRAPH_MIGRATE_SQLITE=1` imports an existing `workspace/graph.db` once. The importer validates or registers legacy entity definitions before records, preserves IDs and relationships, and records a Neo4j migration marker so restarts are idempotent. The SQLite file is left intact as a recoverable source.
+
+## 6. Acceptance criteria
+
+- A fresh backend exposes one pre-built ontology and its core entity inventory.
+- Unknown or abstract entity IDs cannot be used for records.
+- Every stored context record resolves to exactly one ontology entity.
+- An approved extension/new entity is visible to subsequent writes atomically and remains aligned to `ambient-context`.
+- Runtime-only schema proposals are rejected and App-private state is not copied into the KG.
+- Neo4j mutation failure rolls back records, edges, history, and the effect entry together.
+- SQLite-to-Neo4j migration is opt-in, repeatable, and does not delete the source.

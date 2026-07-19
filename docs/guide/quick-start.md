@@ -16,6 +16,8 @@ docker compose up --build
 
 打开 `http://localhost:5173`。后端 API 位于 `http://localhost:8000`。
 
+Docker Compose 也会为规范知识图谱启动 Neo4j，其 Browser 位于 `http://localhost:7474`。在非纯本机环境暴露服务前请修改 `NEO4J_PASSWORD`。如果需要导入已有的 `workspace/graph.db`，请在一次启动中设置 `GRAPH_MIGRATE_SQLITE=1`，完成后再改回 `0`。
+
 `.env` 只保存 Coding Agent 等进程级参数。LLM Provider、密钥、默认模型和 OpenCode/Codex 选择在应用的“模型与 Provider”界面配置；密钥写入被 Git 忽略的 `workspace/llm/secrets.json`，不会写入 `.env`。
 
 Codex 不安装在 Docker 容器中。要复用本机 Codex 登录和 ChatGPT 订阅：
@@ -30,8 +32,8 @@ Bridge 默认仅监听 `127.0.0.1:8765`，使用 Bearer token 鉴权，并且只
 ## 方式二：Dev Container
 
 1. 用 VS Code 打开仓库并执行 **Dev Containers: Reopen in Container**。
-2. `postCreateCommand` 会运行 `uv sync`，并安装 `frontend/` 与 `docs/` 的 npm 依赖。
-3. 分别启动后端和前端：
+2. Dev Containers 会用 `.devcontainer/docker-compose.yml` 同时启动开发工作区和 Neo4j sidecar；`postCreateCommand` 会运行 `uv sync`，并安装 `frontend/` 与 `docs/` 的 npm 依赖。
+3. 在开发容器终端中分别启动后端和前端：
 
 ```bash
 uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
@@ -42,7 +44,9 @@ cd frontend
 npm run dev
 ```
 
-Dev Container 已声明转发 8000、5173 和 5174 端口；如果 IDE 未自动转发，请在 Ports 面板手动添加。
+开发工作区已经设置 `GRAPH_DATABASE_BACKEND=neo4j`，并通过容器网络地址 `bolt://neo4j:7687` 连接 sidecar。Neo4j 的开发凭据是 `neo4j` / `ambient-agent-dev`，数据保存在独立的 Compose volume 中；这些凭据只适合本机开发。
+
+Dev Container 已声明转发工作区端口 8000、5173、5174，以及 Neo4j Browser/Bolt 端口 7474、7687。Browser 位于 `http://localhost:7474`；如果 IDE 未自动转发，请在 Ports 面板手动添加。关闭 Dev Container 会停止这组 Compose 服务，但不会删除 Neo4j 数据卷。
 
 ## 方式三：本机开发
 
@@ -51,6 +55,8 @@ uv sync
 npm --prefix frontend install
 npm --prefix docs install
 ```
+
+本地测试显式使用 SQLite 兼容适配器。若要运行接近生产的本机后端，请先启动 Neo4j，并在启动 Uvicorn 前设置 `GRAPH_DATABASE_BACKEND=neo4j`、`NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD` 与 `NEO4J_DATABASE`。
 
 然后使用与 Dev Container 相同的后端和前端命令。若要预览文档：
 

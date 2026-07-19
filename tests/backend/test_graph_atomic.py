@@ -56,7 +56,7 @@ def test_schema_effect_ledger_preserves_original_undo_snapshot(tmp_path):
     db = GraphDatabase(str(tmp_path))
     proposal = {
         "reused_schemas": [
-            {"id": "Task", "reason": "test", "extended_properties": {"priority": "string"}}
+            {"id": "Task", "reason": "test", "extended_properties": {"effort": "integer"}}
         ],
         "new_schemas": [],
     }
@@ -65,10 +65,10 @@ def test_schema_effect_ledger_preserves_original_undo_snapshot(tmp_path):
     replay = db.apply_schema_proposal_atomic(proposal, idempotency_key="run-1:schema")
 
     assert replay == first
-    assert "priority" in db.get_schema("Task")["properties"]
+    assert "effort" in db.get_schema("Task")["properties"]
     db.restore_schema_snapshot(first["snapshot"], idempotency_key="run-1:schema")
-    assert "priority" not in db.get_schema("Task")["properties"]
+    assert "effort" not in db.get_schema("Task")["properties"]
 
     retried = db.apply_schema_proposal_atomic(proposal, idempotency_key="run-1:schema")
-    assert "priority" in db.get_schema("Task")["properties"]
+    assert "effort" in db.get_schema("Task")["properties"]
     assert retried["snapshot"] == first["snapshot"]

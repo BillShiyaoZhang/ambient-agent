@@ -131,7 +131,7 @@ async def test_route_ollama_function_call_parse(monkeypatch):
                                 {
                                     "kind": "graph_query",
                                     "rationale": "user asks what's today",
-                                    "query": {"type": "CalendarEvent"},
+                                    "query": {"type": "Event"},
                                 }
                             ),
                         },
