@@ -1,159 +1,87 @@
-# Widget (Apps) 架构设计
+# Widget 与应用中心
 
-在 Ambient Agent 中，**Widget（又称 Apps）** 是由大语言模型动态生成并在前端 Canvas 工作区中挂载运行的微型交互卡片。为了在保障系统安全的同时提供极高的开发灵活性与响应速度，Widget 采用了 **React + HTM 统一渲染架构**，通过隔离沙箱和响应式通信链路进行高效协作。
+“Widget”指可在工作区中渲染的 React UI；“App”指带有持久 manifest 和 controller 产物的 Widget；“Capability”指应用中心中可调用但不一定已有 UI 的 skill、MCP 或其他后端能力。
 
-## 0. 统一 React + HTM 渲染模式
+## 1. App 产物
 
-系统全面采用统一的 **React 组件 + HTM 模板** 渲染方案。大模型生成的 Widget XML 采用如下标准格式：
+每个应用位于 `workspace/apps/<app-id>/`：
 
-```xml
-<ambient-widget>
-  <js-script>
-    const { useState, useEffect } = ambient.react;
-    const { Card, Button, Text, Column } = ambient.components;
-
-    export default function App() {
-      const [count, setCount] = useState(0);
-      
-      return ambient.html`
-        <${Card} title="计数器 App">
-          <${Column} gap="12px">
-            <${Text} text="当前计数: ${count}" />
-            <${Button} label="增加" onClick=${() => setCount(count + 1)} />
-          <//>
-        <//>
-      `;
-    }
-  </js-script>
-</ambient-widget>
+```text
+<app-id>/
+├── manifest.json      # 必需：身份、版本、intent、schema 和 backend 信息
+├── controller.js      # 必需：默认导出的 React 组件
+└── README.md          # 可选：应用说明
 ```
 
-> [!NOTE]
-> 历史版本的 HTML 模板、Scoped CSS 文件以及 A2UI JSON 声明式布局已废弃并全部移除。
+旧的 `index.html` 和 `style.css` 只作为兼容源文件被识别；当前生成路径只允许 `controller.js`、`manifest.json` 和 `README.md`，不应再新建三文件 HTML/CSS/JS Widget。
 
-### 核心特性
-1. **动态编译**: 前端通过嵌入的 `@babel/standalone` 在浏览器端动态转译 ES 模块化的 Widget 脚本。
-2. **HTM 声明式模板**: 利用轻量级的 `htm` 库（绑定在 `ambient.html`），以原生的 JS 模板字符串语法编写 JSX，免去了复杂的编译流水线。
-3. **预置优质组件**: 前端注入了统一设计语言的组件库（`ambient.components`），确保生成卡片的外观和系统主题保持高度一致，具备极佳的高级质感与响应式设计。
-
----
-
-## 1. 核心层解耦设计
-
-Widget 采用典型的 **UI (View) - Controller (Logic) - Data (Model)** 架构：
-
-```mermaid
-graph TB
-    subgraph SandboxWidget ["SandboxWidget (Frontend)"]
-        direction LR
-        UI["UI (View)<br/>ambient.html Template"]
-        Ctrl["Controller (Logic)<br/>Dynamic React Component"]
-        Data["Data (Model)<br/>React State & Graph Data"]
-
-        Ctrl --> UI
-        Ctrl --> Data
-    end
-
-    BE["Backend Server"]
-
-    Ctrl -- "HTTP POST (Mutate)" --> BE
-    BE -- "WebSocket (Subscribe)" --> Data
-```
-
-### A. UI 层 (View)
-- Widget 的界面完全通过 `ambient.html` 语法描述，使用预置组件库（如 `Card`, `Button`, `Text`, `Column`, `Row`, `TextField`, `Checkbox`, `List`, `Table`）。
-- 样式遵循系统的 Vanilla CSS 规范设计，Widget 开发者可以通过组件的 props 直接控制边距、对齐和主题表现。
-
-### B. Controller 层 (Logic)
-- Widget 逻辑以标准的 React 函数组件（需 `export default` 导出）运行，可以使用所有的 React Hooks（通过 `ambient.react` 注入，包括 `useState`, `useEffect`, `useMemo`, `useRef` 等）。
-- 事件处理函数直接绑定在 React 组件的事件属性上（例如 `onClick=${handleClick}`），无需执行繁琐的手动 DOM 操作。
-
-### C. Data 层 (Model)
-- **局部状态**: 使用标准的 `useState` 或 `useReducer` 进行卡片内部轻量状态管理。
-- **持久化与共享数据**: 通过后端 SQLite 提供支撑。使用 `ambient.graph.subscribe` 订阅实体图的变化；使用 `ambient.graph.mutate` 提交原子事务变更。
-- **工具链集成**: 使用 `ambient.mcp.callTool` 直接调用系统注册的 MCP 工具。
-
----
-
-## 2. 三层协作与响应式数据流
-
-Widget 的核心优势在于 **“响应式订阅 (Reactive Subscription)”**。组件不需要主动轮询数据库，而是依靠 WebSocket 管道与后端保持实时一致。
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant UI as UI (HTM Template)
-    participant Ctrl as React Component (Logic)
-    participant SDK as ambient SDK
-    participant BE as 后端服务 (FastAPI)
-    participant DB as 图数据库 (SQLite)
-
-    Note over UI, SDK: 阶段 1：页面加载与数据订阅
-    Ctrl->>SDK: ambient.graph.subscribe({ type: "Task" })
-    SDK->>BE: WebSocket: graph_subscribe (Subscription ID)
-    BE->>DB: 注册触发器并查询 Task 列表
-    DB-->>BE: 返回首屏数据
-    BE-->>SDK: WebSocket 推送数据集
-    SDK-->>Ctrl: 触发订阅回调 -> 调用 setState
-    Ctrl->>UI: React 触发重绘，展示数据列表
-
-    Note over UI, SDK: 阶段 2：用户操作与数据变更
-    UI->>Ctrl: 点击“完成”按钮 -> 触发事件处理器
-    Ctrl->>SDK: ambient.graph.mutate([ { action: "update_node", ... } ])
-    SDK->>BE: HTTP POST: /api/graph/mutate
-    BE->>DB: 事务执行变更，写入数据库
-    DB-->>BE: 变更成功
-    BE->>BE: 变更事件触发器捕获，检索关联订阅
-    BE-->>SDK: WebSocket 广播最新数据 (自动推流)
-    SDK-->>Ctrl: 触发订阅回调 -> 调用 setState
-    Ctrl->>UI: React 自动重新渲染最新的 UI
-```
-
----
-
-## 3. 开发原则与最佳实践
-
-为了保证 Widget 的健壮度与系统整体性能，开发与生成 Widget 时应遵循以下基本原则：
-
-1. **单向数据流与零手动拉取**: 
-   - 严禁在 Widget 中使用 `setInterval` 轮询后端 API 来同步数据。
-   - 必须使用 `ambient.graph.subscribe` 建立起持久的响应式链路。数据源的变化会自动向下流动，驱动 UI 重新渲染。
-
-2. **声明式 UI 渲染**:
-   - 严禁使用任何 `document.querySelector` 或 `root.querySelector` 等命令式 DOM 操作去修改视图。所有交互和数据渲染都必须通过 React 状态管理。
-
-3. **使用标准组件库**:
-   - 优先使用 `ambient.components` 导出的高质量组件，确保系统设计系统（Design System）的统一性和交互的高级质感。
-
----
-
-## 4. 应用中心与外部能力
-
-应用中心同时支持两种宿主模式：没有 App 打开时以 `home` 模式成为工作区主页；已有 App 时以 `overlay` 模式覆盖当前工作区。打开 App 会创建全局 Canvas V3 窗口，默认最大化。多个 App 保持挂载，窗口最大化、恢复、吸附和切换不会重新创建其 React 根节点。
-
-Canvas V3 使用归一化窗口边界，在不同尺寸设备上恢复后重新约束到可视区域。旧版 `pinned_ids/widget_spans` 在读取时迁移，聊天 session 切换不改变全局 App 工作区。
-
-应用中心会统一展示生成式 App、外部 Skill 和 MCP。外部安装器通过 `PUT /api/capabilities/{catalog_id}` 注册版本化能力描述；描述只包含展示信息、输入 Schema，以及指向既有后端 App 的非敏感调用引用。命令、环境变量和凭证继续保存在后端 App manifest 中，不会下发到目录接口。
+Manifest V1 的必填字段为：
 
 ```json
 {
   "manifest_version": 1,
-  "id": "calendar-tools",
-  "kind": "mcp",
-  "provider": "Acme",
-  "title": "Calendar Tools",
-  "description": "创建并管理日历事件。",
-  "version": "1.0.0",
-  "tags": ["calendar", "events"],
-  "input_schema": { "type": "object" },
-  "invocation": {
-    "type": "mcp_tool",
-    "app_id": "calendar-backend",
-    "tool_name": "events"
-  }
+  "id": "task-board",
+  "title": "Task Board",
+  "description": "Manage tasks",
+  "app_version": "1.0.0",
+  "intents": ["manage tasks"],
+  "schema_refs": ["Task"]
 }
 ```
 
-生成的界面通过 `ambient.capabilities.invoke(catalogId, input)` 调用能力，后端负责解析适配器并继续执行既有的权限确认与审计流程。`GET /api/app-store` 返回统一目录和同步布局；`PUT /api/app-store/layout` 使用 revision 保护，多端发生并发修改时返回 `409`。
+`id` 必须与目录名相同并使用小写 kebab-case。可选 `backend_type` 为 `code`、`agent` 或 `mcp`；MCP/agent 应分别提供对应配置。
 
-宿主主题通过语义 CSS tokens 传递给标准组件，并通过 `ambient.theme` 暴露给 Widget。自定义 Widget 可以读取主题，但宿主不会重写其硬编码颜色。
+## 2. Controller 加载
+
+`controller.js` 默认导出一个 React 组件。宿主使用 `@babel/standalone` 转译模块，再通过 `new Function("exports", "React", "ambient", ...)` 执行并渲染导出组件。
+
+```javascript
+export default function TaskBoard({ ambient }) {
+  const { useEffect, useState } = ambient.react;
+  const { Card, Text } = ambient.components;
+  const [tasks, setTasks] = useState([]);
+
+  useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
+  return ambient.html`<${Card} title="Tasks"><${Text} text=${`${tasks.length} items`} /></${Card}>`;
+}
+```
+
+运行时提供 `ambient.graph`、`ambient.runs`、`ambient.capabilities`、`ambient.mcp`、React hooks、HTM 和标准组件。完整接口见 [ambient SDK](/widgets/sdk.md)。
+
+## 3. 创建、修改与发布
+
+```mermaid
+flowchart LR
+    Request[用户请求] --> Run[internal_agent Run]
+    Run --> Plan[路由与计划]
+    Plan --> Confirm[必要时确认]
+    Confirm --> Stage[OpenCode staging]
+    Stage --> Verify[controller 与 schema 校验]
+    Verify --> Promote[原子提升为 live app]
+    Promote --> Store[应用中心 / 工作区]
+```
+
+- 新应用和修改都先写 staging，live 目录在批准与校验前保持不变。
+- controller 必须包含默认导出，通过大小、UTF-8、模块语法与 host-capability 规则检查。
+- `SchemaVerificationService` 从 controller 提取 Graph 使用，与有效 schema 比较；需要扩展 schema 时先生成 proposal 并走确认流程。
+- 发布以 artifact hash 和 Run effect 记录保护；恢复时会验证 staged/live 产物，避免重复或错误提升。
+
+## 4. 应用中心
+
+`GET /api/app-store` 合并三类条目：
+
+- `generated_app`：已有 manifest 和 UI 的工作区应用；
+- `skill`：BackendManager 发现的 skill 能力；
+- `mcp`：MCP server/tool 能力。
+
+条目状态为 `ready`、`needs_ui`、`generating` 或 `unavailable`。没有 UI 的 capability 可以通过 `/api/capabilities/{catalog_id}/ui` 启动持久 UI 生成 Run；生成成功后将 capability 与新 app 绑定。
+
+应用中心布局使用带 `revision` 的持久记录。`PUT /api/app-store/layout` 发现并发 revision 冲突时返回 `409`，客户端必须重新加载后再提交。
+
+## 5. 数据与能力边界
+
+- Widget 不拥有独立数据模型；持久业务数据使用 Graph schema。
+- `ambient.graph.mutate` 由后端预检并原子写入；不要使用已弃用的 `ambient.model`。
+- `ambient.capabilities.invoke` 和 `ambient.runs.start` 创建持久 Run，不应绕过确认和 effect 记录。
+- `ambient.mcp.callTool` 仍由后端按 manifest、tool identity 和权限策略校验。
+- controller 与宿主同 realm 执行，只应加载可信代码。详见[运行边界](/widgets/sandbox.md)。

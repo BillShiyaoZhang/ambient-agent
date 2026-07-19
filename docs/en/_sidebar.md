@@ -1,25 +1,26 @@
-- **Getting Started**
+- **Start Here**
   - [Introduction](/en/guide/introduction.md)
   - [Quick Start](/en/guide/quick-start.md)
+  - [Project Structure](/en/architecture/project-structure.md)
 
-- **Core Architecture**
-  - [System Overview](/en/architecture/overview.md)
-  - [Widget Apps Architecture](/en/architecture/apps.md)
-  - [Background Runs and Runtimes](/en/architecture/runs.md)
-  - [Class Diagrams](/en/architecture/uml.md)
-  - [Graph Database (GraphDB)](/en/architecture/graph-db.md)
-
-- **Widget Development**
-  - [XML Protocol](/en/widgets/guide.md)
-  - [Sandbox Isolation](/en/widgets/sandbox.md)
-  - [ambient SDK Reference](/en/widgets/sdk.md)
+- **Understand the System**
+  - [System and Request Flow](/en/architecture/overview.md)
+  - [Workspace UX](/en/architecture/workspace-ux.md)
+  - [Widgets and App Center](/en/architecture/apps.md)
+  - [Durable Runs and Runtimes](/en/architecture/runs.md)
+  - [Graph Database](/en/architecture/graph-db.md)
+  - [Backend UML](/en/architecture/uml.md)
 
 - **Agent Engine**
-  - [Intent Router (IntentRouter)](/en/agent/intent-router.md)
-  - [DAG Pipeline](/en/agent/dag-pipeline.md)
+  - [Intent Router](/en/agent/intent-router.md)
   - [Agent Harness](/en/agent/harness.md)
 
-- **Integrations & Security**
-  - [MCP Tools Integration](/en/integrations/mcp.md)
+- **Widget Development**
+  - [Widget Format and Lifecycle](/en/widgets/guide.md)
+  - [ambient SDK](/en/widgets/sdk.md)
+  - [Runtime Boundary](/en/widgets/sandbox.md)
+
+- **Models, Tools, and Security**
   - [LLM Providers and Models](/en/integrations/llm-providers.md)
-  - [Permissions & Audit](/en/integrations/permissions.md)
+  - [MCP Integration](/en/integrations/mcp.md)
+  - [Permissions and Audit](/en/integrations/permissions.md)

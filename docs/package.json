@@ -4,7 +4,8 @@
   "description": "Ambient Agent Documentation Site",
   "type": "module",
   "scripts": {
-    "dev": "docsify serve . --port 5174"
+    "dev": "docsify serve . --port 5174",
+    "verify": "uv run python ../scripts/verify_docs.py"
   },
   "devDependencies": {
     "docsify-cli": "^4.4.4"

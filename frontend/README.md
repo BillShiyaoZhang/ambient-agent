@@ -1,32 +1,27 @@
-# React + TypeScript + Vite
+# Ambient Agent Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The frontend is a React 19 + TypeScript + Vite app. It implements the App-first workspace, App Center, floating chat, task/runtime surfaces, LLM settings, and the React/HTM Widget host.
 
-Currently, two official plugins are available:
+## Commands
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev
+npm run lint
+npm run test
+npm run build
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+The development server uses port 5173 and talks to the backend on port 8000 at the same hostname.
+
+## Source map
+
+- `src/App.tsx`: top-level session, Canvas, Widget, and dialog coordination.
+- `src/components/AppWorkspace.tsx`: system chrome and window interactions.
+- `src/components/AppCenter.tsx`: unified app/skill/MCP catalog.
+- `src/components/SandboxWidget.tsx`: controller transpilation and `ambient` API injection.
+- `src/components/TaskDrawer.tsx`: Run, interaction, and runtime UI.
+- `src/services/`: Run, WebSocket, LLM, theme, and localization clients.
+- `src/lib/windowManager.ts`: Canvas V3 migration and geometry.
+
+See [the frontend architecture documentation](../docs/en/architecture/project-structure.md) and [Widget runtime boundary](../docs/en/widgets/sandbox.md).

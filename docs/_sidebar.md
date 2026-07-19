@@ -1,25 +1,26 @@
-- **开始使用**
+- **从这里开始**
   - [项目介绍](/guide/introduction.md)
   - [快速开始](/guide/quick-start.md)
+  - [项目结构](/architecture/project-structure.md)
 
-- **核心架构**
-  - [系统概述](/architecture/overview.md)
-  - [Widget 应用架构](/architecture/apps.md)
-  - [后台 Run 与 Runtime](/architecture/runs.md)
-  - [类图设计](/architecture/uml.md)
+- **理解系统**
+  - [系统与请求链路](/architecture/overview.md)
+  - [工作区交互](/architecture/workspace-ux.md)
+  - [Widget 与应用中心](/architecture/apps.md)
+  - [持久 Run 与 Runtime](/architecture/runs.md)
   - [图数据库](/architecture/graph-db.md)
-
-- **动态卡片开发**
-  - [协议说明](/widgets/guide.md)
-  - [沙箱隔离机制](/widgets/sandbox.md)
-  - [接口参考 (SDK)](/widgets/sdk.md)
+  - [后端 UML](/architecture/uml.md)
 
 - **智能体引擎**
   - [意图路由](/agent/intent-router.md)
-  - [任务流水线](/agent/dag-pipeline.md)
-  - [智能体调度中心](/agent/harness.md)
+  - [Agent Harness](/agent/harness.md)
 
-- **集成与安全**
-  - [工具集成 (MCP)](/integrations/mcp.md)
+- **Widget 开发**
+  - [Widget 格式与生命周期](/widgets/guide.md)
+  - [ambient SDK](/widgets/sdk.md)
+  - [运行边界](/widgets/sandbox.md)
+
+- **模型、工具与安全**
   - [LLM Provider 与模型](/integrations/llm-providers.md)
-  - [权限与安全审计](/integrations/permissions.md)
+  - [MCP 工具集成](/integrations/mcp.md)
+  - [权限与审计](/integrations/permissions.md)

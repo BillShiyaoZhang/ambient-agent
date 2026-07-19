@@ -1,10 +1,10 @@
 # Ambient Agent
 
-> 开源、自托管的个人 AI 助理框架
+> 开源、自托管、以应用工作区为核心的个人 AI 助理
 
-- 优先使用富图形交互界面 (Widget GUI) 展示 AI 输出
-- 极致的数据隐私保护，本地/离线友好
-- 实时多设备同步与传输审计
+- 持久化 Agent Run，可取消、恢复和审计
+- React/HTM Widget、图数据和桌面式窗口工作区
+- 可配置的本地或云端 LLM Provider
 
-[开始使用](#/guide/introduction)
-[GitHub 仓库](https://github.com/BillShiyaoZhang/ambient-agent)
+[开始阅读](/guide/introduction.md)
+[GitHub](https://github.com/BillShiyaoZhang/ambient-agent)

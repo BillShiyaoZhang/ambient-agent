@@ -1,3 +1,3 @@
 # Ambient Agent Documentation
 
-Please visit [Get Started](guide/introduction.md) to read the full English documentation.
+Start with the [Introduction](/en/guide/introduction.md). Contributors should continue with [Project Structure](/en/architecture/project-structure.md) and [System and Request Flow](/en/architecture/overview.md).

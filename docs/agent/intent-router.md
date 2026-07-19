@@ -1,50 +1,65 @@
 # 意图路由
 
-在 Ambient Agent 中，用户的每一次对话输入在被送入大语言模型响应前，都需要通过**两层 LLM 意图路由结构**进行精准分类与编排，以确定接下来该执行普通的文本交谈，还是触发系统级的图数据库写入或前端 Widget 卡片生成。
+`IntentRouter` 把用户输入转换为结构化 `IntentPlan`。它决定 durable workflow 走哪条 phase 路径，但不直接执行工具、写 Graph 或发布应用。
 
-## 1. 意图分类规划图
+## 1. 路由上下文
+
+路由输入由以下信息组成：
+
+- 当前用户消息、会话语言和模型快照；
+- 已安装应用的 manifest、intent 与 schema 引用；
+- 有上限的 `GraphSnapshot`；
+- 可用 capability 摘要；
+- fast model（未配置时回退到会话 primary model）。
+
+模型必须通过 `classify_intent` tool schema 返回结构化参数。解析失败、未知 kind、低置信或不安全的旧分类会降级为 `clarify`，不会猜测并执行副作用。
+
+## 2. 顶层 IntentKind
+
+| Kind | 用途 | 主要后续路径 |
+| --- | --- | --- |
+| `converse` | 普通对话和有界只读 tool loop | Converse phase |
+| `graph_query` | 只读结构化查询 | Graph query phase |
+| `graph_mutation` | 一批明确 Graph action | preflight → 必要确认 → atomic apply |
+| `widget_create` | 创建新应用 | plan → confirm → staging → verify → publish |
+| `widget_modify` | 修改已有应用 | plan → confirm → staging → verify → publish |
+| `multi_intent` | 有顺序的多个子动作 | 全量预检后按 saga step 执行 |
+| `plan_and_act` | 需要显式计划的复合动作 | 与 durable multi-step 路径汇合 |
+| `clarify` | 缺少必要信息或无法安全分类 | 创建用户 interaction 或澄清消息 |
+
+`IntentPlan` 还包含 `confidence`、`rationale`，并按 kind 使用 `app_id`、`instruction`、`actions`、`query`、`sub_intents` 或 `clarification_*` 字段。
+
+## 3. SubIntent
+
+`multi_intent` 与 `plan_and_act` 可以包含：
+
+- `graph_mutation`
+- `graph_query`
+- `widget_create`
+- `widget_modify`
+- `widget_extend_schema`
+- `widget_fix_code`
+- `widget_rewrite`
+
+Reducer 在第一个副作用前预检完整列表，然后顺序执行并在每一步 checkpoint。前一步输出可以供后一步使用；失败时根据已持久化的 effect 和 recovery 数据继续或进入 `needs_attention`，而不是依赖旧的内存 DAG。
+
+## 4. 路由与执行的边界
 
 ```mermaid
-graph TD
-    UserRequest["用户对话输入"] --> Router1["第一层路由"]
-
-    Router1 -->|LLM #1 Classify| Plan["结构化意图计划"]
-
-    Plan --> Kind{"意图类别"}
-
-    Kind -->|CONVERSE| Chat["纯文本交谈"]
-    Kind -->|CLARIFY| Ask["向用户发起澄清"]
-    Kind -->|WIDGET_CREATE| WCreate["新建 Widget 卡片"]
-    Kind -->|WIDGET_MODIFY| WModify["修改现有 Widget 卡片"]
-    Kind -->|GRAPH_QUERY| GQuery["执行图数据库查询"]
-    Kind -->|GRAPH_MUTATION| GMutate["修改图数据库实体"]
-
-    Kind -->|PLAN_AND_ACT| Router2["第二层细化路由"]
-    Kind -->|MULTI_INTENT| Router2
-
-    Router2 -->|LLM #2 Details| SubIntents["子动作任务队列"]
+flowchart LR
+    Message[用户消息] --> Context[RouterContext]
+    Context --> Router[IntentRouter]
+    Router --> Plan[IntentPlan]
+    Plan --> Reducer[DurableAgentWorkflow]
+    Reducer --> Read[只读结果]
+    Reducer --> Interaction[用户 interaction]
+    Reducer --> Effect[Graph / Tool / OpenCode effect]
 ```
 
-## 2. 意图枚举定义
+- 路由结果只是计划，不是授权。
+- Graph action 仍须经过 schema preflight。
+- Widget 仍须经过 staging、controller 验证和 schema verification。
+- Tool/MCP/OpenCode 仍须经过对应权限与 lifecycle policy。
+- 同一 Run 使用启动时冻结的模型选择；中途修改会话模型只影响下一个 Run。
 
-在 `backend/agent/intent_plan.py` 中，定义了以下主要的意图种类：
-
-### 顶层意图 `IntentKind`
-
-- `CONVERSE`: 纯文本对话（闲聊或无需系统调用）。
-- `CLARIFY`: 询问澄清。当用户指令模糊（例如有同名 Widget，且没有指明更新哪一个）时，路由为此状态以提供选择项。
-- `WIDGET_CREATE`: 触发全新小程序的 XML 编译与生成逻辑。
-- `WIDGET_MODIFY`: 修改或迭代现有卡片的 HTML/CSS/JS 代码。
-- `GRAPH_QUERY`: 用户要求查询或列出任务、日历等，直接路由至图数据库的 Cypher-like SQL 查询模块。
-- `GRAPH_MUTATION`: 用户要求新增、删除、完成某项任务，直接路由至图变更模块。
-- `MULTI_INTENT` / `PLAN_AND_ACT`: 混合式复杂命令，需要拆解并串联多个子动作运行。
-
-## 3. 子动作规划 `SubIntent`
-
-对于混合式意图（如“新建一个 Todo 小程序，并在里面写上明天买牛奶的任务”），第一层路由会将意图归为 `MULTI_INTENT`，并抛出多个子意图列表：
-
-1.  `WIDGET_CREATE` (创建小程序)
-2.  `GRAPH_MUTATION` (往数据库插入买牛奶的 `Task` 实体)
-3.  `WIDGET_EXTEND_SCHEMA` (将该小程序的权限契约对齐到 `Task` 架构)
-
-第二层路由 `refine_sub_intents()` 调用 LLM #2 填充每一个 SubIntent 的 payload、查询/图变更参数或代码修复参数。`DurableAgentWorkflow` 会先对整个子意图列表做 preflight，任何未知类型、缺少参数或不可授权副作用都在写入前失败。通过后由 `multi_dispatch` 按序作为 saga 执行；只有保存完整补偿数据的步骤才能自动回滚。路由或细化返回未知 kind 时 fail closed 为 `CLARIFY`，不降级成普通成功对话。
+执行细节见 [Agent Harness](/agent/harness.md) 和[持久 Run](/architecture/runs.md)。

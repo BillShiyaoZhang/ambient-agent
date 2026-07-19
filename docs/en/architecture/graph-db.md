@@ -1,48 +1,54 @@
-# Graph Database (GraphDB)
+# Graph Database
 
-Ambient Agent stores node relations in a local SQLite database (`graph.db`) in the workspace, bypassing legacy file-based JSON storage to guarantee robust transactional mutations.
+`GraphDatabase` stores structured data shared by Widgets and the Agent in `workspace/graph.db` (SQLite + WAL). `graph.json` exists only for one-time legacy migration and is renamed to a backup afterward.
 
-## 1. Table Schema Design
+## 1. Tables and responsibilities
 
-Managed in `backend/graph_db.py`, the Graph Database relies on four main SQLite tables:
+| Table | Primary key | Responsibility |
+| --- | --- | --- |
+| `graph_schemas` | `id` | Schema name, description, property types, and core flag |
+| `graph_nodes` | `id` | Node type, JSON properties, namespace, and timestamp |
+| `graph_edges` | `(from_id, to_id, type)` | Directed relationship and JSON properties |
+| `graph_mutation_history` | `id` | Forward/reverse actions, pre-state snapshot, pin/consume state |
+| `graph_effects` | `idempotency_key` | Action input hash and committed result to prevent duplicate effects |
 
-### A. Schemas Table (`graph_schemas`)
+Built-in core schemas are:
 
-Defines the registered types of graph nodes:
+- `Task`: `title`, `description`, `status`, and `due_date`, all strings;
+- `Event`: `title`, `description`, `start_time`, `end_time`, and `location`, all strings;
+- `Note`: `title`, `content`, and `tags`, all strings.
 
-- `id` (TEXT, PK): The schema identifier (e.g. `"Task"`, `"Event"`, `"Note"`).
-- `name` (TEXT): Title of the schema.
-- `description` (TEXT): Description of properties.
-- `properties` (TEXT): JSON string mapping properties to types (e.g. `{"title": "String", "priority": "Integer"}`).
+Apps may propose schema extensions, but ordinary deletion flows cannot remove core schemas.
 
-### B. Nodes Table (`graph_nodes`)
+## 2. Queries
 
-Stores all entity instances:
+Widgets register live queries with `ambient.graph.subscribe(query, callback)`. The backend `GraphSubscriptionManager` retains subscriptions, reruns queries after mutations, and pushes changes. The returned unsubscribe function removes both the persistent WebSocket message and browser listener.
 
-- `id` (TEXT, PK): Unique UUID.
-- `type` (TEXT): Pointer to schema identifier.
-- `properties` (TEXT): JSON serialized values.
-- `namespace` (TEXT): Used to isolate user spaces.
+Agent read-only queries execute through `graph_query_engine.execute_graph_query`. Before routing, `RouterContext` creates a bounded `GraphSnapshot` so the entire database is not placed in the prompt.
 
-### C. Edges Table (`graph_edges`)
+## 3. Mutations
 
-Maps the relationship connections:
+Public actions are:
 
-- `from_id` (TEXT) / `to_id` (TEXT): Start and end node UUIDs.
-- `type` (TEXT): Edge relation type (e.g., `"DEPENDS_ON"`).
-- `properties` (TEXT): JSON serialized relationship metadata.
+- `create_node`
+- `update_node_property`
+- `delete_node`
+- `create_edge`
+- `delete_edge`
 
-### D. Mutation History (`graph_mutation_history`)
+`preflight_actions` resolves temporary node dependencies and checks endpoints and schema types. `apply_actions_atomic` commits the whole action batch in one transaction and creates reverse actions. Any action failure rolls back the entire batch.
 
-- Supports rollbacks (`reverse_actions` payloads) and provides temporary commit history before cleanups.
-- `consumed_at` (TEXT): ISO-8601 timestamp indicating when the rollback action was consumed (if rolled back).
+Widget HTTP mutations automatically include a `widget:<app-id>:<uuid>` idempotency key. The durable workflow uses its own stable effect keys. The same key with the same input returns the committed result; the same key with different input is rejected.
 
-## 2. Core Schemas
+## 4. Schema verification and rollback
 
-By default, the database seeds three core schemas:
+Widget create/modify flows extract subscribe, query, and mutate usage from `controller.js` to produce a `VerificationDiff`. Missing types or properties are handled through a schema proposal and user confirmation. Approved schema changes and app publication both retain recovery snapshots.
 
-| Schema ID | Properties & Types                                                                                   | Description    |
-| :-------- | :--------------------------------------------------------------------------------------------------- | :------------- |
-| **Task**  | `title` (String), `description` (String), `status` (String), `due_date` (String)                     | Todo item      |
-| **Event** | `title` (String), `description` (String), `start_time` (String), `end_time` (String), `location` (String) | Calendar event |
-| **Note**  | `title` (String), `content` (String), `tags` (String)                                                | Note or memo   |
+Mutation history stores forward and reverse actions. `MutationTicketManager` can present a preview, roll back, pin, or consume a ticket; rollback is itself checked by the backend. Internal `replace_node` and `restore_node` operations are only for reverse actions and are not public Widget actions.
+
+## 5. Constraints
+
+- Every public node write must match registered schema property names and types.
+- Edge endpoints must exist or be created earlier in the same action batch.
+- Frontend declarations and manifest `schema_refs` provide context, not authorization; the backend performs final validation.
+- Do not write SQLite directly or generate the deprecated `ambient.model` or `graph.json` interfaces.

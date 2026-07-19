@@ -1,2 +1,1 @@
-- [Docs](/en/guide/introduction.md)
 - [简体中文](/)

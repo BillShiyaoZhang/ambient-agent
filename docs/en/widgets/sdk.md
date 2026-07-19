@@ -1,56 +1,76 @@
-# ambient SDK Reference
+# ambient SDK
 
-The `ambient` object injected in the widget's JS environment exposes API namespaces to communicate with the host application.
+`SandboxWidget` injects the following object as both a component prop and a module-execution argument. This page documents only interfaces present in the current code.
 
-## 1. Chat & Window Control
+## 1. Host and theme
 
-- `ambient.sendMessage(text: string)`: Sends a message query pretending to be the user.
-- `ambient.fullscreen()`: Stretches the card layout to cover the full canvas.
-- `ambient.minimize()`: Restores the card to grid layout.
+| API | Behavior |
+| --- | --- |
+| `ambient.sendMessage(text)` | Send a user message through the chat WebSocket |
+| `ambient.fullscreen()` | Switch the current app window to maximized mode |
+| `ambient.minimize()` | Switch the current app window to floating mode |
+| `ambient.theme.preference` | Current preference: `system`, `light`, or `dark` |
+| `ambient.theme.effective` | Current effective theme, normally `light` or `dark` |
 
-## 2. Database Operations (`ambient.graph`)
+These APIs depend on host callbacks. They are not the browser fullscreen API and do not store domain data.
 
-- `ambient.graph.subscribe(query: object, callback: Function)`: Subscribes to real-time database queries. Fires updates over WS when mutations occur.
-- `ambient.graph.mutate(actions: array)`: Submits Graph Database mutations (`POST /api/graph/mutate`).
-  ```javascript
-  await ambient.graph.mutate([
-    {
-      action: "create_node",
-      type: "Task",
-      properties: { title: "Buy milk", status: "pending" },
-    },
-  ]);
-  ```
+## 2. Graph
 
-## 3. MCP Tools (`ambient.mcp`)
+### `ambient.graph.subscribe(query, callback)`
 
-- `ambient.mcp.callTool(name: string, args: object)`: Resolves an asynchronous MCP tool call.
-  ```javascript
-  const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
-  ```
+Register a persistent WebSocket query and pass query results to the callback initially or after data changes. It returns an unsubscribe function; return it directly from the component effect:
 
-## 4. Background Runs (`ambient.runs`)
+```javascript
+useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
+```
 
-- `ambient.runs.start(catalogId, actionId, input)`: Starts a durable background Run and returns its snapshot.
-- `ambient.runs.get(runId)`: Reads current status, progress, and structured result.
-- `ambient.runs.cancel(runId)`: Requests cooperative cancellation.
-- `ambient.runs.subscribe(runId, callback)`: Subscribes to durable events and returns an unsubscribe function.
-- `ambient.capabilities.invoke(catalogId, input, actionId?)`: Convenience wrapper that starts a Run and waits for its terminal result.
+### `ambient.graph.mutate(actions)`
 
-Closing a Widget removes its local listeners but does not cancel the Run.
+Submit an atomic action batch to `POST /api/graph/mutate`. Public actions are `create_node`, `update_node_property`, `delete_node`, `create_edge`, and `delete_edge`.
 
-## 5. Built-in React & UI Support
+```javascript
+await ambient.graph.mutate([{
+  action: "update_node_property",
+  id: taskId,
+  properties: { status: "done" }
+}]);
+```
 
-The `ambient` object exposes the React environment itself as well as a pre-built styled component library powered by Tailwind CSS:
+The host generates an idempotency key per call. The backend still validates schemas, endpoints, and actions.
 
-- **`ambient.react`**: Exposes standard React Hooks (`useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`).
-- **`ambient.components`**: Exposes pre-designed React components. Includes:
-  - `Card` (card container)
-  - `Button` (interactive button)
-  - `TextField` (input field)
-  - `Checkbox` (checkbox control)
-  - `List` (list wrapper)
-  - `Table` (data table)
-  - `Column` / `Row` (flex layout containers)
-  - `Text` (typography text wrapper)
-- **`ambient.html`**: A declarative template markup rendering utility using `htm`.
+## 3. Durable Runs and capabilities
+
+| API | Result/purpose |
+| --- | --- |
+| `ambient.runs.start(catalogId, actionId, input)` | Create a Run and return its snapshot |
+| `ambient.runs.get(runId)` | Fetch the latest Run snapshot |
+| `ambient.runs.cancel(runId)` | Request Run cancellation |
+| `ambient.runs.subscribe(runId, callback)` | Subscribe to browser events for the Run; returns unsubscribe |
+| `ambient.capabilities.invoke(catalogId, input, actionId?)` | Create a Run and wait for its terminal result |
+
+Prefer `capabilities.invoke` for a normal backend capability call. Use `runs.*` when the Widget needs progress, cancellation, or explicit lifecycle management.
+
+## 4. MCP
+
+`ambient.mcp.callTool(name, args)` requests an MCP tool declared by the app manifest through the chat WebSocket and returns a Promise:
+
+```javascript
+const result = await ambient.mcp.callTool("calendar.list_events", { limit: 20 });
+```
+
+The frontend-supplied `name` is not authorization. The backend revalidates app identity, manifest, server lifecycle, and permission rules.
+
+## 5. React, HTM, and components
+
+- `ambient.html`: an HTM tag bound to React `createElement`.
+- `ambient.react`: `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`.
+- `ambient.components`: `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`.
+
+Controllers may also use the injected `React`. The SDK does not include a fetch cache, `ambient.model`, arbitrary file-system access, or secret-reading APIs.
+
+## 6. Lifecycle and errors
+
+- Cancel Graph/Run subscriptions and custom timers in `useEffect` cleanup.
+- `graph.mutate`, `capabilities.invoke`, `runs.*`, and `mcp.callTool` may reject; show retryable errors in the UI.
+- A Run may enter `waiting_user` or `needs_attention` and require action in the Task Drawer. A Widget must not assume automatic completion.
+- These methods are convenience interfaces; permission enforcement lives in the backend. See [Runtime Boundary](/en/widgets/sandbox.md).

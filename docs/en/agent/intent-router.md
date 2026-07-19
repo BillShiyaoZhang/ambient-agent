@@ -1,35 +1,65 @@
-# Intent Router (IntentRouter)
+# Intent Router
 
-Every user message in Ambient Agent passes through a two-layer routing layout to specify target executions.
+`IntentRouter` converts user input into a structured `IntentPlan`. It chooses the durable workflow's phase path but does not execute tools, write Graph data, or publish apps directly.
 
-## 1. Routing Diagram
+## 1. Routing context
+
+Routing input contains:
+
+- the current user message, session language, and model snapshot;
+- installed app manifests, intents, and schema references;
+- a bounded `GraphSnapshot`;
+- an available-capability summary;
+- the fast model, falling back to the session primary model when unset.
+
+The model must return structured arguments through the `classify_intent` tool schema. Parse failures, unknown kinds, low confidence, or unsafe legacy classifications degrade to `clarify`; they do not guess and execute side effects.
+
+## 2. Top-level IntentKind
+
+| Kind | Purpose | Main next path |
+| --- | --- | --- |
+| `converse` | Normal conversation and bounded read-only tool loop | Converse phase |
+| `graph_query` | Read-only structured query | Graph query phase |
+| `graph_mutation` | An explicit Graph action batch | preflight → required confirmation → atomic apply |
+| `widget_create` | Create a new app | plan → confirm → staging → verify → publish |
+| `widget_modify` | Modify an existing app | plan → confirm → staging → verify → publish |
+| `multi_intent` | Ordered sub-actions | preflight all, then execute saga steps |
+| `plan_and_act` | Composite action requiring an explicit plan | joins the durable multi-step path |
+| `clarify` | Missing required detail or unsafe classification | create a user interaction or clarification message |
+
+`IntentPlan` also contains `confidence` and `rationale`, plus kind-specific `app_id`, `instruction`, `actions`, `query`, `sub_intents`, or `clarification_*` fields.
+
+## 3. SubIntent
+
+`multi_intent` and `plan_and_act` may contain:
+
+- `graph_mutation`
+- `graph_query`
+- `widget_create`
+- `widget_modify`
+- `widget_extend_schema`
+- `widget_fix_code`
+- `widget_rewrite`
+
+The reducer preflights the complete list before the first side effect, then executes sequentially and checkpoints each step. Earlier output may feed later steps. On failure, persisted effect and recovery data determine continuation or `needs_attention`; execution does not depend on the old in-memory DAG.
+
+## 4. Routing versus execution
 
 ```mermaid
-graph TD
-    UserRequest["User Request"] --> Router1["First Layer (IntentRouter.route)"]
-    Router1 -->|LLM #1 Classify| Plan["IntentPlan"]
-    Plan --> Kind{IntentKind}
-
-    Kind -->|CONVERSE| Chat["Converse (Plain text chat)"]
-    Kind -->|CLARIFY| Ask["Clarify (Ask user for details)"]
-    Kind -->|WIDGET_CREATE| WCreate["Widget Build"]
-    Kind -->|WIDGET_MODIFY| WModify["Widget Edit"]
-    Kind -->|GRAPH_QUERY| GQuery["Graph Query"]
-    Kind -->|GRAPH_MUTATION| GMutate["Graph Mutation"]
-
-    Kind -->|PLAN_AND_ACT| Router2["Second Layer (refine_sub_intents)"]
-    Kind -->|MULTI_INTENT| Router2
-    Router2 -->|LLM #2 Details| SubIntents["SubIntents Queue"]
+flowchart LR
+    Message[User message] --> Context[RouterContext]
+    Context --> Router[IntentRouter]
+    Router --> Plan[IntentPlan]
+    Plan --> Reducer[DurableAgentWorkflow]
+    Reducer --> Read[Read-only result]
+    Reducer --> Interaction[User interaction]
+    Reducer --> Effect[Graph / Tool / OpenCode effect]
 ```
 
-## 2. Intent Kinds (`IntentKind`)
+- A routing result is a plan, not authorization.
+- Graph actions still pass schema preflight.
+- Widgets still pass staging, controller verification, and schema verification.
+- Tools, MCP, and OpenCode still pass their permission and lifecycle policies.
+- A Run uses the model selection frozen at start; changing the session model affects only the next Run.
 
-- `CONVERSE`: Plain text chat.
-- `CLARIFY`: Emitted when arguments are ambiguous (e.g. updating a card with multiple matches). Triggers dropdown prompt to ask user.
-- `WIDGET_CREATE` / `WIDGET_MODIFY`: Card code generation.
-- `GRAPH_QUERY` / `GRAPH_MUTATION`: SQLite graph database reads and writes.
-- `MULTI_INTENT`: Triggers the second-layer refinement `refine_sub_intents()` to detail action schemas.
-
-## 3. Durable multi-intent execution
-
-`refine_sub_intents()` fills each SubIntent payload, query/graph-mutation arguments, or code-rework parameters. `DurableAgentWorkflow` preflights the complete list before any write. An unknown kind, missing argument, or unauthorized effect fails before execution. After preflight, `multi_dispatch` executes sub-intents serially as a saga; only a step with complete compensation data can be rolled back automatically. An unknown top-level or refined kind fails closed to `CLARIFY` rather than being reported as a successful conversation.
+See [Agent Harness](/en/agent/harness.md) and [Durable Runs](/en/architecture/runs.md) for execution details.

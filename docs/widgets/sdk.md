@@ -1,118 +1,76 @@
 # ambient SDK
 
-在 Widget 脚本逻辑中，您可以通过全局注入的 `ambient` 对象直接调用系统的全部核心服务。下表是 `ambient` 提供的接口列表。
+`SandboxWidget` 将以下对象作为组件 prop 和模块执行参数注入。本文只记录当前代码实际提供的接口。
 
-## 1. 对话与窗口管理
+## 1. 宿主与主题
 
-### `ambient.sendMessage(text)`
+| API | 行为 |
+| --- | --- |
+| `ambient.sendMessage(text)` | 通过聊天 WebSocket 以用户身份发送消息 |
+| `ambient.fullscreen()` | 将当前应用窗口切换为最大化 |
+| `ambient.minimize()` | 将当前应用窗口切换为浮动 |
+| `ambient.theme.preference` | 当前偏好：`system`、`light` 或 `dark` |
+| `ambient.theme.effective` | 当前有效主题，通常为 `light` 或 `dark` |
 
-以用户的身份向会话发送一条文本消息，使大模型能够收到反馈。
+这些 API 依赖宿主回调；它们不是浏览器全屏 API，也不负责持久业务数据。
 
-- **参数**: `text` (String) - 消息内容。
-- **示例**:
-  ```javascript
-  ambient.sendMessage("帮我总结当前这个卡片的状态");
-  ```
-
-### `ambient.fullscreen()`
-
-将当前 Widget 卡片在 Canvas 画布上扩展至全屏显示。
-
-### `ambient.minimize()`
-
-将当前最大化 Widget 恢复为可移动、可缩放的浮动窗口。
-
-### `ambient.theme`
-
-当前宿主主题的只读快照：
-
-```javascript
-ambient.theme.preference // "system" | "light" | "dark"
-ambient.theme.effective  // "light" | "dark"
-```
-
-主题变化会让 Widget React 根节点重新渲染。标准 `ambient.components` 自动使用新的语义色；自定义颜色可根据 `ambient.theme.effective` 自行切换。
-
-## 2. 图数据库操作
-
-这是最核心的部分，允许卡片与系统的 SQLite 图数据库实时读写。所有数据必须对齐注册的 Schema 契约（如 `Task`, `Event`, `Note`）。
+## 2. Graph
 
 ### `ambient.graph.subscribe(query, callback)`
 
-发起对图数据库节点的实时查询订阅。每当底层数据发生 Mutate 修改时，后台会自动重跑查询并通过 WebSocket 将最新数据推送给该回调。
+注册持久 WebSocket 查询，立即或在数据变化时把查询结果交给 callback。返回 unsubscribe 函数，组件 effect 应直接返回它：
 
-- **参数**:
-  - `query` (Object) - 查询契约参数。例如按类型查询节点。
-  - `callback` (Function) - 接收更新后数据的回调：`(data) => void`。
-- **返回**: `unsubscribe` (Function) - 销毁订阅的函数。
-- **示例**:
-  ```javascript
-  const unsub = ambient.graph.subscribe({ type: "Task" }, (tasks) => {
-    console.log("最新的 todo 列表：", tasks);
-  });
-  // 组件销毁时调用 unsub();
-  ```
+```javascript
+useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
+```
 
 ### `ambient.graph.mutate(actions)`
 
-向后端发送事务型的图变更操作包（如增删改节点或关联关系）。
+向 `POST /api/graph/mutate` 提交一批原子 action。公开 action：`create_node`、`update_node_property`、`delete_node`、`create_edge`、`delete_edge`。
 
-- **参数**: `actions` (Array) - 操作动作数组。
-- **返回**: Promise - 包含操作执行结果。
-- **示例**:
-  ```javascript
-  await ambient.graph.mutate([
-    {
-      action: "create_node",
-      id: "todo-new-uuid",
-      type: "Task",
-      properties: {
-        title: "明天去买咖啡",
-        status: "pending",
-      },
-    },
-  ]);
-  ```
+```javascript
+await ambient.graph.mutate([{
+  action: "update_node_property",
+  id: taskId,
+  properties: { status: "done" }
+}]);
+```
 
-## 3. 模型上下文协议
+宿主为每次调用生成 idempotency key；后端仍会校验 schema、端点和 action。
 
-允许 Widget 卡片调用宿主机上注册的 Model Context Protocol 外部服务工具：
+## 3. 持久 Run 与能力
 
-### `ambient.mcp.callTool(name, args)`
+| API | 返回值/用途 |
+| --- | --- |
+| `ambient.runs.start(catalogId, actionId, input)` | 创建 Run，返回 Run snapshot |
+| `ambient.runs.get(runId)` | 获取最新 Run snapshot |
+| `ambient.runs.cancel(runId)` | 请求取消 Run |
+| `ambient.runs.subscribe(runId, callback)` | 订阅该 Run 的浏览器事件，返回 unsubscribe |
+| `ambient.capabilities.invoke(catalogId, input, actionId?)` | 创建 Run 并等待终态结果 |
 
-调用 MCP 工具。
+调用后端能力时优先使用 `capabilities.invoke`。需要显示进度、取消或自行管理生命周期时使用 `runs.*`。
 
-- **参数**:
-  - `name` (String) - 工具名称（例如 `"git_commit"`, `"fetch_weather"`）。
-  - `args` (Object) - 传递的参数。
-- **返回**: Promise - 执行返回的结果。
-- **示例**:
-  ```javascript
-  const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
-  ```
+## 4. MCP
 
-## 4. 后台 Run
+`ambient.mcp.callTool(name, args)` 通过聊天 WebSocket 请求应用 manifest 声明的 MCP tool，并返回 Promise：
 
-- `ambient.runs.start(catalogId, actionId, input)`：创建持久后台 Run，立即返回 Run snapshot。
-- `ambient.runs.get(runId)`：读取 Run 当前状态、进度和结构化结果。
-- `ambient.runs.cancel(runId)`：请求协作式取消。
-- `ambient.runs.subscribe(runId, callback)`：订阅该 Run 的持久事件，返回取消订阅函数。
-- `ambient.capabilities.invoke(catalogId, input, actionId?)`：创建 Run 并等待 terminal result 的便捷封装。
+```javascript
+const result = await ambient.mcp.callTool("calendar.list_events", { limit: 20 });
+```
 
-关闭 Widget 窗口只会移除订阅回调，不会取消 Run。
+前端传入的 `name` 不是授权依据。后端按 app identity、manifest、server 生命周期和权限规则重新校验。
 
-## 5. 内置 React 与 UI 支持
+## 5. React、HTM 与组件
 
-`ambient` 对象还暴露了 React 环境本身以及一套由 Tailwind CSS 渲染的优质 UI 组件库，Widget 无需自行导入或使用外部 CSS：
+- `ambient.html`：绑定到 React `createElement` 的 HTM tag。
+- `ambient.react`：`useState`、`useEffect`、`useMemo`、`useRef`、`useCallback`、`useContext`、`useReducer`。
+- `ambient.components`：`Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table`。
 
-- **`ambient.react`**: 暴露标准的 React Hooks，例如 `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`。
-- **`ambient.components`**: 暴露精心设计的 React 元组件。包括：
-  - `Card` (卡片容器)
-  - `Button` (按钮)
-  - `TextField` (输入框)
-  - `Checkbox` (复选框)
-  - `List` (列表容器)
-  - `Table` (表格)
-  - `Column` / `Row` (弹性盒子布局)
-  - `Text` (排版文本)
-- **`ambient.html`**: 提供基于 `htm` 的声明式模板标记渲染方法。
+Controller 也能使用注入的 `React`。SDK 不包含 fetch cache、`ambient.model`、任意文件系统访问或秘密读取接口。
+
+## 6. 生命周期与错误处理
+
+- 在 `useEffect` cleanup 中取消 Graph/Run 订阅和自建 timer。
+- `graph.mutate`、`capabilities.invoke`、`runs.*` 和 `mcp.callTool` 都可能 reject；在 UI 中提供可重试错误状态。
+- Run 可能进入 `waiting_user` 或 `needs_attention`，需要用户在任务抽屉处理，而不是由 Widget 假定自动完成。
+- 这些方法暴露的是便利接口，权限 enforcement 位于后端。安全边界见[运行边界](/widgets/sandbox.md)。

@@ -1,127 +1,62 @@
-# 系统架构概述
+# 系统与请求链路
 
-Ambient Agent 是一个本地优先的 Canvas 工作区：React 前端承载聊天、任务中心和动态 Widget；FastAPI 后端管理会话、持久 Run、图数据、App artifact、LLM 以及外部 MCP/Agent runtime。
-
-## 1. 当前系统边界
-
-```mermaid
-flowchart TB
-    subgraph Frontend[React 客户端]
-        Chat[聊天与审批 UI]
-        Tasks[任务中心 / Run projection]
-        Canvas[Canvas 与 Widget runtime]
-    end
-
-    subgraph API[FastAPI 接入层]
-        ChatWS([/ws/chat])
-        RunWS([/ws/runs replay stream])
-        REST[Sessions / Runs / Apps / Graph REST]
-    end
-
-    subgraph Runtime[后端执行层]
-        Coordinator[RunCoordinator]
-        Reducer[DurableAgentWorkflow v2]
-        Domain[AgentOrchestrator domain helpers]
-        Gateway[Tool Gateway]
-        Backend[BackendManager]
-        OpenCode[OpenCode ACP]
-    end
-
-    subgraph Storage[工作区状态]
-        Runs[(.ambient/runs.db)]
-        Sessions[(session/message/audit storage)]
-        Graph[(graph.db)]
-        Apps[(apps live + sibling staging)]
-    end
-
-    subgraph External[外部执行]
-        Models[LLM providers]
-        MCP[MCP stdio processes]
-        Agents[remote Agent endpoints]
-    end
-
-    Chat --> ChatWS
-    Tasks <--> RunWS
-    Canvas --> REST
-    ChatWS --> Coordinator
-    ChatWS --> Sessions
-    REST --> Coordinator
-    Coordinator --> Runs
-    Coordinator --> Reducer
-    Coordinator --> Backend
-    Reducer --> Gateway
-    Reducer --> Domain
-    Reducer --> OpenCode
-    Reducer --> Sessions
-    Reducer --> Graph
-    Gateway --> Graph
-    Backend --> MCP
-    Backend --> Agents
-    OpenCode --> Apps
-    Reducer --> Models
-    Domain --> Models
-```
-
-`RunStore + RunCoordinator` 是 chat `internal_agent`、Capability、MCP tool/resource 和远端 Agent action 的唯一 durable control plane。`AgentOrchestrator` 只提供路由、Converse 和格式化 domain helper；WebSocket ingress 只提交命令、resolve 持久 interaction 并投影结果，不直接执行 workflow 或外部副作用。
-
-## 2. Durable Run 生命周期
-
-```mermaid
-sequenceDiagram
-    actor User as 用户
-    participant Client as Web / Widget
-    participant API as FastAPI
-    participant Store as RunStore
-    participant Worker as RunCoordinator
-    participant Adapter as reducer / MCP / Agent adapter
-
-    User->>Client: 启动 action
-    Client->>API: POST /api/runs 或兼容 invoke
-    API->>Store: 创建 queued Run
-    Worker->>Store: claim + lease_epoch
-    Worker->>Adapter: 执行一个 fenced step
-    Adapter-->>Worker: typed outcome
-    Worker->>Store: 原子提交 step + state + status + events
-    Store-->>Client: /ws/runs 可回放 event
-```
-
-同一 session 使用 FIFO lane；`waiting_user` 释放 worker slot 但继续占有 lane。interaction 响应通过 Run version 防止迟到审批，恢复后由 scheduler 重新领取。
-
-Multi-intent 在任何写入前对整体子意图做 preflight，再按序作为 saga 执行。已完成步骤只有在保存完整补偿数据时才自动回滚；其他未知副作用进入 `needs_attention`。
-
-## 3. Widget 代码生命周期
-
-Widget build 由 `DurableAgentWorkflow` 的显式 phase 驱动；OpenCode 采用 staging/promotion：
+## 1. 运行时组成
 
 ```mermaid
 flowchart LR
-    Intent[route: Widget create / modify] --> Plan[plan / wait_plan]
-    Plan --> Schema[align_schema / wait_schema]
-    Schema --> Stage[创建 per-run staging App]
-    Stage --> ACP[OpenCode 只操作 staging]
-    ACP --> Verify[verify staging artifact + Schema]
-    Verify -->|通过或明确 override| Promote[promote: marker + 原子替换 live App]
-    Verify -->|失败/返工| Preserve[删除 staging；保留 live App]
+    Browser[React 工作区] -->|REST| API[FastAPI]
+    Browser <-->|聊天 / Graph / Run WebSocket| API
+    API --> Workspace[会话、Canvas、审计文件]
+    API --> RunStore[.ambient/runs.db]
+    API --> Graph[graph.db]
+    API --> Apps[workspace/apps]
+    API --> LLM[LLM Provider]
+    API --> External[MCP / OpenCode / 本地工具]
 ```
 
-每个 staging artifact 与 Run checkpoint 绑定；recovery 根据持久 promotion marker 区分“已发布”和“仍待验证”，失败或取消会清理 staging。artifact validation 检查必需文件、大小、UTF-8 和 default export，并使用与前端一致的 Babel pipeline 编译，在禁用动态代码生成、无宿主网络全局且有超时的 Node VM 中完成 module-load smoke；`window`、`document`、`fetch`、WebSocket、Worker、storage、动态 import/require 等直接能力 fail closed。Schema verification 是另一层。这仍不是完整的浏览器 render smoke 或 OS 级 sandbox。
+`backend/main.py` 是装配点。它创建 `WorkspaceStorage`、`LLMConfigStore`、`GraphDatabase`、`AppManager`、`AppStoreService`、`RunStore`、`RunCoordinator` 和 `DurableAgentWorkflow`，并在应用生命周期中恢复可运行任务与清理遗留 staging。
 
-## 4. 数据与通信
+## 2. 用户请求如何执行
 
-- `/ws/chat`：聊天命令、durable interaction 响应、MCP tool/resource 与 Agent Run 的响应投影，以及图订阅控制。
-- `/ws/runs?after_sequence=N`：版本化、可回放的 workspace Run event stream。
-- Runs REST：创建、查询、取消、重试、effect reconciliation 和 resolve interaction。
-- Apps REST：读取或管理 live App artifact。
-- Graph REST/WebSocket：写命令先进入 graph v2 Run，查询和 subscription 保持兼容。
+1. 前端通过 `/ws/chat` 发送消息。
+2. 后端先保存 `ChatMessage`，解析当前会话语言与模型快照，再向 `RunCoordinator` 提交 `internal_agent` Run。
+3. Coordinator 持久化 Run，并为同一 session 管理执行 lane。
+4. `DurableAgentWorkflow` 调用 `IntentRouter` 生成 `IntentPlan`，然后按 phase 推进状态。
+5. 只读对话或查询可以直接完成；Graph mutation、复合任务和 Widget 创建/修改会经过计划、必要的用户 interaction、预检、执行与校验。
+6. 每个 step 使用 claim、lease epoch 和 run version 防止过期 worker 提交。可见事件写入 `run_events` 后经 `/ws/runs` 推送。
+7. 前端将 Run 状态投影到聊天、任务抽屉、应用中心和工作区。
 
-客户端只重放声明为订阅的读模型，不会在断线重连时重放聊天、审批或工具命令。Run event 客户端使用 `stream_epoch + sequence` 检测 reset/gap，并以 `event_id` 去重。
+旧的内存 Agent 循环和 Widget DAG 不再是生产执行路径。`AgentOrchestrator` 只提供路由和有界只读 Converse helper，执行所有权属于 Run 控制平面。
 
-Run event payload 在入库前按敏感键递归脱敏并限制大小，`redacted` 说明内容曾被隐去或截断。Event 与 LLM audit 默认保留 30 天，分别由 `RUN_EVENT_RETENTION_DAYS` 和 `AGENT_AUDIT_RETENTION_DAYS` 调整。
+## 3. Widget 创建与加载
 
-## 5. 安全边界说明
+Widget 有两条进入路径：
 
-- 模型本地工具经过 `ToolGateway` 的 schema、effect、scope、approval、timeout、幂等和输出限制；当前 Converse 只暴露 read tools。
-- MCP 进程使用精确 argv、受限继承环境、initialize/capability negotiation、调用 deadline、有界 stdout/stderr、best-effort cancellation 和 terminate→kill。
-- OpenCode 校验 app ID、拒绝 traversal/symlink、使用 argv 而非 shell、限制 cwd/environment/output，并在 staging 中工作。
-- 浏览器 Widget 的 `new Function` 只提供模块作用域和 ErrorBoundary，不是 hostile-code security sandbox；真正的强隔离仍需要 iframe/Worker/独立 origin 或 OS sandbox。
-- MCP/ACP/远端 Agent 使用各自的协议 adapter，但都由 RunCoordinator effect boundary 管理；它们不是 Python ToolGateway 调用。OpenCode 仍没有强制的 OS 网络隔离，权限提示不应被解释为完整 sandbox。
+- 对话返回 `<ambient-widget>`：`AgentParser` 提取单个 `<js-script>`，`AppManager` 保存 `controller.js` 和 manifest。
+- 创建或修改应用：durable workflow 让 OpenCode 在 staging 目录生成 controller；完成语法、安全规则与 schema 校验后才提升为 live app。失败或未获批不会覆盖现有产物。
+
+前端从 `/api/apps/{id}` 获取应用，`SandboxWidget` 使用 Babel 转译 controller，并注入 React、`ambient` API 和系统组件。它提供故障隔离，但不提供 hostile JavaScript 安全边界。
+
+## 4. 数据与通信职责
+
+| 通道/存储 | 用途 |
+| --- | --- |
+| REST `/api/sessions`, `/api/canvas` | 会话和 Canvas CRUD |
+| REST `/api/runs`, `/api/run-interactions` | Run 查询、取消、重试、协调和用户决策 |
+| REST `/api/apps`, `/api/app-store` | 应用产物和统一能力目录 |
+| REST `/api/graph/mutate` | 后端预检后的 Graph mutation |
+| `/ws/chat` | 聊天消息、兼容投影和 Widget Graph 订阅/命令 |
+| `/ws/runs` | 带 sequence、event ID 和 stream epoch 的可恢复事件流 |
+| `workspace/sessions/*.json` | 会话与消息 |
+| `workspace/.ambient/runs.db` | Run、step、interaction 和 canonical event |
+| `workspace/graph.db` | schema、节点、边、effect 和 mutation history |
+
+## 5. 安全与一致性原则
+
+- Provider 密钥不返回给前端，凭据文件位于 Git 忽略的工作区。
+- Graph mutation 必须通过 schema 预检，并在 SQLite transaction 中原子提交。
+- MCP、工具和 OpenCode 的授权在后端执行；前端不注入 API 不能替代授权。
+- 有副作用的 durable step 使用 effect/idempotency 记录、interaction 和 fencing，避免恢复或并发造成重复提交。
+- Run event 是版本化契约；前端保留未知事件以兼容未来版本。
+
+下一步可阅读[持久 Run](/architecture/runs.md)、[Agent Harness](/agent/harness.md)、[Widget 架构](/architecture/apps.md)或[图数据库](/architecture/graph-db.md)。

@@ -168,22 +168,20 @@
     window.$docsify = {
       name: 'Ambient Agent',
       repo: 'https://github.com/BillShiyaoZhang/ambient-agent',
+      homepage: 'index.md',
       loadSidebar: true,
       loadNavbar: true,
       subMaxLevel: 3,
       coverpage: {
         '/': '_coverpage.md',
-        '/en/': 'en/_coverpage.md'
+        '/en/': '_coverpage.md'
       },
       alias: {
         '/en/.*/_sidebar.md': '/en/_sidebar.md',
-        '/.*/_sidebar.md': '/_sidebar.md',
+        '/(?!en(?:/|$)).*/_sidebar.md': '/_sidebar.md',
         '/en/.*/_navbar.md': '/en/_navbar.md',
-        '/.*/_navbar.md': '/_navbar.md',
-        '/en/': '/en/guide/introduction.md',
-        '/': '/guide/introduction.md',
-        '/en/README.md': '/en/guide/introduction.md',
-        '/README.md': '/guide/introduction.md'
+        '/(?!en(?:/|$)).*/_navbar.md': '/_navbar.md',
+        '/en/': '/en/index.md'
       },
       search: {
         maxAge: 86400000, // 1 day
@@ -201,26 +199,7 @@
       // Mermaid configuration
       mermaidConfig: {
         querySelector: ".mermaid"
-      },
-      // Plugins
-      plugins: [
-        function(hook, vm) {
-          // Dynamic Link Rewriter for internal absolute/root-relative links
-          hook.beforeEach(function(markdown) {
-            // Exclude image links (starts with !) and external links
-            // Matches [text](/path/to/page) or [text](/path/to/page.md)
-            return markdown.replace(/(^|[^!])\[([^\]]+)\]\(([^)]+)\)/g, function(match, prefix, text, link) {
-              if (link.startsWith('/') && !link.startsWith('//')) {
-                let parts = link.split('#');
-                let path = parts[0].replace(/\.md$/, '');
-                let hash = parts[1] ? '?id=' + parts[1] : '';
-                return prefix + '[' + text + '](#' + path + hash + ')';
-              }
-              return match;
-            });
-          });
-        }
-      ]
+      }
     };
 
     // Script to control theme switching dynamically

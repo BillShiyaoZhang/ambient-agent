@@ -1,127 +1,62 @@
-# System Architecture Overview
+# System and Request Flow
 
-Ambient Agent is a local-first Canvas workspace. The React frontend hosts chat, the Task Center, and dynamic Widgets. The FastAPI backend manages sessions, durable Runs, graph data, App artifacts, LLM calls, and external MCP/Agent runtimes.
-
-## 1. Current system boundary
-
-```mermaid
-flowchart TB
-    subgraph Frontend[React client]
-        Chat[Chat and approval UI]
-        Tasks[Task Center / Run projection]
-        Canvas[Canvas and Widget runtime]
-    end
-
-    subgraph API[FastAPI ingress]
-        ChatWS[(/ws/chat)]
-        RunWS[(/ws/runs replay stream)]
-        REST[Sessions / Runs / Apps / Graph REST]
-    end
-
-    subgraph Runtime[Backend execution]
-        Coordinator[RunCoordinator]
-        Reducer[DurableAgentWorkflow v2]
-        Domain[AgentOrchestrator domain helpers]
-        Gateway[Tool Gateway]
-        Backend[BackendManager]
-        OpenCode[OpenCode ACP]
-    end
-
-    subgraph Storage[Workspace state]
-        Runs[(.ambient/runs.db)]
-        Sessions[(session/message/audit storage)]
-        Graph[(graph.db)]
-        Apps[(live Apps + sibling staging)]
-    end
-
-    subgraph External[External execution]
-        Models[LLM providers]
-        MCP[MCP stdio processes]
-        Agents[remote Agent endpoints]
-    end
-
-    Chat --> ChatWS
-    Tasks <--> RunWS
-    Canvas --> REST
-    ChatWS --> Coordinator
-    ChatWS --> Sessions
-    REST --> Coordinator
-    Coordinator --> Runs
-    Coordinator --> Reducer
-    Coordinator --> Backend
-    Reducer --> Gateway
-    Reducer --> Domain
-    Reducer --> OpenCode
-    Reducer --> Sessions
-    Reducer --> Graph
-    Gateway --> Graph
-    Backend --> MCP
-    Backend --> Agents
-    OpenCode --> Apps
-    Reducer --> Models
-    Domain --> Models
-```
-
-`RunStore + RunCoordinator` are the single durable control plane for chat `internal_agent`, capability, MCP tool/resource, and remote-Agent actions. `AgentOrchestrator` supplies only routing, Converse, and formatting domain helpers. WebSocket ingress submits commands, resolves durable interactions, and projects results; it does not execute a workflow or external side effect directly.
-
-## 2. Durable Run lifecycle
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant Client as Web / Widget
-    participant API as FastAPI
-    participant Store as RunStore
-    participant Worker as RunCoordinator
-    participant Adapter as reducer / MCP / Agent adapter
-
-    User->>Client: start action
-    Client->>API: POST /api/runs or compatibility invoke
-    API->>Store: create queued Run
-    Worker->>Store: claim + lease_epoch
-    Worker->>Adapter: execute one fenced step
-    Adapter-->>Worker: typed outcome
-    Worker->>Store: atomic step + state + status + events
-    Store-->>Client: replayable /ws/runs event
-```
-
-Runs in one session share a FIFO lane. `waiting_user` releases its worker slot but retains the lane. Interaction responses use a Run version to reject stale approvals, and the scheduler claims the resumed Run again.
-
-Multi-intent requests preflight the complete sub-intent set before any write, then execute serially as a saga. A completed step is compensated automatically only when complete compensation data was stored; other uncertain effects enter `needs_attention`.
-
-## 3. Widget code lifecycle
-
-`DurableAgentWorkflow` drives Widget builds through explicit phases, while OpenCode uses staging and promotion:
+## 1. Runtime components
 
 ```mermaid
 flowchart LR
-    Intent[route: Widget create / modify] --> Plan[plan / wait_plan]
-    Plan --> Schema[align_schema / wait_schema]
-    Schema --> Stage[Create per-run staging App]
-    Stage --> ACP[OpenCode writes only staging]
-    ACP --> Verify[verify staging artifact + schema]
-    Verify -->|pass or explicit override| Promote[promote: marker + atomic live-App swap]
-    Verify -->|failure/rework| Preserve[Discard staging; preserve live App]
+    Browser[React workspace] -->|REST| API[FastAPI]
+    Browser <-->|Chat / Graph / Run WebSockets| API
+    API --> Workspace[Session, Canvas, audit files]
+    API --> RunStore[.ambient/runs.db]
+    API --> Graph[graph.db]
+    API --> Apps[workspace/apps]
+    API --> LLM[LLM provider]
+    API --> External[MCP / OpenCode / local tools]
 ```
 
-Each staging artifact is tied to its Run checkpoint. Recovery uses the durable promotion marker to distinguish an already-published artifact from one still awaiting verification, while failure or cancellation cleans staging. Artifact validation checks the required file, size, UTF-8, and a default export, then compiles it through the same Babel pipeline as the frontend and performs a bounded module-load smoke test in a Node VM with dynamic code generation and host/network globals removed. Direct access to `window`, `document`, `fetch`, WebSocket, Worker, storage, dynamic import, or require fails closed. Schema verification is separate. This is still not a complete browser render smoke test or an OS-level sandbox.
+`backend/main.py` is the assembly point. It creates `WorkspaceStorage`, `LLMConfigStore`, `GraphDatabase`, `AppManager`, `AppStoreService`, `RunStore`, `RunCoordinator`, and `DurableAgentWorkflow`. During application startup it resumes runnable tasks and cleans up stale staging artifacts.
 
-## 4. Data and communication
+## 2. How a user request executes
 
-- `/ws/chat`: chat commands, durable interaction responses, response projection for MCP tool/resource and Agent Runs, and graph-subscription control.
-- `/ws/runs?after_sequence=N`: versioned, replayable workspace Run events.
-- Runs REST: create, query, cancel, retry, reconcile effects, and resolve interactions.
-- Apps REST: read or manage live App artifacts.
-- Graph REST/WebSocket: write commands first enter the graph v2 Run; queries and subscriptions remain compatible.
+1. The frontend sends a message through `/ws/chat`.
+2. The backend stores a `ChatMessage`, resolves the current session language and model snapshot, and submits an `internal_agent` Run to `RunCoordinator`.
+3. The Coordinator persists the Run and manages the execution lane for that session.
+4. `DurableAgentWorkflow` calls `IntentRouter` to create an `IntentPlan`, then advances explicit phases.
+5. Read-only conversation or queries may finish directly. Graph mutations, composite tasks, and Widget create/modify flows pass through planning, required user interactions, preflight, execution, and verification.
+6. Each step uses claims, lease epochs, and Run versions to reject stale worker commits. Visible events are stored in `run_events` and pushed through `/ws/runs`.
+7. The frontend projects Run state into chat, the Task Drawer, App Center, and workspace.
 
-The client replays declared read subscriptions only; it does not replay chat, approval, or tool commands after reconnect. Run-event clients use `stream_epoch + sequence` for reset/gap detection and `event_id` for deduplication.
+The old in-memory Agent loop and Widget DAG are no longer production paths. `AgentOrchestrator` only provides routing and bounded read-only Converse helpers; the Run control plane owns execution.
 
-Run event payloads are recursively redacted by sensitive key and size-bounded before storage; `redacted` records that data was hidden or truncated. Event and LLM-audit retention default to 30 days and are configured with `RUN_EVENT_RETENTION_DAYS` and `AGENT_AUDIT_RETENTION_DAYS` respectively.
+## 3. Widget creation and loading
 
-## 5. Security boundary notes
+Widgets enter through two paths:
 
-- Model-requested local tools pass through `ToolGateway` schema, effect, scope, approval, timeout, idempotency, and output controls. Converse currently exposes read-only tools.
-- MCP processes use exact argv, a restricted inherited environment, initialize/capability negotiation, call deadlines, bounded stdout/stderr, best-effort cancellation, and terminate→kill shutdown.
-- OpenCode validates App IDs, rejects traversal/symlinks, uses argv rather than a shell, bounds cwd/environment/output, and writes to staging.
-- A browser Widget's `new Function` provides module scoping and an ErrorBoundary, not hostile-code isolation. Strong isolation requires an iframe/Worker/separate origin or an OS sandbox.
-- MCP, ACP, and remote Agents keep protocol-specific adapters but are all governed by the RunCoordinator effect boundary; they are not Python ToolGateway calls. OpenCode still lacks enforced OS-level network isolation. A permission prompt must not be interpreted as a complete sandbox.
+- Conversation returns `<ambient-widget>`: `AgentParser` extracts one `<js-script>`, and `AppManager` stores `controller.js` plus a manifest.
+- App create or modify flow: the durable workflow asks OpenCode to generate a controller in staging. It promotes the artifact to the live app only after syntax, safety-rule, and schema checks. Failure or missing approval does not overwrite the current artifact.
+
+The frontend fetches an app from `/api/apps/{id}`. `SandboxWidget` transpiles the controller with Babel and injects React, the `ambient` API, and system components. This contains rendering failures but is not a security boundary for hostile JavaScript.
+
+## 4. Data and communication responsibilities
+
+| Channel/storage | Purpose |
+| --- | --- |
+| REST `/api/sessions`, `/api/canvas` | Session and Canvas CRUD |
+| REST `/api/runs`, `/api/run-interactions` | Run listing, cancellation, retry, reconciliation, and user decisions |
+| REST `/api/apps`, `/api/app-store` | App artifacts and unified capability catalog |
+| REST `/api/graph/mutate` | Graph mutations after backend preflight |
+| `/ws/chat` | Chat messages, compatibility projections, and Widget Graph subscriptions/commands |
+| `/ws/runs` | Recoverable stream with sequence, event ID, and stream epoch |
+| `workspace/sessions/*.json` | Sessions and messages |
+| `workspace/.ambient/runs.db` | Runs, steps, interactions, and canonical events |
+| `workspace/graph.db` | Schemas, nodes, edges, effects, and mutation history |
+
+## 5. Security and consistency principles
+
+- Provider secrets are not returned to the frontend and live in a Git-ignored workspace file.
+- Graph mutations must pass schema preflight and commit atomically in a SQLite transaction.
+- MCP, tool, and OpenCode authorization is enforced by the backend. Omitting a frontend API is not authorization.
+- Effectful durable steps use effect/idempotency records, interactions, and fencing to avoid duplicate commits during recovery or concurrency.
+- Run events are a versioned contract; the frontend preserves unknown events for forward compatibility.
+
+Continue with [Durable Runs](/en/architecture/runs.md), [Agent Harness](/en/agent/harness.md), [Widget Architecture](/en/architecture/apps.md), or [Graph Database](/en/architecture/graph-db.md).

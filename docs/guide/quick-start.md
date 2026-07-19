@@ -1,95 +1,78 @@
 # 快速开始
 
-本项目为了保障开发环境完全一致并防范本地依赖冲突，全量支持**容器化开发和运行**。本地只需要安装 Docker 即可开始。
+## 环境要求
 
-## 📦 环境要求
+- Docker Desktop；或本机 Python 3.11–3.13、`uv`、Node.js 和 npm。
+- 使用 Dev Container 开发时，还需要 VS Code 与 Dev Containers 扩展。
 
-- **Docker Desktop** (保证容器运行环境)
-- **VS Code** 并安装 **Dev Containers** 插件 (推荐的 IDE 容器开发模式)
-
-## 🚀 步骤 1：克隆项目与环境变量配置
-
-首先克隆本项目至本地目录：
+## 方式一：Docker Compose
 
 ```bash
 git clone <repository-url>
 cd ambient-agent
-```
-
-将根目录下的 `.env.example` 复制为 `.env`：
-
-```bash
 cp .env.example .env
+docker compose up --build
 ```
 
-打开 `.env` 文件，根据您的需要填入大模型（LLM）配置（如 Ollama 端口、MiniMax API Key 等）：
+打开 `http://localhost:5173`。后端 API 位于 `http://localhost:8000`。
 
-```ini
-# LLM Providers Config
-OLLAMA_API_BASE=http://localhost:11434
-# MiniMax or OpenAI-compatible settings
-MINIMAX_API_KEY=your-api-key
-```
+`.env` 只保存 OpenCode 等进程级参数。LLM Provider、密钥和默认模型在应用的“模型与 Provider”界面配置；密钥写入被 Git 忽略的 `workspace/llm/secrets.json`，不会写入 `.env`。
 
-## 🛠️ 步骤 2：使用 VS Code Dev Containers 开发 (推荐)
+## 方式二：Dev Container
 
-这是最推荐的**代码开发与调试方式**。IDE 会直接连接容器内部，提供免安装的编译器、代码补全、格式化和调试体验。
-
-1.  启动本地 Docker Desktop。
-2.  用 VS Code 打开项目根目录。
-3.  按下 `Cmd+Shift+P` (Windows/Linux 上是 `Ctrl+Shift+P`)，选择 **`Dev Containers: Reopen in Container`**。
-4.  容器会自动在本地启动并安装 Node.js 22、Python 3.11、`uv` 依赖，以及 `opencode` CLI 等开发工具。
-5.  **启动后端服务**（打开终端 1）：
-    ```bash
-    uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-    ```
-6.  **启动前端服务**（打开终端 2）：
-    ```bash
-    cd frontend
-    npm run dev
-    ```
-7.  **进行端口转发（重要）**：
-    如果 IDE 没有自动转发 8000 端口，请点击 VS Code 底部的 **Ports** 标签页，点击 **Add Port** 手动添加 `8000` 端口转发。
-8.  在浏览器中访问 `http://localhost:5173/` 即可开始体验。
-
-## 🐳 步骤 3：使用 Docker Compose 一键运行
-
-如果您不需要修改代码，仅想在本地一键拉起整个应用进行运行、演示或集成测试：
-
-1.  在项目根目录下直接运行：
-    ```bash
-    docker compose up --build
-    ```
-2.  服务启动后：
-    - 后端服务运行在：`http://localhost:8000`
-    - 前端服务运行在：`http://localhost:5173`
-    - 本地代码修改会自动挂载并同步热重载至容器内。
-
-## 🧪 单元测试与代码校验
-
-开发过程中，所有代码的规范和功能校验必须在容器内部终端运行并通过：
-
-### 后端代码校验与测试
+1. 用 VS Code 打开仓库并执行 **Dev Containers: Reopen in Container**。
+2. `postCreateCommand` 会运行 `uv sync`，并安装 `frontend/` 与 `docs/` 的 npm 依赖。
+3. 分别启动后端和前端：
 
 ```bash
-# 运行风格检查与自动修复 (Ruff)
-uv run ruff check . --fix
-uv run ruff format .
-
-# 运行后端 pytest 单元测试
-PYTHONPATH=. uv run pytest
-
-# 运行 UML 架构与代码一致性校验
-uv run python scripts/verify_uml.py
+uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
-
-### 前端代码校验与测试
 
 ```bash
 cd frontend
-# 运行代码风格检查
-npm run lint
+npm run dev
+```
 
-# 运行前端单元测试
-npm run test
+Dev Container 已声明转发 8000、5173 和 5174 端口；如果 IDE 未自动转发，请在 Ports 面板手动添加。
+
+## 方式三：本机开发
+
+```bash
+uv sync
+npm --prefix frontend install
+npm --prefix docs install
+```
+
+然后使用与 Dev Container 相同的后端和前端命令。若要预览文档：
+
+```bash
+npm --prefix docs run dev
+```
+
+文档站运行在 `http://localhost:5174`。
+
+## 首次配置模型
+
+1. 打开工作区右上角的“模型与 Provider”。
+2. 新建 Provider，填写类型、API Base 和凭据。
+3. 执行连接测试或模型发现。
+4. 选择默认模型；需要时可为单个会话覆盖模型。
+
+未配置有效默认模型时，提交需要模型的请求会返回可操作的 LLM 配置错误。
+
+## 验证命令
+
+```bash
+uv run ruff check .
+PYTHONPATH=. uv run pytest
+uv run python scripts/verify_uml.py
+npm --prefix frontend run lint
+npm --prefix frontend run test
+npm --prefix frontend run build
+```
+
+文档结构或链接修改后，还应运行文档校验脚本：
+
+```bash
+uv run python scripts/verify_docs.py
 ```
