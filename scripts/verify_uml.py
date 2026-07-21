@@ -11,7 +11,6 @@ CLASS_TO_FILE = {
     "AppManager": "backend/app_manager.py",
     "AppRecordStore": "backend/app_records.py",
     "ContextManager": "backend/context_manager.py",
-    "AgentParser": "backend/agent_parser.py",
     "LLMService": "backend/llm_service.py",
     "LLMResult": "backend/llm_service.py",
     "LLMConfigStore": "backend/llm_config.py",

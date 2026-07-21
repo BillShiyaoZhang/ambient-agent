@@ -240,7 +240,7 @@ describe("RunService event stream", () => {
     unsubscribe();
   });
 
-  it("rebuilds a correlated MCP completion when replay events overtake a failed lookup", async () => {
+  it("rebuilds a correlated capability completion when replay events overtake a failed lookup", async () => {
     const terminalResponse = {
       ok: true,
       json: async () => ({
@@ -248,8 +248,8 @@ describe("RunService event stream", () => {
         status: "succeeded",
         result: { sum: 15 },
         correlation: {
-          projection_type: "mcp_call_response",
-          app_id: "calculator",
+          projection_type: "capability_call_response",
+          catalog_id: "calculator",
           call_id: "call-after-restart",
         },
       }),
@@ -260,7 +260,7 @@ describe("RunService event stream", () => {
     vi.stubGlobal("fetch", fetchRun);
     const service = new RunService();
     const completion = vi.fn();
-    const eventName = "mcp_call_response:calculator:call-after-restart";
+    const eventName = "capability_call_response:calculator:call-after-restart";
     window.addEventListener(eventName, completion);
     const unsubscribe = service.subscribe(() => {});
     const socket = MockWebSocket.instances[0];
@@ -273,8 +273,8 @@ describe("RunService event stream", () => {
         payload: {
           status: "queued",
           correlation: {
-            projection_type: "mcp_call_response",
-            app_id: "calculator",
+            projection_type: "capability_call_response",
+            catalog_id: "calculator",
             call_id: "call-after-restart",
           },
         },
@@ -286,9 +286,9 @@ describe("RunService event stream", () => {
     await vi.waitFor(() => expect(completion).toHaveBeenCalledOnce());
     expect(fetchRun).toHaveBeenCalledTimes(2);
     expect((completion.mock.calls[0][0] as CustomEvent).detail).toMatchObject({
-      type: "mcp_call_response",
+      type: "capability_call_response",
       run_id: "run-one",
-      app_id: "calculator",
+      catalog_id: "calculator",
       call_id: "call-after-restart",
       result: { sum: 15 },
     });
@@ -306,8 +306,8 @@ describe("RunService event stream", () => {
           status: "failed",
           summary: "Remote call failed",
           correlation: {
-            projection_type: "mcp_call_response",
-            app_id: "calculator",
+            projection_type: "capability_call_response",
+            catalog_id: "calculator",
             call_id: "call-retry",
           },
         }),
@@ -315,7 +315,7 @@ describe("RunService event stream", () => {
     vi.stubGlobal("fetch", fetchRun);
     const service = new RunService();
     const completion = vi.fn();
-    const eventName = "mcp_call_response:calculator:call-retry";
+    const eventName = "capability_call_response:calculator:call-retry";
     window.addEventListener(eventName, completion);
     const unsubscribe = service.subscribe(() => {});
     const socket = MockWebSocket.instances[0];
@@ -327,8 +327,8 @@ describe("RunService event stream", () => {
         payload: {
           status: "queued",
           correlation: {
-            projection_type: "mcp_call_response",
-            app_id: "calculator",
+            projection_type: "capability_call_response",
+            catalog_id: "calculator",
             call_id: "call-retry",
           },
         },

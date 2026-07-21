@@ -91,7 +91,7 @@ def test_router_context_build(tmp_path, monkeypatch):
     # Make an app
     am = AppManager()
     am.apps_dir = str(apps_dir)
-    am.create_or_update_app("todo-app-abcd", "Todo", "<html></html>", "css", "js")
+    am.create_or_update_app("todo-app-abcd", "Todo", js="export default function App() {}")
 
     ctx = RouterContext.build(
         app_manager=am,

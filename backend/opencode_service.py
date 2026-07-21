@@ -344,13 +344,21 @@ def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
         raise OpenCodeArtifactError("Generated controller.js must contain a default export")
 
     manifest_path = staging_dir / "manifest.json"
-    if manifest_path.exists():
-        try:
-            AppManifest.read(manifest_path, expected_app_id=app_id)
-        except ManifestValidationError as exc:
-            raise OpenCodeArtifactError(
-                f"App manifest validation failed: {exc!s}. Fix manifest.json according to the App Runtime Contract."
-            ) from exc
+    if not manifest_path.is_file():
+        raise OpenCodeArtifactError("Coding agent did not produce the required Manifest V2 artifact")
+    try:
+        AppManifest.read(manifest_path, expected_app_id=app_id)
+    except ManifestValidationError as exc:
+        raise OpenCodeArtifactError(
+            f"App manifest validation failed: {exc!s}. Fix manifest.json according to the App Runtime Contract."
+        ) from exc
+
+    allowed_names = {".ambient-promotion.json", "README.md", "controller.js", "data", "manifest.json"}
+    unexpected = sorted(path.name for path in staging_dir.iterdir() if path.name not in allowed_names)
+    if unexpected:
+        raise OpenCodeArtifactError(
+            f"App contains unsupported files outside the Runtime Contract: {', '.join(unexpected)}"
+        )
 
     verifier = Path(__file__).resolve().parent.parent / "scripts" / "verify_widget_controller.mjs"
     node_executable = shutil.which("node")
@@ -717,7 +725,6 @@ class PermissionPolicyManager:
         return {
             "policy_mode": "strict",
             "files": {
-                "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
                 "allowed_filenames": ["controller.js", "manifest.json", "README.md"],
             },
             "commands": {
@@ -733,16 +740,10 @@ class PermissionPolicyManager:
         except (OSError, ValueError):
             return False
 
-        # Validate file suffix/name
+        # Coding-agent access is an exact artifact allowlist, never a suffix grant.
         filename = resolved_path.name
-        ext = resolved_path.suffix
-
         allowed_filenames = self.policy.get("files", {}).get("allowed_filenames", [])
-        allowed_extensions = self.policy.get("files", {}).get("allowed_extensions", [])
-
-        if filename in allowed_filenames or ext in allowed_extensions:
-            return True
-        return False
+        return len(resolved_path.relative_to(workspace_root.resolve()).parts) == 1 and filename in allowed_filenames
 
     def validate_command(self, command_str: str) -> bool:
         try:
@@ -786,11 +787,18 @@ class FastAPIACPClient(Client):
         self.terminal_process_groups: set[str] = set()
         self.output_buffer: list[str] = []
 
+    def _artifact_path(self, path: str) -> Path:
+        full_path = _resolve_in_workspace(path, self.workspace_root)
+        relative = full_path.relative_to(self.workspace_root)
+        if len(relative.parts) != 1 or relative.name not in {"README.md", "controller.js", "manifest.json"}:
+            raise ValueError("Coding agents may access only README.md, controller.js, and manifest.json")
+        return full_path
+
     async def read_text_file(
         self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: Any
     ) -> ReadTextFileResponse:
         try:
-            full_path = _resolve_in_workspace(path, self.workspace_root)
+            full_path = self._artifact_path(path)
         except ValueError as exc:
             message = str(exc)
             if "traversal" in message.lower() or "symbolic" in message.lower():
@@ -808,7 +816,7 @@ class FastAPIACPClient(Client):
         self, session_id: str, path: str, content: str, **kwargs: Any
     ) -> WriteTextFileResponse | None:
         try:
-            full_path = _resolve_in_workspace(path, self.workspace_root)
+            full_path = self._artifact_path(path)
         except ValueError as exc:
             message = str(exc)
             if "traversal" in message.lower() or "symbolic" in message.lower():

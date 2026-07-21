@@ -1,70 +1,43 @@
-# Permissions, Execution Boundaries, and Auditing
+# Permissions, Execution Boundaries, and Audit
 
-Ambient Agent uses layered enforcement rather than one global “approved” flag. Local model tools, MCP spawn, remote Agents, OpenCode ACP, and browser Widgets have different security properties.
+Ambient Agent uses composable policy layers rather than one global “approved” boolean. Widget grants, local model tools, Capability actions, MCP/remote-Agent runtimes, and Coding Agents answer different questions. Approval in an outer layer never weakens an inner constraint.
 
-## 1. Local model tools: Tool Gateway
+## 1. Widget Capability Grants
 
-Model-requested Python tools execute through `ToolGateway`. Each `ToolSpec` declares:
+Widget authority is approved together with data schemas in the schema-alignment interaction and persisted as exact Manifest V2 grants. `CapabilityAuthorizer` defaults to deny and checks App, category, operation, and resource for every Graph, network, file, and installed-capability adapter operation.
 
-- typed input and output schemas;
-- a `read`, `write`, `delete`, `execute`, or `network` effect;
-- required scopes and a `never/always` approval policy;
-- timeout, maximum output bytes, idempotency-key requirement, and sensitive argument fields.
+When Manifest revision or grants digest changes, an old SDK snapshot cannot continue calling. Hiding a frontend method is not authorization; the backend trusts only the current persistent Manifest. See [Widget Capability Security](/en/architecture/capability-security.md) for the full model.
 
-The gateway fails closed on unregistered tools, unknown/invalid arguments, insufficient scope, missing approval, and a missing idempotency key. Tool events redact fields declared sensitive. Ordinary Converse currently exposes read-only tools.
+## 2. Local model tools: Tool Gateway
 
-The current idempotency result cache is process-local. It prevents duplicates within one process but is not a restart-durable exactly-once ledger. Side-effecting durable workflows still need persistent idempotency keys and transactional or compensating behavior underneath.
+`ToolGateway` executes model-requested Python tools. Every `ToolSpec` defines typed input/output schemas, effect, required scopes, approval policy, timeout, output limit, idempotency requirement, and sensitive fields.
 
-## 2. MCP and remote-Agent permission
+The Gateway rejects unregistered tools, unknown arguments, insufficient scope, missing approval, and missing idempotency keys, and redacts tool events. Converse receives only read tools projected from the [Agent System Capability Catalog](/en/agent/system-capabilities.md). Effectful workflows use a durable effect ledger rather than an in-process result cache.
 
-`workspace/backend_permissions.json` stores approved identities per App. A new MCP identity includes exact `command`, `args`, a SHA-256 digest of the explicit environment, and the manifest revision. Changing any field requires approval again. Remote Agents are currently approved by their complete endpoint URL.
+## 3. Installed Capabilities, MCP, and remote Agents
 
-An unapproved capability, MCP tool/resource, or Agent Run creates a durable Run interaction before execution. Resolution atomically records the response with `run_version` and requeues the Run. Permission state does not depend on a global Future and survives backend restart.
+A Widget uses only exact `catalog_id + action_id` pairs in its `capability.invoke` grant. The Capability Manifest then fixes the invocation adapter, input/result schemas, and recovery policy. An MCP runtime identity still includes command, arguments, explicit-environment digest, and Manifest revision; changes require a new durable Run interaction.
 
-Spawn approval allows one runtime identity to start. It does not authorize every MCP tool automatically. Capability actions pin a tool name in the manifest; client-submitted MCP tool Runs persist the concrete tool name but do not yet build a dynamic allowlist from `tools/list`.
+A Widget grant is neither MCP spawn approval nor arbitrary-tool approval. A call passes, in order: Widget grant → Capability action schema → adapter runtime identity permission → protocol capability/tool policy → Run effect/recovery policy. The new version does not accept direct Widget `mcp_call_tool` submissions.
 
-## 3. OpenCode ACP
+## 4. Coding Agents
 
-OpenCode works only in a per-Run sibling staging App:
+A Coding Agent works only in a per-Run staging App:
 
-1. `app_id` is validated first, and live/staging paths must be direct children of the Apps directory.
-2. `..`, outside paths, symlinks/junctions, and unsafe links inside an existing App are rejected.
-3. Execution uses `create_subprocess_exec(argv)`, never a shell; shell-control syntax in command/args is rejected.
-4. Terminal cwd must remain in staging. The environment inherits a small allowlist and restricts request-injected variables.
-5. Command policy compares exact/prefix argv tokens and retains a blocklist. Unknown ACP tool kinds are denied by default.
-6. Combined output is byte-bounded. Subprocesses run in a separate process group and stop through TERM→KILL escalation.
-7. `promote` atomically replaces the live App only after artifact/schema verification passes or the user explicitly overrides findings. Failure or rework discards staging.
+1. Paths are safe direct children of the Apps root; escapes and symlinks are rejected.
+2. Only `controller.js`, `manifest.json`, and `README.md` are allowed.
+3. Terminals use fixed argv with `create_subprocess_exec()`, never a shell.
+4. Cwd is fixed to staging and the environment uses a small allowlist.
+5. stdout/stderr, wall time, and process groups are bounded.
+6. The prompt receives only the approved Runtime Contract.
+7. Verification requires equal Manifest grants and subset code use before atomic promotion.
 
-The production `opencode_permissions.json` uses strict exact-argv policy:
+Path/argv/environment/staging policy reduces risk but is not full OS network/filesystem isolation. It never replaces the Widget runtime authorizer.
 
-```json
-{
-  "policy_mode": "strict",
-  "files": {
-    "allowed_extensions": [".js", ".json", ".md"],
-    "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
-  },
-  "commands": {
-    "allowed_commands": ["npm test", "npm run build"],
-    "allowed_prefixes": [],
-    "blocklist": ["rm -rf", "curl", "wget", "sudo"]
-  }
-}
-```
+## 5. Audit and sensitive data
 
-Commands are parsed into a fixed executable and argv tokens and executed with `create_subprocess_exec()`. Production policy permits neither prefixes nor arbitrary terminal/network access. An out-of-policy ACP request fails closed instead of holding a durable worker on process-local approval.
-
-## 4. Audit and sensitive data
-
-- Run events have a versioned envelope with Run/session/step/attempt/trace correlation.
-- Tool Gateway events record redacted arguments, effect, status, and output size.
-- `LLMAuditLog` stores bounded prompt/response previews redacted from tool schemas, plus hashes, usage, latency, and trace correlation.
-
-Run events recursively redact conventional secret keys, bound payload size, and mark changed content with `redacted`. Terminal Run events and LLM audit default to 30-day retention, configured with `RUN_EVENT_RETENTION_DAYS` and `AGENT_AUDIT_RETENTION_DAYS`. They remain sensitive workspace data and must not be exposed to untrusted users.
-
-## 5. What is not a strong sandbox
-
-- OpenCode path, argv, environment, process, and staging controls reduce risk but provide no OS-level filesystem/network isolation.
-- MCP subprocesses likewise have no default network denial or separate user/container boundary.
-- A browser Widget's `new Function` is a module-loading mechanism, not a hostile-code security boundary.
-- User approval does not replace enforced authorization, least-privilege scopes, idempotency, or effect auditing.
+- Every capability allow/deny records App, Manifest revision, category, operation, resource summary, and stable code, never file content, secrets, or a full upstream body.
+- Run events use a versioned envelope with Run/session/step/attempt/trace correlation.
+- Tool and adapter events redact sensitive arguments and bound size. LLM audit stores bounded previews, hashes, usage, and latency.
+- Terminal Run events and LLM audit follow retention policy but remain sensitive workspace data.
+- User approval never replaces least scope, schema validation, idempotency, fencing, compensation, or `needs_attention` reconciliation.

@@ -5,6 +5,7 @@
 
 - **Understand the System**
   - [System and Request Flow](/en/architecture/overview.md)
+  - [Widget Capability Security](/en/architecture/capability-security.md)
   - [Workspace UX](/en/architecture/workspace-ux.md)
   - [Widgets and App Center](/en/architecture/apps.md)
   - [Durable Runs and Runtimes](/en/architecture/runs.md)
@@ -14,6 +15,7 @@
 - **Agent Engine**
   - [Intent Router](/en/agent/intent-router.md)
   - [Agent Harness](/en/agent/harness.md)
+  - [Agent System Capability Catalog](/en/agent/system-capabilities.md)
 
 - **Widget Development**
   - [Widget Format and Lifecycle](/en/widgets/guide.md)

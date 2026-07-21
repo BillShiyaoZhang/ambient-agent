@@ -1,39 +1,27 @@
 # Widget Format and Lifecycle
 
-Current Widgets use a single-file React/HTM controller. Do not generate `<html-content>`, `<css-styles>`, `index.html`, `style.css`, or `ambient.model`.
+Current Widgets use Manifest V2 plus a single React/HTM Controller. Do not generate inline XML Widgets, `index.html`, `style.css`, or removed legacy SDK APIs.
 
-## 1. Two carrier forms
-
-The live artifacts of a persistent app are:
+## 1. One carrier form
 
 ```text
-workspace/apps/<app-id>/controller.js
-workspace/apps/<app-id>/manifest.json
+workspace/apps/<app-id>/
+├── manifest.json
+├── controller.js
+├── README.md
+└── data/
 ```
 
-When a chat model needs to return an inline Widget, it uses XML as a transport container:
-
-```xml
-<ambient-widget id="task-board" title="Task Board">
-<js-script>
-export default function TaskBoard({ ambient }) {
-  const { Card, Text } = ambient.components;
-  return ambient.html`<${Card} title="Tasks"><${Text} text="Ready" /></${Card}>`;
-}
-</js-script>
-</ambient-widget>
-```
-
-`AgentParser` currently extracts only the first `<ambient-widget>`, requires double-quoted `id` and `title`, and saves `<js-script>` as the controller. XML tags must not appear inside `controller.js` itself.
+Every create and modify operation uses the durable Widget workflow, writes staging only after schema + capability approval, then verifies and atomically publishes. A chat model cannot directly return or persist an executable Widget.
 
 ## 2. Controller contract
 
-- Provide a default-exported React component that can be rendered.
-- The component receives `{ ambient }`; injected `React` and `ambient` are also available during module execution.
-- `ambient.html` (HTM) avoids JSX; JSX that the Babel React preset can transpile is also supported.
-- Use hooks exposed by `ambient.react` for state and effects.
-- Use `ambient.graph` for persistent data, and `ambient.runs`, `ambient.capabilities`, or `ambient.mcp` for external capabilities.
-- Clean up subscriptions, timers, and browser listeners when the component unmounts.
+- Default-export a renderable React component that receives `{ ambient }`.
+- Use `ambient.html` or JSX accepted by the Babel React preset.
+- Use `ambient.react` hooks for state and effects.
+- Use only the SDK listed by the Runtime Contract. Graph, network, files, and installed capabilities require matching grants.
+- Capability/source/catalog/action IDs are string literals and are never assembled at runtime.
+- Clean up subscriptions and timers. Do not use direct browser events, DOM, storage, network, or dynamic-code APIs.
 
 ```javascript
 export default function TaskList({ ambient }) {
@@ -41,9 +29,7 @@ export default function TaskList({ ambient }) {
   const { Button, Card, Column, Text } = ambient.components;
   const [tasks, setTasks] = useState([]);
 
-  useEffect(() => {
-    return ambient.graph.subscribe({ type: "Task" }, setTasks);
-  }, []);
+  useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
 
   async function addTask() {
     await ambient.graph.mutate([{
@@ -58,31 +44,32 @@ export default function TaskList({ ambient }) {
       <${Column} gap=${12}>
         <${Text} text=${`${tasks.length} items`} />
         <${Button} label="Add" onClick=${addTask} />
-      </${Column}>
-    </${Card}>`;
+      <//>
+    <//>`;
 }
 ```
 
 ## 3. Standard components
 
-`ambient.components` currently contains `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`. They provide basic host-themed appearance but do not prevent a controller from using normal React elements.
+`ambient.components` includes `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`. They provide host-themed appearance without granting external authority.
 
 ## 4. Generation and publication checks
 
-When the selected OpenCode or Codex backend creates or modifies an app, it writes `controller.js` into a Run-specific staging directory. The coding-agent choice is snapshotted when the Run starts. Publication checks, in order:
+Publication checks, in order:
 
-1. path, file size, UTF-8, and default export;
-2. Node-side module/syntax and forbidden host-capability rules;
-3. Graph subscribe/query/mutate usage against effective schemas;
-4. user-approved plan or schema proposal;
-5. artifact hash, Run version, and effect/idempotency records.
+1. safe paths, allowed files, size, UTF-8, and default export;
+2. module syntax and forbidden host-global/import/dynamic-code rules;
+3. Controller capability use is a subset of approved grants;
+4. staging Manifest grants exactly equal the approved Runtime Contract;
+5. Graph use matches effective schemas;
+6. artifact hash, grants digest, Run version, and effect/idempotency records.
 
-Only then is staging atomically promoted to the live directory. A failed, cancelled, or rejected modification does not overwrite the existing app.
+Only then is staging atomically promoted. Failure, cancellation, or denial preserves the existing App.
 
 ## 5. Debugging
 
-- Compilation errors appear inside the Widget and in the browser console.
-- For Graph mutation failures, check action names, node types, property names, and schema types.
-- For MCP or capability failures, inspect the corresponding Run and interaction in the Task Drawer.
-- Run `node scripts/verify_widget_controller.mjs <controller.js>` for a static controller check.
-- Do not treat `ErrorBoundary` or the word “Sandbox” in a component name as security isolation. See [Runtime Boundary](/en/widgets/sandbox.md).
+- Compilation/render failures appear in the Widget and browser console.
+- For `capability_denied`, first check Manifest entity/operation/source/path/action scope.
+- Handle interactions and `needs_attention` in the Task Drawer.
+- Run `node scripts/verify_widget_controller.mjs <controller.js>` for static verification.
+- See [ambient SDK](/en/widgets/sdk.md) for APIs and [Widget Capability Security](/en/architecture/capability-security.md) for authorization.

@@ -19,6 +19,9 @@ from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
+from backend.capabilities.files import AppFileError, AppFileGateway
+from backend.capabilities.catalog import SystemCapabilityCatalog
+from backend.capabilities.policy import CapabilityAuthorizer, CapabilityDenied
 from backend.coding_agent import (
     AgentModelConfig,
     CodingAgentConfigError,
@@ -91,9 +94,43 @@ coding_agent_config_store = CodingAgentConfigStore(WORKSPACE_DIR)
 set_default_llm_store(llm_config_store)
 app_store = AppStoreService(WORKSPACE_DIR, app_manager)
 
+
+def _system_capability_catalog() -> SystemCapabilityCatalog:
+    from backend.agent.tools import ApprovalPolicy, registry as tool_registry
+
+    model_tools = [
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+            "effect": spec.effect.value,
+            "scopes": sorted(spec.scopes),
+            "approval_required": spec.approval_policy == ApprovalPolicy.ALWAYS,
+            "available": True,
+        }
+        for spec in tool_registry.gateway.specs()
+    ]
+    return SystemCapabilityCatalog.build(
+        installed_capabilities=app_store.list_capabilities(),
+        model_tools=model_tools,
+        coding_agents=coding_agent_config_store.catalog(),
+    )
+
 from backend.graph_db import create_graph_database
 
 graph_db = create_graph_database(WORKSPACE_DIR)
+
+
+def _graph_node_type(node_id: str) -> str | None:
+    node = graph_db.get_node(node_id)
+    return str(node["type"]) if node and node.get("type") else None
+
+
+capability_authorizer = CapabilityAuthorizer(
+    manifest_loader=app_manager.get_manifest,
+    node_type_loader=_graph_node_type,
+)
+app_file_gateway = AppFileGateway(app_manager)
 
 
 def get_db():
@@ -147,6 +184,7 @@ durable_agent_workflow = DurableAgentWorkflow(
     coding_agent_runner=_run_coding_agent_staged,
     event_sink=send_legacy_run_projection,
     app_diagnostic_loader=app_data_source_gateway.recent_diagnostics,
+    capability_catalog_factory=_system_capability_catalog,
 )
 run_coordinator.register_internal_agent_executor(durable_agent_workflow)
 
@@ -673,11 +711,24 @@ async def create_run(data: RunCreate):
     source = data.source or {}
     try:
         action_id = data.action_id
+        if source.get("type") == "widget" and action_id is None:
+            raise ValueError("Widget capability invocation requires an explicit action ID")
         if action_id is None:
             capability = app_store.get_capability(data.catalog_id)
             if capability is None:
                 raise KeyError("Capability not found")
             action_id = capability.normalized_actions()[0].id
+        if source.get("type") == "widget":
+            app_id = str(source.get("id") or "")
+            if not source.get("manifest_revision") or not source.get("grants_digest"):
+                raise ValueError("Widget capability invocation requires a manifest revision and grants digest")
+            capability_authorizer.authorize_invocation(
+                app_id,
+                data.catalog_id,
+                action_id,
+                str(source["manifest_revision"]) if source.get("manifest_revision") is not None else None,
+                str(source["grants_digest"]),
+            )
         return run_coordinator.submit(
             data.catalog_id,
             action_id,
@@ -691,6 +742,8 @@ async def create_run(data: RunCreate):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CapabilityDenied as exc:
+        raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
 
 
 @app.get("/api/runs")
@@ -886,6 +939,8 @@ class AppDataSourceRequest(BaseModel):
     method: str = "GET"
     query: dict[str, Any] | None = None
     body: Any = None
+    manifest_revision: str
+    grants_digest: str
 
 
 @app.post("/api/apps/{app_id}/data-sources/{source_id}/request")
@@ -902,6 +957,82 @@ async def get_app_runtime_diagnostics(app_id: str):
     if app_manager.get_manifest(app_id) is None:
         raise HTTPException(status_code=404, detail="App not found")
     return {"diagnostics": app_data_source_gateway.recent_diagnostics(app_id)}
+
+
+class AppFilePathRequest(BaseModel):
+    path: str
+    manifest_revision: str
+    grants_digest: str
+
+
+class AppFileWriteRequest(AppFilePathRequest):
+    text: str
+
+
+def _app_file_error(exc: AppFileError) -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail={"code": "file_capability_denied", "message": str(exc)},
+    )
+
+
+@app.post("/api/apps/{app_id}/files/read")
+async def read_app_file(app_id: str, data: AppFilePathRequest):
+    try:
+        return {
+            "text": app_file_gateway.read_text(
+                app_id,
+                data.path,
+                manifest_revision=data.manifest_revision,
+                grants_digest=data.grants_digest,
+            )
+        }
+    except AppFileError as exc:
+        raise _app_file_error(exc) from exc
+
+
+@app.post("/api/apps/{app_id}/files/list")
+async def list_app_files(app_id: str, data: AppFilePathRequest):
+    try:
+        return {
+            "files": app_file_gateway.list_files(
+                app_id,
+                data.path,
+                manifest_revision=data.manifest_revision,
+                grants_digest=data.grants_digest,
+            )
+        }
+    except AppFileError as exc:
+        raise _app_file_error(exc) from exc
+
+
+@app.post("/api/apps/{app_id}/files/write")
+async def write_app_file(app_id: str, data: AppFileWriteRequest):
+    try:
+        app_file_gateway.write_text(
+            app_id,
+            data.path,
+            data.text,
+            manifest_revision=data.manifest_revision,
+            grants_digest=data.grants_digest,
+        )
+        return {"status": "ok"}
+    except AppFileError as exc:
+        raise _app_file_error(exc) from exc
+
+
+@app.post("/api/apps/{app_id}/files/delete")
+async def delete_app_file(app_id: str, data: AppFilePathRequest):
+    try:
+        app_file_gateway.delete(
+            app_id,
+            data.path,
+            manifest_revision=data.manifest_revision,
+            grants_digest=data.grants_digest,
+        )
+        return {"status": "ok"}
+    except AppFileError as exc:
+        raise _app_file_error(exc) from exc
 
 
 @app.delete("/api/apps/{app_id}")
@@ -925,6 +1056,8 @@ class GraphMutateRequest(BaseModel):
     actions: list[dict[str, Any]]
     session_id: str = "graph-api"
     idempotency_key: str | None = None
+    manifest_revision: str | None = None
+    grants_digest: str | None = None
 
 
 async def _run_approved_graph_mutation(
@@ -1023,7 +1156,7 @@ async def mutate_graph(data: GraphMutateRequest):
             except Exception:
                 pass
 
-        await subscription_manager.broadcast_updates(graph_db, send_ws)
+        await subscription_manager.broadcast_updates(graph_db, send_ws, authorizer=capability_authorizer)
         return {
             "status": "success",
             "run_id": completed["id"],
@@ -1032,6 +1165,25 @@ async def mutate_graph(data: GraphMutateRequest):
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/apps/{app_id}/graph/mutate")
+async def mutate_app_graph(app_id: str, data: GraphMutateRequest):
+    if not data.manifest_revision or not data.grants_digest:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "capability_snapshot_required", "message": "Manifest revision and grants digest are required"},
+        )
+    try:
+        capability_authorizer.authorize_graph_mutation(
+            app_id,
+            data.actions,
+            manifest_revision=data.manifest_revision,
+            grants_digest=data.grants_digest,
+        )
+    except CapabilityDenied as exc:
+        raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
+    return await mutate_graph(data)
 
 
 # --- WebSocket Chat Handler ---
@@ -1199,139 +1351,6 @@ async def websocket_chat(
         except Exception as e:
             await websocket.send_json({"type": "error", "app_id": app_id, "message": str(e)})
 
-    async def submit_mcp_call(app_id, tool_name, arguments, call_id):
-        try:
-
-            async def mirror_event(payload: dict[str, Any]):
-                await websocket.send_json(payload)
-
-            run = run_coordinator.submit_direct_mcp(
-                app_id,
-                tool_name,
-                arguments,
-                source_type="chat",
-                source_id=session_id,
-                idempotency_key=(f"ws:{session_id}:mcp_call:{app_id}:{call_id}" if call_id else None),
-                correlation={
-                    "projection_type": "mcp_call_response",
-                    "call_id": call_id,
-                    "app_id": app_id,
-                },
-                event_callback=mirror_event,
-            )
-
-            async def project_completion(completed: dict[str, Any]) -> None:
-                payload = {
-                    "type": "mcp_call_response",
-                    "app_id": app_id,
-                    "call_id": call_id,
-                    "run_id": run["id"],
-                }
-                if completed["status"] == "succeeded":
-                    payload["result"] = completed.get("result")
-                else:
-                    payload["error"] = (completed.get("error") or {}).get("message", completed["status"])
-                await websocket.send_json(payload)
-
-            run_coordinator.register_completion_callback(run["id"], project_completion)
-        except Exception as e:
-            await websocket.send_json(
-                {"type": "mcp_call_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
-            )
-
-    async def submit_mcp_read(app_id, uri, call_id):
-        try:
-
-            async def mirror_event(payload: dict[str, Any]):
-                await websocket.send_json(payload)
-
-            run = run_coordinator.submit_direct_mcp_request(
-                app_id,
-                "resources/read",
-                {"uri": uri},
-                source_type="chat",
-                source_id=session_id,
-                idempotency_key=(f"ws:{session_id}:mcp_read:{app_id}:{call_id}" if call_id else None),
-                correlation={
-                    "projection_type": "mcp_read_response",
-                    "call_id": call_id,
-                    "app_id": app_id,
-                },
-                event_callback=mirror_event,
-            )
-
-            async def project_completion(completed: dict[str, Any]) -> None:
-                payload = {
-                    "type": "mcp_read_response",
-                    "app_id": app_id,
-                    "call_id": call_id,
-                    "run_id": run["id"],
-                }
-                if completed["status"] == "succeeded":
-                    payload["result"] = completed.get("result")
-                else:
-                    payload["error"] = (completed.get("error") or {}).get("message", completed["status"])
-                await websocket.send_json(payload)
-
-            run_coordinator.register_completion_callback(run["id"], project_completion)
-        except Exception as e:
-            await websocket.send_json(
-                {"type": "mcp_read_response", "app_id": app_id, "call_id": call_id, "error": str(e)}
-            )
-
-    async def submit_capability_invoke(
-        catalog_id: str,
-        input_data: Any,
-        call_id: str,
-        action_id: str | None = None,
-    ):
-        try:
-            capability = app_store.get_capability(catalog_id)
-            if capability is None:
-                raise ValueError("Capability does not expose an invocation adapter")
-            actions = capability.normalized_actions()
-            selected_action = action_id or actions[0].id
-            run = run_coordinator.submit(
-                catalog_id,
-                selected_action,
-                input_data if isinstance(input_data, dict) else {"input": input_data},
-                source_type="app",
-                source_id=session_id,
-                idempotency_key=(
-                    f"ws:{session_id}:capability:{catalog_id}:{selected_action}:{call_id}" if call_id else None
-                ),
-                correlation={
-                    "projection_type": "capability_call_response",
-                    "call_id": call_id,
-                    "catalog_id": catalog_id,
-                    "action_id": selected_action,
-                },
-            )
-
-            async def project_completion(completed: dict[str, Any]) -> None:
-                payload = {
-                    "type": "capability_call_response",
-                    "catalog_id": catalog_id,
-                    "call_id": call_id,
-                    "run_id": run["id"],
-                }
-                if completed["status"] == "succeeded":
-                    payload["result"] = completed.get("result")
-                else:
-                    payload["error"] = (completed.get("error") or {}).get("message", completed["status"])
-                await websocket.send_json(payload)
-
-            run_coordinator.register_completion_callback(run["id"], project_completion)
-        except Exception as exc:
-            await websocket.send_json(
-                {
-                    "type": "capability_call_response",
-                    "catalog_id": catalog_id,
-                    "call_id": call_id,
-                    "error": str(exc),
-                }
-            )
-
     async def run_capability_ui_generation(catalog_id: str):
         capability = app_store.get_capability(catalog_id)
         if capability is None:
@@ -1355,8 +1374,10 @@ async def websocket_chat(
             ).hexdigest()[:16]
             instruction = (
                 f"Create a polished, responsive UI for the installed capability '{capability.title}'. "
-                f"The capability catalog id is '{catalog_id}'. Use ambient.capabilities.invoke('{catalog_id}', input) "
-                "for every capability action; do not call its provider directly. Build useful controls from the input schema. "
+                f"The capability catalog id is '{catalog_id}'. Use "
+                f"ambient.capabilities.invoke('{catalog_id}', input, '<approved-action-id>') for every capability action; "
+                "the action ID must be an approved string literal. Do not call its provider directly. "
+                "Build useful controls from the input schema. "
                 f"Capability descriptor: {descriptor}"
             )
             current_session = session.get(ChatSession, session_id) or db_session_obj
@@ -1469,28 +1490,6 @@ async def websocket_chat(
                 manifest = app_manager.get_manifest(app_id)
                 if manifest:
                     await submit_agent_msg(app_id, agent_msg_content)
-            elif msg_type == "mcp_call_tool":
-                app_id = data.get("app_id")
-                tool_name = data.get("name")
-                arguments = data.get("arguments", {})
-                call_id = data.get("call_id")
-                manifest = app_manager.get_manifest(app_id)
-                if manifest:
-                    await submit_mcp_call(app_id, tool_name, arguments, call_id)
-            elif msg_type == "mcp_read_resource":
-                app_id = data.get("app_id")
-                uri = data.get("uri")
-                call_id = data.get("call_id")
-                manifest = app_manager.get_manifest(app_id)
-                if manifest:
-                    await submit_mcp_read(app_id, uri, call_id)
-            elif msg_type == "capability_invoke":
-                await submit_capability_invoke(
-                    data.get("catalog_id", ""),
-                    data.get("input", {}),
-                    data.get("call_id", ""),
-                    data.get("action_id"),
-                )
             elif msg_type == "generate_capability_ui":
                 await run_capability_ui_generation(data.get("catalog_id", ""))
             elif msg_type == "permission_response":
@@ -1535,11 +1534,36 @@ async def websocket_chat(
                 sub_id = data.get("subscription_id")
                 query = data.get("query", {})
                 from backend.graph_subscription import subscription_manager
-
-                initial_res = subscription_manager.register(websocket, sub_id, query, graph_db)
-                await websocket.send_json(
-                    {"type": "graph_query_update", "subscription_id": sub_id, "data": initial_res}
-                )
+                try:
+                    if not data.get("manifest_revision") or not data.get("grants_digest"):
+                        raise CapabilityDenied(
+                            "capability_snapshot_required",
+                            "Manifest revision and grants digest are required",
+                            capability="manifest",
+                            operation="load",
+                        )
+                    capability_authorizer.authorize_graph_query(
+                        str(data.get("app_id") or ""),
+                        query,
+                        manifest_revision=data.get("manifest_revision"),
+                        grants_digest=data.get("grants_digest"),
+                    )
+                    initial_res = subscription_manager.register(
+                        websocket,
+                        sub_id,
+                        query,
+                        graph_db,
+                        app_id=str(data.get("app_id") or ""),
+                        manifest_revision=data.get("manifest_revision"),
+                        grants_digest=data.get("grants_digest"),
+                    )
+                    await websocket.send_json(
+                        {"type": "graph_query_update", "subscription_id": sub_id, "data": initial_res}
+                    )
+                except CapabilityDenied as exc:
+                    await websocket.send_json(
+                        {"type": "graph_subscription_error", "subscription_id": sub_id, "error": exc.to_dict()}
+                    )
             elif msg_type == "graph_unsubscribe":
                 sub_id = data.get("subscription_id")
                 from backend.graph_subscription import subscription_manager
@@ -1583,7 +1607,7 @@ async def websocket_chat(
 
                     from backend.graph_subscription import subscription_manager as _sub_mgr
 
-                    await _sub_mgr.broadcast_updates(graph_db, _send_ws)
+                    await _sub_mgr.broadcast_updates(graph_db, _send_ws, authorizer=capability_authorizer)
                     await send_to_session(
                         session_id,
                         {

@@ -196,11 +196,6 @@ export class RunService {
     const projectionType = correlation.projection_type;
     const callId = correlation.call_id;
     if (typeof projectionType !== "string" || typeof callId !== "string" || !callId) return null;
-    if (projectionType === "mcp_call_response" || projectionType === "mcp_read_response") {
-      return typeof correlation.app_id === "string" && correlation.app_id
-        ? `${projectionType}:${correlation.app_id}:${callId}`
-        : null;
-    }
     if (projectionType === "capability_call_response") {
       return typeof correlation.catalog_id === "string" && correlation.catalog_id
         ? `${projectionType}:${correlation.catalog_id}:${callId}`
@@ -415,9 +410,9 @@ export class RunService {
         this.correlatedRuns.add(event.run_id);
       }
     }
-    // A terminal Run may complete while /ws/chat or the backend process is
-    // reconnecting. Rebuild legacy call responses from durable correlation
-    // instead of relying on the process-local completion callback.
+    // A terminal capability Run may complete while /ws/chat or the backend
+    // process is reconnecting. Rebuild its correlated completion from durable
+    // state instead of relying on a process-local callback.
     if (
       this.correlatedRuns.has(event.run_id)
       && ["run_created", "step_committed", "status_changed"].includes(event.type)
@@ -492,7 +487,12 @@ export class RunService {
     return response.json();
   }
 
-  async start(catalogId: string, actionId: string | undefined, input: unknown): Promise<AmbientRun> {
+  async start(
+    catalogId: string,
+    actionId: string,
+    input: unknown,
+    widgetContext?: { appId: string; manifestRevision?: string; grantsDigest?: string },
+  ): Promise<AmbientRun> {
     const response = await fetch(`${API_BASE}/api/runs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -500,7 +500,14 @@ export class RunService {
         catalog_id: catalogId,
         action_id: actionId,
         input,
-        source: { type: "app", id: catalogId },
+        source: widgetContext
+          ? {
+              type: "widget",
+              id: widgetContext.appId,
+              manifest_revision: widgetContext.manifestRevision,
+              grants_digest: widgetContext.grantsDigest,
+            }
+          : { type: "user", id: catalogId },
       }),
     });
     const payload = await response.json();

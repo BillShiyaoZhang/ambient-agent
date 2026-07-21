@@ -274,31 +274,3 @@ async def test_route_passes_router_context_to_prompt(monkeypatch):
     assert "Task=2" in sys_msg
     # tool schema passed in
     assert any(t.get("function", {}).get("name") == "classify_intent" for t in (seen_payload["tools"] or []))
-
-
-@pytest.mark.asyncio
-async def test_route_keeps_legacy_signature_for_harness_compat(monkeypatch):
-    # The harness still calls the old signature passing existing_apps;
-    # IntentRouter.route should accept the legacy shape and convert internally.
-    mock_call = _mock_call_api_factory(
-        [
-            {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "classify_intent",
-                            "arguments": json.dumps({"kind": "converse", "rationale": "ok"}),
-                        },
-                    }
-                ],
-            }
-        ]
-    )
-    monkeypatch.setattr("backend.agent.router.call_llm_api", mock_call)
-
-    # Legacy list-of-apps still accepted
-    plan = await IntentRouter.route_legacy("hello", existing_apps=[{"id": "x", "title": "X"}])
-    assert plan.kind == IntentKind.CONVERSE

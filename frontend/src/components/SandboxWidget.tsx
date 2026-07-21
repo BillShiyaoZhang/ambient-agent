@@ -300,7 +300,8 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   const customListenersRef = useRef<{ event: string; handler: EventListener }[]>([]);
 
   const ambientProps = useMemo(() => {
-    return {
+    const grants = new Map((widget.capabilities || []).map((grant) => [grant.id, grant.scope]));
+    const sdk: Record<string, any> = {
       sendMessage: (text: string) => {
         wsService.sendMessage({
           sender: "user",
@@ -325,58 +326,86 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           return document.documentElement.dataset.theme || "dark";
         },
       },
-      graph: {
-        subscribe: (query: any, callback: (data: any) => void) => {
-          const subId = `sub-${Math.random().toString(36).substring(2, 11)}`;
-          const handler = (e: Event) => {
-            callback((e as CustomEvent).detail);
-          };
-          const eventName = `graph_query_update:${subId}`;
-          window.addEventListener(eventName, handler);
-          customListenersRef.current.push({ event: eventName, handler });
+      html: html,
+      components: Object.freeze(ambientComponents),
+      react: Object.freeze({
+        useState,
+        useEffect,
+        useMemo,
+        useRef,
+        useCallback: React.useCallback,
+        useContext: React.useContext,
+        useReducer: React.useReducer
+      }),
+    };
 
-          const registrationKey = `graph:${subId}`;
-          wsService.registerPersistentMessage(registrationKey, {
-            type: "graph_subscribe",
+    const graph: Record<string, any> = {};
+    if (grants.has("graph.query")) {
+      graph.subscribe = (query: any, callback: (data: any) => void) => {
+        const subId = `sub-${Math.random().toString(36).substring(2, 11)}`;
+        const handler = (e: Event) => {
+          callback((e as CustomEvent).detail);
+        };
+        const eventName = `graph_query_update:${subId}`;
+        window.addEventListener(eventName, handler);
+        customListenersRef.current.push({ event: eventName, handler });
+
+        const registrationKey = `graph:${subId}`;
+        wsService.registerPersistentMessage(registrationKey, {
+          type: "graph_subscribe",
+          subscription_id: subId,
+          app_id: widget.id,
+          manifest_revision: widget.manifest_revision,
+          grants_digest: widget.grants_digest,
+          query,
+        });
+
+        return () => {
+          window.removeEventListener(eventName, handler);
+          const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
+          if (idx !== -1) customListenersRef.current.splice(idx, 1);
+          wsService.unregisterPersistentMessage(registrationKey, {
+            type: "graph_unsubscribe",
             subscription_id: subId,
-            query: query
           });
+        };
+      };
+    }
+    if (grants.has("graph.mutate")) {
+      graph.mutate = async (actions: any[]) => {
+        const invocationId = typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const res = await fetch(`${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/graph/mutate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actions,
+            manifest_revision: widget.manifest_revision,
+            grants_digest: widget.grants_digest,
+            idempotency_key: `widget:${widget.id}:${invocationId}`,
+          }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload?.detail?.message || "Failed to mutate graph");
+        return payload;
+      };
+    }
+    if (Object.keys(graph).length > 0) sdk.graph = Object.freeze(graph);
 
-          return () => {
-            window.removeEventListener(eventName, handler);
-            const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
-            if (idx !== -1) customListenersRef.current.splice(idx, 1);
-
-            wsService.unregisterPersistentMessage(registrationKey, {
-              type: "graph_unsubscribe",
-              subscription_id: subId
-            });
-          };
-        },
-        mutate: async (actions: any[]) => {
-          const invocationId = typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          const res = await fetch(`${API_BASE}/api/graph/mutate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              actions,
-              idempotency_key: `widget:${widget.id}:${invocationId}`
-            })
-          });
-          if (!res.ok) throw new Error("Failed to mutate graph");
-          return res.json();
-        }
-      },
-      net: {
+    if (grants.has("network.request")) {
+      sdk.net = Object.freeze({
         request: async (sourceId: string, request: any) => {
           const res = await fetch(
             `${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/data-sources/${encodeURIComponent(sourceId)}/request`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(request || {}),
+              body: JSON.stringify({
+                ...(request || {}),
+                manifest_revision: widget.manifest_revision,
+                grants_digest: widget.grants_digest,
+              }),
             },
           );
           const payload = await res.json().catch(() => ({}));
@@ -394,73 +423,51 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           }
           return payload.data;
         },
-      },
-      capabilities: {
-        invoke: async (catalogId: string, input: any, actionId?: string) => {
-          const run = await runService.start(catalogId, actionId, input);
+      });
+    }
+
+    if (grants.has("capability.invoke")) {
+      sdk.capabilities = Object.freeze({
+        invoke: async (catalogId: string, input: any, actionId: string) => {
+          const run = await runService.start(catalogId, actionId, input, {
+            appId: widget.id,
+            manifestRevision: widget.manifest_revision,
+            grantsDigest: widget.grants_digest,
+          });
           return runService.wait(run.id);
         },
-      },
-      runs: {
-        start: (catalogId: string, actionId: string | undefined, input: any) => runService.start(catalogId, actionId, input),
-        get: (runId: string) => runService.get(runId),
-        cancel: (runId: string) => runService.cancel(runId),
-        subscribe: (runId: string, callback: (event: any) => void) => {
-          const handler = (event: Event) => callback((event as CustomEvent).detail);
-          const eventName = `ambient_run_event:${runId}`;
-          window.addEventListener(eventName, handler);
-          customListenersRef.current.push({ event: eventName, handler });
-          runService.connect();
-          return () => {
-            window.removeEventListener(eventName, handler);
-            const index = customListenersRef.current.findIndex((listener) => listener.event === eventName && listener.handler === handler);
-            if (index >= 0) customListenersRef.current.splice(index, 1);
-          };
-        },
-      },
-      mcp: {
-        callTool: (name: string, args: any) => {
-          return new Promise((resolve, reject) => {
-            const callId = `call-${Math.random().toString(36).substring(2, 11)}`;
-            const eventName = `mcp_call_response:${widget.id}:${callId}`;
-            const handler = (e: Event) => {
-              window.removeEventListener(eventName, handler);
-              const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
-              if (idx !== -1) customListenersRef.current.splice(idx, 1);
-              
-              const resData = (e as CustomEvent).detail;
-              if (resData.error) {
-                reject(new Error(resData.error));
-              } else {
-                resolve(resData.result);
-              }
-            };
-            window.addEventListener(eventName, handler);
-            customListenersRef.current.push({ event: eventName, handler });
+      });
+    }
 
-            wsService.sendMessage({
-              type: "mcp_call_tool",
-              app_id: widget.id,
-              call_id: callId,
-              name: name,
-              arguments: args
-            });
-          });
-        }
-      },
-      html: html,
-      components: ambientComponents,
-      react: {
-        useState,
-        useEffect,
-        useMemo,
-        useRef,
-        useCallback: React.useCallback,
-        useContext: React.useContext,
-        useReducer: React.useReducer
-      }
+    const files: Record<string, any> = {};
+    const fileRequest = async (operation: string, body: Record<string, unknown>) => {
+      const res = await fetch(`${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/files/${operation}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...body,
+          manifest_revision: widget.manifest_revision,
+          grants_digest: widget.grants_digest,
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload?.detail?.message || `File ${operation} failed`);
+      return payload;
     };
-  }, [widget.id]);
+    if (grants.has("file.read")) {
+      files.read = async (path: string) => (await fileRequest("read", { path })).text;
+      files.list = async (path: string) => (await fileRequest("list", { path })).files;
+    }
+    if (grants.has("file.write")) {
+      files.write = (path: string, text: string) => fileRequest("write", { path, text });
+    }
+    if (grants.has("file.delete")) {
+      files.delete = (path: string) => fileRequest("delete", { path });
+    }
+    if (Object.keys(files).length > 0) sdk.files = Object.freeze(files);
+
+    return Object.freeze(sdk);
+  }, [widget.id, widget.manifest_revision, widget.grants_digest, widget.capabilities]);
 
   useEffect(() => {
     const listeners = customListenersRef.current;

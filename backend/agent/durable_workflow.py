@@ -19,7 +19,9 @@ from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubInte
 from backend.agent.providers import ToolLoopBudget
 from backend.agent.run_context import RunContext
 from backend.app_manager import AppManager
-from backend.app_manifest import validate_app_id
+from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
+from backend.capabilities.models import RuntimeContract, normalize_grants
 from backend.context_manager import ContextManager
 from backend.graph_db import GraphDatabase
 from backend.graph_query_engine import execute_graph_query
@@ -70,6 +72,7 @@ class DurableAgentWorkflow:
         "approved_plan",
         "schema_candidate",
         "approved_schema",
+        "runtime_contract",
         "code_feedback",
         "staged_app",
         "verification_report",
@@ -87,24 +90,20 @@ class DurableAgentWorkflow:
         app_manager: AppManager,
         graph_db: GraphDatabase,
         llm_config_store: LLMConfigStore | Callable[[], LLMConfigStore],
-        coding_agent_runner: CodingAgentRunner | None = None,
-        opencode_runner: CodingAgentRunner | None = None,
+        coding_agent_runner: CodingAgentRunner,
         event_sink: EventSink | None = None,
         app_diagnostic_loader: Callable[[str], list[dict[str, Any]]] | None = None,
+        capability_catalog_factory: Callable[[], SystemCapabilityCatalog] | None = None,
     ) -> None:
         self.workspace_dir = workspace_dir
         self.run_store = run_store
         self.app_manager = app_manager
         self.graph_db = graph_db
         self.llm_config_store = llm_config_store
-        self.coding_agent_runner = coding_agent_runner or opencode_runner
-        if self.coding_agent_runner is None:
-            raise ValueError("A coding-agent runner is required")
-        # Compatibility for test hosts and extensions that still reference the
-        # pre-registry attribute directly.
-        self.opencode_runner = self.coding_agent_runner
+        self.coding_agent_runner = coding_agent_runner
         self.event_sink = event_sink
         self.app_diagnostic_loader = app_diagnostic_loader
+        self.capability_catalog_factory = capability_catalog_factory or SystemCapabilityCatalog.build
         self._event_buffer: ContextVar[list[PendingRunEvent] | None] = ContextVar(
             "durable_agent_event_buffer",
             default=None,
@@ -612,7 +611,7 @@ class DurableAgentWorkflow:
             return
         normalized = state if isinstance(state, AgentRunState) else AgentRunState.model_validate(state)
         staged = normalized.data.get("staged_app")
-        if staged and not staged.get("legacy_promoted") and not normalized.data.get("non_compensable_effect"):
+        if staged and not normalized.data.get("non_compensable_effect"):
             try:
                 discard_opencode_staging(self._staged_result(staged))
                 normalized.data.pop("staged_app", None)
@@ -656,6 +655,7 @@ class DurableAgentWorkflow:
             context_summary=context_summary,
             artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
             tool_loop_budget=self._model_budget(state),
+            capability_catalog=self.capability_catalog_factory(),
         )
         intent = await orchestrator._classify_intent(
             content,
@@ -718,6 +718,7 @@ class DurableAgentWorkflow:
                 max_iterations=remaining_model_turns,
                 max_tool_calls=12,
             ),
+            capability_catalog=self.capability_catalog_factory(),
         )
 
         async def on_update(payload: Any) -> None:
@@ -1035,6 +1036,7 @@ class DurableAgentWorkflow:
                 language=str(state.data.get("language") or "zh"),
                 audit_context=self._run_context(run, state).audit_context(),
                 budget=self._model_budget(state),
+                capability_catalog=self.capability_catalog_factory(),
             )
             proposal = self._merge_preapproved_schema_props(
                 proposal,
@@ -1063,14 +1065,33 @@ class DurableAgentWorkflow:
         action = self._approval(response)
         proposal = state.data.get("schema_candidate") or {}
         if action == "approve":
-            approved = response.get("proposal") or proposal
-            self.graph_db.effective_schemas(approved)
+            approved = json.loads(json.dumps(response.get("proposal") or proposal))
+            approved_schema_ids = {
+                str(item.get("id"))
+                for item in [*approved.get("reused_schemas", []), *approved.get("new_schemas", [])]
+                if item.get("id")
+            }
+            normalized_grants = normalize_grants(approved.get("capabilities", []))
+            self.capability_catalog_factory().validate_grants(
+                normalized_grants,
+                graph_entity_ids=approved_schema_ids,
+            )
+            approved["capabilities"] = [grant.to_dict() for grant in normalized_grants]
+            effective_schemas = self.graph_db.effective_schemas(approved)
             state.data["approved_schema"] = approved
+            effective_by_id = {item["id"]: item for item in effective_schemas}
+            schemas = [effective_by_id[schema_id] for schema_id in sorted(approved_schema_ids)]
+            state.data["runtime_contract"] = RuntimeContract.create(
+                app_id=intent.app_id or "",
+                schemas=schemas,
+                capabilities=approved["capabilities"],
+            ).to_dict()
             return Continue(next_phase="stage_code", summary="Schema proposal approved")
         if action == "rework_plan":
             state.data.pop("plan_candidate", None)
             state.data.pop("approved_plan", None)
             state.data.pop("schema_candidate", None)
+            state.data.pop("runtime_contract", None)
             return Continue(next_phase="plan", summary="Returning to development plan")
         if action == "refine":
             refined = await SchemaAlignmentService.refine_proposal(
@@ -1084,6 +1105,7 @@ class DurableAgentWorkflow:
                 language=str(state.data.get("language") or "zh"),
                 audit_context=self._run_context(run, state).audit_context(),
                 budget=self._model_budget(state),
+                capability_catalog=self.capability_catalog_factory(),
             )
             self.graph_db.effective_schemas(refined)
             state.data["schema_candidate"] = refined
@@ -1127,11 +1149,18 @@ class DurableAgentWorkflow:
             state.data.pop("staged_app", None)
 
         self._consume_model_turn(state, 1)
-        schemas = self.graph_db.effective_schemas(state.data.get("approved_schema") or {})
+        contract = state.data.get("runtime_contract")
+        if not isinstance(contract, dict):
+            raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
+        schemas = list(contract.get("schemas") or [])
         schema_text = "\n".join(f"- Type '{item['id']}': {json.dumps(item.get('properties', {}))}" for item in schemas)
         instruction = (
             f"{intent.instruction or ''}\n\n[APPROVED DEVELOPMENT PLAN]\n"
             f"{state.data.get('approved_plan', '')}\n\n[GRAPH DATABASE SCHEMAS]\n{schema_text}"
+            "\n\n[APPROVED RUNTIME CONTRACT — COPY EXACTLY INTO MANIFEST V2]\n"
+            f"{json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)}"
+            "\n\n[SYSTEM CAPABILITIES]\n"
+            f"{self.capability_catalog_factory().render(AgentRole.CODING_AGENT)}"
         )
         if state.data.get("code_feedback"):
             instruction += f"\n\n[VERIFICATION FEEDBACK]\n{state.data['code_feedback']}"
@@ -1173,6 +1202,7 @@ class DurableAgentWorkflow:
         generated = await self.coding_agent_runner(intent.app_id, instruction, **kwargs)
         if isinstance(generated, CodingAgentStagedResult):
             validate_opencode_staging(generated)
+            self._assert_staged_runtime_contract(generated.staging_dir, contract)
             state.data["staged_app"] = {
                 "output": generated.output[-64_000:],
                 "app_id": generated.app_id,
@@ -1180,21 +1210,13 @@ class DurableAgentWorkflow:
                 "live_dir": str(generated.live_dir),
                 "coding_agent": coding_agent,
             }
-        elif isinstance(generated, str) and not supports_promote:
-            # Compatibility for injected legacy test runners. Production always
-            # uses the retained staging API.
-            state.data["staged_app"] = {
-                "output": generated[-64_000:],
-                "app_id": intent.app_id,
-                "legacy_promoted": True,
-            }
         else:
             raise WorkflowError("Coding agent did not return a staged artifact", code="staged_artifact_missing")
         return Continue(next_phase="verify", summary="Staged App generated")
 
     @staticmethod
     def _staged_result(data: dict[str, Any]) -> CodingAgentStagedResult:
-        if not isinstance(data, dict) or data.get("legacy_promoted"):
+        if not isinstance(data, dict):
             raise WorkflowError("No retained staging artifact is available", code="staged_artifact_missing")
         return CodingAgentStagedResult(
             output=str(data.get("output") or ""),
@@ -1205,12 +1227,45 @@ class DurableAgentWorkflow:
 
     def _staged_widget_code(self, state: AgentRunState) -> dict[str, str]:
         staged = state.data.get("staged_app") or {}
-        if staged.get("legacy_promoted"):
-            files = self.app_manager.get_app_files(str(staged["app_id"])) or {}
-            return {"js": str(files.get("js") or "")}
         result = self._staged_result(staged)
         controller = validate_opencode_staging(result)
         return {"js": controller.read_text(encoding="utf-8")}
+
+    @staticmethod
+    def _assert_staged_runtime_contract(staging_dir: Path, contract: dict[str, Any]) -> AppManifest:
+        app_id = str(contract.get("app_id") or "")
+        try:
+            manifest = AppManifest.read(staging_dir / "manifest.json", expected_app_id=app_id)
+        except (OSError, ManifestValidationError) as exc:
+            raise WorkflowError(
+                "Staged App is missing a valid Manifest V2",
+                code="runtime_contract_mismatch",
+            ) from exc
+        expected_capabilities = normalize_grants(contract.get("capabilities", []))
+        if manifest.capabilities != expected_capabilities or manifest.grants_digest != contract.get("grants_digest"):
+            raise WorkflowError(
+                "Staged App capabilities differ from the user-approved Runtime Contract",
+                code="runtime_contract_mismatch",
+            )
+        if manifest.backend_type != "code" or manifest.mcp_server is not None or manifest.agent_url is not None:
+            raise WorkflowError(
+                "Generated Widgets cannot declare executable backend adapters",
+                code="runtime_contract_mismatch",
+            )
+        expected_schema_refs = tuple(sorted(str(item["id"]) for item in contract.get("schemas", []) if item.get("id")))
+        if tuple(sorted(manifest.schema_refs)) != expected_schema_refs:
+            raise WorkflowError(
+                "Staged App schema_refs differ from the user-approved Runtime Contract",
+                code="runtime_contract_mismatch",
+            )
+        allowed_names = {".ambient-promotion.json", "README.md", "controller.js", "data", "manifest.json"}
+        unexpected = sorted(path.name for path in staging_dir.iterdir() if path.name not in allowed_names)
+        if unexpected:
+            raise WorkflowError(
+                f"Staged App contains files outside the Runtime Contract: {', '.join(unexpected)}",
+                code="runtime_contract_mismatch",
+            )
+        return manifest
 
     async def _phase_verify(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         intent = self._current_intent(state)
@@ -1224,7 +1279,10 @@ class DurableAgentWorkflow:
             if state.data.get("language") == "zh"
             else "🔍 Verifying staged code and Database Schema...",
         )
-        schemas = self.graph_db.effective_schemas(state.data.get("approved_schema") or {})
+        contract = state.data.get("runtime_contract")
+        if not isinstance(contract, dict):
+            raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
+        schemas = list(contract.get("schemas") or [])
         diff = await SchemaVerificationService.diff(
             app_id=intent.app_id or "",
             widget_code=self._staged_widget_code(state),
@@ -1232,6 +1290,7 @@ class DurableAgentWorkflow:
             db_session=self._run_storage(state),
             audit_context=self._run_context(run, state).audit_context(),
             budget=self._model_budget(state),
+            capability_catalog=self.capability_catalog_factory(),
         )
         report = diff.to_markdown()
         state.data["verification_report"] = report
@@ -1268,20 +1327,17 @@ class DurableAgentWorkflow:
             return Continue(next_phase="promote", summary="Verification override approved")
         if action == "rework_code":
             state.data["code_feedback"] = str(response.get("feedback") or state.data.get("verification_report") or "")
-            if not staged.get("legacy_promoted"):
-                discard_opencode_staging(self._staged_result(staged))
+            discard_opencode_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
             return Continue(next_phase="stage_code", summary="Reworking staged code")
         if action == "rework_schema":
-            if not staged.get("legacy_promoted"):
-                discard_opencode_staging(self._staged_result(staged))
+            discard_opencode_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
             state.data.pop("schema_candidate", None)
             state.data.pop("approved_schema", None)
             return Continue(next_phase="align_schema", summary="Reworking schema proposal")
         if action == "rework_plan":
-            if not staged.get("legacy_promoted"):
-                discard_opencode_staging(self._staged_result(staged))
+            discard_opencode_staging(self._staged_result(staged))
             for key in self._WIDGET_KEYS:
                 state.data.pop(key, None)
             return Continue(next_phase="plan", summary="Reworking development plan")
@@ -1303,11 +1359,14 @@ class DurableAgentWorkflow:
         staged = state.data.get("staged_app") or {}
         schema_effect_key = f"agent-run:{run['id']}:schema_promote"
         schema_change: dict[str, Any] | None = None
-        staged_result: CodingAgentStagedResult | None = None
+        staged_result = self._staged_result(staged)
         recovered_controller: Path | None = None
-        if not staged.get("legacy_promoted"):
-            staged_result = self._staged_result(staged)
-            recovered_controller = validate_opencode_promotion(staged_result, run["id"])
+        contract = state.data.get("runtime_contract")
+        if not isinstance(contract, dict):
+            raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
+        recovered_controller = validate_opencode_promotion(staged_result, run["id"])
+        contract_dir = staged_result.live_dir if recovered_controller is not None else staged_result.staging_dir
+        self._assert_staged_runtime_contract(contract_dir, contract)
         if state.data.get("approved_schema"):
             state.data["effect_in_flight"] = "schema_atomic_commit"
             try:
@@ -1324,21 +1383,18 @@ class DurableAgentWorkflow:
             state.data.pop("effect_in_flight", None)
             state.data["schema_snapshot"] = schema_change["snapshot"]
         try:
-            if not staged.get("legacy_promoted"):
-                if staged_result is None:
-                    raise WorkflowError("Promotion has no staging handle", code="staged_artifact_missing")
-                controller = recovered_controller or validate_opencode_staging(staged_result)
-                artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
-                if recovered_controller is None:
-                    marker = staged_result.staging_dir / ".ambient-promotion.json"
-                    marker.write_text(
-                        json.dumps({"run_id": run["id"], "artifact_hash": artifact_hash}),
-                        encoding="utf-8",
-                    )
-                    state.data["effect_in_flight"] = "app_atomic_promote"
-                    await asyncio.to_thread(promote_opencode_staging, staged_result)
-                    state.data.pop("effect_in_flight", None)
-                state.artifact_refs.append({"type": "app", "id": staged_result.app_id, "sha256": artifact_hash})
+            controller = recovered_controller or validate_opencode_staging(staged_result)
+            artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
+            if recovered_controller is None:
+                marker = staged_result.staging_dir / ".ambient-promotion.json"
+                marker.write_text(
+                    json.dumps({"run_id": run["id"], "artifact_hash": artifact_hash}),
+                    encoding="utf-8",
+                )
+                state.data["effect_in_flight"] = "app_atomic_promote"
+                await asyncio.to_thread(promote_opencode_staging, staged_result)
+                state.data.pop("effect_in_flight", None)
+            state.artifact_refs.append({"type": "app", "id": staged_result.app_id, "sha256": artifact_hash})
         except (Exception, asyncio.CancelledError):
             if schema_change is not None:
                 self.graph_db.restore_schema_snapshot(
@@ -1371,13 +1427,20 @@ class DurableAgentWorkflow:
         coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"
         content = f"{coding_agent_name} Execution Log:\n\n```\n{output}\n```\n\n### 🔍 Database Schema Verification Report\n\n{report}"
 
-        from backend.agent_parser import serialize_widget_to_text
-
         code_message = ChatMessage(
             session_id=state.session_id,
             role="code",
             sender="agent",
-            content=serialize_widget_to_text(widget),
+            content=json.dumps(
+                {
+                    "artifact": "app",
+                    "app_id": widget.get("id"),
+                    "manifest_revision": widget.get("manifest_revision"),
+                    "grants_digest": widget.get("grants_digest"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             run_id=f"{run['id']}:artifact",
         )
         if self._message_for_run(storage, state.session_id or "", code_message.run_id) is None:

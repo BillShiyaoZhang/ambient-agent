@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from backend.app_manager import AppManager
+from backend.capabilities.policy import CapabilityAuthorizer, CapabilityDenied
 
 _MAX_DIAGNOSTIC_FILE_BYTES = 1024 * 1024
 _MAX_DIAGNOSTIC_LINES = 256
@@ -147,6 +148,7 @@ class AppDataSourceGateway:
         self.transport = transport
         self.public_host_resolver = public_host_resolver
         self.diagnostics = AppRuntimeDiagnostics(workspace_dir)
+        self.authorizer = CapabilityAuthorizer(manifest_loader=app_manager.get_manifest)
 
     def recent_diagnostics(self, app_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
         return self.diagnostics.recent(app_id, limit=limit)
@@ -207,38 +209,32 @@ class AppDataSourceGateway:
 
     async def request(self, app_id: str, source_id: str, request: dict[str, Any]) -> Any:
         try:
-            manifest = self.app_manager.get_manifest(app_id)
-            if manifest is None:
-                raise AppDataSourceError(
-                    "app_manifest_unavailable",
-                    f"App '{app_id}' has no valid manifest",
-                    "Create or repair manifest.json before using ambient.net.request.",
-                    status_code=404,
+            path = request.get("path")
+            method = str(request.get("method") or "GET").upper()
+            try:
+                source = self.authorizer.authorize_network_request(
+                    app_id,
+                    source_id,
+                    path=path,
+                    method=method,
+                    manifest_revision=request.get("manifest_revision"),
+                    grants_digest=request.get("grants_digest"),
                 )
-            source = (manifest.data_sources or {}).get(source_id)
-            if source is None:
+            except CapabilityDenied as exc:
+                if exc.code in {"app_manifest_unavailable", "manifest_revision_stale", "grants_digest_stale"}:
+                    raise AppDataSourceError(
+                        exc.code,
+                        str(exc),
+                        "Refresh the App snapshot and retry with its current Manifest V2 revision.",
+                        status_code=404 if exc.code == "app_manifest_unavailable" else 409,
+                        details=exc.details,
+                    ) from exc
                 raise AppDataSourceError(
                     "data_source_not_declared",
-                    f"Data source '{source_id}' is not declared by App '{app_id}'",
-                    f"Add data_sources.{source_id} to manifest.json or use a declared source id.",
-                    details={"declared_sources": sorted((manifest.data_sources or {}).keys())},
-                )
-            path = request.get("path")
-            if path not in source["allowed_paths"]:
-                raise AppDataSourceError(
-                    "data_source_path_not_allowed",
-                    f"Path '{path}' is not allowed for data source '{source_id}'",
-                    "Add the exact public API path to manifest.json allowed_paths, then republish the App.",
-                    details={"allowed_paths": source["allowed_paths"]},
-                )
-            method = str(request.get("method") or "GET").upper()
-            if method not in source["methods"]:
-                raise AppDataSourceError(
-                    "data_source_method_not_allowed",
-                    f"Method '{method}' is not allowed for data source '{source_id}'",
-                    "Use a declared method or update manifest.json methods and republish the App.",
-                    details={"allowed_methods": source["methods"]},
-                )
+                    f"Data source '{source_id}' or the requested operation is not approved for App '{app_id}'",
+                    "Add the exact source, path, and method to the network.request grant during schema alignment.",
+                    details=exc.details,
+                ) from exc
             query = self._validate_query(request.get("query"))
             body = request.get("body")
             if method == "GET" and body is not None:

@@ -34,10 +34,11 @@ def test_create_and_get_app(temp_apps_dir):
     manifest = json.loads((app_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["id"] == app_id
     assert manifest["title"] == title
-    assert manifest["manifest_version"] == 1
+    assert manifest["manifest_version"] == 2
     assert manifest["description"] == ""
     assert manifest["intents"] == []
     assert manifest["schema_refs"] == []
+    assert manifest["capabilities"] == []
 
     # 2. Get app files
     app_files = manager.get_app_files(app_id)
@@ -48,6 +49,7 @@ def test_create_and_get_app(temp_apps_dir):
     assert app_files["description"] == ""
     assert app_files["intents"] == []
     assert app_files["schema_refs"] == []
+    assert app_files["capabilities"] == []
 
 
 def test_list_apps(temp_apps_dir):
@@ -65,7 +67,7 @@ def test_list_apps(temp_apps_dir):
     titles = [a["title"] for a in apps]
     assert "App One" in titles
     assert "App Two" in titles
-    assert all(app["manifest_version"] == 1 for app in apps)
+    assert all(app["manifest_version"] == 2 for app in apps)
     assert all("created_at" in app and "updated_at" in app for app in apps)
 
 

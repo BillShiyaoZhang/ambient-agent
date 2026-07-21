@@ -470,13 +470,14 @@ for line in sys.stdin:
 
 def _mcp_manifest(command: list[str], env: dict[str, str] | None = None, app_version: str = "1.0.0"):
     return AppManifest(
-        manifest_version=1,
+        manifest_version=2,
         id="test-app",
         title="Test App",
         description="",
         app_version=app_version,
         intents=(),
         schema_refs=(),
+        capabilities=(),
         backend_type="mcp",
         mcp_server={"command": command, "args": [], "env": env or {}},
     )
@@ -494,10 +495,10 @@ def test_mcp_permission_identity_binds_env_and_manifest_revision(tmp_workspace):
         manifest.mcp_server["command"],
         [],
         {"TOKEN": "one"},
-        "1:1.0.0",
+        "2:1.0.0",
     )
-    assert not manager.is_mcp_approved(manifest.id, ["mcp-server"], [], {"TOKEN": "two"}, "1:1.0.0")
-    assert not manager.is_mcp_approved(manifest.id, ["mcp-server"], [], {"TOKEN": "one"}, "1:2.0.0")
+    assert not manager.is_mcp_approved(manifest.id, ["mcp-server"], [], {"TOKEN": "two"}, "2:1.0.0")
+    assert not manager.is_mcp_approved(manifest.id, ["mcp-server"], [], {"TOKEN": "one"}, "2:2.0.0")
     assert set(identity) == {"command", "args", "env_digest", "manifest_revision"}
     assert "one" not in manager.permissions_file.read_text(encoding="utf-8")
 
@@ -538,13 +539,14 @@ async def test_get_or_start_serializes_concurrent_spawns(tmp_workspace, monkeypa
 
 def _agent_manifest(agent_url: str = "https://agent.example.test/events") -> AppManifest:
     return AppManifest(
-        manifest_version=1,
+        manifest_version=2,
         id="test-agent",
         title="Test Agent",
         description="",
         app_version="1.0.0",
         intents=(),
         schema_refs=(),
+        capabilities=(),
         backend_type="agent",
         agent_url=agent_url,
     )

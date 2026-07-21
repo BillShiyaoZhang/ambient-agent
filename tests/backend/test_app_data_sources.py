@@ -1,5 +1,3 @@
-import json
-
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -19,20 +17,22 @@ def _manager_with_source(tmp_path, monkeypatch) -> AppManager:
         "weather-app",
         "Weather",
         js="export default function App() { return null; }",
+        capabilities=[
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {
+                            "base_url": "https://api.open-meteo.com",
+                            "paths": ["/v1/forecast"],
+                            "methods": ["GET"],
+                            "response_limit": 4096,
+                        }
+                    }
+                },
+            }
+        ],
     )
-    manifest_path = apps_dir / "weather-app" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["data_sources"] = {
-        "forecast": {
-            "type": "http",
-            "base_url": "https://api.open-meteo.com",
-            "allowed_paths": ["/v1/forecast"],
-            "methods": ["GET"],
-            "response_format": "json",
-            "response_limit": 4096,
-        }
-    }
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manager
 
 
@@ -78,11 +78,11 @@ async def test_gateway_failure_is_actionable_and_available_to_the_next_agent_run
         )
 
     assert exc_info.value.code == "data_source_not_declared"
-    assert "manifest.json" in exc_info.value.hint
+    assert "network.request" in exc_info.value.hint
     diagnostics = gateway.recent_diagnostics("weather-app")
     assert diagnostics[-1]["code"] == "data_source_not_declared"
     assert diagnostics[-1]["source_id"] == "missing-source"
-    assert "manifest.json" in diagnostics[-1]["hint"]
+    assert "network.request" in diagnostics[-1]["hint"]
 
 
 @pytest.mark.asyncio
@@ -103,6 +103,9 @@ async def test_gateway_rejects_oversized_query_before_network_access(tmp_path, m
 
 def test_data_source_api_returns_data_and_structured_errors(tmp_path, monkeypatch):
     manager = _manager_with_source(tmp_path, monkeypatch)
+    manifest = manager.get_manifest("weather-app")
+    assert manifest is not None
+    snapshot = {"manifest_revision": manifest.revision, "grants_digest": manifest.grants_digest}
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"temperature": 28})
@@ -121,11 +124,11 @@ def test_data_source_api_returns_data_and_structured_errors(tmp_path, monkeypatc
     with TestClient(main_module.app) as client:
         success = client.post(
             "/api/apps/weather-app/data-sources/forecast/request",
-            json={"path": "/v1/forecast", "method": "GET", "query": {"latitude": 31.23}},
+            json={"path": "/v1/forecast", "method": "GET", "query": {"latitude": 31.23}, **snapshot},
         )
         failure = client.post(
             "/api/apps/weather-app/data-sources/missing/request",
-            json={"path": "/v1/forecast", "method": "GET"},
+            json={"path": "/v1/forecast", "method": "GET", **snapshot},
         )
 
     assert success.status_code == 200

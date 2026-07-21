@@ -144,7 +144,7 @@ async def test_scripted_converse_runs_through_coordinator_and_evaluates_persiste
         app_manager=app_manager,
         graph_db=GraphDatabase(str(tmp_path)),
         llm_config_store=_FakeLLMConfigStore(),
-        opencode_runner=lambda **_kwargs: pytest.fail("Converse must not invoke OpenCode"),
+        coding_agent_runner=lambda **_kwargs: pytest.fail("Converse must not invoke a coding agent"),
     )
     coordinator = RunCoordinator(store, SimpleNamespace(), app_manager, SimpleNamespace())
     coordinator.register_internal_agent_executor(workflow)

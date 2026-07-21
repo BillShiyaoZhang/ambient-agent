@@ -3,6 +3,7 @@ import { render, screen, waitFor, act } from "@testing-library/react";
 import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
 import { Widget } from "../../frontend/src/components/DashboardCanvas";
 import wsService from "../../frontend/src/services/websocket";
+import { runService } from "../../frontend/src/services/runs";
 import React from "react";
 
 describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
@@ -30,8 +31,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "graph-widget-test",
       title: "Graph Widget Test",
-      html: "",
-      css: "",
       js: `
         const { useState, useEffect } = ambient.react;
         export default function App() {
@@ -44,6 +43,9 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
           return ambient.html\`<div data-testid="output">\${text}</div>\`;
         }
       `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:test",
+      capabilities: [{ id: "graph.query", scope: { entities: ["Task"] } }],
     };
 
     render(<SandboxWidget widget={mockWidget} />);
@@ -52,6 +54,8 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
       expect.stringMatching(/^graph:sub-/),
       expect.objectContaining({
         type: "graph_subscribe",
+        app_id: "graph-widget-test",
+        manifest_revision: "2:1.0.0",
         query: { type: "Task" },
       })
     );
@@ -75,8 +79,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "layout-widget-test",
       title: "Layout Widget Test",
-      html: "",
-      css: "",
       js: `
         const { Row } = ambient.components;
         export default function App() {
@@ -100,8 +102,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "static-siblings-widget-test",
       title: "Static Siblings Widget Test",
-      html: "",
-      css: "",
       js: `
         export default function App() {
           const labels = ["first", "second", "third"];
@@ -132,8 +132,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "graph-widget-test",
       title: "Graph Widget Test",
-      html: "",
-      css: "",
       js: `
         const { useEffect } = ambient.react;
         const { Button } = ambient.components;
@@ -146,6 +144,9 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
           return ambient.html\`<\${Button} data-testid="unsub-btn" label="Unsubscribe" onClick=\${() => unsub && unsub()} />\`;
         }
       `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:test",
+      capabilities: [{ id: "graph.query", scope: { entities: ["Task"] } }],
     };
 
     render(<SandboxWidget widget={mockWidget} />);
@@ -177,8 +178,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "graph-widget-test",
       title: "Graph Widget Test",
-      html: "",
-      css: "",
       js: `
         const { Button } = ambient.components;
         export default function App() {
@@ -190,6 +189,11 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
           return ambient.html\`<\${Button} data-testid="mutate-btn" label="Mutate" onClick=\${handleMutate} />\`;
         }
       `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:test",
+      capabilities: [
+        { id: "graph.mutate", scope: { entities: ["Task"], operations: ["create"] } },
+      ],
     };
 
     render(<SandboxWidget widget={mockWidget} />);
@@ -201,7 +205,7 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
       expect(global.fetch).toHaveBeenCalledTimes(1);
     });
     const [url, request] = vi.mocked(global.fetch).mock.calls[0];
-    expect(url).toBe("http://localhost:8000/api/graph/mutate");
+    expect(url).toBe("http://localhost:8000/api/apps/graph-widget-test/graph/mutate");
     expect(request).toMatchObject({
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -209,6 +213,7 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const payload = JSON.parse(String(request?.body));
     expect(payload.actions).toEqual(actions);
     expect(payload.idempotency_key).toMatch(/^widget:graph-widget-test:/);
+    expect(payload.manifest_revision).toBe("2:1.0.0");
   });
 
   it("should access only an app-scoped declared data source through ambient.net", async () => {
@@ -219,8 +224,6 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const mockWidget: Widget = {
       id: "weather-app",
       title: "Weather",
-      html: "",
-      css: "",
       js: `
         const { useEffect, useState } = ambient.react;
         export default function App() {
@@ -235,6 +238,23 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
           return ambient.html\`<div data-testid="temperature">\${temperature}</div>\`;
         }
       `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:test",
+      capabilities: [
+        {
+          id: "network.request",
+          scope: {
+            sources: {
+              forecast: {
+                base_url: "https://api.example.com",
+                paths: ["/v1/forecast"],
+                methods: ["GET"],
+                response_limit: 4096,
+              },
+            },
+          },
+        },
+      ],
     };
 
     render(<SandboxWidget widget={mockWidget} />);
@@ -249,51 +269,87 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     );
   });
 
-  it("should support ambient.mcp.callTool and resolve promise on WebSocket response", async () => {
+  it("should expose only approved frozen SDK namespaces", async () => {
     const mockWidget: Widget = {
-      id: "mcp-widget-test",
-      title: "MCP Widget Test",
-      html: "",
-      css: "",
+      id: "no-grants-widget",
+      title: "No Grants",
       js: `
-        const { useState, useEffect } = ambient.react;
         export default function App() {
-          const [val, setVal] = useState("No Data");
-          useEffect(() => {
-            ambient.mcp.callTool("calc", { x: 5, y: 10 }).then((res) => {
-              setVal(JSON.stringify(res));
-            });
-          }, []);
-          return ambient.html\`<div data-testid="output">\${val}</div>\`;
+          const result = ["graph", "net", "files", "capabilities", "runs", "mcp"]
+            .map((key) => \`\${key}:\${key in ambient}\`)
+            .join(",");
+          return ambient.html\`<div data-testid="surface">\${result}|frozen:\${String(Object.isFrozen(ambient))}</div>\`;
         }
       `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:empty",
+      capabilities: [],
     };
 
     render(<SandboxWidget widget={mockWidget} />);
 
-    expect(wsService.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "mcp_call_tool",
-        name: "calc",
-        arguments: { x: 5, y: 10 },
-      })
+    expect(screen.getByTestId("surface").textContent).toBe(
+      "graph:false,net:false,files:false,capabilities:false,runs:false,mcp:false|frozen:true",
     );
+  });
 
-    const calls = (wsService.sendMessage as any).mock.calls;
-    const mcpCall = calls.find((c: any) => c[0].type === "mcp_call_tool");
-    expect(mcpCall).toBeDefined();
-    const callIdCaptured = mcpCall[0].call_id;
+  it("should invoke only a grant-scoped installed capability", async () => {
+    vi.spyOn(runService, "start").mockResolvedValue({ id: "run-1" } as any);
+    vi.spyOn(runService, "wait").mockResolvedValue({ status: "succeeded", result: { count: 3 } } as any);
+    const mockWidget: Widget = {
+      id: "calendar-ui",
+      title: "Calendar",
+      js: `
+        const { Button } = ambient.components;
+        export default function App() {
+          const invoke = () => ambient.capabilities.invoke("mcp:calendar:calendar", {}, "list-events");
+          return ambient.html\`<\${Button} data-testid="invoke" label="Load" onClick=\${invoke} />\`;
+        }
+      `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:invoke",
+      capabilities: [
+        {
+          id: "capability.invoke",
+          scope: { catalog_ids: ["mcp:calendar:calendar"], actions: ["list-events"] },
+        },
+      ],
+    };
 
-    const eventName = `mcp_call_response:mcp-widget-test:${callIdCaptured}`;
-    window.dispatchEvent(
-      new CustomEvent(eventName, {
-        detail: { result: { sum: 15 } },
-      })
-    );
+    render(<SandboxWidget widget={mockWidget} />);
+    screen.getByTestId("invoke").click();
+    await waitFor(() => expect(runService.start).toHaveBeenCalledWith(
+      "mcp:calendar:calendar",
+      "list-events",
+      {},
+      expect.objectContaining({ appId: "calendar-ui", manifestRevision: "2:1.0.0" }),
+    ));
+  });
 
-    await waitFor(() => {
-      const output = screen.getByTestId("output");
-      expect(output.textContent).toBe(JSON.stringify({ sum: 15 }));
-    });
+  it("should bind approved file writes to the current app", async () => {
+    (global.fetch as any).mockResolvedValue({ ok: true, json: async () => ({ status: "ok" }) });
+    const mockWidget: Widget = {
+      id: "notes-app",
+      title: "Notes",
+      js: `
+        const { Button } = ambient.components;
+        export default function App() {
+          const save = () => ambient.files.write("drafts/today.md", "hello");
+          return ambient.html\`<\${Button} data-testid="save" label="Save" onClick=\${save} />\`;
+        }
+      `,
+      manifest_revision: "2:1.0.0",
+      grants_digest: "sha256:files",
+      capabilities: [
+        { id: "file.write", scope: { paths: ["drafts/**"], max_bytes: 1024 } },
+      ],
+    };
+
+    render(<SandboxWidget widget={mockWidget} />);
+    screen.getByTestId("save").click();
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/apps/notes-app/files/write",
+      expect.objectContaining({ method: "POST" }),
+    ));
   });
 });

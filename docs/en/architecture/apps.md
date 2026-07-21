@@ -1,58 +1,43 @@
 # Widgets and App Center
 
-A “Widget” is a React UI rendered in the workspace. An “App” is a Widget with a persistent manifest and controller artifact. A “Capability” is a skill, MCP tool, or other backend capability listed in App Center that may not yet have a UI.
+A “Widget” is a React UI rendered in the workspace. An “App” is a Widget with a persistent Manifest V2 and Controller. A “Capability” is an invokable backend action in App Center that may not have a UI. An App accesses host or external resources only through approved capability grants.
 
 ## 1. App artifacts
 
-Each app lives under `workspace/apps/<app-id>/`:
-
 ```text
-<app-id>/
-├── manifest.json      # Required: identity, version, intents, schemas, backend
+workspace/apps/<app-id>/
+├── manifest.json      # Required: identity, schema refs, exact capability grants
 ├── controller.js      # Required: default-exported React component
-└── README.md          # Optional app documentation
+├── README.md          # Optional App documentation
+└── data/              # Optional private runtime data constrained by file.* grants
 ```
 
-Legacy `index.html` and `style.css` files are recognized only as compatibility sources. The current generation path permits only `controller.js`, `manifest.json`, and `README.md`; do not create new three-file HTML/CSS/JS Widgets.
-
-Manifest V1 requires these fields:
+Manifest V2 is the only loadable and publishable format:
 
 ```json
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "id": "task-board",
   "title": "Task Board",
   "description": "Manage tasks",
   "app_version": "1.0.0",
   "intents": ["manage tasks"],
-  "schema_refs": ["Task"]
-}
-```
-
-`id` must match the directory name and use lowercase kebab-case. Optional `backend_type` is `code`, `agent`, or `mcp`; MCP and agent backends provide their corresponding configuration.
-
-An App that reads public external data declares its own App-scoped HTTP connector in `data_sources`; Ambient does not preinstall business capabilities such as `weather.forecast`:
-
-```json
-{
-  "data_sources": {
-    "forecast": {
-      "type": "http",
-      "base_url": "https://api.open-meteo.com",
-      "allowed_paths": ["/v1/forecast"],
-      "methods": ["GET"],
-      "response_format": "json",
-      "response_limit": 1048576
+  "schema_refs": ["Task"],
+  "capabilities": [
+    {"id": "graph.query", "scope": {"entities": ["Task"]}},
+    {
+      "id": "graph.mutate",
+      "scope": {"entities": ["Task"], "operations": ["create", "update", "delete"]}
     }
-  }
+  ]
 }
 ```
 
-V1 connectors support credential-free HTTPS JSON APIs only. `base_url` must be a public origin and each path must be declared explicitly. Localhost, IP literals, private/reserved destinations, redirects, proxy environment variables, and oversized responses fail closed. OAuth, secrets, signatures, and dedicated SDKs require an MCP/Capability binding; credentials must never be written into a manifest or controller.
+`id` matches the directory name and uses lowercase kebab case. An App with no external access still writes `"capabilities": []`. V1, top-level `data_sources`, `index.html`, `style.css`, `layout.json`, and `index.jsx` are not new-version artifacts and are neither implicitly migrated nor loaded.
 
-## 2. Controller loading
+## 2. Controller and minimal SDK
 
-`controller.js` default-exports a React component. The host transpiles the module with `@babel/standalone`, executes it through `new Function("exports", "React", "ambient", ...)`, and renders the exported component.
+`controller.js` default-exports a React component. After transpilation, the host constructs an `ambient` capability membrane only from approved Manifest grants.
 
 ```javascript
 export default function TaskBoard({ ambient }) {
@@ -61,50 +46,49 @@ export default function TaskBoard({ ambient }) {
   const [tasks, setTasks] = useState([]);
 
   useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
-  return ambient.html`<${Card} title="Tasks"><${Text} text=${`${tasks.length} items`} /></${Card}>`;
+  return ambient.html`<${Card} title="Tasks"><${Text} text=${`${tasks.length} items`} /><//>`;
 }
 ```
 
-The runtime exposes `ambient.graph`, `ambient.net`, `ambient.runs`, `ambient.capabilities`, `ambient.mcp`, React hooks, HTM, and standard components. See the complete [ambient SDK](/en/widgets/sdk.md).
+The example injects `ambient.graph.subscribe` only when a `graph.query` grant exists and includes `Task`. Without `network.request`, `ambient.net` does not exist. Without a `file.*` grant, `ambient.files` does not exist. The backend reloads the persistent Manifest and authorizes every request again.
 
 ## 3. Creation, modification, and publication
 
 ```mermaid
 flowchart LR
     Request[User request] --> Run[internal_agent Run]
-    Run --> Plan[Routing and plan]
-    Plan --> Confirm[Confirmation when required]
-    Confirm --> Stage[OpenCode staging]
-    Stage --> Verify[Controller and schema checks]
-    Verify --> Promote[Atomic promotion to live app]
+    Run --> Plan[Development plan approval]
+    Plan --> Align[Schema + capability alignment]
+    Align --> Approval[User approves exact proposal]
+    Approval --> Contract[Immutable Runtime Contract]
+    Contract --> Stage[Coding Agent staging]
+    Stage --> Verify[Code use / Manifest / Schema checks]
+    Verify --> Promote[Atomic promotion]
     Promote --> Store[App Center / workspace]
 ```
 
-- New apps and modifications write to staging first. The live directory remains unchanged until approval and verification.
-- A controller must contain a default export and pass size, UTF-8, module syntax, and host-capability rules.
-- A manifest with `data_sources` must pass the connector contract, and every `ambient.net.request("source-id", ...)` in the controller must reference a source declared by the sibling manifest.
-- `SchemaVerificationService` extracts Graph usage from the controller and compares it with effective schemas. Required schema extensions become a proposal and follow confirmation.
-- Publication is protected by artifact hashes and Run effect records. Recovery validates staged/live artifacts to avoid duplicate or incorrect promotion.
+- A denied capability proposal prevents the Coding Agent from starting.
+- For an existing App, current grants enter the proposal. Any expansion or replacement requires explicit approval.
+- The Coding Agent receives only approved schemas, grants, the SDK subset, and allowed files.
+- Controller capability IDs, source IDs, catalog IDs, and action IDs must be statically extractable string literals.
+- Verification requires normalized staging Manifest grants to equal the Runtime Contract and code use to be a subset.
+- The live directory remains unchanged until approval and verification complete. Recovery checks artifact hash, grants digest, and Run effect records before promotion.
+
+See [Widget Capability Security](/en/architecture/capability-security.md) for the full contract.
 
 ## 4. App Center
 
-`GET /api/app-store` combines three entry kinds:
+`GET /api/app-store` combines `generated_app`, `skill`, and `mcp` items. A headless capability may start a durable UI-generation Run. Its UI requests a `capability.invoke` grant limited to the target `catalog_id + action_id`; it never binds a provider, MCP server, or tool name directly.
 
-- `generated_app`: a workspace app with a manifest and UI;
-- `skill`: a skill capability discovered by BackendManager;
-- `mcp`: an MCP server/tool capability.
-
-Entry status is `ready`, `needs_ui`, `generating`, or `unavailable`. A capability without UI can start a durable UI-generation Run through `/api/capabilities/{catalog_id}/ui`; success binds the capability to the new app.
-
-App Center layout uses a persistent `revision`. `PUT /api/app-store/layout` returns `409` on a concurrent revision conflict; the client must reload before submitting again.
+Items are `ready`, `needs_ui`, `generating`, or `unavailable`. Layout uses revision-based optimistic concurrency. A conflict returns `409`, after which the client reloads before submitting again.
 
 ## 5. Data and capability boundaries
 
-- Widgets do not own separate data models; persistent domain data uses Graph schemas.
-- The backend preflights and atomically commits `ambient.graph.mutate`. Do not use the deprecated `ambient.model`.
-- `ambient.net.request` can address only a data source declared by the current App manifest. Widgets cannot supply full URLs and cannot call `fetch` directly.
-- `ambient.capabilities.invoke` and `ambient.runs.start` create durable Runs and must not bypass confirmation or effect records.
-- `ambient.mcp.callTool` remains subject to backend manifest, tool-identity, and permission checks.
-- Controllers execute in the host realm and should only load trusted code. See [Runtime Boundary](/en/widgets/sandbox.md).
+- The Graph stores only user context. App caches, cursors, UI state, and raw provider payloads live under `data/`.
+- `graph.query` and `graph.mutate` are separate grants further constrained by entity, operation, and edge type.
+- A `network.request` grant declares the public HTTPS origin, paths, methods, and response limit. The Controller never supplies a full URL.
+- `file.*` accesses only `app://data/`; it cannot read the Manifest, Controller, sessions, Graph, or credentials.
+- `capability.invoke` calls only exact approved App Center actions. Direct `ambient.mcp` has been removed from the Widget SDK.
+- A grant only allows the App to request an operation. Run interactions, adapter spawn permission, input/output schemas, idempotency, and recovery policy remain in force.
 
-Data-source failures return stable `code`, `message`, `hint`, and safe `details`, and append a bounded diagnostic to the workspace. When that App is modified later, Durable Workflow supplies recent diagnostics alongside the Runtime Contract so the coding agent can correct source ids, manifest paths, request parameters, or upstream response issues without receiving secrets or unbounded response bodies.
+Runtime errors use stable `code`, `capability`, `operation`, `hint`, and safe `details`, and write bounded audit/diagnostic records for later repair.

@@ -48,6 +48,30 @@ from backend.opencode_service import (
 )
 
 
+def _write_manifest(
+    directory: Path,
+    app_id: str,
+    *,
+    capabilities: list[dict] | None = None,
+    schema_refs: list[str] | None = None,
+) -> None:
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 2,
+                "id": app_id,
+                "title": app_id.replace("-", " ").title(),
+                "description": "",
+                "app_version": "0.1.0",
+                "intents": [],
+                "schema_refs": schema_refs or [],
+                "capabilities": capabilities or [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_orphan_staging_cleanup_only_removes_old_unreferenced_directories(tmp_path):
     apps_dir = tmp_path / "apps"
     apps_dir.mkdir()
@@ -187,6 +211,7 @@ def test_promotion_marker_recovers_exact_committed_artifact(tmp_path):
     staging_dir.mkdir()
     controller = staging_dir / "controller.js"
     controller.write_text("export default function App() { return null; }", encoding="utf-8")
+    _write_manifest(staging_dir, "demo-app")
     artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
     (staging_dir / ".ambient-promotion.json").write_text(
         json.dumps({"run_id": "run-1", "artifact_hash": artifact_hash}),
@@ -226,6 +251,7 @@ def test_staging_verifier_rejects_invalid_or_host_capable_controller(tmp_path, s
     staging_dir = apps_dir / f".secure-app.staging-{'a' * 32}"
     staging_dir.mkdir()
     (staging_dir / "controller.js").write_text(source, encoding="utf-8")
+    _write_manifest(staging_dir, "secure-app")
     result = OpenCodeStagedResult("", "secure-app", staging_dir, apps_dir / "secure-app")
 
     with pytest.raises(OpenCodeArtifactError, match=message):
@@ -241,24 +267,10 @@ def test_staging_verifier_requires_ambient_net_source_to_be_declared(tmp_path):
         'export default async function App() { await ambient.net.request("forecast", { path: "/v1/forecast" }); return null; }',
         encoding="utf-8",
     )
-    (staging_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "manifest_version": 1,
-                "id": "weather-app",
-                "title": "Weather",
-                "description": "",
-                "app_version": "0.1.0",
-                "intents": [],
-                "schema_refs": [],
-                "data_sources": {},
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_manifest(staging_dir, "weather-app")
     result = OpenCodeStagedResult("", "weather-app", staging_dir, apps_dir / "weather-app")
 
-    with pytest.raises(OpenCodeArtifactError, match=r"forecast.*data_sources"):
+    with pytest.raises(OpenCodeArtifactError, match=r"network\.request"):
         validate_opencode_staging(result)
 
 
@@ -269,22 +281,22 @@ async def test_client_fs_operations(tmp_path):
     workspace_root.mkdir()
 
     # Write a test file
-    test_file_path = workspace_root / "index.html"
+    test_file_path = workspace_root / "controller.js"
     test_file_path.write_text("hello html", encoding="utf-8")
 
     # 2. Instantiate client
     client = FastAPIACPClient(workspace_root=workspace_root, on_update_callback=lambda x: None)
 
     # Test read_text_file
-    read_resp = await client.read_text_file(session_id="sess", path="index.html")
+    read_resp = await client.read_text_file(session_id="sess", path="controller.js")
     assert isinstance(read_resp, ReadTextFileResponse)
     assert read_resp.content == "hello html"
 
     # Test write_text_file
-    write_resp = await client.write_text_file(session_id="sess", path="style.css", content="body {color: red;}")
+    write_resp = await client.write_text_file(session_id="sess", path="README.md", content="notes")
     assert isinstance(write_resp, WriteTextFileResponse)
-    assert (workspace_root / "style.css").exists()
-    assert (workspace_root / "style.css").read_text(encoding="utf-8") == "body {color: red;}"
+    assert (workspace_root / "README.md").exists()
+    assert (workspace_root / "README.md").read_text(encoding="utf-8") == "notes"
 
 
 @pytest.mark.asyncio
@@ -296,7 +308,7 @@ async def test_client_request_permission():
         PermissionOption(option_id="opt-deny", name="Deny", kind="reject_always"),
     ]
 
-    tool_call = MagicMock(kind="read", raw_input={"path": "backend/opencode_permissions.json"}, content=None)
+    tool_call = MagicMock(kind="read", raw_input={"path": "controller.js"}, content=None)
     resp = await client.request_permission(session_id="sess", tool_call=tool_call, options=options)
     assert isinstance(resp, RequestPermissionResponse)
     assert isinstance(resp.outcome, AllowedOutcome)
@@ -367,6 +379,7 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
     async def generate_controller(*args, **kwargs):
         staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
         (staging_dir / "controller.js").write_text("export default function App() { return null; }", encoding="utf-8")
+        _write_manifest(staging_dir, "weather-card")
         return PromptResponse(stop_reason="end_turn")
 
     mock_conn.prompt = AsyncMock(side_effect=generate_controller)
@@ -465,7 +478,7 @@ def test_permission_policy_manager(tmp_path):
 
     policy_data = {
         "policy_mode": "interactive",
-        "files": {"allowed_extensions": [".html", ".css", ".js"], "allowed_filenames": ["data.json"]},
+        "files": {"allowed_filenames": ["controller.js", "manifest.json", "README.md"]},
         "commands": {
             "allowed_commands": ["npm test", "npm run build"],
             "allowed_prefixes": ["npm install "],
@@ -477,8 +490,9 @@ def test_permission_policy_manager(tmp_path):
     mgr = PermissionPolicyManager(config_path=str(config_file))
 
     # Test file paths
-    assert mgr.validate_file_path("index.html", tmp_path) is True
-    assert mgr.validate_file_path("data.json", tmp_path) is True
+    assert mgr.validate_file_path("controller.js", tmp_path) is True
+    assert mgr.validate_file_path("manifest.json", tmp_path) is True
+    assert mgr.validate_file_path("nested/controller.js", tmp_path) is False
     assert mgr.validate_file_path("unsafe.exe", tmp_path) is False
     assert mgr.validate_file_path("../conftest.py", tmp_path) is False  # Directory traversal blocked
 
@@ -727,6 +741,7 @@ async def test_acp_can_retain_validate_and_promote_staging(monkeypatch, tmp_path
     async def generate_controller(*args, **kwargs):
         staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
         (staging_dir / "controller.js").write_text(new_source, encoding="utf-8")
+        _write_manifest(staging_dir, "weather-card")
         return PromptResponse(stop_reason="end_turn")
 
     mock_conn.prompt = generate_controller
@@ -766,6 +781,7 @@ async def test_discard_retained_staging_preserves_live_app(monkeypatch, tmp_path
         (staging_dir / "controller.js").write_text(
             "export default function DiscardedApp() { return null; }", encoding="utf-8"
         )
+        _write_manifest(staging_dir, "weather-card")
         return PromptResponse(stop_reason="end_turn")
 
     mock_conn.prompt = generate_controller

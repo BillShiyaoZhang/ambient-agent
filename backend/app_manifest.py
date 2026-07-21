@@ -1,14 +1,14 @@
 import json
-import ipaddress
 import os
 import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
-APP_MANIFEST_VERSION = 1
+from backend.capabilities.models import CapabilityGrant, grants_digest, normalize_grants
+
+APP_MANIFEST_VERSION = 2
 MAX_APP_ID_LENGTH = 64
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 2000
@@ -51,18 +51,18 @@ _REQUIRED_FIELDS = {
     "app_version",
     "intents",
     "schema_refs",
+    "capabilities",
 }
 _OPTIONAL_FIELDS = {
     "backend_type",
     "mcp_server",
     "agent_url",
-    "data_sources",
 }
 _FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
 
 
 class ManifestValidationError(ValueError):
-    """Raised when an App Manifest does not satisfy the V1 contract."""
+    """Raised when an App Manifest does not satisfy the V2 contract."""
 
 
 def validate_app_id(app_id: Any) -> str:
@@ -141,109 +141,6 @@ def _validate_mcp_server(value: Any) -> dict[str, Any] | None:
     }
 
 
-_DATA_SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_DATA_SOURCE_FIELDS = {
-    "type",
-    "base_url",
-    "allowed_paths",
-    "methods",
-    "response_format",
-    "response_limit",
-}
-
-
-def _validate_data_sources(value: Any) -> dict[str, dict[str, Any]]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict) or len(value) > 32:
-        raise ManifestValidationError("data_sources must be a JSON object with at most 32 entries")
-    result: dict[str, dict[str, Any]] = {}
-    for source_id, source in value.items():
-        if not isinstance(source_id, str) or not _DATA_SOURCE_ID_PATTERN.fullmatch(source_id):
-            raise ManifestValidationError("data_sources ids must be lowercase kebab-case identifiers")
-        if not isinstance(source, dict):
-            raise ManifestValidationError(f"data_sources.{source_id} must be a JSON object")
-        unknown = set(source) - _DATA_SOURCE_FIELDS
-        if unknown:
-            raise ManifestValidationError(
-                f"data_sources.{source_id} contains unknown fields: {', '.join(sorted(unknown))}"
-            )
-        if source.get("type") != "http":
-            raise ManifestValidationError(f"data_sources.{source_id}.type must be 'http'")
-        base_url = source.get("base_url")
-        if not isinstance(base_url, str):
-            raise ManifestValidationError(f"data_sources.{source_id}.base_url must be a string")
-        parsed = urlsplit(base_url)
-        hostname = parsed.hostname
-        if (
-            parsed.scheme != "https"
-            or not hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ManifestValidationError(f"data_sources.{source_id}.base_url must be a credential-free HTTPS origin")
-        lowered_host = hostname.rstrip(".").lower()
-        try:
-            ipaddress.ip_address(lowered_host)
-        except ValueError:
-            pass
-        else:
-            raise ManifestValidationError(f"data_sources.{source_id}.base_url cannot use an IP literal")
-        if lowered_host == "localhost" or lowered_host.endswith((".localhost", ".local")):
-            raise ManifestValidationError(f"data_sources.{source_id}.base_url must use a public hostname")
-
-        paths = source.get("allowed_paths")
-        if not isinstance(paths, list) or not paths or len(paths) > 64:
-            raise ManifestValidationError(
-                f"data_sources.{source_id}.allowed_paths must be a non-empty array with at most 64 paths"
-            )
-        normalized_paths: list[str] = []
-        for path in paths:
-            path_parts = urlsplit(path) if isinstance(path, str) else None
-            if (
-                path_parts is None
-                or not path.startswith("/")
-                or path.startswith("//")
-                or path_parts.scheme
-                or path_parts.netloc
-                or path_parts.query
-                or path_parts.fragment
-                or any(part == ".." for part in path.split("/"))
-            ):
-                raise ManifestValidationError(
-                    f"data_sources.{source_id}.allowed_paths must contain absolute URL paths without traversal"
-                )
-            normalized_paths.append(path)
-        if len(normalized_paths) != len(set(normalized_paths)):
-            raise ManifestValidationError(f"data_sources.{source_id}.allowed_paths cannot contain duplicates")
-
-        methods = source.get("methods", ["GET"])
-        if not isinstance(methods, list) or not methods or any(method not in {"GET", "POST"} for method in methods):
-            raise ManifestValidationError(f"data_sources.{source_id}.methods supports only GET and POST")
-        if len(methods) != len(set(methods)):
-            raise ManifestValidationError(f"data_sources.{source_id}.methods cannot contain duplicates")
-        response_format = source.get("response_format", "json")
-        if response_format != "json":
-            raise ManifestValidationError(f"data_sources.{source_id}.response_format must be 'json'")
-        response_limit = source.get("response_limit", 1_048_576)
-        if type(response_limit) is not int or not 1024 <= response_limit <= 2_097_152:
-            raise ManifestValidationError(
-                f"data_sources.{source_id}.response_limit must be an integer between 1024 and 2097152"
-            )
-        result[source_id] = {
-            "type": "http",
-            "base_url": base_url.rstrip("/"),
-            "allowed_paths": normalized_paths,
-            "methods": methods,
-            "response_format": "json",
-            "response_limit": response_limit,
-        }
-    return result
-
-
 @dataclass(frozen=True, slots=True)
 class AppManifest:
     manifest_version: int
@@ -253,10 +150,10 @@ class AppManifest:
     app_version: str
     intents: tuple[str, ...]
     schema_refs: tuple[str, ...]
+    capabilities: tuple[CapabilityGrant, ...]
     backend_type: str = "code"
     mcp_server: dict[str, Any] | None = None
     agent_url: str | None = None
-    data_sources: dict[str, dict[str, Any]] | None = None
 
     @classmethod
     def from_dict(cls, data: Any, *, expected_app_id: str) -> "AppManifest":
@@ -281,6 +178,11 @@ class AppManifest:
         if agent_url is not None:
             agent_url = _validate_text("agent_url", agent_url, allow_empty=False, max_length=1000)
 
+        try:
+            capabilities = normalize_grants(data["capabilities"])
+        except ValueError as exc:
+            raise ManifestValidationError(f"capabilities: {exc!s}") from exc
+
         return cls(
             manifest_version=APP_MANIFEST_VERSION,
             id=app_id,
@@ -293,10 +195,10 @@ class AppManifest:
             ),
             intents=_validate_string_list("intents", data["intents"]),
             schema_refs=_validate_string_list("schema_refs", data["schema_refs"]),
+            capabilities=capabilities,
             backend_type=backend_type,
             mcp_server=mcp_server,
             agent_url=agent_url,
-            data_sources=_validate_data_sources(data.get("data_sources")),
         )
 
     @classmethod
@@ -321,6 +223,7 @@ class AppManifest:
             "app_version": self.app_version,
             "intents": list(self.intents),
             "schema_refs": list(self.schema_refs),
+            "capabilities": [grant.to_dict() for grant in self.capabilities],
         }
         if self.backend_type != "code":
             result["backend_type"] = self.backend_type
@@ -328,9 +231,15 @@ class AppManifest:
             result["mcp_server"] = self.mcp_server
         if self.agent_url is not None:
             result["agent_url"] = self.agent_url
-        if self.data_sources:
-            result["data_sources"] = self.data_sources
         return result
+
+    @property
+    def revision(self) -> str:
+        return f"{self.manifest_version}:{self.app_version}"
+
+    @property
+    def grants_digest(self) -> str:
+        return grants_digest(self.capabilities)
 
     def write_atomic(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

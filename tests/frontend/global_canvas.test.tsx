@@ -56,8 +56,6 @@ describe("Frontend Global Canvas & Message Merging TDD", () => {
               Promise.resolve({
                 id: app_id,
                 title: `App ${app_id}`,
-                html: "<div>mocked</div>",
-                css: "",
                 js: "",
               }),
           });

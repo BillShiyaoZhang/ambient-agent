@@ -107,25 +107,25 @@ async def test_intent_router(monkeypatch):
     monkeypatch.setattr("backend.agent.router.call_llm_api", mock_call_api)
 
     # 1. Conversational path
-    plan = await IntentRouter.route("Hello, how are you?", [])
+    plan = await IntentRouter.route("Hello, how are you?", RouterContext())
     assert plan.kind == IntentKind.CONVERSE
     assert plan.app_id is None
     assert plan.instruction == "Hello, how are you?"
 
     # 2. Explicit slash command
-    plan = await IntentRouter.route("/app calculator-app Add a new divide button", [])
+    plan = await IntentRouter.route("/app calculator-app Add a new divide button", RouterContext())
     assert plan.kind == IntentKind.WIDGET_MODIFY
     assert plan.app_id == "calculator-app"
     assert plan.instruction == "Add a new divide button"
 
     # 3. Chinese creation phrase
-    plan = await IntentRouter.route("给我创建一个待办 widget", [])
+    plan = await IntentRouter.route("给我创建一个待办 widget", RouterContext())
     assert plan.kind == IntentKind.WIDGET_CREATE
     assert "todo-app-" in (plan.app_id or "")
     assert plan.instruction == "给我创建一个待办 widget"
 
     # 4. English creation pattern
-    plan = await IntentRouter.route("build a new widget to show weather", [])
+    plan = await IntentRouter.route("build a new widget to show weather", RouterContext())
     assert plan.kind == IntentKind.WIDGET_CREATE
     assert "weather-app-" in (plan.app_id or "")
 

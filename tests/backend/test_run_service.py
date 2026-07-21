@@ -59,7 +59,7 @@ def test_run_state_machine_idempotency_and_retry_history(tmp_path):
 
 def test_run_correlation_is_durable_and_part_of_idempotency_identity(tmp_path):
     store = RunStore(str(tmp_path))
-    correlation = {"projection_type": "mcp_call_response", "call_id": "call-1"}
+    correlation = {"projection_type": "capability_call_response", "call_id": "call-1"}
     run = create(store, idempotency_key="call-1", correlation=correlation)
     restored = store.get_run(run["id"], include_events=True)
 
@@ -69,7 +69,7 @@ def test_run_correlation_is_durable_and_part_of_idempotency_identity(tmp_path):
         create(
             store,
             idempotency_key="call-1",
-            correlation={"projection_type": "mcp_call_response", "call_id": "call-2"},
+            correlation={"projection_type": "capability_call_response", "call_id": "call-2"},
         )
 
 
@@ -1144,6 +1144,21 @@ def test_cancel_detects_artifact_promoted_before_checkpoint(tmp_path):
     live_dir.mkdir(parents=True)
     controller = live_dir / "controller.js"
     controller.write_text("export default function App() { return null; }\n", encoding="utf-8")
+    (live_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 2,
+                "id": "promoted-app",
+                "title": "Promoted App",
+                "description": "",
+                "app_version": "0.1.0",
+                "intents": [],
+                "schema_refs": [],
+                "capabilities": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     store = RunStore(str(tmp_path))
     state = AgentRunState(
         workflow_type="widget_modify",

@@ -5,6 +5,8 @@ from typing import Any
 
 from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
+from backend.capabilities.models import normalize_grants
 from backend.graph_db import GraphDatabase
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
@@ -23,6 +25,7 @@ class SchemaAlignmentService:
         language: str = "zh",
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
@@ -40,6 +43,8 @@ class SchemaAlignmentService:
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
         is_zh = language == "zh"
+        catalog = capability_catalog or SystemCapabilityCatalog.build()
+        rendered_capability_catalog = catalog.render(AgentRole.SCHEMA_ALIGNMENT)
         system_prompt = f"""You are a Canonical Ontology Alignment Architect.
 Your task is to analyze a widget request and match only its user-context facts against the single `ambient-context` ontology.
 
@@ -50,6 +55,9 @@ Your task is to analyze a widget request and match only its user-context facts a
 4. **Property Extensions**: If you reuse an existing entity, propose extra context fields under `extended_properties`.
 5. **New Entities**: Propose a new entity only if the concept is genuinely new. Attach it to an existing `subclass_of` parent (normally `Thing`) and provide established external `equivalent_to` IRIs when available.
 6. **Supported Data Types**: Property fields must use one of: "string", "integer", "number", "boolean".
+7. **Capability Ontology**: Propose the smallest required Widget grants from the supplied Capability Ontology. Do not invent category ids, scope fields, sources, entity types, catalog ids, or actions. An empty array is valid.
+
+{rendered_capability_catalog}
 
 IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
 
@@ -80,6 +88,9 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "equivalent_to": ["https://schema.org/Action"],
       "data_scope": "user_context"
     }}
+  ],
+  "capabilities": [
+    {{"id": "graph.query", "scope": {{"entities": ["Task"]}}}}
   ]
 }}
 """
@@ -137,6 +148,14 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
                 proposal["reused_schemas"] = []
             if "new_schemas" not in proposal:
                 proposal["new_schemas"] = []
+            normalized_grants = normalize_grants(proposal.get("capabilities", []))
+            graph_entity_ids = {
+                str(item.get("id"))
+                for item in [*proposal["reused_schemas"], *proposal["new_schemas"]]
+                if isinstance(item, dict) and item.get("id")
+            }
+            catalog.validate_grants(normalized_grants, graph_entity_ids=graph_entity_ids)
+            proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
 
             return proposal
 
@@ -145,7 +164,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         except Exception as e:
             logger.error(f"Failed to generate or parse schema alignment: {e}. Raw response: {raw_response}")
             raise WorkflowError(
-                "Schema alignment generation or parsing failed",
+                "Schema capability alignment generation or parsing failed",
                 code="schema_alignment_failed",
                 retryable=True,
             ) from e
@@ -162,6 +181,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         language: str = "zh",
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
@@ -173,6 +193,8 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
         is_zh = language == "zh"
+        catalog = capability_catalog or SystemCapabilityCatalog.build()
+        rendered_capability_catalog = catalog.render(AgentRole.SCHEMA_ALIGNMENT)
         system_prompt = f"""You are a Canonical Ontology Alignment Architect.
 Your task is to refine an `ambient-context` ontology proposal based on direct natural language feedback from the user.
 
@@ -182,6 +204,9 @@ Your task is to refine an `ambient-context` ontology proposal based on direct na
 3. Implement exactly what the user requests in their feedback.
 4. Keep all entities in the single canonical ontology and preserve `subclass_of`/`equivalent_to` alignments.
 5. Never model App-only runtime data; caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay in the App directory.
+6. Refine capability grants from the supplied Capability Ontology with least privilege. Do not invent category ids or scope fields.
+
+{rendered_capability_catalog}
 
 IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
 
@@ -212,6 +237,9 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "equivalent_to": ["https://schema.org/Action"],
       "data_scope": "user_context"
     }}
+  ],
+  "capabilities": [
+    {{"id": "graph.query", "scope": {{"entities": ["Task"]}}}}
   ]
 }}
 """
@@ -266,13 +294,21 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
                 proposal["reused_schemas"] = []
             if "new_schemas" not in proposal:
                 proposal["new_schemas"] = []
+            normalized_grants = normalize_grants(proposal.get("capabilities", []))
+            graph_entity_ids = {
+                str(item.get("id"))
+                for item in [*proposal["reused_schemas"], *proposal["new_schemas"]]
+                if isinstance(item, dict) and item.get("id")
+            }
+            catalog.validate_grants(normalized_grants, graph_entity_ids=graph_entity_ids)
+            proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
             return proposal
         except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to refine schema alignment: {e}. Raw response: {raw_response}")
             raise WorkflowError(
-                "Schema alignment refinement failed",
+                "Schema capability alignment refinement failed",
                 code="schema_alignment_refinement_failed",
                 retryable=True,
             ) from e

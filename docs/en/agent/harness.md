@@ -82,7 +82,7 @@ stateDiagram-v2
     wait_plan --> align_schema: approve
     wait_plan --> plan: refine
     wait_plan --> failed: deny
-    align_schema --> wait_schema: proposal persisted
+    align_schema --> wait_schema: schema + capability proposal persisted
     wait_schema --> stage_code: approve
     wait_schema --> align_schema: refine
     wait_schema --> plan: rework plan
@@ -97,7 +97,7 @@ stateDiagram-v2
     promote --> done: atomic live-App swap
 ```
 
-OpenCode runs with `promote=False` and returns `OpenCodeStagedResult`. `verify` reads staging only. `promote` revalidates the artifact, computes its hash, persists a promotion marker, commits the approved schema, and atomically replaces the live App. Recovery checks the marker and does not publish twice. Failure, rework, and cancellation discard staging and preserve the old live App.
+The schema interaction atomically approves data schemas and capability grants. The Workflow then creates an immutable Runtime Contract with a grants digest. OpenCode generates staging with `promote=False`; verification requires Manifest grants to equal the contract and code use to be a subset before checking Graph schemas. Promotion persists a marker, commits schemas, and atomically replaces the live App. Recovery does not publish twice, and failure, rework, or cancellation preserves the old live App.
 
 ### Graph mutation
 
@@ -110,7 +110,7 @@ stateDiagram-v2
     graph_commit --> done: one Neo4j transaction
 ```
 
-Preflight performs no database write and first verifies that every record entity exists in the single `ambient-context` ontology. Commit uses `apply_actions_atomic()` to store context records/edges, a rollback ticket, complete reverse actions, and the `run_id + phase` Graph effect ledger in one Neo4j transaction. If a worker crashes after that transaction but before the Run checkpoint, retry returns the original result rather than duplicating writes. `/api/graph/mutate` and WebSocket rollback use the same reducer, with an explicit command recorded as a durable approval interaction. Multi-intent preflights the complete request first, then `multi_dispatch` advances it serially as a saga. A retryable current phase preserves prior effects and compensation data; only a terminal failure compensates in reverse and rewinds cursor/results to the saga start. Incomplete compensation or uncertain effects enter `needs_attention`.
+Preflight performs no database write and first verifies that every record entity exists in the single `ambient-context` ontology. An App-scoped Widget mutation additionally resolves entity, operation, and edge type against approved grants. Commit uses `apply_actions_atomic()` to store context records/edges, a rollback ticket, complete reverse actions, and the Graph effect ledger in one Neo4j transaction; crash retry returns the original result rather than duplicating writes. Multi-intent preflights the complete request before advancing serially as a saga, and only a terminal failure compensates in reverse. Incomplete compensation or uncertain effects enter `needs_attention`.
 
 ### Converse and read-only queries
 
@@ -124,7 +124,7 @@ Preflight performs no database write and first verifies that every record entity
 
 Capability, MCP, ACP, and HTTP adapters execute at the same `RunCoordinator` effect boundary and share lease fencing, durable approval, deadline, cancellation, and `needs_attention` semantics. HTTP Agents additionally have a total wall-clock deadline, request/response/event bounds, a bounded SSE decoder, and disabled environment-proxy inheritance. Remote effects default to manual recovery; a manifest string cannot replace proof of remote idempotency or reconciliation. Protocol-specific schemas, capabilities, and process policies remain enforced by their adapters; they do not masquerade as Python tools or bypass the durable Run control plane.
 
-The reducer constructs `RunContext` from the durable Run and checkpoint and passes it explicitly into routing, planning, schema alignment, verification, and Converse providers. `ContextManager` deterministically bounds recent-message count, per-message characters, artifact characters, and total prompt size. Messages outside the window become a deterministic checkpointed summary verified by `context_summary_ref=sha256:…`. LLM audit rows record prompt/model/tool-schema hashes and the hashes of retrieved artifacts. Trimming is character-based, while provider-reported token and cost usage enters the Run's total budget. The primary/fast models, Coding Agent, agent model binding, and resolved shared model are snapshotted at submission, so recovery does not drift when the UI changes settings mid-run.
+The reducer constructs `RunContext` from the durable Run and checkpoint and passes it explicitly into routing, planning, schema alignment, verification, and Converse providers. Each Agent role also receives a least-information projection generated from the structured `SystemCapabilityCatalog`; a Coding Agent receives only this App's approved Runtime Contract. `ContextManager` deterministically bounds recent-message count, per-message characters, artifact characters, and total prompt size. Messages outside the window become a deterministic checkpointed summary verified by `context_summary_ref=sha256:…`. LLM audit rows record prompt/model/tool-schema hashes and the hashes of retrieved artifacts. Trimming is character-based, while provider-reported token and cost usage enters the Run's total budget. The primary/fast models, Coding Agent, agent model binding, and resolved shared model are snapshotted at submission, so recovery does not drift when the UI changes settings mid-run.
 
 ## 5. Events, cancellation, and retention
 

@@ -29,8 +29,6 @@ describe("SandboxWidget Rendering & Containment", () => {
     const mockWidget: Widget = {
       id: "htm-unified-test",
       title: "HTM Test App",
-      html: "",
-      css: "",
       js: `
         const { useState } = ambient.react;
         const { Card, Button, Text } = ambient.components;

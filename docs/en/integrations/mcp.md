@@ -6,14 +6,14 @@ Ambient Agent manages MCP stdio subprocesses through `BackendManager`, with `Std
 
 ```mermaid
 sequenceDiagram
-    participant Widget as Widget ambient.mcp
-    participant WS as /ws/chat ingress
+    participant Widget as Widget ambient.capabilities
+    participant API as Capability Run API
     participant Run as RunCoordinator / RunStore
     participant BM as BackendManager
     participant MCP as MCP stdio process
 
-    Widget->>WS: mcp_call_tool(app_id, name, arguments, call_id)
-    WS->>Run: submit_direct_mcp()
+    Widget->>API: invoke(catalog_id, action_id, input)
+    API->>Run: submit(capability action)
     Run->>BM: get_or_start_mcp_client()
     BM->>MCP: initialize
     MCP-->>BM: protocolVersion + capabilities
@@ -21,11 +21,11 @@ sequenceDiagram
     Run->>MCP: tools/call
     MCP-->>Run: JSON-RPC result/error
     Run->>Run: fenced terminal commit + event
-    Run-->>WS: mcp_call_response(run_id, result)
-    WS-->>Widget: resolve Promise
+    Run-->>API: terminal Run snapshot
+    API-->>Widget: resolve Promise
 ```
 
-An `mcp_tool` action declared by a capability manifest also runs through `RunCoordinator`, with input and result schemas validated around execution. A manifest action pins a specific `tool_name`. Widget `mcp_call_tool` submits an `mcp_tool` Run, while `mcp_read_resource` submits a read-only `mcp_request` Run. The WebSocket registers a best-effort compatibility projection but neither waits for nor owns the JSON-RPC call. `projection_type + call_id` is durable Run correlation, and the call ID is part of idempotency identity so canonical Runs/events can reconstruct the response link.
+An `mcp_tool` action declared by a Capability Manifest runs through `RunCoordinator`, with input and result schemas validated around execution. The Manifest action pins a specific `tool_name`, while the Widget's `capability.invoke` grant pins `catalog_id + action_id`. A new-version Widget cannot submit a raw MCP tool or resource name; MCP is an internal Capability adapter.
 
 ## 2. Client lifecycle
 
@@ -65,7 +65,7 @@ MCP spawn permission compares more than an executable command. A new identity in
 
 A changed manifest revision or explicit environment creates a new identity and requires approval again. Approved identities are stored in `workspace/backend_permissions.json`.
 
-Capability and direct MCP tool/resource Runs persist an unapproved spawn as a Run interaction. Resolution atomically records the response with `run_version` and requeues the Run. Permission does not depend on a global Future, so the interaction remains resumable after backend restart.
+A Capability Run persists an unapproved spawn as a Run interaction. Resolution atomically records the response with `run_version` and requeues the Run. Permission does not depend on a global Future, so the interaction remains resumable after backend restart.
 
 ## 4. Cancellation, recovery, and effects
 
@@ -77,6 +77,6 @@ Capability and direct MCP tool/resource Runs persist an unapproved spawn as a Ru
 ## 5. Current limitations
 
 - The client rejects method families missing from negotiated capabilities, but it does not yet call `tools/list` to derive a dynamic per-tool allowlist.
-- Capability actions pin the tool name in a manifest; a client-supplied `mcp_call_tool` name is persisted, audited, and validated as Run input.
+- Capability actions pin the tool name in a Manifest; Widgets have no direct MCP entry point.
 - MCP subprocesses have argv/environment/I/O/lifecycle controls but no OS-level filesystem/network sandbox.
 - Client capabilities remain empty, so sampling/roots and similar server requests are unsupported; `ping` is handled and every other method receives explicit `-32601`.

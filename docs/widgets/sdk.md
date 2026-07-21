@@ -1,32 +1,29 @@
 # ambient SDK
 
-`SandboxWidget` 将以下对象作为组件 prop 和模块执行参数注入。本文只记录当前代码实际提供的接口。
+`SandboxWidget` 始终注入纯 UI host features，只为当前 App 的批准 grants 注入对外访问方法。本文记录 Manifest V2 的 SDK；调用方必须处理方法不存在和请求被后端拒绝两种情况。
 
-## 1. 宿主与主题
+## 1. 始终可用的 Host Features
 
 | API | 行为 |
 | --- | --- |
-| `ambient.sendMessage(text)` | 通过聊天 WebSocket 以用户身份发送消息 |
-| `ambient.fullscreen()` | 将当前应用窗口切换为最大化 |
-| `ambient.minimize()` | 将当前应用窗口切换为浮动 |
-| `ambient.theme.preference` | 当前偏好：`system`、`light` 或 `dark` |
-| `ambient.theme.effective` | 当前有效主题，通常为 `light` 或 `dark` |
+| `ambient.sendMessage(text)` | 向当前聊天提交用户消息 |
+| `ambient.fullscreen()` / `ambient.minimize()` | 请求宿主切换当前 App 窗口状态 |
+| `ambient.theme.preference` / `effective` | 读取主题偏好和有效主题 |
+| `ambient.html` | 绑定 React createElement 的 HTM tag |
+| `ambient.react` | 受支持的 React hooks |
+| `ambient.components` | `Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table` |
 
-这些 API 依赖宿主回调；它们不是浏览器全屏 API，也不负责持久业务数据。
+这些接口不授予外部数据访问。Controller 不使用 `window`、DOM 查询、storage、import、`fetch`、原始 WebSocket、`eval` 或 `Function`。
 
-## 2. Graph
+## 2. Graph Grants
 
-### `ambient.graph.subscribe(query, callback)`
-
-注册持久 WebSocket 查询，立即或在数据变化时把查询结果交给 callback。返回 unsubscribe 函数，组件 effect 应直接返回它：
+`graph.query` 注入 `ambient.graph.subscribe(query, callback)`；query 必须明确 `type`，include 必须明确 `target_type`，所有实体都在 grant scope 内。方法返回 unsubscribe：
 
 ```javascript
 useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
 ```
 
-### `ambient.graph.mutate(actions)`
-
-向 `POST /api/graph/mutate` 提交一批原子 action。公开 action：`create_node`、`update_node_property`、`delete_node`、`create_edge`、`delete_edge`。
+`graph.mutate` 注入 `ambient.graph.mutate(actions)`。action 映射到 `create`、`update`、`delete` operation；实体和 edge type 必须获批：
 
 ```javascript
 await ambient.graph.mutate([{
@@ -36,57 +33,58 @@ await ambient.graph.mutate([{
 }]);
 ```
 
-宿主为每次调用生成 idempotency key；后端仍会校验 schema、端点和 action。
+SDK 自动绑定当前 App identity 和 idempotency key。后端先解析节点真实类型并授权，再进入 Graph durable effect/interaction 流程。
 
-## 3. 持久 Run 与能力
+## 3. Network Grant
 
-| API | 返回值/用途 |
-| --- | --- |
-| `ambient.runs.start(catalogId, actionId, input)` | 创建 Run，返回 Run snapshot |
-| `ambient.runs.get(runId)` | 获取最新 Run snapshot |
-| `ambient.runs.cancel(runId)` | 请求取消 Run |
-| `ambient.runs.subscribe(runId, callback)` | 订阅该 Run 的浏览器事件，返回 unsubscribe |
-| `ambient.capabilities.invoke(catalogId, input, actionId?)` | 创建 Run 并等待终态结果 |
-
-调用后端能力时优先使用 `capabilities.invoke`。需要显示进度、取消或自行管理生命周期时使用 `runs.*`。
-
-## 4. App-scoped 外部数据
-
-`ambient.net.request(sourceId, request)` 通过后端安全网关访问当前 App `manifest.json` 中声明的 `data_sources`。`sourceId` 是 App 私有逻辑名，不是 Ambient 预置 capability。
+`network.request` 注入 `ambient.net.request(sourceId, request)`。source 的 origin、path、method 和 response limit 来自 grant：
 
 ```javascript
 const forecast = await ambient.net.request("forecast", {
   path: "/v1/forecast",
   method: "GET",
-  query: { latitude: 31.23, longitude: 121.47, hourly: "temperature_2m" }
+  query: { latitude: 31.23, longitude: 121.47 }
 });
 ```
 
-返回值是上游 JSON。失败时抛出的 Error 包含 `code`、`hint` 和 `details`；UI 应显示可重试状态。controller 不能传完整 URL、覆盖 host 或直接使用 `fetch`。
+Controller 不能传完整 URL、覆盖 host、跟随 redirect 或附带 secret。认证访问必须申请应用中心 action 的 `capability.invoke`。
 
-## 5. MCP
+## 4. File Grants
 
-`ambient.mcp.callTool(name, args)` 通过聊天 WebSocket 请求应用 manifest 声明的 MCP tool，并返回 Promise：
+文件路径相对于 `app://data/`，使用 POSIX 分隔符：
+
+| Grant | API |
+| --- | --- |
+| `file.read` | `ambient.files.read(path)`、`ambient.files.list(path)` |
+| `file.write` | `ambient.files.write(path, text)` |
+| `file.delete` | `ambient.files.delete(path)` |
 
 ```javascript
-const result = await ambient.mcp.callTool("calendar.list_events", { limit: 20 });
+const draft = await ambient.files.read("drafts/today.md");
+await ambient.files.write("drafts/today.md", `${draft}\nDone`);
 ```
 
-前端传入的 `name` 不是授权依据。后端按 app identity、manifest、server 生命周期和权限规则重新校验。
+每次操作都检查 path glob、大小、路径逃逸和符号链接。文件 SDK 不访问 Manifest、Controller、README 或其他工作区目录。
 
-## 6. React、HTM 与组件
+## 5. Installed Capability Grant
 
-- `ambient.html`：绑定到 React `createElement` 的 HTM tag。
-- `ambient.react`：`useState`、`useEffect`、`useMemo`、`useRef`、`useCallback`、`useContext`、`useReducer`。
-- `ambient.components`：`Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table`。
+`capability.invoke` 注入 `ambient.capabilities.invoke(catalogId, input, actionId)`。`catalogId` 与 `actionId` 都必须是批准的字符串字面量：
 
-`Row` 与 `Column` 接受 `gap`、`padding`、`align`、`justify`、`wrap` 和 `style`。`wrap` 为布尔值并映射为 flex wrapping；这些布局 prop 由组件消费，不会透传为无效 DOM attribute。
+```javascript
+const result = await ambient.capabilities.invoke(
+  "mcp:calendar:calendar",
+  { title: "Review", start: "2026-07-22T09:00:00+08:00" },
+  "create-event"
+);
+```
 
-Controller 也能使用注入的 `React`。SDK 不包含 fetch cache、`ambient.model`、任意文件系统访问或秘密读取接口。
+调用创建持久 Run，并等待终态结果。进度、approval 或 `needs_attention` 在任务抽屉处理。新版本不向 Widget 注入 `ambient.mcp` 或任意 `runs.start(catalogId, ...)`，避免绕过精确 action grant。
 
-## 7. 生命周期与错误处理
+## 6. SDK Membrane 与错误
 
-- 在 `useEffect` cleanup 中取消 Graph/Run 订阅和自建 timer。
-- `graph.mutate`、`net.request`、`capabilities.invoke`、`runs.*` 和 `mcp.callTool` 都可能 reject；在 UI 中提供可重试错误状态。
-- Run 可能进入 `waiting_user` 或 `needs_attention`，需要用户在任务抽屉处理，而不是由 Widget 假定自动完成。
-- 这些方法暴露的是便利接口，权限 enforcement 位于后端。安全边界见[运行边界](/widgets/sandbox.md)。
+- 没有对应 grant 时，整个 namespace 或方法不存在；Controller 应只使用 Runtime Contract 中列出的 API。
+- 即使方法存在，后端仍可能因 grant 已撤销、resource 超 scope、manifest revision 变化或 adapter policy 而拒绝。
+- 拒绝 Error 包含 `code`、`capability`、`operation`、`hint` 和安全 `details`。
+- 在 `useEffect` cleanup 中取消订阅和 timer；所有异步方法都必须提供 loading、error 和 retry UI。
+
+完整授权语义见 [Widget 能力安全架构](/architecture/capability-security.md)，运行隔离限制见[运行边界](/widgets/sandbox.md)。

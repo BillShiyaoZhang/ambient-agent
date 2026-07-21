@@ -1,5 +1,5 @@
+import json
 import os
-import re
 from dataclasses import dataclass
 
 from backend.app_manager import AppManager
@@ -30,56 +30,41 @@ class ContextManager:
         self.app_manager = app_manager
 
     def _extract_app_ids(self, messages: list[ChatMessage]) -> list[str]:
-        """
-        Scans messages for <ambient-widget id="some-id" ...> tags and
-        /app <app_id> references to identify which apps have been created
-        or modified in this session.
-        """
-        app_ids = set()
-        # Find ID patterns matching single or double quotes
-        xml_pattern = r"<ambient-widget\s+[^>]*?id=[\"']([^\"']+)[\"']"
-        # Match slash command: /app <app_id> (with optional spaces/word boundaries)
-        slash_pattern = r"(?:^|\s)/app\s+([a-zA-Z0-9_-]+)"
+        """Return App IDs from structured artifact-reference messages."""
 
+        app_ids: set[str] = set()
         for msg in messages:
-            # Extract from XML tags
-            xml_matches = re.findall(xml_pattern, msg.content)
-            for m in xml_matches:
-                app_ids.add(m.strip())
-
-            # Extract from /app slash commands
-            slash_matches = re.findall(slash_pattern, msg.content)
-            for m in slash_matches:
-                app_ids.add(m.strip())
+            reference = self._artifact_reference(msg.content)
+            if reference is not None:
+                app_ids.add(reference["app_id"])
 
         return sorted(app_ids)
 
-    def _prune_message_content(self, content: str) -> str:
-        """
-        Replaces the verbose inner XML contents (<html-content>, <css-styles>, <js-script>)
-        inside <ambient-widget> blocks with a small placeholder.
-        """
+    @staticmethod
+    def _artifact_reference(content: str) -> dict[str, str] | None:
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("artifact") != "app":
+            return None
+        app_id = payload.get("app_id")
+        if not isinstance(app_id, str) or not app_id.strip():
+            return None
+        return {
+            "artifact": "app",
+            "app_id": app_id.strip(),
+            **(
+                {"manifest_revision": str(payload["manifest_revision"])}
+                if payload.get("manifest_revision") is not None
+                else {}
+            ),
+            **({"grants_digest": str(payload["grants_digest"])} if payload.get("grants_digest") else {}),
+        }
 
-        def replace_block(match):
-            widget_tag = match.group(0)
-            # Find the ID and Title attributes matching single or double quotes
-            id_match = re.search(r"id=[\"']([^\"']+)[\"']", widget_tag)
-            title_match = re.search(r"title=[\"']([^\"']+)[\"']", widget_tag)
-
-            widget_id = id_match.group(1) if id_match else "unknown"
-            widget_title = title_match.group(1) if title_match else "Widget"
-
-            return (
-                f'<ambient-widget id="{widget_id}" title="{widget_title}">\n'
-                f"  <!-- [HTML, CSS, JS source code omitted from history to save context space] -->\n"
-                f"  <!-- The current up-to-date source files for this app are injected in system instructions. -->\n"
-                f"</ambient-widget>"
-            )
-
-        pattern = (
-            r"<ambient-widget\s+[^>]*?id=[\"']([^\"']+)[\"'][^>]*?title=[\"']([^\"']+)[\"'][^>]*?>.*?</ambient-widget>"
-        )
-        return re.sub(pattern, replace_block, content, flags=re.DOTALL)
+    def _compact_message_content(self, content: str) -> str:
+        reference = self._artifact_reference(content)
+        return json.dumps(reference, ensure_ascii=False, sort_keys=True) if reference is not None else content
 
     def build_persistent_summary(
         self,
@@ -106,7 +91,7 @@ class ContextManager:
         used = 0
         for message in reversed(omitted):
             role = "user" if message.role == "user" else "assistant"
-            content = self._truncate(self._prune_message_content(message.content), 600, "summary item")
+            content = self._truncate(self._compact_message_content(message.content), 600, "summary item")
             line = f"- [{role}] {content}"
             if selected and used + len(line) + 1 > remaining:
                 continue
@@ -160,30 +145,17 @@ class ContextManager:
         for app_id in app_ids:
             app_files = self.app_manager.get_app_files(app_id)
             if app_files:
-                if "layout" in app_files:
-                    artifact = (
-                        f"[Active App: {app_id}]\n"
-                        f"Format: A2UI Layout\n"
-                        f"Title: {app_files['title']}\n"
-                        f"--- layout.json (A2UI Declarative View) ---\n"
-                        f"{app_files['layout']}\n"
-                        f"--- controller.js (Controller - using 'ambient' SDK) ---\n"
-                        f"{app_files['js']}\n"
-                        f"-------------------------"
-                    )
-                else:
-                    artifact = (
-                        f"[Active App: {app_id}]\n"
-                        f"Format: Legacy HTML\n"
-                        f"Title: {app_files['title']}\n"
-                        f"--- index.html (View) ---\n"
-                        f"{app_files['html']}\n"
-                        f"--- style.css (Style) ---\n"
-                        f"{app_files['css']}\n"
-                        f"--- controller.js (Controller - using 'ambient' SDK) ---\n"
-                        f"{app_files['js']}\n"
-                        f"-------------------------"
-                    )
+                artifact = (
+                    f"[Active App: {app_id}]\n"
+                    f"Format: Manifest V2 React/HTM\n"
+                    f"Title: {app_files['title']}\n"
+                    f"Manifest revision: {app_files.get('manifest_revision', '')}\n"
+                    f"Capability digest: {app_files.get('grants_digest', '')}\n"
+                    f"Capabilities: {app_files.get('capabilities', [])}\n"
+                    f"--- controller.js ---\n"
+                    f"{app_files['js']}\n"
+                    f"-------------------------"
+                )
                 remaining = limits.max_artifact_chars - artifact_chars
                 if remaining <= 0:
                     break
@@ -212,9 +184,9 @@ class ContextManager:
                 # Fallback
                 llm_role = "user"
 
-            # Prune code payload if it's a code block or contains widget definitions
+            # Structured artifact references remain compact and deterministic.
             per_message_limit = min(limits.max_message_chars, max(0, message_budget - message_chars))
-            pruned_content = self._truncate(self._prune_message_content(msg.content), per_message_limit, "message")
+            pruned_content = self._truncate(self._compact_message_content(msg.content), per_message_limit, "message")
             if not pruned_content:
                 omitted_count += 1
                 continue
@@ -243,9 +215,10 @@ class ContextManager:
         # 5. Inject the active apps code in a system message at the beginning of the context
         if active_apps_context:
             apps_context_str = (
-                "Here are the current source code files of the active apps in this conversation.\n"
-                "If the user asks to modify an app, make changes directly to these code files and "
-                "return the updated code in the same <ambient-widget> structure.\n\n" + "\n\n".join(active_apps_context)
+                "Here are read-only snapshots of active App artifacts referenced by this conversation.\n"
+                "Use them to understand current state. Any App change must go through the isolated Widget coding, "
+                "verification, and atomic-promotion workflow; never return executable App source in conversation.\n\n"
+                + "\n\n".join(active_apps_context)
             )
             # Insert active app context right after system prompt, or as a system message at index 0.
             # We will insert it at index 0 so it sets the stage.

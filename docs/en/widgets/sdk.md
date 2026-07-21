@@ -1,32 +1,29 @@
 # ambient SDK
 
-`SandboxWidget` injects the following object as both a component prop and a module-execution argument. This page documents only interfaces present in the current code.
+`SandboxWidget` always injects pure UI host features and injects external-access methods only for the current App's approved grants. This page documents the Manifest V2 SDK. Callers handle both an absent method and backend denial.
 
-## 1. Host and theme
+## 1. Always-available Host Features
 
 | API | Behavior |
 | --- | --- |
-| `ambient.sendMessage(text)` | Send a user message through the chat WebSocket |
-| `ambient.fullscreen()` | Switch the current app window to maximized mode |
-| `ambient.minimize()` | Switch the current app window to floating mode |
-| `ambient.theme.preference` | Current preference: `system`, `light`, or `dark` |
-| `ambient.theme.effective` | Current effective theme, normally `light` or `dark` |
+| `ambient.sendMessage(text)` | Submit a user message to the current chat |
+| `ambient.fullscreen()` / `ambient.minimize()` | Ask the host to change the current App window state |
+| `ambient.theme.preference` / `effective` | Read theme preference and effective theme |
+| `ambient.html` | HTM tag bound to React createElement |
+| `ambient.react` | Supported React hooks |
+| `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table` |
 
-These APIs depend on host callbacks. They are not the browser fullscreen API and do not store domain data.
+These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, storage, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
 
-## 2. Graph
+## 2. Graph Grants
 
-### `ambient.graph.subscribe(query, callback)`
-
-Register a persistent WebSocket query and pass query results to the callback initially or after data changes. It returns an unsubscribe function; return it directly from the component effect:
+`graph.query` injects `ambient.graph.subscribe(query, callback)`. A query names its `type`; every include names `target_type`; all entities are within grant scope. It returns an unsubscribe function:
 
 ```javascript
 useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
 ```
 
-### `ambient.graph.mutate(actions)`
-
-Submit an atomic action batch to `POST /api/graph/mutate`. Public actions are `create_node`, `update_node_property`, `delete_node`, `create_edge`, and `delete_edge`.
+`graph.mutate` injects `ambient.graph.mutate(actions)`. Actions map to `create`, `update`, and `delete`; entities and edge types must be approved:
 
 ```javascript
 await ambient.graph.mutate([{
@@ -36,57 +33,58 @@ await ambient.graph.mutate([{
 }]);
 ```
 
-The host generates an idempotency key per call. The backend still validates schemas, endpoints, and actions.
+The SDK binds current App identity and an idempotency key. The backend resolves actual node types and authorizes before entering the durable Graph effect/interaction flow.
 
-## 3. Durable Runs and capabilities
+## 3. Network Grant
 
-| API | Result/purpose |
-| --- | --- |
-| `ambient.runs.start(catalogId, actionId, input)` | Create a Run and return its snapshot |
-| `ambient.runs.get(runId)` | Fetch the latest Run snapshot |
-| `ambient.runs.cancel(runId)` | Request Run cancellation |
-| `ambient.runs.subscribe(runId, callback)` | Subscribe to browser events for the Run; returns unsubscribe |
-| `ambient.capabilities.invoke(catalogId, input, actionId?)` | Create a Run and wait for its terminal result |
-
-Prefer `capabilities.invoke` for a normal backend capability call. Use `runs.*` when the Widget needs progress, cancellation, or explicit lifecycle management.
-
-## 4. App-scoped external data
-
-`ambient.net.request(sourceId, request)` reaches a `data_sources` entry declared by the current App's `manifest.json` through the guarded backend gateway. `sourceId` is an App-private logical name, not a capability preinstalled by Ambient.
+`network.request` injects `ambient.net.request(sourceId, request)`. Source origin, paths, methods, and response limit come from the grant:
 
 ```javascript
 const forecast = await ambient.net.request("forecast", {
   path: "/v1/forecast",
   method: "GET",
-  query: { latitude: 31.23, longitude: 121.47, hourly: "temperature_2m" }
+  query: { latitude: 31.23, longitude: 121.47 }
 });
 ```
 
-The result is upstream JSON. Rejections expose `code`, `hint`, and `details`; the UI should show a retryable error state. A controller cannot provide a full URL, override the host, or call `fetch` directly.
+The Controller cannot supply a full URL, replace the host, follow redirects, or attach a secret. Authenticated access requests `capability.invoke` for an App Center action.
 
-## 5. MCP
+## 4. File Grants
 
-`ambient.mcp.callTool(name, args)` requests an MCP tool declared by the app manifest through the chat WebSocket and returns a Promise:
+File paths are POSIX paths relative to `app://data/`:
+
+| Grant | API |
+| --- | --- |
+| `file.read` | `ambient.files.read(path)`, `ambient.files.list(path)` |
+| `file.write` | `ambient.files.write(path, text)` |
+| `file.delete` | `ambient.files.delete(path)` |
 
 ```javascript
-const result = await ambient.mcp.callTool("calendar.list_events", { limit: 20 });
+const draft = await ambient.files.read("drafts/today.md");
+await ambient.files.write("drafts/today.md", `${draft}\nDone`);
 ```
 
-The frontend-supplied `name` is not authorization. The backend revalidates app identity, manifest, server lifecycle, and permission rules.
+Every operation checks path globs, size, escape, and symlinks. The file SDK never accesses the Manifest, Controller, README, or another workspace directory.
 
-## 6. React, HTM, and components
+## 5. Installed Capability Grant
 
-- `ambient.html`: an HTM tag bound to React `createElement`.
-- `ambient.react`: `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`.
-- `ambient.components`: `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`.
+`capability.invoke` injects `ambient.capabilities.invoke(catalogId, input, actionId)`. Both IDs are approved string literals:
 
-`Row` and `Column` accept `gap`, `padding`, `align`, `justify`, `wrap`, and `style`. The boolean `wrap` prop maps to flex wrapping; these layout props are consumed by the component and are not forwarded as invalid DOM attributes.
+```javascript
+const result = await ambient.capabilities.invoke(
+  "mcp:calendar:calendar",
+  { title: "Review", start: "2026-07-22T09:00:00+08:00" },
+  "create-event"
+);
+```
 
-Controllers may also use the injected `React`. The SDK does not include a fetch cache, `ambient.model`, arbitrary file-system access, or secret-reading APIs.
+The call creates a durable Run and waits for its terminal result. Progress, approval, and `needs_attention` are handled in the Task Drawer. The new version does not inject `ambient.mcp` or arbitrary `runs.start(catalogId, ...)`, preventing bypass of an exact action grant.
 
-## 7. Lifecycle and errors
+## 6. SDK Membrane and errors
 
-- Cancel Graph/Run subscriptions and custom timers in `useEffect` cleanup.
-- `graph.mutate`, `net.request`, `capabilities.invoke`, `runs.*`, and `mcp.callTool` may reject; show retryable errors in the UI.
-- A Run may enter `waiting_user` or `needs_attention` and require action in the Task Drawer. A Widget must not assume automatic completion.
-- These methods are convenience interfaces; permission enforcement lives in the backend. See [Runtime Boundary](/en/widgets/sandbox.md).
+- Without a matching grant, the namespace or method is absent. A Controller uses only APIs listed in its Runtime Contract.
+- Even when a method exists, the backend may deny a revoked grant, out-of-scope resource, changed Manifest revision, or adapter-policy violation.
+- A denial Error includes `code`, `capability`, `operation`, `hint`, and safe `details`.
+- Clean up subscriptions and timers in `useEffect`; every async method provides loading, error, and retry UI.
+
+See [Widget Capability Security](/en/architecture/capability-security.md) for authorization and [Runtime Boundary](/en/widgets/sandbox.md) for isolation limits.

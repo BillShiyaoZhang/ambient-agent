@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import shutil
 import uuid
 from pathlib import Path
@@ -14,6 +15,8 @@ import backend.agent.durable_workflow as durable_workflow_module
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubIntentKind
+from backend.app_manifest import AppManifest
+from backend.capabilities.models import RuntimeContract
 from backend.graph_db import GraphDatabase
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import OpenCodeStagedResult
@@ -48,13 +51,59 @@ class FakeAppManager:
         controller = app_dir / "controller.js"
         if not controller.is_file():
             return None
+        manifest_path = app_dir / "manifest.json"
+        manifest = AppManifest.read(manifest_path, expected_app_id=app_id) if manifest_path.is_file() else None
         return {
             "id": app_id,
             "title": "Durable Test App",
-            "html": (app_dir / "index.html").read_text(encoding="utf-8") if (app_dir / "index.html").is_file() else "",
-            "css": (app_dir / "style.css").read_text(encoding="utf-8") if (app_dir / "style.css").is_file() else "",
             "js": controller.read_text(encoding="utf-8"),
+            "manifest_revision": manifest.revision if manifest else None,
+            "grants_digest": manifest.grants_digest if manifest else None,
+            "capabilities": [grant.to_dict() for grant in manifest.capabilities] if manifest else [],
         }
+
+
+def _runtime_contract(app_id: str, capabilities: list[dict] | None = None) -> dict[str, Any]:
+    return RuntimeContract.create(app_id=app_id, schemas=[], capabilities=capabilities or []).to_dict()
+
+
+def _write_manifest(directory: Path, app_id: str, contract: dict[str, Any]) -> None:
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 2,
+                "id": app_id,
+                "title": "Durable Test App",
+                "description": "",
+                "app_version": "0.1.0",
+                "intents": [],
+                "schema_refs": [schema["id"] for schema in contract["schemas"]],
+                "capabilities": contract["capabilities"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_staged_runtime_contract_rejects_backend_adapter_declarations(tmp_path: Path) -> None:
+    app_id = "unsafe-backend-app"
+    contract = _runtime_contract(app_id)
+    manifest = {
+        "manifest_version": 2,
+        "id": app_id,
+        "title": "Unsafe Backend App",
+        "description": "",
+        "app_version": "0.1.0",
+        "intents": [],
+        "schema_refs": [],
+        "capabilities": [],
+        "backend_type": "mcp",
+        "mcp_server": {"command": ["node"], "args": ["server.js"], "env": {}},
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(durable_workflow_module.WorkflowError, match="backend adapters"):
+        DurableAgentWorkflow._assert_staged_runtime_contract(tmp_path, contract)
 
 
 def _state(
@@ -99,7 +148,7 @@ def _workflow(
     graph_db: GraphDatabase,
     *,
     app_manager: FakeAppManager | None = None,
-    opencode_runner: Any = None,
+    coding_agent_runner: Any = None,
     emitted: list[dict[str, Any]] | None = None,
     app_diagnostic_loader: Any = None,
 ) -> DurableAgentWorkflow:
@@ -116,7 +165,7 @@ def _workflow(
         app_manager=app_manager or FakeAppManager(tmp_path / "apps"),
         graph_db=graph_db,
         llm_config_store=FakeLLMConfigStore(),
-        opencode_runner=opencode_runner or fail_if_called,
+        coding_agent_runner=coding_agent_runner or fail_if_called,
         event_sink=event_sink,
         app_diagnostic_loader=app_diagnostic_loader,
     )
@@ -425,9 +474,8 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
         assert promote is False
         staging_dir = apps_dir / f".{app_id}.staging-{uuid.uuid4().hex}"
         staging_dir.mkdir()
-        (staging_dir / "index.html").write_text("<main>new</main>", encoding="utf-8")
-        (staging_dir / "style.css").write_text("main {}", encoding="utf-8")
         (staging_dir / "controller.js").write_text("// verified new controller", encoding="utf-8")
+        _write_manifest(staging_dir, app_id, _runtime_contract(app_id))
         return OpenCodeStagedResult(
             output="generated safely",
             app_id=app_id,
@@ -459,7 +507,7 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
         store,
         graph_db,
         app_manager=app_manager,
-        opencode_runner=staged_runner,
+        coding_agent_runner=staged_runner,
         app_diagnostic_loader=lambda app_id: [
             {
                 "app_id": app_id,
@@ -478,7 +526,12 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
         phase="stage_code",
         workflow_type="widget_modify",
         intent=intent,
-        data={"language": "en", "approved_plan": "Implement and verify it"},
+        data={
+            "language": "en",
+            "approved_plan": "Implement and verify it",
+            "approved_schema": {"reused_schemas": [], "new_schemas": [], "capabilities": []},
+            "runtime_contract": _runtime_contract("durable-app"),
+        },
     )
     run = _create_run(store, state, content="replace the app")
 
@@ -560,9 +613,8 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
         await on_update({"type": "opencode_progress", "message": "scripted staging complete"})
         staging_dir = apps_dir / f".{app_id}.staging-{uuid.uuid4().hex}"
         staging_dir.mkdir()
-        (staging_dir / "index.html").write_text("<main>v2</main>", encoding="utf-8")
-        (staging_dir / "style.css").write_text("main { color: green; }", encoding="utf-8")
         (staging_dir / "controller.js").write_text(new_controller, encoding="utf-8")
+        _write_manifest(staging_dir, app_id, _runtime_contract(app_id))
         assert (live_dir / "controller.js").read_text(encoding="utf-8") == old_controller
         return OpenCodeStagedResult(
             output="scripted v2 staged output",
@@ -614,7 +666,7 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
         store,
         graph_db,
         app_manager=app_manager,
-        opencode_runner=staged_runner,
+        coding_agent_runner=staged_runner,
     )
     coordinator = RunCoordinator(store, SimpleNamespace(), app_manager, SimpleNamespace())
     coordinator.register_internal_agent_executor(workflow)

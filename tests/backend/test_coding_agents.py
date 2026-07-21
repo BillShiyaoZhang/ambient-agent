@@ -138,13 +138,14 @@ def test_codex_event_projection_extracts_messages_and_progress():
 def test_codex_prompt_explains_the_supported_app_scoped_data_path():
     prompt = _codex_prompt("weather-app", "show live weather", "en")
 
-    assert "NEVER use `fetch`" in prompt
+    assert "Never use `fetch`" in prompt
     assert "ambient.net.request" in prompt
-    assert '"data_sources"' in prompt
+    assert "network.request" in prompt
+    assert "Manifest V2" in prompt
     assert "manifest.json" in prompt
-    assert "Do not silently replace requested live data with sample data" in prompt
-    assert "HTM closing syntax is strict" in prompt
-    assert "malformed `</${Row>`" in prompt
+    assert "Do not replace requested live behavior with fake/sample data" in prompt
+    assert "Close dynamic HTM components with `<//>`" in prompt
+    assert "ambient.mcp" in prompt
 
 
 @pytest.mark.asyncio
@@ -154,8 +155,9 @@ async def test_codex_runner_uses_managed_container_runtime(tmp_path, monkeypatch
         "#!/usr/bin/env python3\n"
         "import json, pathlib, sys\n"
         "sys.stdin.read()\n"
-        "pathlib.Path('invocation.json').write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
+        "pathlib.Path('README.md').write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
         "pathlib.Path('controller.js').write_text(\"export default function App() { return null; }\", encoding='utf-8')\n"
+        "pathlib.Path('manifest.json').write_text(json.dumps({'manifest_version': 2, 'id': 'codex-widget', 'title': 'Codex Widget', 'description': '', 'app_version': '0.1.0', 'intents': [], 'schema_refs': [], 'capabilities': []}), encoding='utf-8')\n"
         "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'done'}}))\n",
         encoding="utf-8",
     )
@@ -178,7 +180,7 @@ async def test_codex_runner_uses_managed_container_runtime(tmp_path, monkeypatch
 
     assert isinstance(result, OpenCodeStagedResult)
     assert result.output == "done"
-    invocation = json.loads((result.staging_dir / "invocation.json").read_text(encoding="utf-8"))
+    invocation = json.loads((result.staging_dir / "README.md").read_text(encoding="utf-8"))
     assert invocation[0] == "exec"
     assert "--model" in invocation
     assert invocation[invocation.index("--model") + 1] == "gpt-test"

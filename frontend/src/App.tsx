@@ -191,6 +191,10 @@ function App() {
       data_scope?: "user_context";
     }>;
     new_schemas: OntologyProposalEntity[];
+    capabilities: Array<{
+      id: string;
+      scope: Record<string, unknown>;
+    }>;
   }
   interface SchemaApprovalRequest {
     request_id: string;
@@ -230,7 +234,9 @@ function App() {
 
   useEffect(() => {
     if (pendingSchemaRequest) {
-      setEditedProposal(JSON.parse(JSON.stringify(pendingSchemaRequest.proposal)));
+      const proposal = JSON.parse(JSON.stringify(pendingSchemaRequest.proposal));
+      proposal.capabilities = Array.isArray(proposal.capabilities) ? proposal.capabilities : [];
+      setEditedProposal(proposal);
       setSchemaFeedback("");
     } else {
       setEditedProposal(null);
@@ -561,18 +567,6 @@ function App() {
         window.dispatchEvent(
           new CustomEvent(`ag_ui_event:${data.app_id}`, {
             detail: data.event,
-          })
-        );
-      } else if (data.type === "mcp_call_response") {
-        window.dispatchEvent(
-          new CustomEvent(`mcp_call_response:${data.app_id}:${data.call_id}`, {
-            detail: data,
-          })
-        );
-      } else if (data.type === "mcp_read_response") {
-        window.dispatchEvent(
-          new CustomEvent(`mcp_read_response:${data.app_id}:${data.call_id}`, {
-            detail: data,
           })
         );
       } else if (data.type === "capability_call_response") {
@@ -971,7 +965,7 @@ function App() {
 
       {/* 🧠 Canonical ontology alignment modal */}
       {pendingSchemaRequest && editedProposal && (
-        <SystemDialog open blocking size="large" title={language === "zh" ? "规范本体对齐" : "Canonical Ontology Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 对齐唯一的 ambient-context 本体；这里只保存用户上下文。` : `Align app ${pendingSchemaRequest.app_id} to the single ambient-context ontology; only user context belongs here.`}>
+        <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
           <div className="system-dialog-body flex flex-col gap-4">
 
             {/* Reused Schemas list */}
@@ -1164,6 +1158,35 @@ function App() {
                 ))}
               </div>
             )}
+
+            <div className="flex flex-col gap-3 border border-amber-500/20 bg-amber-950/10 rounded-xl p-4">
+              <div>
+                <h4 className="text-xs font-semibold text-amber-300 uppercase tracking-wider">
+                  🛡️ {language === "zh" ? "申请的 Widget 能力" : "Requested Widget Capabilities"}
+                </h4>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  {language === "zh"
+                    ? "未列出的能力不会注入 Widget；所有调用还会在后端按下列 scope 再次授权。"
+                    : "Capabilities not listed here are absent from the Widget SDK; every operation is re-authorized against these scopes on the backend."}
+                </p>
+              </div>
+              {(editedProposal.capabilities || []).length === 0 ? (
+                <p className="text-[11px] text-slate-500 italic">
+                  {language === "zh" ? "不申请外部数据或写入能力（默认拒绝）" : "No external-data or write capability requested (default deny)"}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(editedProposal.capabilities || []).map((grant) => (
+                    <div key={grant.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                      <span className="font-mono text-[11px] font-semibold text-amber-300">{grant.id}</span>
+                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-slate-300">
+                        {JSON.stringify(grant.scope, null, 2)}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* 💬 自然语言微调反馈输入 */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">

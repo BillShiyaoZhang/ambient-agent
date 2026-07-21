@@ -10,13 +10,15 @@ Ambient Agent 是一个开源、自托管、以应用工作区为核心的个人
 
 - 持久 Run：支持 checkpoint、用户确认、取消、重试、恢复和版本化事件流。
 - App-first 工作区：应用中心、浮动/最大化/贴靠窗口、任务抽屉和浮层聊天。
-- 动态 Widget：`controller.js` 默认导出 React 组件，生成产物先 staging、校验，再原子发布。
+- 动态 Widget：Manifest V2 + `controller.js`，先批准 schema 与 capability proposal，再 staging、校验并原子发布。
 - Schema-first Graph：Widget 与 Agent 通过后端校验的 Graph API 共享 Task、Event、Note 及扩展数据。
 - Provider Registry：在 UI 中配置本地或云端模型、默认/快速模型和会话覆盖。
 - 可选 Coding Agent：可在前端按需安装、登录和选择 OpenCode（ACP）或 Codex，每个 Run 固定 Agent 与模型绑定并在隔离 staging 中生成代码。
+- 最小能力授权：Widget 只获得 schema 对齐阶段批准的 Graph、Network、File 或 installed-capability grants，后端逐次执行默认拒绝 policy。
+- 结构化 Agent 能力目录：按 Router、Converse、Schema、Coding、Verification 角色投影真实可用能力，避免 prompt 漂移。
 - 后端权限与审计：Tool Gateway、MCP、Coding Agent、mutation interaction 和 LLM audit。
 
-`SandboxWidget` 不是执行不受信任 JavaScript 的强安全沙箱。Widget controller 与宿主页同 realm 执行，只应加载可信工作区代码。
+`SandboxWidget` 使用静态 verifier、最小 SDK membrane 与后端授权限制宿主 I/O；Controller 仍与宿主页同 realm 执行，因此这不是执行任意第三方 JavaScript 的通用强沙箱。
 
 ## 快速开始
 
@@ -69,9 +71,9 @@ npm --prefix frontend run build
 
 Ambient Agent is an open-source, self-hosted personal AI assistant built around an app-first workspace. It combines chat, durable background Runs, graph data, and React/HTM Widgets in one desktop-style interface.
 
-Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged and verified Widget publication, schema-first Graph data, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, and backend enforcement for tools, MCP, mutations, and audit records.
+Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged Manifest V2 Widget publication, schema-first Graph data, user-approved least-authority Widget grants, a structured Agent capability catalog, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, and backend enforcement for tools, MCP, mutations, and audit records.
 
-`SandboxWidget` is not a strong sandbox for untrusted JavaScript. Widget controllers execute in the host page realm and should only load trusted workspace code.
+`SandboxWidget` combines static verification, a least-authority SDK membrane, and backend I/O authorization. Controllers still execute in the host page realm, so this is not a general strong sandbox for arbitrary third-party JavaScript.
 
 Start with:
 

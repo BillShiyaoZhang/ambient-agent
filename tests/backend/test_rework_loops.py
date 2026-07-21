@@ -1,10 +1,11 @@
+import json
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app, app_manager, get_db
+from backend.main import app, app_manager, coding_agent_config_store, get_db
 from backend.models import ChatSession
 from backend.opencode_service import OpenCodeStagedResult
 from backend.schema_diff import UnknownProperty, VerificationDiff
@@ -23,8 +24,16 @@ def test_session_fixture(tmp_path):
     app_manager.apps_dir = old_apps_dir
 
 
-def test_websocket_rework_loops_flow(test_session, monkeypatch):
+@pytest.fixture(name="client")
+def client_fixture():
+    with TestClient(app) as client:
+        yield client
+
+
+def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
+    coding_settings = {**coding_agent_config_store.get_settings(), "default_agent": "opencode"}
+    monkeypatch.setattr("backend.main.coding_agent_config_store.get_settings", lambda: coding_settings)
 
     # 1. Mock routing
     async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
@@ -82,6 +91,21 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             f"export default function App() {{ return ambient.html`<div>rework {opencode_counter}</div>`; }}",
             encoding="utf-8",
         )
+        (staging_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "manifest_version": 2,
+                    "id": app_id,
+                    "title": "Rework App",
+                    "description": "",
+                    "app_version": "0.1.0",
+                    "intents": [],
+                    "schema_refs": [],
+                    "capabilities": [],
+                }
+            ),
+            encoding="utf-8",
+        )
         return OpenCodeStagedResult(
             output=f"OpenCode ran {opencode_counter} times",
             app_id=app_id,
@@ -122,13 +146,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
     app.dependency_overrides[get_db] = override_get_db
 
     # Save a chat session to the DB
-    session_obj = ChatSession(id="session-rework", title="Rework Loops Chat")
+    session_id = f"session-rework-{uuid4().hex}"
+    session_obj = ChatSession(id=session_id, title="Rework Loops Chat")
     test_session.add(session_obj)
     test_session.commit()
 
-    client = TestClient(app)
-
-    with client.websocket_connect("/ws/chat?session_id=session-rework") as websocket:
+    with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
         websocket.send_json({"sender": "user", "content": "Create complex app"})
 
         # Expect active list

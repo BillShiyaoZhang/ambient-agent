@@ -13,6 +13,14 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
     from backend import main
 
     main.graph_db = main_db
+    main.app_manager.create_or_update_app(
+        "sync-app",
+        "Sync App",
+        js="export default function App() {}",
+        capabilities=[{"id": "graph.query", "scope": {"entities": ["Task"]}}],
+    )
+    manifest = main.app_manager.get_manifest("sync-app")
+    assert manifest is not None
 
     client = TestClient(app)
 
@@ -20,7 +28,14 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
         active_list = websocket.receive_json()
         assert active_list["type"] == "active_sessions_list"
         # 1. Subscribe to Task nodes
-        sub_msg = {"type": "graph_subscribe", "subscription_id": "sub-tasks", "query": {"type": "Task"}}
+        sub_msg = {
+            "type": "graph_subscribe",
+            "subscription_id": "sub-tasks",
+            "app_id": "sync-app",
+            "manifest_revision": manifest.revision,
+            "grants_digest": manifest.grants_digest,
+            "query": {"type": "Task"},
+        }
         websocket.send_json(sub_msg)
 
         # 2. Check for initial query result message

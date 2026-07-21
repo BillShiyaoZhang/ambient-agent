@@ -82,7 +82,7 @@ stateDiagram-v2
     wait_plan --> align_schema: approve
     wait_plan --> plan: refine
     wait_plan --> failed: deny
-    align_schema --> wait_schema: proposal persisted
+    align_schema --> wait_schema: schema + capability proposal persisted
     wait_schema --> stage_code: approve
     wait_schema --> align_schema: refine
     wait_schema --> plan: rework plan
@@ -97,7 +97,7 @@ stateDiagram-v2
     promote --> done: atomic live-App swap
 ```
 
-OpenCode 使用 `promote=False` 生成 `OpenCodeStagedResult`。`verify` 只读 staging；`promote` 再次验证 artifact、计算 hash、持久 promotion marker、提交已批准的 Schema，并原子替换 live App。recovery 先检查 marker，不重复发布；失败、返工和取消会丢弃 staging，旧 live App 保持不变。
+Schema interaction 原子批准数据 schema 与 capability grants。Workflow 随后生成带 grants digest 的不可变 Runtime Contract。OpenCode 使用 `promote=False` 生成 staging；`verify` 要求 Manifest grants 等于 contract、代码使用为其子集，再检查 Graph schema。`promote` 持久化 marker、提交 schema 并原子替换 live App。recovery 不重复发布；失败、返工和取消保留旧 live App。
 
 ### Graph mutation
 
@@ -110,7 +110,7 @@ stateDiagram-v2
     graph_commit --> done: one Neo4j transaction
 ```
 
-preflight 不写数据库，并先确认每个 record 的 entity 已存在于唯一的 `ambient-context` 本体。commit 使用 `apply_actions_atomic()`，在一个 Neo4j transaction 中同时提交 context record/edge、rollback ticket、完整 reverse actions，并以 `run_id + phase` 写入 Graph effect ledger；worker 在 Graph transaction 提交后、Run checkpoint 前崩溃时，重试返回原结果而不会重复写。`/api/graph/mutate` 和 WebSocket rollback 也走这个 reducer，显式命令作为 durable approval interaction 记录。Multi-intent 先整体 preflight，再由 `multi_dispatch` 顺序作为 saga 推进；当前 phase 可重试时保留此前 effect 与 compensation，只有确定终止时才逆序补偿并把 cursor/results 回退到 saga 起点，避免报告已被撤销的结果。补偿不完整或效果未知时进入 `needs_attention`。
+preflight 不写数据库，并先确认每个 record 的 entity 已存在于唯一的 `ambient-context` 本体。App-scoped Widget mutation 还先根据批准 grant 解析 entity/operation/edge type。commit 使用 `apply_actions_atomic()`，在一个 Neo4j transaction 中同时提交 context record/edge、rollback ticket、完整 reverse actions和 Graph effect ledger；崩溃重试返回原结果而不会重复写。Multi-intent 先整体 preflight，再按 saga 顺序推进；只有确定终止时才逆序补偿。补偿不完整或效果未知时进入 `needs_attention`。
 
 ### Converse 与只读查询
 
@@ -124,7 +124,7 @@ preflight 不写数据库，并先确认每个 record 的 entity 已存在于唯
 
 Capability/MCP/ACP/HTTP adapter 由同一个 `RunCoordinator` effect boundary 执行，复用 lease fencing、持久审批、deadline、取消和 `needs_attention` 语义；协议专属的 schema/capability/进程 policy 仍由各 adapter 校验。HTTP Agent 另有总 wall-clock deadline、request/response/event 上限、有界 SSE decoder，并关闭环境代理继承。远端 effect 默认 manual recovery；manifest 的字符串声明不能替代远端幂等或 reconciliation 证明。它们不伪装成 Python tool，也不会绕过 durable Run 控制面。
 
-`RunContext` 由 reducer 从当前持久 Run 与 checkpoint 构造，并显式传给路由、计划、Schema、校验和 Converse provider。`ContextManager` 按稳定顺序限制近期消息数、单消息字符数、artifact 字符数和总 prompt；窗口外消息形成 checkpoint 内的确定性摘要，并用 `context_summary_ref=sha256:…` 校验恢复内容。LLM audit 记录 prompt/model/tool-schema hash 和实际读取的 artifact hash。当前裁剪是字符预算，provider 返回的 token/cost 则进入 Run 总预算。Run 的 primary/fast 模型、Coding Agent、Agent 模型绑定与解析后的 shared model 都在提交时快照，恢复后不会因 UI 中途切换设置而漂移。
+`RunContext` 由 reducer 从当前持久 Run 与 checkpoint 构造，并显式传给路由、计划、Schema、校验和 Converse provider。每个 Agent 角色还接收由结构化 `SystemCapabilityCatalog` 生成的最小投影；Coding Agent 只接收本 App 批准的 Runtime Contract。`ContextManager` 按稳定顺序限制近期消息数、单消息字符数、artifact 字符数和总 prompt；窗口外消息形成 checkpoint 内的确定性摘要，并用 `context_summary_ref=sha256:…` 校验恢复内容。LLM audit 记录 prompt/model/tool-schema hash 和实际读取的 artifact hash。当前裁剪是字符预算，provider 返回的 token/cost 则进入 Run 总预算。Run 的 primary/fast 模型、Coding Agent、Agent 模型绑定与解析后的 shared model 都在提交时快照，恢复后不会因 UI 中途切换设置而漂移。
 
 ## 5. 事件、取消与保留期
 

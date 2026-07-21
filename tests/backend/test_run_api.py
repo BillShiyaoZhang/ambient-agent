@@ -105,6 +105,27 @@ def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
             assert next_event["event"]["sequence"] > first_sequence
 
 
+def test_widget_run_requires_explicit_action_id():
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/runs",
+        json={
+            "catalog_id": "mcp:acme:mail",
+            "input": {"subject": "Hello"},
+            "source": {
+                "type": "widget",
+                "id": "mail-widget",
+                "manifest_revision": "2:1.0.0",
+                "grants_digest": "digest",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Widget capability invocation requires an explicit action ID"
+
+
 def test_interaction_api_uses_run_version_and_atomically_requeues(tmp_path, monkeypatch):
     store = RunStore(str(tmp_path))
     coordinator = ApiCoordinator(store)

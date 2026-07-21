@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from backend.app_manager import AppManager
@@ -33,7 +35,11 @@ def test_session_message_relations(db_session):
     # Add messages with different roles
     msg1 = ChatMessage(session_id="session-1", role="user", content="Hello")
     msg2 = ChatMessage(session_id="session-1", role="agent", content="Hi")
-    msg3 = ChatMessage(session_id="session-1", role="code", content="<ambient-widget id='w1'>...</ambient-widget>")
+    msg3 = ChatMessage(
+        session_id="session-1",
+        role="code",
+        content=json.dumps({"artifact": "app", "app_id": "w1", "manifest_revision": 1}),
+    )
 
     db_session.add(msg1)
     db_session.add(msg2)
@@ -65,11 +71,18 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
 
     # Chat messages history
     msg_user1 = ChatMessage(session_id="session-2", role="user", content="Show weather")
-    # This message has role "code" containing the widget definition
+    # Code-role messages contain only structured artifact references.
     msg_code = ChatMessage(
         session_id="session-2",
         role="code",
-        content="<ambient-widget id='weather-widget' title='Weather Widget'>...</ambient-widget>",
+        content=json.dumps(
+            {
+                "artifact": "app",
+                "app_id": "weather-widget",
+                "manifest_revision": 1,
+                "grants_digest": "test-digest",
+            }
+        ),
     )
     msg_agent1 = ChatMessage(session_id="session-2", role="agent", content="I spawned the widget for you.")
     msg_user2 = ChatMessage(session_id="session-2", role="user", content="Make the text green")
@@ -87,10 +100,10 @@ def test_context_manager_pruning_and_injection(db_session, temp_apps_dir):
     # We expect prompt_messages to be a list of dicts suitable for LLM APIs (role, content)
     # The list should contain:
     # - User message 1
-    # - The Code message but PRUNED (the large widget definition stripped/reduced)
+    # - The compact structured artifact-reference message
     # - Agent message 1
     # - User message 2
-    # - Injected System/System block containing active app code: weather-widget index.html, style.css, controller.js
+    # - Injected system block containing the current Manifest V2 controller snapshot
 
     # Let's inspect the messages
     assert len(prompt_messages) > 0

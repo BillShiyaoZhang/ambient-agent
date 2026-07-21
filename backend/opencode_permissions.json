@@ -1,7 +1,6 @@
 {
   "policy_mode": "strict",
   "files": {
-    "allowed_extensions": [".js", ".json", ".md"],
     "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
   },
   "commands": {

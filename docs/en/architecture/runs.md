@@ -113,7 +113,7 @@ Before insertion, RunStore recursively replaces conventional secret/token/passwo
 - `mcp_request`: executes allowlisted resource/prompt reads as Runs.
 - `agent_message`: invokes an approved remote Agent endpoint.
 
-`POST /api/graph/mutate` and WebSocket rollback also submit a v2 `graph_mutation` Run. Preflight, durable approval interaction, fenced atomic commit, and the effect ledger all remain inside the same control plane. The legacy synchronous response remains and now includes `run_id`.
+App-scoped Graph mutation and rollback both submit a v2 `graph_mutation` Run. Widget-grant authorization, preflight, durable approval interaction, fenced atomic commit, and the effect ledger remain inside one control plane. Widgets have no generic mutation endpoint that bypasses grants.
 
 Compatible public entry points remain:
 

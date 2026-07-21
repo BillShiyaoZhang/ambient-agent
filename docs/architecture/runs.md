@@ -113,7 +113,7 @@ RunStore 在入库前递归替换常见 secret/token/password 键、截断超限
 - `mcp_request`：以 Run 执行白名单内的 resource/prompt 读请求。
 - `agent_message`：调用获批的远端 Agent endpoint。
 
-`POST /api/graph/mutate` 与 WebSocket rollback 也提交 `graph_mutation` v2 Run：预检、持久 approval interaction、fenced atomic commit 与 effect ledger 都经过同一控制平面。旧同步响应仍保留，并附带 `run_id`。
+App-scoped Graph mutation 与 rollback 都提交 `graph_mutation` v2 Run：Widget grant 授权、预检、持久 approval interaction、fenced atomic commit 与 effect ledger 都经过同一控制平面。不存在绕开 grant 的 Widget 通用 mutation endpoint。
 
 公共入口保持兼容：
 

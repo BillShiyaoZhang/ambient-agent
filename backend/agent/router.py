@@ -32,6 +32,7 @@ from backend.agent.intent_plan import (
 from backend.agent.errors import BudgetExhaustedError
 from backend.agent.providers import ToolLoopBudget
 from backend.agent.prompts.manager import PromptManager
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.llm_service import call_llm_api
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import fast_selection, primary_selection, selection_ids
@@ -53,7 +54,7 @@ class IntentRouter:
     async def route(
         cls,
         content: str,
-        context: RouterContext | list[dict[str, Any]] | None = None,
+        context: RouterContext | None = None,
         db_session: Session | None = None,
         provider_name: str | None = None,
         model_name: str | None = None,
@@ -65,6 +66,7 @@ class IntentRouter:
         fallback_keywords: list[str] | None = None,
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> IntentPlan:
         """Classify a user message.
 
@@ -88,15 +90,8 @@ class IntentRouter:
                 instruction=instruction,
             )
 
-        # 2. Normalize legacy context (list-of-apps, or anything else) into a RouterContext.
-        if isinstance(context, RouterContext):
-            ctx = context
-        elif isinstance(context, list):
-            ctx = RouterContext(app_manifests=list(context))
-        elif context is None:
-            ctx = RouterContext()
-        else:
-            ctx = context
+        # 2. Normalize the optional structured context.
+        ctx = context or RouterContext()
 
         sections = context_sections if context_sections is not None else _default_context_sections()
 
@@ -115,6 +110,7 @@ class IntentRouter:
                 language=language,
                 audit_context=audit_context,
                 budget=budget,
+                capability_catalog=capability_catalog,
             )
             if plan is not None:
                 return plan
@@ -141,7 +137,7 @@ class IntentRouter:
     async def refine_sub_intents(
         cls,
         plan: IntentPlan,
-        context: RouterContext | list[dict[str, Any]] | None = None,
+        context: RouterContext | None = None,
         db_session: Session | None = None,
         provider_name: str | None = None,
         model_name: str | None = None,
@@ -149,6 +145,7 @@ class IntentRouter:
         language: str = "zh",
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> IntentPlan:
         """Layer 2 of the router: specialise sub-intents.
 
@@ -162,12 +159,7 @@ class IntentRouter:
         if not plan.sub_intents:
             return plan
 
-        if isinstance(context, RouterContext):
-            ctx = context
-        elif isinstance(context, list):
-            ctx = RouterContext(app_manifests=list(context))
-        else:
-            ctx = RouterContext()
+        ctx = context or RouterContext()
 
         runtime_provider, runtime_model = selection_ids(primary_selection())
         provider_name = provider_name or runtime_provider
@@ -188,6 +180,9 @@ class IntentRouter:
         except Exception as e:
             logger.warning(f"Could not load refine_sub_intent.md prompt: {e}")
             return plan
+        system_prompt += "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(
+            AgentRole.INTENT_ROUTER
+        )
 
         plan_json = plan.to_dict()
         user_prompt = (
@@ -286,19 +281,6 @@ class IntentRouter:
         return response
 
     @classmethod
-    async def route_legacy(
-        cls,
-        content: str,
-        existing_apps: list[dict[str, Any]] | None = None,
-        db_session: Session | None = None,
-    ) -> IntentPlan:
-        return await cls.route(
-            content=content,
-            context=existing_apps or [],
-            db_session=db_session,
-        )
-
-    @classmethod
     async def _route_with_llm(
         cls,
         content_stripped: str,
@@ -313,6 +295,7 @@ class IntentRouter:
         include_widget_keyword_hint: bool = False,
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> IntentPlan | None:
         if override_system_prompt is not None:
             rendered_ctx = context.render_for_prompt(
@@ -334,6 +317,9 @@ class IntentRouter:
             except Exception as e:
                 logger.warning(f"Could not load router_v2.md prompt: {e}")
                 system_prompt = "You are Ambient Agent's intent router. Reply by calling the classify_intent function."
+        system_prompt += "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(
+            AgentRole.INTENT_ROUTER
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},

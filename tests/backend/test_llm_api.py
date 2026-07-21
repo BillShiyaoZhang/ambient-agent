@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 import backend.main as main_module
@@ -95,9 +97,10 @@ def test_removing_a_session_referenced_model_returns_conflict(tmp_path, monkeypa
 
 def test_unconfigured_websocket_run_returns_actionable_error(tmp_path, monkeypatch):
     _isolate_llm(tmp_path, monkeypatch)
+    session_id = f"needs-model-{uuid4().hex}"
 
     with TestClient(main_module.app) as client:
-        with client.websocket_connect("/ws/chat?session_id=needs-model") as websocket:
+        with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
             assert websocket.receive_json()["type"] == "active_sessions_list"
             websocket.send_json({"sender": "user", "content": "hello"})
             assert websocket.receive_json()["type"] == "ack"

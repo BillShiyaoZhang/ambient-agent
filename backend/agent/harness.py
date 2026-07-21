@@ -19,8 +19,8 @@ from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.router import IntentRouter
 from backend.agent.run_context import RunContext
 from backend.agent.tools import ToolEffect, registry as tool_registry
-from backend.agent_parser import parse_widget_from_text
 from backend.app_manager import AppManager
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.context_manager import ContextManager
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
@@ -41,6 +41,7 @@ class AgentOrchestrator:
         context_summary: str | None = None,
         artifact_ids: list[str] | None = None,
         tool_loop_budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> None:
         self.db = db_session
         self.app_manager = app_manager
@@ -49,6 +50,7 @@ class AgentOrchestrator:
         self.context_summary = context_summary
         self.artifact_ids = artifact_ids
         self.tool_loop_budget = tool_loop_budget
+        self.capability_catalog = capability_catalog or SystemCapabilityCatalog.build()
 
     async def handle_message(
         self,
@@ -119,6 +121,7 @@ class AgentOrchestrator:
                 language=language,
                 audit_context=audit_context,
                 budget=self.tool_loop_budget,
+                capability_catalog=self.capability_catalog,
             )
             if plan.kind in {IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT}:
                 plan = await IntentRouter.refine_sub_intents(
@@ -128,6 +131,7 @@ class AgentOrchestrator:
                     language=language,
                     audit_context=audit_context,
                     budget=self.tool_loop_budget,
+                    capability_catalog=self.capability_catalog,
                 )
             return plan
         except (LLMConfigError, BudgetExhaustedError):
@@ -158,7 +162,11 @@ class AgentOrchestrator:
 
         from backend.agent.prompts.manager import PromptManager
 
-        system_prompt = PromptManager().get_prompt("agent_system.md", language=language)
+        system_prompt = PromptManager().get_prompt(
+            "agent_system.md",
+            language=language,
+            system_capabilities=self.capability_catalog.render(AgentRole.CONVERSE),
+        )
         messages = self.context_manager.build_llm_prompt(
             session_id,
             context_summary=self.context_summary,
@@ -187,7 +195,7 @@ class AgentOrchestrator:
             budget=self.tool_loop_budget,
             audit_context=self.run_context.audit_context(stage="converse") if self.run_context else None,
         )
-        if parse_widget_from_text(raw_response):
+        if "<ambient-widget" in raw_response.lower():
             raise WorkflowError(
                 "Converse produced an unverified App artifact; route UI generation through the widget workflow",
                 code="unverified_inline_artifact",

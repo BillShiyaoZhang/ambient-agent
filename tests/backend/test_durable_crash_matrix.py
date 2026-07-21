@@ -398,7 +398,7 @@ async def test_graph_effect_committed_before_process_death_replays_exactly_once(
         app_manager=SimpleNamespace(),
         graph_db=graph_db,
         llm_config_store=SimpleNamespace(),
-        opencode_runner=lambda **_kwargs: None,
+        coding_agent_runner=lambda **_kwargs: None,
     )
     outcome = await workflow(claimed, resumed_state)
     assert isinstance(outcome, Succeeded)

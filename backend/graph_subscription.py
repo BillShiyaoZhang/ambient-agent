@@ -11,14 +11,29 @@ logger = logging.getLogger("graph_subscription")
 class SubscriptionManager:
     def __init__(self):
         # Maps websocket -> {subscription_id: query}
-        self.active_subscriptions: dict[Any, dict[str, dict]] = {}
+        self.active_subscriptions: dict[Any, dict[str, dict[str, Any]]] = {}
         # Maps (websocket, subscription_id) -> last_seen_results_json
         self.last_results: dict[tuple[Any, str], str] = {}
 
-    def register(self, websocket: Any, subscription_id: str, query: dict, db: GraphDatabase) -> dict:
+    def register(
+        self,
+        websocket: Any,
+        subscription_id: str,
+        query: dict,
+        db: GraphDatabase,
+        *,
+        app_id: str | None = None,
+        manifest_revision: str | None = None,
+        grants_digest: str | None = None,
+    ) -> dict:
         if websocket not in self.active_subscriptions:
             self.active_subscriptions[websocket] = {}
-        self.active_subscriptions[websocket][subscription_id] = query
+        self.active_subscriptions[websocket][subscription_id] = {
+            "query": query,
+            "app_id": app_id,
+            "manifest_revision": manifest_revision,
+            "grants_digest": grants_digest,
+        }
 
         # Execute immediately and return initial data to seed
         res = execute_graph_query(query, db)
@@ -37,10 +52,35 @@ class SubscriptionManager:
             for sub_id in subs.keys():
                 self.last_results.pop((websocket, sub_id), None)
 
-    async def broadcast_updates(self, db: GraphDatabase, send_json_fn: Any, mutated_types: set[str] | None = None):
+    async def broadcast_updates(
+        self,
+        db: GraphDatabase,
+        send_json_fn: Any,
+        mutated_types: set[str] | None = None,
+        *,
+        authorizer: Any = None,
+    ):
         # Evaluate all subscriptions and push updates if the output changed
         for websocket, subs in list(self.active_subscriptions.items()):
-            for sub_id, query in list(subs.items()):
+            for sub_id, subscription in list(subs.items()):
+                query = subscription["query"]
+                app_id = subscription.get("app_id")
+                if app_id and authorizer is not None:
+                    try:
+                        authorizer.authorize_graph_query(
+                            app_id,
+                            query,
+                            manifest_revision=subscription.get("manifest_revision"),
+                            grants_digest=subscription.get("grants_digest"),
+                        )
+                    except Exception as exc:
+                        self.unregister(websocket, sub_id)
+                        error = exc.to_dict() if hasattr(exc, "to_dict") else {"message": str(exc)}
+                        await send_json_fn(
+                            websocket,
+                            {"type": "graph_subscription_error", "subscription_id": sub_id, "error": error},
+                        )
+                        continue
                 # Optimization check: skip executing query if the mutation doesn't affect its types
                 if mutated_types is not None:
                     query_type = query.get("type")

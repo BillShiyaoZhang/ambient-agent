@@ -5,6 +5,7 @@
 
 - **理解系统**
   - [系统与请求链路](/architecture/overview.md)
+  - [Widget 能力安全架构](/architecture/capability-security.md)
   - [工作区交互](/architecture/workspace-ux.md)
   - [Widget 与应用中心](/architecture/apps.md)
   - [持久 Run 与 Runtime](/architecture/runs.md)
@@ -14,6 +15,7 @@
 - **智能体引擎**
   - [意图路由](/agent/intent-router.md)
   - [Agent Harness](/agent/harness.md)
+  - [Agent 系统能力目录](/agent/system-capabilities.md)
 
 - **Widget 开发**
   - [Widget 格式与生命周期](/widgets/guide.md)
