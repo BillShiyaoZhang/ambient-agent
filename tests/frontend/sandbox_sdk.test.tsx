@@ -70,6 +70,56 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     });
   });
 
+  it("should consume Row flex layout props without forwarding invalid DOM attributes", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockWidget: Widget = {
+      id: "layout-widget-test",
+      title: "Layout Widget Test",
+      html: "",
+      css: "",
+      js: `
+        const { Row } = ambient.components;
+        export default function App() {
+          return ambient.html\`<\${Row} data-testid="layout-row" wrap=\${true} justify="space-between">content<//>\`;
+        }
+      `,
+    };
+
+    render(<SandboxWidget widget={mockWidget} />);
+
+    const row = screen.getByTestId("layout-row");
+    expect(row.style.flexWrap).toBe("wrap");
+    expect(row.style.justifyContent).toBe("space-between");
+    expect(row.hasAttribute("wrap")).toBe(false);
+    expect(row.hasAttribute("justify")).toBe(false);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("should normalize HTM child arrays without React key warnings", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockWidget: Widget = {
+      id: "static-siblings-widget-test",
+      title: "Static Siblings Widget Test",
+      html: "",
+      css: "",
+      js: `
+        export default function App() {
+          const labels = ["first", "second", "third"];
+          return ambient.html\`<div data-testid="static-siblings">
+            \${labels.map((label) => ambient.html\`<span>\${label}</span>\`)}
+          </div>\`;
+        }
+      `,
+    };
+
+    render(<SandboxWidget widget={mockWidget} />);
+
+    expect(screen.getByTestId("static-siblings").textContent?.replace(/\s/g, "")).toBe("firstsecondthird");
+    expect(consoleError.mock.calls.flat().join("\n")).not.toContain(
+      'Each child in a list should have a unique "key" prop',
+    );
+  });
+
   it("should unsubscribe correctly and send graph_unsubscribe message", async () => {
     let subIdCaptured = "";
     vi.spyOn(wsService, "registerPersistentMessage").mockImplementation((_key: string, msg: any) => {
@@ -159,6 +209,44 @@ describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
     const payload = JSON.parse(String(request?.body));
     expect(payload.actions).toEqual(actions);
     expect(payload.idempotency_key).toMatch(/^widget:graph-widget-test:/);
+  });
+
+  it("should access only an app-scoped declared data source through ambient.net", async () => {
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { temperature: 28 } }),
+    });
+    const mockWidget: Widget = {
+      id: "weather-app",
+      title: "Weather",
+      html: "",
+      css: "",
+      js: `
+        const { useEffect, useState } = ambient.react;
+        export default function App() {
+          const [temperature, setTemperature] = useState(null);
+          useEffect(() => {
+            ambient.net.request("forecast", {
+              path: "/v1/forecast",
+              method: "GET",
+              query: { latitude: 31.23 }
+            }).then((data) => setTemperature(data.temperature));
+          }, []);
+          return ambient.html\`<div data-testid="temperature">\${temperature}</div>\`;
+        }
+      `,
+    };
+
+    render(<SandboxWidget widget={mockWidget} />);
+
+    await waitFor(() => expect(screen.getByTestId("temperature").textContent).toBe("28"));
+    expect(global.fetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/apps/weather-app/data-sources/forecast/request",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
   });
 
   it("should support ambient.mcp.callTool and resolve promise on WebSocket response", async () => {

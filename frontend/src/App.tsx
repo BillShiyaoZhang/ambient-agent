@@ -25,8 +25,14 @@ import {
 import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
+  clearCodingAgentAuth,
+  getCodingAgentAuth,
+  installCodingAgent,
+  listCodingAgentModels,
   loadCodingAgentConfiguration,
+  startCodingAgentAuth,
   updateCodingAgentSettings,
+  updateCodingAgentModel,
   type CodingAgentDefinition,
   type CodingAgentSettings,
 } from "./services/codingAgents";
@@ -70,7 +76,13 @@ function App() {
   const [llmProviders, setLLMProviders] = useState<LLMProvider[]>([]);
   const [llmSettings, setLLMSettings] = useState<LLMSettings>({ default_model: null, fast_model: null });
   const [codingAgents, setCodingAgents] = useState<CodingAgentDefinition[]>([]);
-  const [codingAgentSettings, setCodingAgentSettings] = useState<CodingAgentSettings>({ default_agent: "opencode" });
+  const [codingAgentSettings, setCodingAgentSettings] = useState<CodingAgentSettings>({
+    default_agent: "opencode",
+    agent_models: {
+      opencode: { mode: "shared_binding", inherit: "ambient.primary" },
+      codex: { mode: "native" },
+    },
+  });
   const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
@@ -865,6 +877,8 @@ function App() {
         modelSelection={sessions.find((session) => session.id === activeSessionId)?.model_selection ?? llmSettings.default_model}
         onModelChange={handleSessionModelChange}
         onManageModels={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
+        codingAgent={codingAgents?.find((agent) => agent.id === codingAgentSettings?.default_agent)}
+        codingAgentModel={codingAgentSettings?.agent_models?.[codingAgentSettings.default_agent]}
       />
 
       <LLMSettingsDialog
@@ -884,6 +898,12 @@ function App() {
         onTestProvider={(providerId, modelId, mode) => testProviderConnection(API_BASE, providerId, modelId, mode)}
         onUpdateSettings={(patch) => updateLLMSettings(API_BASE, patch)}
         onUpdateCodingAgent={(patch) => updateCodingAgentSettings(API_BASE, patch)}
+        onInstallCodingAgent={(agentId) => installCodingAgent(API_BASE, agentId)}
+        onStartCodingAgentAuth={(agentId) => startCodingAgentAuth(API_BASE, agentId)}
+        onGetCodingAgentAuth={(agentId) => getCodingAgentAuth(API_BASE, agentId)}
+        onListCodingAgentModels={(agentId) => listCodingAgentModels(API_BASE, agentId)}
+        onClearCodingAgentAuth={(agentId) => clearCodingAgentAuth(API_BASE, agentId)}
+        onUpdateCodingAgentModel={(agentId, config) => updateCodingAgentModel(API_BASE, agentId, config)}
       />
 
       {/* Audit Log Panel Overlay */}

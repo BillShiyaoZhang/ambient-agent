@@ -8,7 +8,7 @@
   "customizations": {
     "vscode": {
       "settings": {
-        "python.defaultInterpreterPath": "${workspaceRoot}/.venv/bin/python",
+        "python.defaultInterpreterPath": "/var/lib/ambient/python-env/bin/python",
         "python.linting.enabled": false,
         "editor.formatOnSave": true,
         "editor.codeActionsOnSave": {

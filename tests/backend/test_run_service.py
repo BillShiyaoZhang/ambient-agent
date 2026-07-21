@@ -204,7 +204,11 @@ async def test_direct_mcp_resource_uses_durable_permission_and_resumes(tmp_path)
 
     class Apps:
         def get_manifest(self, app_id):
-            return SimpleNamespace(mcp_server={"command": ["mcp-server"], "args": ["--stdio"]}) if app_id == "docs" else None
+            return (
+                SimpleNamespace(mcp_server={"command": ["mcp-server"], "args": ["--stdio"]})
+                if app_id == "docs"
+                else None
+            )
 
     approved = False
     client = SimpleNamespace(call=AsyncMock(return_value={"contents": [{"text": "ok"}]}))
@@ -405,6 +409,106 @@ def test_confirmed_committed_effect_cannot_be_retried(tmp_path):
     assert reconciled["error"]["effect_state"] == "committed"
     with pytest.raises(ValueError, match="committed external effect"):
         coordinator.retry(run["id"])
+
+
+def test_agent_retry_gets_a_fresh_active_time_window_and_keeps_usage_counters(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    store = RunStore(str(tmp_path))
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="stage_code",
+        budget=RunBudget(model_turns=5, tokens_used=7_033, cost_usd=0.75),
+        data={"active_seconds": 266.9, "approved_plan": "Build the app"},
+        last_error={"code": "verifier_unavailable", "message": "Node.js is missing", "effect_state": "none"},
+    )
+    run = create(
+        store,
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    failed = store.transition(
+        run["id"],
+        "failed",
+        error={"code": "verifier_unavailable", "message": "Node.js is missing", "effect_state": "none"},
+    )
+    coordinator = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace())
+
+    retried = coordinator.retry(failed["id"])
+
+    assert retried["state"]["data"]["active_seconds"] == 0.0
+    assert retried["state"]["data"]["approved_plan"] == "Build the app"
+    assert retried["state"]["budget"]["model_turns"] == 5
+    assert retried["state"]["budget"]["tokens_used"] == 7_033
+    assert retried["state"]["budget"]["cost_usd"] == 0.75
+
+
+def test_widget_retry_without_retained_staging_restarts_code_generation(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    store = RunStore(str(tmp_path))
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="verify",
+        budget=RunBudget(model_turns=5, tokens_used=7_957),
+        data={
+            "active_seconds": 312.6,
+            "approved_plan": "Build the weather app",
+            "approved_schema": {"reused_schemas": [{"id": "Place"}]},
+            "verification_report": "stale report",
+            "verification_options": ["rework_code"],
+            "verification_passed": False,
+            "verification_override": True,
+            "code_feedback": "stale feedback",
+        },
+        last_error={
+            "code": "budget_exhausted",
+            "message": "Active time exhausted",
+            "effect_state": "none",
+        },
+    )
+    run = create(
+        store,
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    failed = store.transition(
+        run["id"],
+        "failed",
+        error={"code": "budget_exhausted", "message": "Active time exhausted", "effect_state": "none"},
+    )
+    coordinator = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace())
+
+    retried = coordinator.retry(failed["id"])
+
+    assert retried["state"]["phase"] == "stage_code"
+    assert retried["state"]["data"]["active_seconds"] == 0.0
+    assert retried["state"]["data"]["approved_plan"] == "Build the weather app"
+    assert retried["state"]["data"]["approved_schema"] == {"reused_schemas": [{"id": "Place"}]}
+    for stale_key in (
+        "verification_report",
+        "verification_options",
+        "verification_passed",
+        "verification_override",
+        "code_feedback",
+    ):
+        assert stale_key not in retried["state"]["data"]
 
 
 def test_agent_state_and_step_outcomes_are_strictly_serializable():
@@ -632,9 +736,7 @@ def test_fenced_atomic_commit_rejects_old_worker_and_records_step_attempts(tmp_p
     assert completed["steps"][0]["status"] == "interrupted"
     assert completed["steps"][1]["status"] == "succeeded"
     committed_event = next(
-        event
-        for event in store.get_run(run["id"], include_events=True)["events"]
-        if event["type"] == "step_committed"
+        event for event in store.get_run(run["id"], include_events=True)["events"] if event["type"] == "step_committed"
     )
     assert committed_event["duration_ms"] is not None
     assert committed_event["model_usage"] == {"model_turns": 0, "tokens": 0, "cost_usd": 0.0}
@@ -871,9 +973,7 @@ def test_cancelling_inactive_widget_run_discards_staging_without_publishing(
         outcome=outcome,
     )
     assert inactive["status"] == cancel_from
-    assert inactive["checkpoint"]["state"]["data"]["staged_app"]["staging_dir"] == str(
-        staging_dir
-    )
+    assert inactive["checkpoint"]["state"]["data"]["staged_app"]["staging_dir"] == str(staging_dir)
     assert staging_dir.is_dir()
 
     cancelled = store.request_cancel(run["id"])
@@ -886,9 +986,7 @@ def test_cancelling_inactive_widget_run_discards_staging_without_publishing(
     assert "staged_app" not in cancelled["checkpoint"]["state"]["data"]
     assert cancelled["artifacts"] == []
     assert [
-        event["payload"]
-        for event in cancelled_with_events["events"]
-        if event["type"] == "staged_artifact_discarded"
+        event["payload"] for event in cancelled_with_events["events"] if event["type"] == "staged_artifact_discarded"
     ] == [{"app_id": "cancel-app", "reason": "run_cancelled"}]
     assert not any(event["type"] == "widget" for event in cancelled_with_events["events"])
     if cancel_from == "waiting_user":
@@ -970,9 +1068,7 @@ def test_staging_cancel_tombstone_recovers_both_crash_windows(
     pending = store.get_run(run["id"])
     assert pending["status"] == "cancel_requested"
     assert "staged_app" not in pending["state"]["data"]
-    assert pending["state"]["data"]["staged_app_cleanup_pending"]["staging_dir"] == str(
-        staging_dir
-    )
+    assert pending["state"]["data"]["staged_app_cleanup_pending"]["staging_dir"] == str(staging_dir)
     assert "staged_app" not in pending["checkpoint"]["state"]["data"]
     assert "staged_app_cleanup_pending" in pending["checkpoint"]["state"]["data"]
 
@@ -990,8 +1086,7 @@ def test_staging_cancel_tombstone_recovers_both_crash_windows(
     assert [
         event["type"]
         for event in recovered["events"]
-        if event["type"].startswith("staged_artifact_cleanup")
-        or event["type"] == "staged_artifact_discarded"
+        if event["type"].startswith("staged_artifact_cleanup") or event["type"] == "staged_artifact_discarded"
     ][-2:] == ["staged_artifact_cleanup_requested", "staged_artifact_discarded"]
 
 
@@ -1077,10 +1172,12 @@ def test_cancel_detects_artifact_promoted_before_checkpoint(tmp_path):
         workflow_version=state.workflow_version,
     )
     (live_dir / ".ambient-promotion.json").write_text(
-        json.dumps({
-            "run_id": run["id"],
-            "artifact_hash": hashlib.sha256(controller.read_bytes()).hexdigest(),
-        }),
+        json.dumps(
+            {
+                "run_id": run["id"],
+                "artifact_hash": hashlib.sha256(controller.read_bytes()).hexdigest(),
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -1112,9 +1209,7 @@ def test_unknown_effect_outcomes_require_attention(tmp_path):
         state=state,
     )
     claimed = store.claim_next("worker", 4, 1)
-    attempt = store.begin_step_attempt(
-        run["id"], "execute", lease_owner="worker", lease_epoch=claimed["lease_epoch"]
-    )
+    attempt = store.begin_step_attempt(run["id"], "execute", lease_owner="worker", lease_epoch=claimed["lease_epoch"])
     result = store.commit_step(
         run["id"],
         "execute",
@@ -1146,9 +1241,7 @@ def test_cancel_fences_late_commit_and_handles_prestart_race(tmp_path):
         state=state,
     )
     claimed = store.claim_next("worker", 4, 1)
-    attempt = store.begin_step_attempt(
-        run["id"], "execute", lease_owner="worker", lease_epoch=claimed["lease_epoch"]
-    )
+    attempt = store.begin_step_attempt(run["id"], "execute", lease_owner="worker", lease_epoch=claimed["lease_epoch"])
     assert store.request_cancel(run["id"])["status"] == "cancel_requested"
     with pytest.raises(StaleLeaseError):
         store.commit_step(

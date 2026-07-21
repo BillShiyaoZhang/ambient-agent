@@ -16,13 +16,16 @@ from pydantic import BaseModel
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
+from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.coding_agent import (
+    AgentModelConfig,
     CodingAgentConfigError,
     CodingAgentConfigStore,
     run_coding_agent,
 )
+from backend.coding_agent_runtime import CodingAgentRuntimeError, spec_for
 from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
@@ -81,6 +84,7 @@ app_manager = AppManager()
 
 # Initialize workspace storage
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
+app_data_source_gateway = AppDataSourceGateway(app_manager, WORKSPACE_DIR)
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
 llm_config_store = LLMConfigStore(WORKSPACE_DIR)
 coding_agent_config_store = CodingAgentConfigStore(WORKSPACE_DIR)
@@ -110,6 +114,7 @@ async def _run_coding_agent_staged(
     on_update: Any = None,
     promote: bool = True,
     coding_agent: str | None = None,
+    coding_agent_model: dict[str, Any] | None = None,
 ):
     selected = coding_agent or coding_agent_config_store.get_settings()["default_agent"]
     # Keep the long-standing module injection point for local hosts and tests.
@@ -128,6 +133,8 @@ async def _run_coding_agent_staged(
         on_update=on_update,
         promote=promote,
         coding_agent=selected,
+        runtime=coding_agent_config_store.runtime,
+        model_config=coding_agent_model or coding_agent_config_store.model_config(selected),
     )
 
 
@@ -139,6 +146,7 @@ durable_agent_workflow = DurableAgentWorkflow(
     llm_config_store=lambda: llm_config_store,
     coding_agent_runner=_run_coding_agent_staged,
     event_sink=send_legacy_run_projection,
+    app_diagnostic_loader=app_data_source_gateway.recent_diagnostics,
 )
 run_coordinator.register_internal_agent_executor(durable_agent_workflow)
 
@@ -154,10 +162,26 @@ def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
     fast = ModelSelection.model_validate(settings.get("fast_model") or primary)
     llm_config_store.resolve(primary)
     llm_config_store.resolve(fast)
+    coding_settings = coding_agent_config_store.get_settings()
+    coding_agent = coding_settings["default_agent"]
+    coding_config = coding_settings["agent_models"][coding_agent]
+    coding_model: ModelSelection | None = None
+    if coding_config["mode"] == "shared_binding":
+        coding_model = (
+            primary
+            if coding_config.get("inherit") == "ambient.primary"
+            else ModelSelection(
+                provider_id=str(coding_config.get("provider_id") or ""),
+                model_id=str(coding_config.get("model_id") or ""),
+            )
+        )
+        llm_config_store.resolve(coding_model)
     return {
         "primary": primary.model_dump(mode="json"),
         "fast": fast.model_dump(mode="json"),
-        "coding_agent": coding_agent_config_store.get_settings()["default_agent"],
+        "coding_agent": coding_agent,
+        "coding_agent_config": coding_config,
+        "coding_model": coding_model.model_dump(mode="json") if coding_model else None,
     }
 
 
@@ -166,9 +190,7 @@ def _active_chat_session_ids() -> set[str]:
     return {
         str(run["source_id"])
         for run in active
-        if run.get("source_type") == "chat"
-        and run.get("source_id")
-        and run.get("status") != "needs_attention"
+        if run.get("source_type") == "chat" and run.get("source_id") and run.get("status") != "needs_attention"
     }
 
 
@@ -255,11 +277,7 @@ async def lifespan(app: FastAPI):
         active_state = active_run.get("state") if isinstance(active_run.get("state"), dict) else {}
         active_data = active_state.get("data") if isinstance(active_state.get("data"), dict) else {}
         for handle_key in ("staged_app", "staged_app_cleanup_pending"):
-            staged_app = (
-                active_data.get(handle_key)
-                if isinstance(active_data.get(handle_key), dict)
-                else {}
-            )
+            staged_app = active_data.get(handle_key) if isinstance(active_data.get(handle_key), dict) else {}
             if staged_app.get("staging_dir"):
                 staging_references.add(str(staged_app["staging_dir"]))
     try:
@@ -282,6 +300,7 @@ async def lifespan(app: FastAPI):
     await run_coordinator.start()
     yield
     await run_coordinator.shutdown()
+    await coding_agent_config_store.runtime.shutdown()
     await backend_manager.shutdown()
 
 
@@ -337,6 +356,10 @@ class LLMSettingsUpdateRequest(BaseModel):
 
 class CodingAgentSettingsUpdateRequest(BaseModel):
     default_agent: str
+
+
+class CodingAgentAuthRequest(BaseModel):
+    method: str = "device_code"
 
 
 class ProviderTestRequest(BaseModel):
@@ -420,8 +443,80 @@ async def get_coding_agents():
 @app.patch("/api/coding-agents/settings")
 async def update_coding_agent_settings(data: CodingAgentSettingsUpdateRequest):
     try:
+        spec = spec_for(data.default_agent)
+        status = await coding_agent_config_store.runtime.status(data.default_agent)
+        if not status["installed"]:
+            raise CodingAgentRuntimeError(
+                "Install the coding agent before selecting it", code="coding_agent_not_installed"
+            )
+        if spec.auth_methods and not status["authenticated"]:
+            raise CodingAgentRuntimeError(
+                "Sign in to the coding agent before selecting it", code="coding_agent_auth_required"
+            )
         return coding_agent_config_store.update_settings(data.model_dump())
-    except CodingAgentConfigError as exc:
+    except (CodingAgentConfigError, CodingAgentRuntimeError) as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.patch("/api/coding-agents/{agent_id}/model")
+async def update_coding_agent_model(agent_id: str, data: AgentModelConfig):
+    try:
+        if data.mode == "shared_binding" and not data.inherit:
+            llm_config_store.resolve(ModelSelection(provider_id=data.provider_id or "", model_id=data.model_id or ""))
+        return coding_agent_config_store.update_agent_model(agent_id, data.model_dump())
+    except (CodingAgentConfigError, CodingAgentRuntimeError, LLMConfigError) as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.post("/api/coding-agents/{agent_id}/install", status_code=202)
+async def install_coding_agent(agent_id: str):
+    try:
+        return await coding_agent_config_store.runtime.start_install(agent_id)
+    except CodingAgentRuntimeError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.get("/api/coding-agents/{agent_id}/operations/{operation_id}")
+async def get_coding_agent_operation(agent_id: str, operation_id: str):
+    try:
+        return coding_agent_config_store.runtime.operation(agent_id, operation_id)
+    except CodingAgentRuntimeError as exc:
+        status_code = 404 if exc.code == "operation_not_found" else 422
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.post("/api/coding-agents/{agent_id}/auth", status_code=202)
+async def start_coding_agent_auth(agent_id: str, data: CodingAgentAuthRequest):
+    try:
+        return await coding_agent_config_store.runtime.start_auth(agent_id, data.method)
+    except CodingAgentRuntimeError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.get("/api/coding-agents/{agent_id}/auth")
+async def get_coding_agent_auth(agent_id: str):
+    try:
+        return coding_agent_config_store.runtime.auth_session(agent_id)
+    except CodingAgentRuntimeError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.get("/api/coding-agents/{agent_id}/models")
+async def get_coding_agent_models(agent_id: str):
+    try:
+        return await coding_agent_config_store.runtime.models(agent_id)
+    except CodingAgentRuntimeError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.delete("/api/coding-agents/{agent_id}/auth")
+async def clear_coding_agent_auth(agent_id: str):
+    try:
+        status = await coding_agent_config_store.runtime.status(agent_id)
+        if status["authenticated"]:
+            return await coding_agent_config_store.runtime.logout(agent_id)
+        return await coding_agent_config_store.runtime.cancel_auth(agent_id)
+    except CodingAgentRuntimeError as exc:
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
@@ -786,6 +881,29 @@ async def get_app_files(app_id: str):
     raise HTTPException(status_code=404, detail="App not found")
 
 
+class AppDataSourceRequest(BaseModel):
+    path: str
+    method: str = "GET"
+    query: dict[str, Any] | None = None
+    body: Any = None
+
+
+@app.post("/api/apps/{app_id}/data-sources/{source_id}/request")
+async def request_app_data_source(app_id: str, source_id: str, data: AppDataSourceRequest):
+    try:
+        result = await app_data_source_gateway.request(app_id, source_id, data.model_dump())
+        return {"data": result}
+    except AppDataSourceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
+
+
+@app.get("/api/apps/{app_id}/diagnostics")
+async def get_app_runtime_diagnostics(app_id: str):
+    if app_manager.get_manifest(app_id) is None:
+        raise HTTPException(status_code=404, detail="App not found")
+    return {"diagnostics": app_data_source_gateway.recent_diagnostics(app_id)}
+
+
 @app.delete("/api/apps/{app_id}")
 async def delete_app(app_id: str):
     if run_store.has_active_owner(f"app:{app_id}") or run_store.has_active_runtime(app_id):
@@ -863,8 +981,7 @@ async def _run_approved_graph_mutation(
                 (
                     interaction
                     for interaction in current.get("interactions", [])
-                    if interaction.get("status") == "pending"
-                    and interaction.get("type") == "graph_mutation_approval"
+                    if interaction.get("status") == "pending" and interaction.get("type") == "graph_mutation_approval"
                 ),
                 None,
             )
@@ -958,9 +1075,7 @@ async def websocket_chat(
         current.title = title
         session.add(current)
         session.commit()
-        await broadcast_global(
-            {"type": "session_title_updated", "session_id": session_id, "title": title}
-        )
+        await broadcast_global({"type": "session_title_updated", "session_id": session_id, "title": title})
 
     async def submit_user_message(content_str: str, sender_str: str) -> dict[str, Any] | None:
         """Persist the command and enqueue the scheduler-owned workflow."""
@@ -1096,9 +1211,7 @@ async def websocket_chat(
                 arguments,
                 source_type="chat",
                 source_id=session_id,
-                idempotency_key=(
-                    f"ws:{session_id}:mcp_call:{app_id}:{call_id}" if call_id else None
-                ),
+                idempotency_key=(f"ws:{session_id}:mcp_call:{app_id}:{call_id}" if call_id else None),
                 correlation={
                     "projection_type": "mcp_call_response",
                     "call_id": call_id,
@@ -1117,9 +1230,7 @@ async def websocket_chat(
                 if completed["status"] == "succeeded":
                     payload["result"] = completed.get("result")
                 else:
-                    payload["error"] = (completed.get("error") or {}).get(
-                        "message", completed["status"]
-                    )
+                    payload["error"] = (completed.get("error") or {}).get("message", completed["status"])
                 await websocket.send_json(payload)
 
             run_coordinator.register_completion_callback(run["id"], project_completion)
@@ -1140,9 +1251,7 @@ async def websocket_chat(
                 {"uri": uri},
                 source_type="chat",
                 source_id=session_id,
-                idempotency_key=(
-                    f"ws:{session_id}:mcp_read:{app_id}:{call_id}" if call_id else None
-                ),
+                idempotency_key=(f"ws:{session_id}:mcp_read:{app_id}:{call_id}" if call_id else None),
                 correlation={
                     "projection_type": "mcp_read_response",
                     "call_id": call_id,
@@ -1161,9 +1270,7 @@ async def websocket_chat(
                 if completed["status"] == "succeeded":
                     payload["result"] = completed.get("result")
                 else:
-                    payload["error"] = (completed.get("error") or {}).get(
-                        "message", completed["status"]
-                    )
+                    payload["error"] = (completed.get("error") or {}).get("message", completed["status"])
                 await websocket.send_json(payload)
 
             run_coordinator.register_completion_callback(run["id"], project_completion)
@@ -1191,9 +1298,7 @@ async def websocket_chat(
                 source_type="app",
                 source_id=session_id,
                 idempotency_key=(
-                    f"ws:{session_id}:capability:{catalog_id}:{selected_action}:{call_id}"
-                    if call_id
-                    else None
+                    f"ws:{session_id}:capability:{catalog_id}:{selected_action}:{call_id}" if call_id else None
                 ),
                 correlation={
                     "projection_type": "capability_call_response",
@@ -1202,6 +1307,7 @@ async def websocket_chat(
                     "action_id": selected_action,
                 },
             )
+
             async def project_completion(completed: dict[str, Any]) -> None:
                 payload = {
                     "type": "capability_call_response",
@@ -1212,9 +1318,7 @@ async def websocket_chat(
                 if completed["status"] == "succeeded":
                     payload["result"] = completed.get("result")
                 else:
-                    payload["error"] = (completed.get("error") or {}).get(
-                        "message", completed["status"]
-                    )
+                    payload["error"] = (completed.get("error") or {}).get("message", completed["status"])
                 await websocket.send_json(payload)
 
             run_coordinator.register_completion_callback(run["id"], project_completion)

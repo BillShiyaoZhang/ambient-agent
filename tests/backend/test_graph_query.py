@@ -88,7 +88,7 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
                 "type": "ASSOCIATED_WITH",
                 "properties": {"note": "mutation check"},
             },
-        ]
+        ],
     }
 
     response = client.post("/api/graph/mutate", json=payload)

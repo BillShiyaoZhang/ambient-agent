@@ -31,6 +31,25 @@ Manifest V1 的必填字段为：
 
 `id` 必须与目录名相同并使用小写 kebab-case。可选 `backend_type` 为 `code`、`agent` 或 `mcp`；MCP/agent 应分别提供对应配置。
 
+需要读取公共外部数据的 App 自己在 `data_sources` 中声明 App-scoped HTTP connector；Ambient 不预置 `weather.forecast` 一类业务 capability：
+
+```json
+{
+  "data_sources": {
+    "forecast": {
+      "type": "http",
+      "base_url": "https://api.open-meteo.com",
+      "allowed_paths": ["/v1/forecast"],
+      "methods": ["GET"],
+      "response_format": "json",
+      "response_limit": 1048576
+    }
+  }
+}
+```
+
+V1 connector 只支持无凭证的 HTTPS JSON API。`base_url` 必须是公开 origin，path 必须逐项声明；localhost、IP literal、私网/保留地址、redirect、代理环境变量和超限响应均失败关闭。需要 OAuth、secret、签名或专用 SDK 时必须绑定 MCP/Capability，不能把凭证写进 manifest 或 controller。
+
 ## 2. Controller 加载
 
 `controller.js` 默认导出一个 React 组件。宿主使用 `@babel/standalone` 转译模块，再通过 `new Function("exports", "React", "ambient", ...)` 执行并渲染导出组件。
@@ -46,7 +65,7 @@ export default function TaskBoard({ ambient }) {
 }
 ```
 
-运行时提供 `ambient.graph`、`ambient.runs`、`ambient.capabilities`、`ambient.mcp`、React hooks、HTM 和标准组件。完整接口见 [ambient SDK](/widgets/sdk.md)。
+运行时提供 `ambient.graph`、`ambient.net`、`ambient.runs`、`ambient.capabilities`、`ambient.mcp`、React hooks、HTM 和标准组件。完整接口见 [ambient SDK](/widgets/sdk.md)。
 
 ## 3. 创建、修改与发布
 
@@ -63,6 +82,7 @@ flowchart LR
 
 - 新应用和修改都先写 staging，live 目录在批准与校验前保持不变。
 - controller 必须包含默认导出，通过大小、UTF-8、模块语法与 host-capability 规则检查。
+- manifest 若声明 `data_sources`，发布校验会检查 connector contract；controller 中的 `ambient.net.request("source-id", ...)` 必须引用同目录 manifest 中已声明的 source。
 - `SchemaVerificationService` 从 controller 提取 Graph 使用，与有效 schema 比较；需要扩展 schema 时先生成 proposal 并走确认流程。
 - 发布以 artifact hash 和 Run effect 记录保护；恢复时会验证 staged/live 产物，避免重复或错误提升。
 
@@ -82,6 +102,9 @@ flowchart LR
 
 - Widget 不拥有独立数据模型；持久业务数据使用 Graph schema。
 - `ambient.graph.mutate` 由后端预检并原子写入；不要使用已弃用的 `ambient.model`。
+- `ambient.net.request` 只访问当前 App manifest 已声明的数据源；Widget 不能提供完整 URL，也不能直接使用 `fetch`。
 - `ambient.capabilities.invoke` 和 `ambient.runs.start` 创建持久 Run，不应绕过确认和 effect 记录。
 - `ambient.mcp.callTool` 仍由后端按 manifest、tool identity 和权限策略校验。
 - controller 与宿主同 realm 执行，只应加载可信代码。详见[运行边界](/widgets/sandbox.md)。
+
+数据源调用失败会返回稳定的 `code`、`message`、`hint` 和安全的 `details`，并把有界诊断持久化到 workspace。后续修改该 App 时，Durable Workflow 会把最近诊断随 Runtime Contract 一起提供给 Coding Agent，使其能修正 source id、manifest path、请求参数或上游响应问题，而不暴露 secret 或无界响应正文。

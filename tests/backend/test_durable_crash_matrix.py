@@ -421,8 +421,6 @@ async def test_graph_effect_committed_before_process_death_replays_exactly_once(
             "SELECT COUNT(*) FROM graph_effects WHERE idempotency_key=?",
             (f"agent-run:{run['id']}:graph_commit:0",),
         ).fetchone()[0]
-        node_count = connection.execute(
-            "SELECT COUNT(*) FROM graph_nodes WHERE id='crash-window-node'"
-        ).fetchone()[0]
+        node_count = connection.execute("SELECT COUNT(*) FROM graph_nodes WHERE id='crash-window-node'").fetchone()[0]
     assert effect_count == 1
     assert node_count == 1

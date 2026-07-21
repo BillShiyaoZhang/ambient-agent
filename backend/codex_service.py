@@ -10,15 +10,13 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable
-from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
-import httpx
-
+from backend.coding_agent_runtime import CodingAgentRuntime
 from backend.opencode_service import (
     CodingAgentStagedResult,
+    OpenCodeArtifactError,
     _prepare_staging_app,
     _terminate_process,
     promote_coding_agent_staging,
@@ -27,7 +25,7 @@ from backend.opencode_service import (
 
 _MAX_CODEX_EVENT_BYTES = 4 * 1024 * 1024
 _MAX_CODEX_STDERR_BYTES = 64 * 1024
-_MAX_BRIDGE_LINE_BYTES = 1024 * 1024
+_MAX_CODEX_VALIDATION_REPAIRS = 3
 _CODEX_ENV_ALLOWLIST = {
     "ALL_PROXY",
     "APPDATA",
@@ -90,8 +88,8 @@ def _codex_environment() -> dict[str, str]:
     return {name: value for name in _CODEX_ENV_ALLOWLIST if (value := os.environ.get(name)) is not None}
 
 
-def _codex_exec_argv(command_argv: list[str], staging_dir: Path) -> list[str]:
-    return [
+def _codex_exec_argv(command_argv: list[str], staging_dir: Path, native_model: str | None = None) -> list[str]:
+    argv = [
         *command_argv,
         "exec",
         "--json",
@@ -103,30 +101,11 @@ def _codex_exec_argv(command_argv: list[str], staging_dir: Path) -> list[str]:
         "workspace-write",
         "-C",
         str(staging_dir),
-        "-",
     ]
-
-
-def _host_bridge_config() -> tuple[str, str]:
-    raw_url = os.getenv("CODEX_HOST_BRIDGE_URL", "http://host.docker.internal:8765").strip()
-    token = os.getenv("CODEX_HOST_BRIDGE_TOKEN", "").strip()
-    if not token:
-        raise CodexAgentStartupError("CODEX_HOST_BRIDGE_TOKEN is required for host Codex")
-    parsed = urlparse(raw_url)
-    if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password:
-        raise CodexAgentInputError("CODEX_HOST_BRIDGE_URL must be an unauthenticated http URL")
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise CodexAgentInputError("CODEX_HOST_BRIDGE_URL must not contain a path, query, or fragment")
-    hostname = parsed.hostname.lower()
-    allowed = hostname in {"host.docker.internal", "localhost", "127.0.0.1", "::1"}
-    if not allowed:
-        try:
-            allowed = ip_address(hostname).is_private
-        except ValueError:
-            allowed = False
-    if not allowed:
-        raise CodexAgentInputError("CODEX_HOST_BRIDGE_URL must target localhost or a private host address")
-    return raw_url.rstrip("/"), token
+    if native_model:
+        argv.extend(["--model", native_model])
+    argv.append("-")
+    return argv
 
 
 async def _emit(callback: Callable[[Any], Any] | None, payload: Any) -> None:
@@ -168,6 +147,7 @@ async def _run_codex_exec(
     prompt: str,
     timeout: float,
     on_update: Callable[[Any], Any] | None,
+    environment: dict[str, str] | None = None,
 ) -> str:
     process_kwargs: dict[str, Any] = {}
     if os.name == "nt":
@@ -181,7 +161,7 @@ async def _run_codex_exec(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_codex_environment(),
+            env=environment or _codex_environment(),
             **process_kwargs,
         )
     except (FileNotFoundError, PermissionError, OSError) as exc:
@@ -285,103 +265,6 @@ def _codex_prompt(app_id: str, instruction: str, language: str) -> str:
     )
 
 
-async def codex_host_bridge_status() -> dict[str, Any]:
-    try:
-        base_url, token = _host_bridge_config()
-        timeout = httpx.Timeout(3.0, connect=2.0)
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.get(
-                f"{base_url}/health",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("invalid bridge health response")
-        bridge_ready = payload.get("ok") is True
-        return {
-            "available": bridge_ready,
-            "authenticated": bool(payload.get("authenticated")),
-            "version": str(payload.get("version") or ""),
-            "status_detail": str(payload.get("login_status") or ""),
-        }
-    except (CodexAgentError, httpx.HTTPError, TypeError, ValueError) as exc:
-        return {
-            "available": False,
-            "authenticated": False,
-            "version": "",
-            "status_detail": str(exc),
-        }
-
-
-async def _run_codex_via_host_bridge(
-    *,
-    app_id: str,
-    staging_dir: Path,
-    prompt: str,
-    timeout: float,
-    on_update: Callable[[Any], Any] | None,
-) -> str:
-    base_url, token = _host_bridge_config()
-    request_timeout = httpx.Timeout(timeout + 15.0, connect=3.0)
-    total_bytes = 0
-    output: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=request_timeout, trust_env=False) as client:
-            async with client.stream(
-                "POST",
-                f"{base_url}/v1/run",
-                headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "app_id": app_id,
-                    "staging_dir": staging_dir.name,
-                    "prompt": prompt,
-                    "timeout_seconds": timeout,
-                },
-            ) as response:
-                if response.status_code != 200:
-                    body = (await response.aread())[:_MAX_BRIDGE_LINE_BYTES].decode("utf-8", errors="replace")
-                    raise CodexAgentStartupError(
-                        f"Host Codex bridge rejected the request ({response.status_code}): {body}"
-                    )
-                async for line in response.aiter_lines():
-                    total_bytes += len(line.encode("utf-8"))
-                    if total_bytes > _MAX_CODEX_EVENT_BYTES:
-                        raise CodexAgentProtocolError("Host Codex bridge response exceeded the size limit")
-                    if not line:
-                        continue
-                    if len(line.encode("utf-8")) > _MAX_BRIDGE_LINE_BYTES:
-                        raise CodexAgentProtocolError("Host Codex bridge emitted an oversized event")
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise CodexAgentProtocolError("Host Codex bridge emitted malformed JSONL") from exc
-                    if not isinstance(event, dict):
-                        raise CodexAgentProtocolError("Host Codex bridge emitted a non-object event")
-                    event_type = event.get("type")
-                    if event_type == "progress":
-                        await _emit(on_update, event.get("payload"))
-                    elif event_type == "result" and isinstance(event.get("output"), str):
-                        output = event["output"]
-                    elif event_type == "error":
-                        code = str(event.get("code") or "protocol_error")
-                        message = str(event.get("message") or "Host Codex execution failed")
-                        if code == "timeout":
-                            raise CodexAgentTimeoutError(message)
-                        if code == "startup":
-                            raise CodexAgentStartupError(message)
-                        raise CodexAgentProtocolError(message)
-    except CodexAgentError:
-        raise
-    except httpx.TimeoutException as exc:
-        raise CodexAgentTimeoutError(f"Host Codex bridge timed out after {timeout:g} seconds") from exc
-    except httpx.HTTPError as exc:
-        raise CodexAgentStartupError(f"Unable to reach Host Codex bridge: {exc!s}") from exc
-    if output is None:
-        raise CodexAgentProtocolError("Host Codex bridge completed without a result")
-    return output
-
-
 async def run_codex_agent(
     app_id: str,
     instruction: str,
@@ -389,29 +272,59 @@ async def run_codex_agent(
     on_update: Callable[[Any], Any] | None = None,
     *,
     promote: bool = True,
+    runtime: CodingAgentRuntime | None = None,
+    native_model: str | None = None,
 ) -> str | CodingAgentStagedResult:
-    """Generate a Widget in staging through the authenticated host Codex bridge."""
+    """Generate a Widget with the managed container Codex runtime."""
     timeout = _codex_timeout()
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
+    runtime = runtime or CodingAgentRuntime(workspace_dir)
+    command = runtime.command("codex")
+    if command is None:
+        raise CodexAgentStartupError("Codex is not installed")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
     live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
     retain_staging = False
     try:
         prompt = _codex_prompt(app_id, instruction, language)
-        output = await _run_codex_via_host_bridge(
-            app_id=app_id,
-            staging_dir=staging_dir,
-            prompt=prompt,
-            timeout=timeout,
-            on_update=on_update,
-        )
-        result = CodingAgentStagedResult(
-            output=output,
-            app_id=app_id,
-            staging_dir=staging_dir,
-            live_dir=live_dir,
-        )
-        validate_coding_agent_staging(result)
+        result: CodingAgentStagedResult | None = None
+        for attempt in range(_MAX_CODEX_VALIDATION_REPAIRS + 1):
+            output = await _run_codex_exec(
+                _codex_exec_argv(command, staging_dir, native_model),
+                cwd=staging_dir,
+                prompt=prompt,
+                timeout=timeout,
+                on_update=on_update,
+                environment=runtime.process_environment("codex"),
+            )
+            result = CodingAgentStagedResult(
+                output=output,
+                app_id=app_id,
+                staging_dir=staging_dir,
+                live_dir=live_dir,
+            )
+            try:
+                validate_coding_agent_staging(result)
+                break
+            except OpenCodeArtifactError as exc:
+                if attempt == _MAX_CODEX_VALIDATION_REPAIRS:
+                    raise
+                diagnostic = str(exc)[:12_000]
+                await _emit(
+                    on_update,
+                    "\n🔧 Codex generated code that failed mandatory validation; asking it to repair the staging App in place.",
+                )
+                prompt = (
+                    "The existing controller.js failed mandatory validation. Fix that file in place, "
+                    "do not create any other files, and preserve the requested functionality while obeying "
+                    "the Widget runtime and network boundary. Inspect the whole files for the same class of "
+                    "mistake, not only the reported line. HTM component closing syntax is `<//>`; never emit "
+                    "React-like `</${Component}>` or malformed `</${Component>`. Re-run your own inspection "
+                    "before finishing.\n\n"
+                    f"[VALIDATION ERROR]\n{diagnostic}"
+                )
+        if result is None:  # pragma: no cover - the bounded loop always executes
+            raise CodexAgentProtocolError("Codex did not produce a staging result")
         if not promote:
             retain_staging = True
             return result

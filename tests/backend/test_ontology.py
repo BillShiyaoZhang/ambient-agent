@@ -149,11 +149,7 @@ def test_ontology_growth_survives_restart_and_cannot_change_existing_property_ty
     workspace = str(tmp_path / "workspace")
     db = GraphDatabase(workspace)
     db.apply_schema_proposal_atomic(
-        {
-            "reused_schemas": [
-                {"id": "Task", "extended_properties": {"estimated_minutes": "integer"}}
-            ]
-        }
+        {"reused_schemas": [{"id": "Task", "extended_properties": {"estimated_minutes": "integer"}}]}
     )
 
     reopened = GraphDatabase(workspace)
@@ -161,11 +157,7 @@ def test_ontology_growth_survives_restart_and_cannot_change_existing_property_ty
     assert reopened.get_schema("Task")["properties"]["estimated_minutes"] == "integer"
     with pytest.raises(ValueError, match="cannot change property 'estimated_minutes'"):
         reopened.apply_schema_proposal_atomic(
-            {
-                "reused_schemas": [
-                    {"id": "Task", "extended_properties": {"estimated_minutes": "string"}}
-                ]
-            }
+            {"reused_schemas": [{"id": "Task", "extended_properties": {"estimated_minutes": "string"}}]}
         )
 
 

@@ -55,9 +55,7 @@ def test_graph_effect_ledger_replays_result_without_duplicate_write(tmp_path):
 def test_schema_effect_ledger_preserves_original_undo_snapshot(tmp_path):
     db = GraphDatabase(str(tmp_path))
     proposal = {
-        "reused_schemas": [
-            {"id": "Task", "reason": "test", "extended_properties": {"effort": "integer"}}
-        ],
+        "reused_schemas": [{"id": "Task", "reason": "test", "extended_properties": {"effort": "integer"}}],
         "new_schemas": [],
     }
 

@@ -1,4 +1,3 @@
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,40 +22,14 @@ class GraphSnapshot:
         ``recent_per_type`` caps how many nodes of each type we expose per type, to
         keep LLM prompt size bounded.
         """
-        snap = cls()
-        with db.get_conn() as conn:
-            # Type counts
-            count_rows = conn.execute("SELECT type, COUNT(*) AS c FROM graph_nodes GROUP BY type").fetchall()
-            snap.type_counts = {r["type"]: r["c"] for r in count_rows}
-
-            # Total node + edge count for context
-            tot = conn.execute("SELECT COUNT(*) AS c FROM graph_nodes").fetchone()
-            snap.node_count = tot["c"] if tot else 0
-            tot_e = conn.execute("SELECT COUNT(*) AS c FROM graph_edges").fetchone()
-            snap.edge_count = tot_e["c"] if tot_e else 0
-
-            # Recent nodes per type, ordered by created_at DESC
-            recent_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            rows = conn.execute(
-                "SELECT id, type, properties, created_at FROM graph_nodes ORDER BY created_at DESC"
-            ).fetchall()
-            for row in rows:
-                if len(recent_by_type[row["type"]]) >= recent_per_type:
-                    continue
-                import json
-
-                recent_by_type[row["type"]].append(
-                    {
-                        "id": row["id"],
-                        "type": row["type"],
-                        "properties": json.loads(row["properties"]),
-                        "created_at": row["created_at"],
-                    }
-                )
-            snap.recent_nodes_by_type = dict(recent_by_type)
-
-        snap.schema_manifest = db.list_schemas()
-        return snap
+        payload = db.routing_snapshot(recent_per_type)
+        return cls(
+            type_counts=dict(payload.get("type_counts") or {}),
+            recent_nodes_by_type=dict(payload.get("recent_nodes_by_type") or {}),
+            schema_manifest=list(payload.get("schema_manifest") or []),
+            node_count=int(payload.get("node_count") or 0),
+            edge_count=int(payload.get("edge_count") or 0),
+        )
 
 
 @dataclass

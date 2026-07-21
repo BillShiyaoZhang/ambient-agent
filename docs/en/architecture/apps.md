@@ -31,6 +31,25 @@ Manifest V1 requires these fields:
 
 `id` must match the directory name and use lowercase kebab-case. Optional `backend_type` is `code`, `agent`, or `mcp`; MCP and agent backends provide their corresponding configuration.
 
+An App that reads public external data declares its own App-scoped HTTP connector in `data_sources`; Ambient does not preinstall business capabilities such as `weather.forecast`:
+
+```json
+{
+  "data_sources": {
+    "forecast": {
+      "type": "http",
+      "base_url": "https://api.open-meteo.com",
+      "allowed_paths": ["/v1/forecast"],
+      "methods": ["GET"],
+      "response_format": "json",
+      "response_limit": 1048576
+    }
+  }
+}
+```
+
+V1 connectors support credential-free HTTPS JSON APIs only. `base_url` must be a public origin and each path must be declared explicitly. Localhost, IP literals, private/reserved destinations, redirects, proxy environment variables, and oversized responses fail closed. OAuth, secrets, signatures, and dedicated SDKs require an MCP/Capability binding; credentials must never be written into a manifest or controller.
+
 ## 2. Controller loading
 
 `controller.js` default-exports a React component. The host transpiles the module with `@babel/standalone`, executes it through `new Function("exports", "React", "ambient", ...)`, and renders the exported component.
@@ -46,7 +65,7 @@ export default function TaskBoard({ ambient }) {
 }
 ```
 
-The runtime exposes `ambient.graph`, `ambient.runs`, `ambient.capabilities`, `ambient.mcp`, React hooks, HTM, and standard components. See the complete [ambient SDK](/en/widgets/sdk.md).
+The runtime exposes `ambient.graph`, `ambient.net`, `ambient.runs`, `ambient.capabilities`, `ambient.mcp`, React hooks, HTM, and standard components. See the complete [ambient SDK](/en/widgets/sdk.md).
 
 ## 3. Creation, modification, and publication
 
@@ -63,6 +82,7 @@ flowchart LR
 
 - New apps and modifications write to staging first. The live directory remains unchanged until approval and verification.
 - A controller must contain a default export and pass size, UTF-8, module syntax, and host-capability rules.
+- A manifest with `data_sources` must pass the connector contract, and every `ambient.net.request("source-id", ...)` in the controller must reference a source declared by the sibling manifest.
 - `SchemaVerificationService` extracts Graph usage from the controller and compares it with effective schemas. Required schema extensions become a proposal and follow confirmation.
 - Publication is protected by artifact hashes and Run effect records. Recovery validates staged/live artifacts to avoid duplicate or incorrect promotion.
 
@@ -82,6 +102,9 @@ App Center layout uses a persistent `revision`. `PUT /api/app-store/layout` retu
 
 - Widgets do not own separate data models; persistent domain data uses Graph schemas.
 - The backend preflights and atomically commits `ambient.graph.mutate`. Do not use the deprecated `ambient.model`.
+- `ambient.net.request` can address only a data source declared by the current App manifest. Widgets cannot supply full URLs and cannot call `fetch` directly.
 - `ambient.capabilities.invoke` and `ambient.runs.start` create durable Runs and must not bypass confirmation or effect records.
 - `ambient.mcp.callTool` remains subject to backend manifest, tool-identity, and permission checks.
 - Controllers execute in the host realm and should only load trusted code. See [Runtime Boundary](/en/widgets/sandbox.md).
+
+Data-source failures return stable `code`, `message`, `hint`, and safe `details`, and append a bounded diagnostic to the workspace. When that App is modified later, Durable Workflow supplies recent diagnostics alongside the Runtime Contract so the coding agent can correct source ids, manifest paths, request parameters, or upstream response issues without receiving secrets or unbounded response bodies.

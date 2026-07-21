@@ -37,7 +37,7 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
-from backend.app_manifest import ManifestValidationError, validate_app_id
+from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
 
 logger = logging.getLogger("opencode_service")
 
@@ -313,9 +313,7 @@ def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]
         if live_dir.exists():
             for path in live_dir.rglob("*"):
                 if _is_link_or_junction(path):
-                    raise OpenCodeACPInputError(
-                        f"Existing App contains an unsafe link: {path.relative_to(live_dir)}"
-                    )
+                    raise OpenCodeACPInputError(f"Existing App contains an unsafe link: {path.relative_to(live_dir)}")
             shutil.copytree(live_dir, staging_dir)
         else:
             staging_dir.mkdir()
@@ -328,7 +326,7 @@ def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]
         raise OpenCodeACPStartupError(f"Unable to prepare coding-agent staging directory: {exc!s}") from exc
 
 
-def _validate_staged_app(staging_dir: Path) -> None:
+def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
     controller_path = _resolve_in_workspace("controller.js", staging_dir)
     if not controller_path.is_file():
         raise OpenCodeArtifactError("Coding agent did not produce the required controller.js artifact")
@@ -344,6 +342,15 @@ def _validate_staged_app(staging_dir: Path) -> None:
         raise OpenCodeArtifactError("Generated controller.js must be valid UTF-8") from exc
     if "\x00" in source or re.search(r"\bexport\s+default\b", source) is None:
         raise OpenCodeArtifactError("Generated controller.js must contain a default export")
+
+    manifest_path = staging_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            AppManifest.read(manifest_path, expected_app_id=app_id)
+        except ManifestValidationError as exc:
+            raise OpenCodeArtifactError(
+                f"App manifest validation failed: {exc!s}. Fix manifest.json according to the App Runtime Contract."
+            ) from exc
 
     verifier = Path(__file__).resolve().parent.parent / "scripts" / "verify_widget_controller.mjs"
     node_executable = shutil.which("node")
@@ -365,9 +372,19 @@ def _validate_staged_app(staging_dir: Path) -> None:
         raise OpenCodeArtifactError(f"Widget syntax/runtime verification failed: {exc!s}") from exc
     if completed.returncode != 0:
         diagnostic = (completed.stderr or completed.stdout or "unknown verifier error").strip()
+        try:
+            structured = json.loads(diagnostic)
+        except json.JSONDecodeError:
+            structured = None
+        if isinstance(structured, dict):
+            code = str(structured.get("code") or "widget_verification_failed")
+            message = str(structured.get("message") or "Widget verification failed")
+            hint = str(structured.get("hint") or "Fix the generated App and retry validation.")
+            raise OpenCodeArtifactError(
+                f"Widget syntax/runtime/security verification failed [{code}]: {message}\nSuggested fix: {hint}"
+            )
         raise OpenCodeArtifactError(
-            f"Widget syntax/runtime/security verification failed: "
-            f"{diagnostic[:_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT]}"
+            f"Widget syntax/runtime/security verification failed: {diagnostic[:_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT]}"
         )
 
 
@@ -441,14 +458,14 @@ def _validated_staging_handle(result: OpenCodeStagedResult, *, require_exists: b
 def validate_opencode_staging(result: OpenCodeStagedResult) -> Path:
     """Validate a retained staging result and return its controller artifact path."""
     _, staging_dir = _validated_staging_handle(result, require_exists=True)
-    _validate_staged_app(staging_dir)
+    _validate_staged_app(staging_dir, result.app_id)
     return staging_dir / "controller.js"
 
 
 def promote_opencode_staging(result: OpenCodeStagedResult) -> Path:
     """Revalidate and promote a retained staging result to its live App directory."""
     live_dir, staging_dir = _validated_staging_handle(result, require_exists=True)
-    _validate_staged_app(staging_dir)
+    _validate_staged_app(staging_dir, result.app_id)
     try:
         _promote_staging_app(staging_dir, live_dir)
     except Exception as exc:
@@ -471,7 +488,7 @@ def validate_opencode_promotion(result: OpenCodeStagedResult, run_id: str) -> Pa
         raise OpenCodeACPProtocolError("Published App has an invalid promotion marker") from exc
     if payload.get("run_id") != run_id:
         return None
-    _validate_staged_app(live_dir)
+    _validate_staged_app(live_dir, result.app_id)
     controller = live_dir / "controller.js"
     artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
     if payload.get("artifact_hash") != artifact_hash:
@@ -618,10 +635,10 @@ _OPENCODE_NPM_BY_PRESET = {
 
 def _opencode_runtime_env() -> dict[str, str]:
     """Build a process-local OpenCode override from the active run snapshot."""
-    from backend.llm_runtime import primary_selection
+    from backend.llm_runtime import coding_selection
     from backend.llm_service import get_default_llm_store
 
-    selection = primary_selection()
+    selection = coding_selection()
     if selection is None:
         return {}
     resolved = get_default_llm_store().resolve(selection)
@@ -701,7 +718,7 @@ class PermissionPolicyManager:
             "policy_mode": "strict",
             "files": {
                 "allowed_extensions": [".html", ".css", ".js", ".json", ".md"],
-                "allowed_filenames": ["index.html", "style.css", "controller.js", "data.json", "README.md"],
+                "allowed_filenames": ["controller.js", "manifest.json", "README.md"],
             },
             "commands": {
                 "allowed_commands": ["npm test", "npm run build"],

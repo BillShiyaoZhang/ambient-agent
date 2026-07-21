@@ -51,12 +51,8 @@ class FakeAppManager:
         return {
             "id": app_id,
             "title": "Durable Test App",
-            "html": (app_dir / "index.html").read_text(encoding="utf-8")
-            if (app_dir / "index.html").is_file()
-            else "",
-            "css": (app_dir / "style.css").read_text(encoding="utf-8")
-            if (app_dir / "style.css").is_file()
-            else "",
+            "html": (app_dir / "index.html").read_text(encoding="utf-8") if (app_dir / "index.html").is_file() else "",
+            "css": (app_dir / "style.css").read_text(encoding="utf-8") if (app_dir / "style.css").is_file() else "",
             "js": controller.read_text(encoding="utf-8"),
         }
 
@@ -105,6 +101,7 @@ def _workflow(
     app_manager: FakeAppManager | None = None,
     opencode_runner: Any = None,
     emitted: list[dict[str, Any]] | None = None,
+    app_diagnostic_loader: Any = None,
 ) -> DurableAgentWorkflow:
     async def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("OpenCode must not be called in this workflow tape")
@@ -121,6 +118,7 @@ def _workflow(
         llm_config_store=FakeLLMConfigStore(),
         opencode_runner=opencode_runner or fail_if_called,
         event_sink=event_sink,
+        app_diagnostic_loader=app_diagnostic_loader,
     )
 
 
@@ -166,9 +164,7 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     run = _create_run(store, state, content="say hello")
     converse_calls = 0
 
-    async def scripted_route(
-        _self: AgentOrchestrator, content: str, session_id: str, language: str
-    ) -> IntentPlan:
+    async def scripted_route(_self: AgentOrchestrator, content: str, session_id: str, language: str) -> IntentPlan:
         assert (content, session_id, language) == ("say hello", "session-1", "zh")
         return IntentPlan(kind=IntentKind.CONVERSE, confidence=1.0, rationale="scripted tape")
 
@@ -209,9 +205,7 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     assert replayed.result == completed.result
     assert converse_calls == 1
     messages = WorkspaceStorage(str(tmp_path)).get_messages("session-1")
-    assert [(message.role, message.content, message.run_id) for message in messages] == [
-        ("agent", "hello", run["id"])
-    ]
+    assert [(message.role, message.content, message.run_id) for message in messages] == [("agent", "hello", run["id"])]
     reply_event = next(event for event in completed.events if event.type == "reply")
     assert reply_event.payload["type"] == "reply"
     assert reply_event.payload["message"]["content"] == "hello"
@@ -288,9 +282,7 @@ async def test_route_checkpoints_content_addressed_context_summary(
     workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)))
     run = _create_run(store, _state(), content="continue")
 
-    async def scripted_route(
-        _self: AgentOrchestrator, content: str, session_id: str, language: str
-    ) -> IntentPlan:
+    async def scripted_route(_self: AgentOrchestrator, content: str, session_id: str, language: str) -> IntentPlan:
         assert _self.context_summary is not None
         assert "durable history 0" in _self.context_summary
         return IntentPlan(kind=IntentKind.CONVERSE, instruction=content)
@@ -332,9 +324,7 @@ async def test_graph_mutation_preflight_wait_resolve_and_atomic_commit(tmp_path:
         _state(phase="graph_preflight", workflow_type="graph_mutation", intent=intent),
     )
 
-    waiting_outcome, waiting, _ = await _execute_fenced_step(
-        store, workflow, run["id"], worker_id="worker-preflight"
-    )
+    waiting_outcome, waiting, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker-preflight")
     assert isinstance(waiting_outcome, Wait)
     assert waiting["status"] == "waiting_user"
     assert graph_db.get_node("task-1") is None
@@ -351,17 +341,13 @@ async def test_graph_mutation_preflight_wait_resolve_and_atomic_commit(tmp_path:
     assert resolved_interaction["status"] == "resolved"
     assert store.get_run(run["id"])["status"] == "queued"
 
-    approval_outcome, approved, _ = await _execute_fenced_step(
-        store, workflow, run["id"], worker_id="worker-approval"
-    )
+    approval_outcome, approved, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker-approval")
     assert isinstance(approval_outcome, Continue)
     assert approval_outcome.next_phase == "graph_commit"
     assert approved["state"]["pending_interaction_id"] is None
     assert graph_db.get_node("task-1") is None
 
-    commit_outcome, committed, _ = await _execute_fenced_step(
-        store, workflow, run["id"], worker_id="worker-commit"
-    )
+    commit_outcome, committed, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker-commit")
     assert isinstance(commit_outcome, Succeeded)
     assert committed["status"] == "succeeded"
     assert committed["state"]["phase"] == "done"
@@ -375,9 +361,7 @@ async def test_graph_mutation_preflight_wait_resolve_and_atomic_commit(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval", [False, "unknown-action"])
-async def test_graph_mutation_denied_or_unknown_approval_fails_closed(
-    tmp_path: Path, approval: bool | str
-) -> None:
+async def test_graph_mutation_denied_or_unknown_approval_fails_closed(tmp_path: Path, approval: bool | str) -> None:
     store = RunStore(str(tmp_path))
     graph_db = GraphDatabase(str(tmp_path))
     workflow = _workflow(tmp_path, store, graph_db)
@@ -396,9 +380,7 @@ async def test_graph_mutation_denied_or_unknown_approval_fails_closed(
         store,
         _state(phase="graph_preflight", workflow_type="graph_mutation", intent=intent),
     )
-    wait_outcome, waiting, _ = await _execute_fenced_step(
-        store, workflow, run["id"], worker_id="worker-preflight"
-    )
+    wait_outcome, waiting, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker-preflight")
     assert isinstance(wait_outcome, Wait)
     store.resolve_interaction(
         wait_outcome.interaction_id,
@@ -406,9 +388,7 @@ async def test_graph_mutation_denied_or_unknown_approval_fails_closed(
         expected_run_version=waiting["version"],
     )
 
-    denied_outcome, failed, _ = await _execute_fenced_step(
-        store, workflow, run["id"], worker_id="worker-denied"
-    )
+    denied_outcome, failed, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker-denied")
     assert isinstance(denied_outcome, Failed)
     assert denied_outcome.error_code == "approval_denied"
     assert failed["status"] == "failed"
@@ -438,6 +418,9 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
     ) -> OpenCodeStagedResult:
         assert app_id == "durable-app"
         assert "APPROVED DEVELOPMENT PLAN" in instruction
+        assert "RECENT APP RUNTIME DIAGNOSTICS" in instruction
+        assert "data_source_path_not_allowed" in instruction
+        assert "Add the exact API path" in instruction
         assert language == "en"
         assert promote is False
         staging_dir = apps_dir / f".{app_id}.staging-{uuid.uuid4().hex}"
@@ -477,6 +460,14 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
         graph_db,
         app_manager=app_manager,
         opencode_runner=staged_runner,
+        app_diagnostic_loader=lambda app_id: [
+            {
+                "app_id": app_id,
+                "code": "data_source_path_not_allowed",
+                "message": "Path is not allowed",
+                "hint": "Add the exact API path",
+            }
+        ],
     )
     intent = IntentPlan(
         kind=IntentKind.WIDGET_MODIFY,
@@ -512,6 +503,9 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
     assert promotion_calls == ["durable-app"]
     assert (live_dir / "controller.js").read_text(encoding="utf-8") == "// verified new controller"
     assert state.data["verification_report"] == "✅ Schema Verification PASSED"
+    canvas = WorkspaceStorage(str(tmp_path)).get_canvas_config()
+    assert canvas["open_app_ids"] == ["durable-app"]
+    assert canvas["active_app_id"] == "durable-app"
 
 
 @pytest.mark.asyncio
@@ -666,9 +660,7 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
                     resolved_interactions.append((expected_type, interaction["id"]))
                     break
                 if current["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
-                    raise AssertionError(
-                        f"Widget Run terminated as {current['status']} before {expected_type}"
-                    )
+                    raise AssertionError(f"Widget Run terminated as {current['status']} before {expected_type}")
                 await asyncio.sleep(0.005)
             else:
                 raise AssertionError(f"Widget Run never requested {expected_type}")
@@ -727,9 +719,9 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
         "promote",
     ]
     assert [step["step_key"] for step in completed["steps"]] == expected_phases
-    assert [(step["attempt"], step["status"]) for step in completed["steps"]] == [
-        (1, "succeeded")
-    ] * len(expected_phases)
+    assert [(step["attempt"], step["status"]) for step in completed["steps"]] == [(1, "succeeded")] * len(
+        expected_phases
+    )
     assert [item[0] for item in resolved_interactions] == ["plan_approval", "schema_approval"]
     assert [item["type"] for item in completed["interactions"]] == [
         "plan_approval",
@@ -903,9 +895,7 @@ async def test_retryable_saga_failure_keeps_prior_effect_and_compensation(tmp_pa
         intent=IntentPlan(kind=IntentKind.MULTI_INTENT),
         data={
             "effects_committed": True,
-            "graph_compensations": [
-                {"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}
-            ],
+            "graph_compensations": [{"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}],
             "multi_index": 1,
             "multi_results": [{"message": "committed"}],
         },
@@ -959,9 +949,7 @@ async def test_shutdown_requeues_checkpoint_without_compensating_live_effect(
         intent=IntentPlan(kind=IntentKind.MULTI_INTENT),
         data={
             "effects_committed": True,
-            "graph_compensations": [
-                {"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}
-            ],
+            "graph_compensations": [{"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}],
             "multi_index": 1,
             "multi_results": [{"message": "committed"}],
         },
@@ -1028,9 +1016,7 @@ async def test_explicit_cancel_still_compensates_inflight_durable_workflow(
         intent=IntentPlan(kind=IntentKind.MULTI_INTENT),
         data={
             "effects_committed": True,
-            "graph_compensations": [
-                {"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}
-            ],
+            "graph_compensations": [{"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}],
         },
     )
     coordinator = RunCoordinator(store, SimpleNamespace(), SimpleNamespace(), SimpleNamespace())

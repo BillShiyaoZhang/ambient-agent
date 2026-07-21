@@ -6,11 +6,23 @@ import * as Babel from "@babel/standalone";
 import { ErrorBoundary } from "./ErrorBoundary";
 import htm from "htm";
 
-const html = htm.bind(React.createElement);
+// HTM can hand React interpolated or adjacent children as nested arrays. React
+// treats those arrays as dynamic lists and warns unless their elements have
+// keys, even when the Widget authored only static siblings. Normalize each
+// array at the SDK boundary so generated Widgets do not need host-specific key
+// workarounds; explicit keys from genuine lists are preserved.
+const ambientCreateElement = (type: any, props: any, ...children: any[]) =>
+  React.createElement(
+    type,
+    props,
+    ...React.Children.toArray(children),
+  );
+
+const html = htm.bind(ambientCreateElement);
 const API_BASE = `http://${window.location.hostname}:8000`;
 
 // Pre-defined React components for ambient.components unified scheme
-const Column = ({ children, gap, padding, style, onClick, ...rest }: any) => {
+const Column = ({ children, gap, padding, align, justify, wrap, style, onClick, ...rest }: any) => {
   return (
     <div
       onClick={onClick}
@@ -19,6 +31,9 @@ const Column = ({ children, gap, padding, style, onClick, ...rest }: any) => {
         flexDirection: "column",
         gap: gap,
         padding: padding,
+        alignItems: align === "center" ? "center" : align === "end" ? "flex-end" : align === "start" ? "flex-start" : align,
+        justifyContent: justify,
+        flexWrap: wrap ? "wrap" : undefined,
         cursor: onClick ? "pointer" : undefined,
         ...style
       }}
@@ -29,7 +44,7 @@ const Column = ({ children, gap, padding, style, onClick, ...rest }: any) => {
   );
 };
 
-const Row = ({ children, gap, padding, align, style, onClick, ...rest }: any) => {
+const Row = ({ children, gap, padding, align, justify, wrap, style, onClick, ...rest }: any) => {
   return (
     <div
       onClick={onClick}
@@ -39,6 +54,8 @@ const Row = ({ children, gap, padding, align, style, onClick, ...rest }: any) =>
         gap: gap,
         padding: padding,
         alignItems: align === "center" ? "center" : align === "end" ? "flex-end" : "flex-start",
+        justifyContent: justify,
+        flexWrap: wrap ? "wrap" : undefined,
         cursor: onClick ? "pointer" : undefined,
         ...style
       }}
@@ -351,6 +368,32 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
           if (!res.ok) throw new Error("Failed to mutate graph");
           return res.json();
         }
+      },
+      net: {
+        request: async (sourceId: string, request: any) => {
+          const res = await fetch(
+            `${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/data-sources/${encodeURIComponent(sourceId)}/request`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(request || {}),
+            },
+          );
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const detail = payload?.detail && typeof payload.detail === "object" ? payload.detail : {};
+            const error = new Error(detail.message || `Data source request failed (${res.status})`) as Error & {
+              code?: string;
+              hint?: string;
+              details?: Record<string, unknown>;
+            };
+            error.code = detail.code;
+            error.hint = detail.hint;
+            error.details = detail.details;
+            throw error;
+          }
+          return payload.data;
+        },
       },
       capabilities: {
         invoke: async (catalogId: string, input: any, actionId?: string) => {

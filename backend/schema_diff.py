@@ -594,10 +594,18 @@ def _is_word_boundary(src: str, i: int, length: int) -> bool:
 
 
 def _infer_js_type(value_repr: str) -> str:
-    """Best-effort guess of the JS literal type."""
+    """Infer statically evident JS types without guessing dynamic expressions."""
     v = (value_repr or "").strip()
-    if not v or v in ("null", "undefined"):
+    if v in {"Number", "parseFloat"}:
+        return "number"
+    if v == "parseInt":
+        return "integer"
+    if v == "String":
         return "string"
+    if v == "Boolean":
+        return "boolean"
+    if not v or v in ("null", "undefined"):
+        return "unknown"
     if v.startswith('"') or v.startswith("'") or v.startswith("`"):
         return "string"
     if v in ("true", "false"):
@@ -616,7 +624,7 @@ def _infer_js_type(value_repr: str) -> str:
         return "number"
     except Exception:
         pass
-    return "string"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +904,8 @@ def compute_diff(
             expected = schema_props[prop_name].lower()
             for sample in entry["samples"]:
                 observed = _infer_js_type(sample)
+                if observed == "unknown":
+                    continue
                 if observed == "string" and expected == "string":
                     continue
                 if observed == "object" or observed == "array":

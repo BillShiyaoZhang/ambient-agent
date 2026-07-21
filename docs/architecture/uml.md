@@ -173,6 +173,8 @@ flowchart LR
 
 `ToolGateway` 当前统一模型请求的本地 Python tools；Capability、MCP、远端 Agent 与 ACP 仍各自保留 adapter/permission policy。OpenCode 已有 path、argv、environment、output、process-group 和 staging 约束，但并非 OS 级网络/文件系统 sandbox。
 
+Backend 镜像必须同时包含 Node.js 与由前端 lockfile 固定的 `@babel/standalone`。`validate_opencode_staging` 对 OpenCode/Codex 共用的 staging 执行 Babel 解析、host/network global 拒绝和受限 VM smoke test；verifier 缺失或失败时 staging 不得提升为 live App。
+
 ## 6. 事件与恢复边界
 
 Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/model usage/`redacted` 元数据；终态 event 默认保留 30 天。Graph effect ledger 防止 checkpoint 窗口重复写，App promotion marker 区分已发布与待发布 staging。只有完整补偿数据的 saga step 才自动回滚。
@@ -183,6 +185,7 @@ Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/m
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
         +apply_schema_proposal_atomic(proposal)
@@ -205,3 +208,22 @@ classDiagram
 ```
 
 `create_graph_database()` 是运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。两种 adapter 执行同一 `ambient-context` 本体契约；未知实体、抽象实体和未知属性都不能写入 record。
+
+## 8. Coding Agent Runtime 与模型所有权
+
+```mermaid
+flowchart LR
+    Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]
+    Runtime -->|按需安装 / 状态 / 登录 / model-list| Codex[codex_service.py: run_codex_agent]
+    Settings --> Dispatch[coding_agent.py: run_coding_agent]
+    Dispatch --> Codex
+    Dispatch --> OpenCode[opencode_service.py: run_opencode_agent_acp]
+
+    Provider[中心 Provider Registry] --> Ambient[primary / fast]
+    Provider -->|per-agent shared binding| OpenCode
+    Native[Codex 原生登录与订阅] --> Codex
+```
+
+内置 Adapter 是受信任的能力清单，但 CLI 只有在用户选择安装时才下载到独立持久卷。安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
+
+Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。

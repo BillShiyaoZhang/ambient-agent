@@ -64,8 +64,7 @@ def _schema_contains_sensitive(schema: Any) -> bool:
     if _schema_contains_sensitive(schema.get("items")):
         return True
     return any(
-        isinstance(schema.get(keyword), list)
-        and any(_schema_contains_sensitive(item) for item in schema[keyword])
+        isinstance(schema.get(keyword), list) and any(_schema_contains_sensitive(item) for item in schema[keyword])
         for keyword in ("allOf", "anyOf", "oneOf")
     )
 
@@ -281,8 +280,7 @@ def _resolved_audit_context(
     resolved["artifact_hashes"] = {
         _bounded_text(str(artifact_id), 256): str(digest).lower()
         for artifact_id, digest in (raw_hashes.items() if isinstance(raw_hashes, dict) else ())
-        if len(str(digest)) == 64
-        and all(character in "0123456789abcdefABCDEF" for character in str(digest))
+        if len(str(digest)) == 64 and all(character in "0123456789abcdefABCDEF" for character in str(digest))
     }
     return resolved
 
@@ -395,9 +393,7 @@ class BaseLLMProvider(ABC):
         tool_call_count = 0
         repeated_calls: dict[tuple[str, str], int] = {}
         allowed_tool_names = {
-            str(item.get("function", {}).get("name"))
-            for item in (tools or [])
-            if item.get("function", {}).get("name")
+            str(item.get("function", {}).get("name")) for item in (tools or []) if item.get("function", {}).get("name")
         }
         trace_context = _resolved_audit_context(audit_context, tool_context)
         audit_policies = _tool_audit_policies(tools, tool_registry)

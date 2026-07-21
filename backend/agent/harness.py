@@ -70,7 +70,8 @@ class AgentOrchestrator:
                 session_id=session_id,
                 role="agent",
                 sender="agent",
-                content=plan.clarification_message or ("请提供更多信息。" if language == "zh" else "Please provide more details."),
+                content=plan.clarification_message
+                or ("请提供更多信息。" if language == "zh" else "Please provide more details."),
             )
             self.db.add(message)
             self.db.commit()
@@ -97,8 +98,7 @@ class AgentOrchestrator:
 
             graph_db = create_graph_database(os.getenv("WORKSPACE_DIR", "workspace"))
             session_messages = [
-                {"role": message.role, "content": message.content}
-                for message in self.db.get_messages(session_id)
+                {"role": message.role, "content": message.content} for message in self.db.get_messages(session_id)
             ]
             router_context = RouterContext.build(
                 app_manager=self.app_manager,
@@ -227,17 +227,9 @@ class AgentOrchestrator:
                     else f"Created {action.get('type', 'node')} '{title}'"
                 )
             elif kind == "update_node_property":
-                parts.append(
-                    f"已更新节点 `{action.get('id')}`"
-                    if is_zh
-                    else f"Updated node '{action.get('id')}'"
-                )
+                parts.append(f"已更新节点 `{action.get('id')}`" if is_zh else f"Updated node '{action.get('id')}'")
             elif kind == "delete_node":
-                parts.append(
-                    f"已删除节点 `{action.get('id')}`"
-                    if is_zh
-                    else f"Deleted node '{action.get('id')}'"
-                )
+                parts.append(f"已删除节点 `{action.get('id')}`" if is_zh else f"Deleted node '{action.get('id')}'")
             elif kind == "create_edge":
                 parts.append(
                     f"已创建关联 {action.get('from_id')} → {action.get('to_id')}"

@@ -50,7 +50,21 @@ The host generates an idempotency key per call. The backend still validates sche
 
 Prefer `capabilities.invoke` for a normal backend capability call. Use `runs.*` when the Widget needs progress, cancellation, or explicit lifecycle management.
 
-## 4. MCP
+## 4. App-scoped external data
+
+`ambient.net.request(sourceId, request)` reaches a `data_sources` entry declared by the current App's `manifest.json` through the guarded backend gateway. `sourceId` is an App-private logical name, not a capability preinstalled by Ambient.
+
+```javascript
+const forecast = await ambient.net.request("forecast", {
+  path: "/v1/forecast",
+  method: "GET",
+  query: { latitude: 31.23, longitude: 121.47, hourly: "temperature_2m" }
+});
+```
+
+The result is upstream JSON. Rejections expose `code`, `hint`, and `details`; the UI should show a retryable error state. A controller cannot provide a full URL, override the host, or call `fetch` directly.
+
+## 5. MCP
 
 `ambient.mcp.callTool(name, args)` requests an MCP tool declared by the app manifest through the chat WebSocket and returns a Promise:
 
@@ -60,17 +74,19 @@ const result = await ambient.mcp.callTool("calendar.list_events", { limit: 20 })
 
 The frontend-supplied `name` is not authorization. The backend revalidates app identity, manifest, server lifecycle, and permission rules.
 
-## 5. React, HTM, and components
+## 6. React, HTM, and components
 
 - `ambient.html`: an HTM tag bound to React `createElement`.
 - `ambient.react`: `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`.
 - `ambient.components`: `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`.
 
+`Row` and `Column` accept `gap`, `padding`, `align`, `justify`, `wrap`, and `style`. The boolean `wrap` prop maps to flex wrapping; these layout props are consumed by the component and are not forwarded as invalid DOM attributes.
+
 Controllers may also use the injected `React`. The SDK does not include a fetch cache, `ambient.model`, arbitrary file-system access, or secret-reading APIs.
 
-## 6. Lifecycle and errors
+## 7. Lifecycle and errors
 
 - Cancel Graph/Run subscriptions and custom timers in `useEffect` cleanup.
-- `graph.mutate`, `capabilities.invoke`, `runs.*`, and `mcp.callTool` may reject; show retryable errors in the UI.
+- `graph.mutate`, `net.request`, `capabilities.invoke`, `runs.*`, and `mcp.callTool` may reject; show retryable errors in the UI.
 - A Run may enter `waiting_user` or `needs_attention` and require action in the Task Drawer. A Widget must not assume automatic completion.
 - These methods are convenience interfaces; permission enforcement lives in the backend. See [Runtime Boundary](/en/widgets/sandbox.md).

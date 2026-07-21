@@ -101,4 +101,27 @@ describe("App-first workspace UI", () => {
     expect(workspace.style.width).toBe("900px");
     expect(workspace.style.height).toBe("700px");
   });
+
+  it("labels Ambient and coding models as separate roles", () => {
+    render(<AgentChatOverlay
+      open
+      unreadCount={0}
+      messages={[]}
+      sessions={[]}
+      activeSessionId={null}
+      runningSessions={[]}
+      isConnected
+      language="zh"
+      onOpenChange={vi.fn()}
+      onSendMessage={vi.fn()}
+      onSelectSession={vi.fn()}
+      onCreateSession={vi.fn()}
+      onDeleteSession={vi.fn()}
+      codingAgent={{ id: "codex", name: "Codex" } as never}
+      codingAgentModel={{ mode: "native" }}
+    />);
+
+    expect(screen.getByText("Ambient")).toBeDefined();
+    expect(screen.getByText("代码 · Codex · Agent 默认")).toBeDefined();
+  });
 });

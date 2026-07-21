@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import shlex
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from backend.codex_service import codex_host_bridge_status, run_codex_agent
+from backend.codex_service import run_codex_agent
+from backend.coding_agent_runtime import CodingAgentRuntime, SPECS, model_capability, spec_for
 from backend.opencode_service import run_opencode_agent_acp
 
 CodingAgentId = Literal["opencode", "codex"]
@@ -27,51 +27,51 @@ class CodingAgentConfigError(RuntimeError):
             self.code = code
 
 
+class AgentModelConfig(BaseModel):
+    mode: Literal["native", "shared_binding", "hybrid", "none"]
+    inherit: Literal["ambient.primary"] | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
+    native_model: str | None = None
+
+    @model_validator(mode="after")
+    def validate_binding(self):
+        if self.mode == "shared_binding":
+            explicit = bool(self.provider_id and self.model_id)
+            if not self.inherit and not explicit:
+                raise ValueError("A shared model binding must inherit ambient.primary or select a provider model")
+            if self.inherit and (self.provider_id or self.model_id):
+                raise ValueError("A shared model binding cannot inherit and select an explicit model")
+        return self
+
+
+def _default_agent_models() -> dict[str, AgentModelConfig]:
+    return {
+        "opencode": AgentModelConfig(mode="shared_binding", inherit="ambient.primary"),
+        "codex": AgentModelConfig(mode="native"),
+    }
+
+
 class CodingAgentSettings(BaseModel):
     default_agent: CodingAgentId = "opencode"
+    agent_models: dict[str, AgentModelConfig] = Field(default_factory=_default_agent_models)
 
-
-_AGENTS: tuple[dict[str, str], ...] = (
-    {
-        "id": "opencode",
-        "name": "OpenCode",
-        "description": "Uses OpenCode's ACP server and the model selected for this Ambient Agent run.",
-        "command_env": "OPENCODE_COMMAND",
-        "default_command": "opencode",
-        "auth_hint": "Uses the configured LLM provider credentials.",
-        "auth_mode": "run_model",
-    },
-    {
-        "id": "codex",
-        "name": "Codex",
-        "description": "Uses the host Codex CLI through an authenticated local bridge.",
-        "command_env": "CODEX_HOST_COMMAND",
-        "default_command": "",
-        "auth_hint": "Uses the host Codex login/ChatGPT subscription, not the Ambient Agent LLM provider.",
-        "auth_mode": "codex_native",
-    },
-)
-
-
-def _command_available(command: str) -> bool:
-    try:
-        argv = shlex.split(command, posix=os.name != "nt")
-    except ValueError:
-        return False
-    if not argv:
-        return False
-    executable = argv[0]
-    if Path(executable).is_absolute():
-        return Path(executable).is_file()
-    return shutil.which(executable) is not None
+    @model_validator(mode="after")
+    def add_defaults(self):
+        defaults = _default_agent_models()
+        for agent_id, config in defaults.items():
+            self.agent_models.setdefault(agent_id, config)
+        return self
 
 
 class CodingAgentConfigStore:
     """Stores only non-secret coding-agent preferences in the workspace."""
 
     def __init__(self, workspace_dir: str | Path):
+        self.workspace_dir = Path(workspace_dir)
         self.directory = Path(workspace_dir) / "coding_agents"
         self.path = self.directory / "config.json"
+        self.runtime = CodingAgentRuntime(workspace_dir)
 
     def get_settings(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -112,33 +112,61 @@ class CodingAgentConfigStore:
                 temp_path.unlink(missing_ok=True)
         return settings.model_dump(mode="json")
 
+    def update_agent_model(self, agent_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        spec = spec_for(agent_id)
+        try:
+            config = AgentModelConfig.model_validate(data)
+        except ValidationError as exc:
+            raise CodingAgentConfigError("Invalid coding-agent model configuration") from exc
+        if config.mode not in spec.model_modes:
+            raise CodingAgentConfigError(
+                f"{spec.name} does not support the {config.mode} model mode",
+                code="coding_agent_model_mode_unsupported",
+            )
+        settings = CodingAgentSettings.model_validate(self.get_settings())
+        settings.agent_models[agent_id] = config
+        return self.update_settings(settings.model_dump(mode="json"))["agent_models"][agent_id]
+
+    def model_config(self, agent_id: str) -> dict[str, Any]:
+        spec_for(agent_id)
+        return self.get_settings()["agent_models"][agent_id]
+
     def catalog(self) -> list[dict[str, Any]]:
         catalog: list[dict[str, Any]] = []
-        for definition in _AGENTS:
-            command = os.getenv(definition["command_env"], definition["default_command"])
+        settings = self.get_settings()
+        for spec in SPECS:
+            installed = self.runtime.command(spec.id) is not None
             catalog.append(
                 {
-                    "id": definition["id"],
-                    "name": definition["name"],
-                    "description": definition["description"],
-                    "auth_hint": definition["auth_hint"],
-                    "auth_mode": definition["auth_mode"],
-                    "uses_run_model": definition["auth_mode"] == "run_model",
-                    "available": _command_available(command) if definition["id"] == "opencode" else False,
-                    "command_env": definition["command_env"],
-                    "execution_target": "host" if definition["id"] == "codex" else "container",
-                    "authenticated": None,
+                    "id": spec.id,
+                    "name": spec.name,
+                    "description": spec.description,
+                    "auth_hint": spec.auth_hint,
+                    "auth_mode": "codex_native" if spec.auth_methods else "run_model",
+                    "auth_methods": list(spec.auth_methods),
+                    "uses_run_model": spec.default_model_mode == "shared_binding",
+                    "available": installed,
+                    "installed": installed,
+                    "install_state": "installed" if installed else "not_installed",
+                    "installable": spec.install_handler is not None,
+                    "install_operation": None,
+                    "command_env": spec.command_env,
+                    "execution_target": "container",
+                    "authenticated": None if not spec.auth_methods else False,
+                    "auth_state": "not_required" if not spec.auth_methods else "signed_out",
                     "version": "",
                     "status_detail": "",
+                    "model_capability": model_capability(spec),
+                    "model_config": settings["agent_models"][spec.id],
                 }
             )
         return catalog
 
     async def runtime_catalog(self) -> list[dict[str, Any]]:
         catalog = self.catalog()
-        status = await codex_host_bridge_status()
-        codex = next(item for item in catalog if item["id"] == "codex")
-        codex.update(status)
+        statuses = await asyncio.gather(*(self.runtime.status(item["id"]) for item in catalog))
+        for item, status in zip(catalog, statuses, strict=True):
+            item.update(status)
         return catalog
 
 
@@ -150,6 +178,8 @@ async def run_coding_agent(
     *,
     promote: bool = True,
     coding_agent: str = "opencode",
+    runtime: CodingAgentRuntime | None = None,
+    model_config: dict[str, Any] | None = None,
 ):
     if coding_agent == "opencode":
         return await run_opencode_agent_acp(
@@ -166,5 +196,7 @@ async def run_coding_agent(
             language=language,
             on_update=on_update,
             promote=promote,
+            runtime=runtime,
+            native_model=str((model_config or {}).get("native_model") or "") or None,
         )
     raise CodingAgentConfigError("Unknown coding agent", code="coding_agent_not_found")

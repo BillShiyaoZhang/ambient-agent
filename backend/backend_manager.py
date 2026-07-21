@@ -104,10 +104,7 @@ class StdioJsonRpcClient:
     @property
     def is_healthy(self) -> bool:
         return bool(
-            self.process
-            and self.process.returncode is None
-            and self._initialized
-            and self._transport_error is None
+            self.process and self.process.returncode is None and self._initialized and self._transport_error is None
         )
 
     @property
@@ -215,9 +212,7 @@ class StdioJsonRpcClient:
                 try:
                     line = await self.process.stdout.readline()
                 except (ValueError, asyncio.LimitOverrunError) as exc:
-                    raise MCPProtocolError(
-                        f"MCP response exceeded {self.max_response_bytes} bytes"
-                    ) from exc
+                    raise MCPProtocolError(f"MCP response exceeded {self.max_response_bytes} bytes") from exc
                 if not line:
                     failure = MCPTransportError("MCP server closed stdout")
                     break
@@ -520,9 +515,7 @@ class BackendManager:
             explicit_env = {} if env is _PERMISSION_VALUE_UNSET or env is None else dict(env)
             serialized_env = json.dumps(explicit_env, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             target["env_digest"] = hashlib.sha256(serialized_env.encode("utf-8")).hexdigest()
-            target["manifest_revision"] = (
-                None if manifest_revision is _PERMISSION_VALUE_UNSET else manifest_revision
-            )
+            target["manifest_revision"] = None if manifest_revision is _PERMISSION_VALUE_UNSET else manifest_revision
         return target
 
     @staticmethod
@@ -682,9 +675,7 @@ class BackendManager:
             separators=(",", ":"),
         ).encode("utf-8")
         if len(serialized_message) > self.http_agent_max_request_bytes:
-            raise ValueError(
-                f"Agent request exceeded {self.http_agent_max_request_bytes} bytes"
-            )
+            raise ValueError(f"Agent request exceeded {self.http_agent_max_request_bytes} bytes")
 
         self.agent_runtimes[app_id] = {
             "id": app_id,
@@ -732,19 +723,14 @@ class BackendManager:
                                 raise RuntimeError("Agent SSE event must be a JSON object")
                             emitted_events += 1
                             if emitted_events > self.http_agent_max_events:
-                                raise RuntimeError(
-                                    f"Agent response exceeded {self.http_agent_max_events} events"
-                                )
-                            await send_ws_message_func(
-                                {"type": "ag_ui_event", "app_id": app_id, "event": event_data}
-                            )
+                                raise RuntimeError(f"Agent response exceeded {self.http_agent_max_events} events")
+                            await send_ws_message_func({"type": "ag_ui_event", "app_id": app_id, "event": event_data})
 
                         async for chunk in response.aiter_bytes(chunk_size=HTTP_AGENT_READ_CHUNK_BYTES):
                             received_bytes += len(chunk)
                             if received_bytes > self.http_agent_max_response_bytes:
                                 raise RuntimeError(
-                                    "Agent response exceeded "
-                                    f"{self.http_agent_max_response_bytes} bytes"
+                                    f"Agent response exceeded {self.http_agent_max_response_bytes} bytes"
                                 )
                             buffered.extend(chunk)
                             while True:
@@ -767,9 +753,7 @@ class BackendManager:
             raise
         except TimeoutError as exc:
             self.agent_runtimes[app_id]["status"] = "unhealthy"
-            raise TimeoutError(
-                f"Agent call timed out after {self.http_agent_timeout_seconds:g}s"
-            ) from exc
+            raise TimeoutError(f"Agent call timed out after {self.http_agent_timeout_seconds:g}s") from exc
         except Exception:
             self.agent_runtimes[app_id]["status"] = "unhealthy"
             raise

@@ -228,9 +228,7 @@ class ToolGateway:
             if parameter_name in injected and injected[parameter_name] is not None:
                 validated[parameter_name] = injected[parameter_name]
 
-        redacted_args = {
-            key: "[REDACTED]" if key in spec.sensitive_fields else value for key, value in args.items()
-        }
+        redacted_args = {key: "[REDACTED]" if key in spec.sensitive_fields else value for key, value in args.items()}
         await self._emit(
             context,
             {

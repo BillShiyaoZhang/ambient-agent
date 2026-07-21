@@ -69,11 +69,13 @@ Data needed only to keep an App running—cache entries, sync cursors, UI state,
 
 ## 4. Queries and mutations
 
-Widgets register live queries with `ambient.graph.subscribe(query, callback)`. The backend retains subscriptions, reruns bounded queries after mutations, and pushes changes. Agent read-only queries execute through `graph_query_engine.execute_graph_query`; `RouterContext` creates a bounded snapshot rather than placing the whole graph in a prompt.
+Widgets register live queries with `ambient.graph.subscribe(query, callback)`. The backend retains subscriptions, reruns bounded queries after mutations, and pushes changes. Agent read-only queries execute through `graph_query_engine.execute_graph_query`; `RouterContext` asks the Graph adapter for a bounded `routing_snapshot()` instead of reading SQLite tables or placing the whole graph in a prompt. SQLite and Neo4j adapters must expose the same counts, recent-record, and schema snapshot contract.
 
 Public mutation actions are `create_node`, `update_node_property`, `delete_node`, `create_edge`, and `delete_edge`. `preflight_actions` validates the complete batch without writing. `apply_actions_atomic` commits the batch, reverse actions, rollback ticket, and effect-ledger entry in one Neo4j transaction. A repeated idempotency key with identical input returns the original result; reusing it with different input is rejected.
 
 Widget declarations and manifest `schema_refs` provide context, not authorization. Backend ontology validation is final. If a requested record has no suitable entity, the schema-alignment flow must grow the ontology and receive approval before the record mutation can pass.
+
+The deterministic pre-publish schema diff reports a type mismatch only when a JavaScript value's type is statically known from a literal or explicit coercion. Dynamic expressions such as `place.latitude` and function results are classified as unknown and deferred to graph-mutation preflight; the verifier must not invent a string type and trigger needless rework.
 
 ## 5. Configuration and migration
 
@@ -90,3 +92,5 @@ Setting `GRAPH_MIGRATE_SQLITE=1` imports an existing `workspace/graph.db` once. 
 - Runtime-only schema proposals are rejected and App-private state is not copied into the KG.
 - Neo4j mutation failure rolls back records, edges, history, and the effect entry together.
 - SQLite-to-Neo4j migration is opt-in, repeatable, and does not delete the source.
+- Router snapshot construction is storage-independent and behaves consistently with the Dev Container Neo4j backend and the SQLite test adapter.
+- The static schema diff does not report unknown dynamic JavaScript expressions as type mismatches; actual mutations must still pass backend preflight.

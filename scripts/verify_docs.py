@@ -59,9 +59,7 @@ def main() -> int:
         zh_levels = [len(value) for value in HEADING_RE.findall(zh_path.read_text(encoding="utf-8"))]
         en_levels = [len(value) for value in HEADING_RE.findall(en_path.read_text(encoding="utf-8"))]
         if zh_levels != en_levels:
-            errors.append(
-                f"Heading structure differs: docs/{relative} {zh_levels} != docs/en/{relative} {en_levels}"
-            )
+            errors.append(f"Heading structure differs: docs/{relative} {zh_levels} != docs/en/{relative} {en_levels}")
 
     source_paths = [DOCS_ROOT / path for path in sorted(chinese)] + [EN_ROOT / path for path in sorted(english)]
     for source in source_paths:

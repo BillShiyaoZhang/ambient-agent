@@ -252,9 +252,7 @@ class RunStoreTraceAdapter:
                         attempt=int(event["attempt"]) if event.get("attempt") is not None else None,
                         trace_id=str(event.get("trace_id")) if event.get("trace_id") else None,
                         status=(
-                            str(payload.get("to"))
-                            if event_type == "status_changed" and payload.get("to")
-                            else None
+                            str(payload.get("to")) if event_type == "status_changed" and payload.get("to") else None
                         ),
                         tool_name=tool_name,
                         effect=effect,
@@ -330,9 +328,7 @@ class RunStoreTraceAdapter:
 
         run_error = run.get("error") if isinstance(run.get("error"), Mapping) else {}
         checkpoint = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else {}
-        if not unsafe_attempt_present and (
-            _effect_state_unknown(run_error) or _effect_state_unknown(checkpoint)
-        ):
+        if not unsafe_attempt_present and (_effect_state_unknown(run_error) or _effect_state_unknown(checkpoint)):
             timeline.append(
                 (
                     _timestamp(run.get("finished_at") or run.get("updated_at"), created_at),
@@ -383,9 +379,7 @@ class ScriptedTape:
 
     def __post_init__(self) -> None:
         normalized = tuple(
-            trace.model_copy(deep=True)
-            if isinstance(trace, EvaluationTrace)
-            else EvaluationTrace.model_validate(trace)
+            trace.model_copy(deep=True) if isinstance(trace, EvaluationTrace) else EvaluationTrace.model_validate(trace)
             for trace in self.traces
         )
         if not normalized:
@@ -591,9 +585,7 @@ def _metrics(samples: Sequence[EvaluationSample]) -> EvaluationMetrics:
         cost_usd=sum(sample.cost_usd for sample in samples),
         latency_ms=sum(sample.latency_ms for sample in samples) / runs,
         recovery_rate=(
-            sum(sample.recoveries_succeeded for sample in samples) / recovery_attempts
-            if recovery_attempts
-            else 0
+            sum(sample.recoveries_succeeded for sample in samples) / recovery_attempts if recovery_attempts else 0
         ),
     )
 
@@ -630,9 +622,7 @@ class EvaluationHarness:
             )
 
         metrics = _metrics(all_samples)
-        ci_gate_passed = all(
-            sample.passed for sample in all_samples if sample.mode == "deterministic"
-        )
+        ci_gate_passed = all(sample.passed for sample in all_samples if sample.mode == "deterministic")
         report = EvaluationReport(
             **metrics.model_dump(),
             scenarios=scenario_reports,

@@ -29,6 +29,54 @@ def test_valid_manifest_round_trips():
     assert manifest.to_dict() == valid_manifest()
 
 
+def test_app_scoped_https_data_sources_round_trip():
+    data_sources = {
+        "forecast": {
+            "type": "http",
+            "base_url": "https://api.open-meteo.com",
+            "allowed_paths": ["/v1/forecast"],
+            "methods": ["GET"],
+            "response_format": "json",
+            "response_limit": 1_048_576,
+        }
+    }
+
+    manifest = AppManifest.from_dict(
+        valid_manifest(data_sources=data_sources),
+        expected_app_id="morning-planner",
+    )
+
+    assert manifest.data_sources == data_sources
+    assert manifest.to_dict()["data_sources"] == data_sources
+
+
+@pytest.mark.parametrize(
+    "data_sources",
+    [
+        {"forecast": {"type": "http", "base_url": "http://api.example.com", "allowed_paths": ["/v1"]}},
+        {"forecast": {"type": "http", "base_url": "https://127.0.0.1", "allowed_paths": ["/v1"]}},
+        {"forecast": {"type": "http", "base_url": "https://localhost", "allowed_paths": ["/v1"]}},
+        {"Forecast": {"type": "http", "base_url": "https://api.example.com", "allowed_paths": ["/v1"]}},
+        {"forecast": {"type": "http", "base_url": "https://api.example.com/path", "allowed_paths": ["/v1"]}},
+        {"forecast": {"type": "http", "base_url": "https://api.example.com", "allowed_paths": ["https://evil.test/"]}},
+        {
+            "forecast": {
+                "type": "http",
+                "base_url": "https://api.example.com",
+                "allowed_paths": ["/v1"],
+                "methods": ["DELETE"],
+            }
+        },
+    ],
+)
+def test_data_sources_reject_unsafe_or_unsupported_declarations(data_sources):
+    with pytest.raises(ManifestValidationError, match="data_sources"):
+        AppManifest.from_dict(
+            valid_manifest(data_sources=data_sources),
+            expected_app_id="morning-planner",
+        )
+
+
 @pytest.mark.parametrize("version", [0, 2, "1", None])
 def test_manifest_version_must_be_supported_integer(version):
     with pytest.raises(ManifestValidationError, match="manifest_version"):

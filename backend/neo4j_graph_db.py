@@ -403,6 +403,60 @@ class Neo4jGraphDatabase(GraphDatabase):
             node.pop("created_at", None)
         return node
 
+    def routing_snapshot(self, recent_per_type: int = 5) -> dict[str, Any]:
+        """Return the same bounded Router context contract as the SQLite adapter."""
+
+        def fetch(tx: Any) -> dict[str, Any]:
+            type_counts = {
+                record["type"]: record["count"]
+                for record in tx.run(
+                    """
+                    MATCH (n:ContextRecord)-[:INSTANCE_OF]->
+                          (e:OntologyEntity {ontology_id: $ontology_id})
+                    RETURN e.id AS type, count(n) AS count
+                    ORDER BY type
+                    """,
+                    ontology_id=ONTOLOGY_ID,
+                )
+            }
+            node_record = tx.run("MATCH (n:ContextRecord) RETURN count(n) AS count").single()
+            edge_record = tx.run(
+                "MATCH (:ContextRecord)-[r:GRAPH_EDGE]->(:ContextRecord) RETURN count(r) AS count"
+            ).single()
+            recent_by_type: dict[str, list[dict[str, Any]]] = {}
+            records = tx.run(
+                """
+                MATCH (n:ContextRecord)-[:INSTANCE_OF]->
+                      (e:OntologyEntity {ontology_id: $ontology_id})
+                RETURN n.id AS id, e.id AS type, n.properties_json AS properties_json,
+                       n.created_at AS created_at
+                ORDER BY n.created_at DESC, n.id ASC
+                """,
+                ontology_id=ONTOLOGY_ID,
+            )
+            for record in records:
+                items = recent_by_type.setdefault(record["type"], [])
+                if len(items) >= recent_per_type:
+                    continue
+                items.append(
+                    {
+                        "id": record["id"],
+                        "type": record["type"],
+                        "properties": json.loads(record["properties_json"] or "{}"),
+                        "created_at": record["created_at"],
+                    }
+                )
+            return {
+                "type_counts": type_counts,
+                "recent_nodes_by_type": recent_by_type,
+                "node_count": node_record["count"] if node_record else 0,
+                "edge_count": edge_record["count"] if edge_record else 0,
+            }
+
+        snapshot = self._read(fetch)
+        snapshot["schema_manifest"] = self.list_schemas()
+        return snapshot
+
     def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
         node = self.get_node(node_id)
         if node is None:
@@ -658,9 +712,7 @@ class Neo4jGraphDatabase(GraphDatabase):
                         properties=validated,
                         now=now,
                     )
-                    normalized.append(
-                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
-                    )
+                    normalized.append({"action": kind, "id": node_id, "type": node_type, "properties": validated})
 
                 elif kind in {"update_node_property", "replace_node"}:
                     node_id = self._required_text(action, "id")
@@ -692,9 +744,7 @@ class Neo4jGraphDatabase(GraphDatabase):
                         properties=validated,
                         now=now,
                     )
-                    normalized.append(
-                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
-                    )
+                    normalized.append({"action": kind, "id": node_id, "type": node_type, "properties": validated})
 
                 elif kind == "delete_node":
                     node_id = self._required_text(action, "id")
@@ -826,9 +876,7 @@ class Neo4jGraphDatabase(GraphDatabase):
                             }
                         )
                         self._tx_delete_edge(tx, from_id, to_id, edge_type)
-                        normalized.append(
-                            {"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type}
-                        )
+                        normalized.append({"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type})
                 else:
                     raise ValueError(f"Unsupported graph mutation action: {kind}")
 
@@ -966,9 +1014,7 @@ class Neo4jGraphDatabase(GraphDatabase):
             )
         for item in normalized["new_schemas"]:
             if item["id"] in schemas:
-                raise ValueError(
-                    f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead"
-                )
+                raise ValueError(f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead")
             schemas[item["id"]] = {**item, "is_core": False}
         return [schemas[key] for key in sorted(schemas)]
 
@@ -1348,18 +1394,21 @@ class Neo4jGraphDatabase(GraphDatabase):
                     if old_key in properties:
                         properties.setdefault(new_key, properties[old_key])
                         properties.pop(old_key, None)
-                definition = definitions.setdefault(schema_id, {
-                    "id": schema_id,
-                    "name": raw.get("name") or schema_id,
-                    "description": raw.get("description") or "Imported from the SQLite knowledge graph",
-                    "properties": {},
-                    "is_core": bool(raw.get("is_core")),
-                    "ontology_iri": raw.get("ontology_iri") or f"urn:ambient:legacy:{schema_id}",
-                    "source": raw.get("source") or "legacy-sqlite",
-                    "equivalent_to": json.loads(raw.get("equivalent_to") or "[]"),
-                    "subclass_of": raw.get("subclass_of") or "Thing",
-                    "abstract": bool(raw.get("abstract")),
-                })
+                definition = definitions.setdefault(
+                    schema_id,
+                    {
+                        "id": schema_id,
+                        "name": raw.get("name") or schema_id,
+                        "description": raw.get("description") or "Imported from the SQLite knowledge graph",
+                        "properties": {},
+                        "is_core": bool(raw.get("is_core")),
+                        "ontology_iri": raw.get("ontology_iri") or f"urn:ambient:legacy:{schema_id}",
+                        "source": raw.get("source") or "legacy-sqlite",
+                        "equivalent_to": json.loads(raw.get("equivalent_to") or "[]"),
+                        "subclass_of": raw.get("subclass_of") or "Thing",
+                        "abstract": bool(raw.get("abstract")),
+                    },
+                )
                 definition["properties"].update(properties)
 
             decoded_nodes: list[dict[str, Any]] = []

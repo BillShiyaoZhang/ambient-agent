@@ -3,6 +3,7 @@ import { History, LoaderCircle, MessageCircle, Plus, Send, Trash2, X } from "luc
 import type { Message } from "./ChatPanel";
 import type { Session } from "./SessionSidebar";
 import type { LLMProvider, ModelSelection } from "../services/llm";
+import type { AgentModelConfig, CodingAgentDefinition } from "../services/codingAgents";
 import { ModelPicker } from "./LLMSettings";
 import { SystemIconButton, SystemPopover } from "./system/SystemUI";
 import "./Workspace.css";
@@ -25,19 +26,21 @@ interface AgentChatOverlayProps {
   modelSelection?: ModelSelection | null;
   onModelChange?: (selection: ModelSelection) => void;
   onManageModels?: () => void;
+  codingAgent?: CodingAgentDefinition;
+  codingAgentModel?: AgentModelConfig;
 }
 
 export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
   open, unreadCount, messages, sessions, activeSessionId, runningSessions, isConnected, language,
   onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession,
-  providers = [], modelSelection = null, onModelChange, onManageModels,
+  providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel,
 }) => {
   const isZh = language === "zh";
   const [historyOpen, setHistoryOpen] = useState(false);
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const historyTriggerRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { if (open) endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, open]);
+  useEffect(() => { if (open) endRef.current?.scrollIntoView?.({ behavior: "smooth" }); }, [messages, open]);
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!input.trim()) return;
@@ -46,6 +49,11 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
   };
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const anyRunning = runningSessions.length > 0;
+  const codingModelLabel = codingAgent?.id === "codex"
+    ? (codingAgentModel?.native_model || (isZh ? "Agent 默认" : "Agent default"))
+    : codingAgentModel?.inherit
+      ? (isZh ? "跟随 Ambient" : "Follows Ambient")
+      : codingAgentModel?.model_id;
 
   return (
     <>
@@ -81,7 +89,8 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
         </div>
         <form className="agent-chat-composer" onSubmit={submit}>
           <div className="agent-chat-model-row">
-            <ModelPicker providers={providers} value={modelSelection} onChange={(selection) => onModelChange?.(selection)} onManage={onManageModels} language={language} disabled={!onModelChange} />
+            <div className="agent-chat-model-choice"><span>Ambient</span><ModelPicker providers={providers} value={modelSelection} onChange={(selection) => onModelChange?.(selection)} onManage={onManageModels} language={language} disabled={!onModelChange} /></div>
+            {codingAgent ? <span className="agent-chat-coding-model">{isZh ? "代码" : "Code"} · {codingAgent.name}{codingModelLabel ? ` · ${codingModelLabel}` : ""}</span> : null}
             {runningSessions.includes(activeSessionId ?? "") ? <span>{isZh ? "切换将从下次请求生效" : "Changes apply to the next request"}</span> : null}
           </div>
           <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={isZh ? "向 Ambient 发送消息…" : "Message Ambient…"} rows={1} />

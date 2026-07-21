@@ -56,7 +56,10 @@ Widget 有两条进入路径：
 ## 5. 安全与一致性原则
 
 - Provider 密钥不返回给前端，凭据文件位于 Git 忽略的工作区。
-- Codex 只通过带 Bearer token 的本机 Bridge 运行，复用本机 CLI 登录/ChatGPT 订阅；Docker 镜像不安装 Codex、不保存其凭据，后端也不会把 Ambient Agent Provider 密钥或 Run 模型传给 Codex 进程。Bridge 只接受共享 `workspace/apps` 下由后端创建的随机 staging 目录。
+- Coding Agent Runtime 使用可信内置 Adapter，将 CLI 按需安装到专用持久卷，并统一管理安装、认证、动态模型发现、模型绑定与运行状态。Codex 通过容器内设备码登录使用自己的 ChatGPT 订阅，并通过官方 app-server `model/list` 返回当前账号可选模型；OpenCode 引用中心 Provider Registry 的模型绑定。后端不会把 Ambient Provider 密钥或模型绑定传给 native 模式的 Codex。
+- Docker Compose 放开默认 seccomp 对非特权 user namespace 的拦截，使 Codex 能在容器边界内继续使用自己的 bubblewrap `workspace-write` 沙箱；不授予 `SYS_ADMIN`，也不切换到 `danger-full-access`。
+- Backend 镜像内置与前端锁文件一致的 Node.js 与 `@babel/standalone` verifier runtime。所有 Coding Agent 生成的 `controller.js` 只有通过语法、禁用 host/network global 与受限 VM 执行检查后才会从 staging 提升为 live App；校验器缺失时必须失败关闭，不能发布未验证代码。
+- Coding Agent 的生成契约必须明确禁止 `fetch`、浏览器 host global 和未声明的网络访问。staging 校验失败时，adapter 会把每轮最新的有界诊断反馈给同一个 agent，在原 staging 中最多进行三轮修复并逐轮重新校验；耗尽修复预算仍失败才终止 Run，且始终不会发布违规代码。这样 manifest 与 controller 中依次暴露的独立错误也能进入同一个修复闭环。
 - Graph mutation 必须通过规范本体预检，并在一个 Neo4j transaction 中原子提交。
 - MCP、工具和 Coding Agent 的授权与沙箱策略在后端执行；前端不注入 API 不能替代授权。
 - 有副作用的 durable step 使用 effect/idempotency 记录、interaction 和 fencing，避免恢复或并发造成重复提交。

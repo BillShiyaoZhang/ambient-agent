@@ -518,9 +518,9 @@ class RunStore:
                 "INSERT OR IGNORE INTO run_store_meta(key, value) VALUES ('stream_epoch', ?)",
                 (str(uuid.uuid4()),),
             )
-            stream_epoch = connection.execute(
-                "SELECT value FROM run_store_meta WHERE key='stream_epoch'"
-            ).fetchone()["value"]
+            stream_epoch = connection.execute("SELECT value FROM run_store_meta WHERE key='stream_epoch'").fetchone()[
+                "value"
+            ]
             event_columns = {row["name"] for row in connection.execute("PRAGMA table_info(run_events)").fetchall()}
             event_migrations = {
                 "event_id": "TEXT",
@@ -608,9 +608,7 @@ class RunStore:
                         and legacy_input["content"].strip()
                         and isinstance(legacy_state, dict)
                     ):
-                        legacy_data = (
-                            legacy_state.get("data") if isinstance(legacy_state.get("data"), dict) else {}
-                        )
+                        legacy_data = legacy_state.get("data") if isinstance(legacy_state.get("data"), dict) else {}
                         replay_data: dict[str, Any] = {"workspace_dir": self.workspace_dir}
                         for key in ("user_message_id", "language"):
                             if key in legacy_data:
@@ -699,15 +697,11 @@ class RunStore:
                 state = decoded if isinstance(decoded, dict) else {}
             except (TypeError, json.JSONDecodeError):
                 pass
-        session_id = state.get("session_id") or (
-            run["source_id"] if run and run["source_type"] == "chat" else None
-        )
+        session_id = state.get("session_id") or (run["source_id"] if run and run["source_type"] == "chat" else None)
         state_data = state.get("data") if isinstance(state.get("data"), dict) else {}
         trace_id = trace_id_override or state_data.get("trace_id") or run_id
         payload_dict = payload if isinstance(payload, dict) else {}
-        step_id = step_id_override or payload_dict.get(
-            "step_id", payload_dict.get("step_key", state.get("phase"))
-        )
+        step_id = step_id_override or payload_dict.get("step_id", payload_dict.get("step_key", state.get("phase")))
         attempt = attempt_override or payload_dict.get("attempt", state.get("attempt"))
         duration_ms = payload_dict.get("duration_ms")
         if not isinstance(duration_ms, (int, float)) or isinstance(duration_ms, bool):
@@ -725,9 +719,7 @@ class RunStore:
                 else None
             )
         sanitized_payload, redacted = _sanitize_event_value(payload)
-        epoch_row = connection.execute(
-            "SELECT value FROM run_store_meta WHERE key='stream_epoch'"
-        ).fetchone()
+        epoch_row = connection.execute("SELECT value FROM run_store_meta WHERE key='stream_epoch'").fetchone()
         stream_epoch = epoch_row["value"] if epoch_row else "legacy"
         cursor = connection.execute(
             """INSERT INTO run_events(
@@ -961,12 +953,8 @@ class RunStore:
         """Return the durable identity and high-water mark for event replay."""
 
         with self._connect() as connection:
-            epoch_row = connection.execute(
-                "SELECT value FROM run_store_meta WHERE key='stream_epoch'"
-            ).fetchone()
-            latest = connection.execute(
-                "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM run_events"
-            ).fetchone()
+            epoch_row = connection.execute("SELECT value FROM run_store_meta WHERE key='stream_epoch'").fetchone()
+            latest = connection.execute("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM run_events").fetchone()
         return {
             "stream_epoch": epoch_row["value"] if epoch_row else "legacy",
             "latest_sequence": int(latest["sequence"] if latest else 0),
@@ -1656,9 +1644,7 @@ class RunStore:
                     step_id_override=step_key,
                     attempt_override=attempt,
                     trace_id_override=(
-                        str(normalized_state.data.get("trace_id"))
-                        if normalized_state.data.get("trace_id")
-                        else run_id
+                        str(normalized_state.data.get("trace_id")) if normalized_state.data.get("trace_id") else run_id
                     ),
                 )
             self._append_event(
@@ -1922,14 +1908,12 @@ class RunStore:
                     except (TypeError, json.JSONDecodeError):
                         current_state = {}
                     current_data = current_state.get("data") if isinstance(current_state, dict) else None
-                    current_pending = current_data.get("staged_app_cleanup_pending") if isinstance(current_data, dict) else None
+                    current_pending = (
+                        current_data.get("staged_app_cleanup_pending") if isinstance(current_data, dict) else None
+                    )
                     if not isinstance(current_pending, dict) or _json(current_pending) != pending_identity:
                         continue
-                    existing_error = (
-                        json.loads(current["error_json"])
-                        if current["error_json"]
-                        else None
-                    )
+                    existing_error = json.loads(current["error_json"]) if current["error_json"] else None
                     if isinstance(current_state, dict):
                         current_state["last_error"] = error
                     if current["status"] == "needs_attention" and existing_error == error:
@@ -1979,7 +1963,9 @@ class RunStore:
                 except (TypeError, json.JSONDecodeError):
                     current_state = {}
                 current_data = current_state.get("data") if isinstance(current_state, dict) else None
-                current_pending = current_data.get("staged_app_cleanup_pending") if isinstance(current_data, dict) else None
+                current_pending = (
+                    current_data.get("staged_app_cleanup_pending") if isinstance(current_data, dict) else None
+                )
                 if not isinstance(current_pending, dict) or _json(current_pending) != pending_identity:
                     continue
                 current_data.pop("staged_app_cleanup_pending", None)
@@ -2049,8 +2035,7 @@ class RunStore:
                 return self.get_run(run_id) or {}
             if run["status"] == "needs_attention":
                 raise ValueError(
-                    "needs-attention runs require explicit effect reconciliation; "
-                    "they cannot be marked cancelled"
+                    "needs-attention runs require explicit effect reconciliation; they cannot be marked cancelled"
                 )
             if run["status"] == "cancel_requested":
                 connection.rollback()
@@ -2090,9 +2075,7 @@ class RunStore:
                         staging_dir=Path(str(staged.get("staging_dir") or "")),
                         live_dir=Path(str(staged.get("live_dir") or "")),
                     )
-                    promoted_effect_detected = (
-                        validate_opencode_promotion(staged_result, run_id) is not None
-                    )
+                    promoted_effect_detected = validate_opencode_promotion(staged_result, run_id) is not None
                     if promoted_effect_detected:
                         state_data["effects_committed"] = True
                         state_data["non_compensable_effect"] = True
@@ -2154,9 +2137,7 @@ class RunStore:
             if (cleanup_queued or promoted_effect_detected or attention_error is not None) and raw_state is not None:
                 updates["state_json"] = _json(raw_state)
                 if cleanup_queued and run["checkpoint_json"]:
-                    updates["checkpoint_json"] = _queue_staged_app_cleanup_in_checkpoint(
-                        run["checkpoint_json"]
-                    )
+                    updates["checkpoint_json"] = _queue_staged_app_cleanup_in_checkpoint(run["checkpoint_json"])
             if attention_error is not None:
                 updates["error_json"] = _json(attention_error)
             if target == "cancelled":
@@ -2240,8 +2221,7 @@ class RunStore:
                     or (
                         pending_data.get("staged_app")
                         and run["error_json"]
-                        and (json.loads(run["error_json"]) or {}).get("code")
-                        == "staged_artifact_cleanup_failed"
+                        and (json.loads(run["error_json"]) or {}).get("code") == "staged_artifact_cleanup_failed"
                     )
                 )
                 if cleanup_blocked:
@@ -2426,9 +2406,7 @@ class RunCoordinator:
             self.store.finalize_cancel_requested(run_id, self.worker_id)
             current = self.store.get_run(run_id)
         self._active.pop(run_id, None)
-        is_terminal = bool(
-            current and current["status"] in TERMINAL_STATUSES | {"needs_attention"}
-        )
+        is_terminal = bool(current and current["status"] in TERMINAL_STATUSES | {"needs_attention"})
         if is_terminal:
             self._event_callbacks.pop(run_id, None)
         completion_callback = self._completion_callbacks.pop(run_id, None) if is_terminal else None
@@ -2562,12 +2540,16 @@ class RunCoordinator:
         step_key = "invoke"
         step_attempt: int | None = None
         effect_started = False
-        state = AgentRunState.model_validate(run["state"]) if run.get("state") else AgentRunState(
-            workflow_type="capability" if run["adapter_type"] != "internal_agent" else run["workflow_type"],
-            workflow_version=int(run["workflow_version"]),
-            session_id=run["source_id"] if run["source_type"] == "chat" else None,
-            phase="invoke",
-            attempt=int(run["attempt"]),
+        state = (
+            AgentRunState.model_validate(run["state"])
+            if run.get("state")
+            else AgentRunState(
+                workflow_type="capability" if run["adapter_type"] != "internal_agent" else run["workflow_type"],
+                workflow_version=int(run["workflow_version"]),
+                session_id=run["source_id"] if run["source_type"] == "chat" else None,
+                phase="invoke",
+                attempt=int(run["attempt"]),
+            )
         )
         try:
             action = self._resolve_action(run)
@@ -2847,7 +2829,9 @@ class RunCoordinator:
             runtime_id=app_id,
             tool_name=method,
             input_data=params,
-            recovery="restart_safe" if method in {"resources/read", "resources/list", "prompts/get", "prompts/list"} else "manual",
+            recovery="restart_safe"
+            if method in {"resources/read", "resources/list", "prompts/get", "prompts/list"}
+            else "manual",
             idempotency_key=idempotency_key,
             correlation=correlation,
         )
@@ -3000,6 +2984,21 @@ class RunCoordinator:
             normalized_retry_state.pending_interaction_id = None
             normalized_retry_state.last_error = None
             normalized_retry_state.data.pop("phase_retries", None)
+            normalized_retry_state.data["active_seconds"] = 0.0
+            if (
+                normalized_retry_state.workflow_type.startswith("widget")
+                and normalized_retry_state.phase in {"verify", "wait_override", "promote"}
+                and not normalized_retry_state.data.get("staged_app")
+            ):
+                normalized_retry_state.phase = "stage_code"
+                for key in (
+                    "verification_report",
+                    "verification_options",
+                    "verification_passed",
+                    "verification_override",
+                    "code_feedback",
+                ):
+                    normalized_retry_state.data.pop(key, None)
             if original["status"] == "cancelled":
                 preserved = {
                     key: normalized_retry_state.data[key]

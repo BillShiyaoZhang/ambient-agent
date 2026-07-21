@@ -90,6 +90,7 @@ class DurableAgentWorkflow:
         coding_agent_runner: CodingAgentRunner | None = None,
         opencode_runner: CodingAgentRunner | None = None,
         event_sink: EventSink | None = None,
+        app_diagnostic_loader: Callable[[str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.workspace_dir = workspace_dir
         self.run_store = run_store
@@ -103,6 +104,7 @@ class DurableAgentWorkflow:
         # pre-registry attribute directly.
         self.opencode_runner = self.coding_agent_runner
         self.event_sink = event_sink
+        self.app_diagnostic_loader = app_diagnostic_loader
         self._event_buffer: ContextVar[list[PendingRunEvent] | None] = ContextVar(
             "durable_agent_event_buffer",
             default=None,
@@ -148,7 +150,9 @@ class DurableAgentWorkflow:
                 outcome = await handler(run, state)
             else:
                 primary, fast = self._model_selections(state)
-                with use_model_selections(primary, fast):
+                coding_raw = state.model_snapshot.get("coding_model")
+                coding = ModelSelection.model_validate(coding_raw) if coding_raw else primary
+                with use_model_selections(primary, fast, coding):
                     outcome = await handler(run, state)
             if isinstance(outcome, Failed):
                 return await self._failure(
@@ -201,9 +205,7 @@ class DurableAgentWorkflow:
                 ),
             )
         finally:
-            state.data["active_seconds"] = float(state.data.get("active_seconds", 0.0)) + (
-                time.monotonic() - started
-            )
+            state.data["active_seconds"] = float(state.data.get("active_seconds", 0.0)) + (time.monotonic() - started)
 
     def _model_selections(self, state: AgentRunState) -> tuple[ModelSelection, ModelSelection]:
         config_store = self.llm_config_store() if callable(self.llm_config_store) else self.llm_config_store
@@ -380,15 +382,9 @@ class DurableAgentWorkflow:
         call_cost = number("cost_usd", "response_cost", "cost") or 0.0
         state.budget.tokens_used += int(total_tokens)
         state.budget.cost_usd += call_cost
-        if (
-            state.budget.max_tokens is not None
-            and state.budget.tokens_used > state.budget.max_tokens
-        ):
+        if state.budget.max_tokens is not None and state.budget.tokens_used > state.budget.max_tokens:
             raise BudgetExhaustedError("Agent Run exceeded its token budget")
-        if (
-            state.budget.max_cost_usd is not None
-            and state.budget.cost_usd > state.budget.max_cost_usd
-        ):
+        if state.budget.max_cost_usd is not None and state.budget.cost_usd > state.budget.max_cost_usd:
             raise BudgetExhaustedError("Agent Run exceeded its cost budget")
 
     def _model_budget(
@@ -658,11 +654,7 @@ class DurableAgentWorkflow:
             app_manager=self.app_manager,
             run_context=self._run_context(run, state),
             context_summary=context_summary,
-            artifact_ids=[
-                str(ref.get("id"))
-                for ref in state.artifact_refs
-                if isinstance(ref, dict) and ref.get("id")
-            ],
+            artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
             tool_loop_budget=self._model_budget(state),
         )
         intent = await orchestrator._classify_intent(
@@ -720,11 +712,7 @@ class DurableAgentWorkflow:
             app_manager=self.app_manager,
             run_context=self._run_context(run, state),
             context_summary=context_summary,
-            artifact_ids=[
-                str(ref.get("id"))
-                for ref in state.artifact_refs
-                if isinstance(ref, dict) and ref.get("id")
-            ],
+            artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
             tool_loop_budget=self._model_budget(
                 state,
                 max_iterations=remaining_model_turns,
@@ -804,9 +792,7 @@ class DurableAgentWorkflow:
             },
         )
 
-    async def _phase_wait_graph_approval(
-        self, run: dict[str, Any], state: AgentRunState
-    ) -> StepOutcomeValue:
+    async def _phase_wait_graph_approval(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         del run
         response = self._response(state)
         if response is None:
@@ -827,9 +813,7 @@ class DurableAgentWorkflow:
                 self.graph_db.apply_actions_atomic,
                 actions,
                 session_id=state.session_id,
-                idempotency_key=(
-                    f"agent-run:{run['id']}:graph_commit:{int(state.data.get('multi_index', 0))}"
-                ),
+                idempotency_key=(f"agent-run:{run['id']}:graph_commit:{int(state.data.get('multi_index', 0))}"),
             )
         except asyncio.CancelledError:
             # The SQLite transaction may still finish in its worker thread.
@@ -901,9 +885,7 @@ class DurableAgentWorkflow:
                     )
             intents.append(intent)
 
-        normalized_graph_actions = (
-            self.graph_db.preflight_actions(all_graph_actions) if all_graph_actions else []
-        )
+        normalized_graph_actions = self.graph_db.preflight_actions(all_graph_actions) if all_graph_actions else []
         for intent, (start, count) in zip(intents, graph_slices, strict=True):
             if start >= 0:
                 intent.actions = normalized_graph_actions[start : start + count]
@@ -917,7 +899,9 @@ class DurableAgentWorkflow:
         if index >= len(root.sub_intents):
             results = list(state.data.get("multi_results") or [])
             content = "\n\n".join(str(item.get("message") or "") for item in results if item.get("message"))
-            content = content or ("✅ 所有步骤已完成。" if state.data.get("language") == "zh" else "✅ All steps completed.")
+            content = content or (
+                "✅ 所有步骤已完成。" if state.data.get("language") == "zh" else "✅ All steps completed."
+            )
             message, created = self._save_agent_message(run, state, content)
             if created:
                 await self._emit(run, self._reply_payload(message))
@@ -983,7 +967,12 @@ class DurableAgentWorkflow:
                 budget=self._model_budget(state),
             )
             state.data["plan_candidate"] = candidate
-        await self._emit(run, "🔍 正在为您制定开发计划 Plan..." if state.data.get("language") == "zh" else "🔍 Formulating development plan...")
+        await self._emit(
+            run,
+            "🔍 正在为您制定开发计划 Plan..."
+            if state.data.get("language") == "zh"
+            else "🔍 Formulating development plan...",
+        )
         state.phase = "wait_plan"
         return await self._wait(
             run,
@@ -1053,7 +1042,10 @@ class DurableAgentWorkflow:
             )
             self.graph_db.effective_schemas(proposal)
             state.data["schema_candidate"] = proposal
-        await self._emit(run, "🔍 正在对齐数据库 Schema..." if state.data.get("language") == "zh" else "🔍 Aligning database schemas...")
+        await self._emit(
+            run,
+            "🔍 正在对齐数据库 Schema..." if state.data.get("language") == "zh" else "🔍 Aligning database schemas...",
+        )
         state.phase = "wait_schema"
         return await self._wait(
             run,
@@ -1143,6 +1135,15 @@ class DurableAgentWorkflow:
         )
         if state.data.get("code_feedback"):
             instruction += f"\n\n[VERIFICATION FEEDBACK]\n{state.data['code_feedback']}"
+        if self.app_diagnostic_loader is not None:
+            diagnostics = self.app_diagnostic_loader(intent.app_id)
+            if diagnostics:
+                instruction += (
+                    "\n\n[RECENT APP RUNTIME DIAGNOSTICS]\n"
+                    "Use these structured failures to repair the App. Do not ignore them or silently downgrade "
+                    "requested live behavior.\n"
+                    f"{json.dumps(diagnostics, ensure_ascii=False, indent=2)[:16_000]}"
+                )
         language = str(state.data.get("language") or "zh")
         coding_agent = str(state.model_snapshot.get("coding_agent") or "opencode")
         coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"
@@ -1158,13 +1159,17 @@ class DurableAgentWorkflow:
             runner_parameters = inspect.signature(self.coding_agent_runner).parameters
             supports_promote = "promote" in runner_parameters
             supports_coding_agent = "coding_agent" in runner_parameters
+            supports_coding_agent_model = "coding_agent_model" in runner_parameters
         except (TypeError, ValueError):
             supports_promote = True
             supports_coding_agent = True
+            supports_coding_agent_model = True
         if supports_promote:
             kwargs["promote"] = False
         if supports_coding_agent:
             kwargs["coding_agent"] = coding_agent
+        if supports_coding_agent_model:
+            kwargs["coding_agent_model"] = dict(state.model_snapshot.get("coding_agent_config") or {})
         generated = await self.coding_agent_runner(intent.app_id, instruction, **kwargs)
         if isinstance(generated, CodingAgentStagedResult):
             validate_opencode_staging(generated)
@@ -1262,9 +1267,7 @@ class DurableAgentWorkflow:
             state.data["verification_override"] = True
             return Continue(next_phase="promote", summary="Verification override approved")
         if action == "rework_code":
-            state.data["code_feedback"] = str(
-                response.get("feedback") or state.data.get("verification_report") or ""
-            )
+            state.data["code_feedback"] = str(response.get("feedback") or state.data.get("verification_report") or "")
             if not staged.get("legacy_promoted"):
                 discard_opencode_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
@@ -1296,9 +1299,7 @@ class DurableAgentWorkflow:
             )
         return await self._publish_widget(run, state, self._current_intent(state))
 
-    async def _publish_widget(
-        self, run: dict[str, Any], state: AgentRunState, intent: IntentPlan
-    ) -> StepOutcomeValue:
+    async def _publish_widget(self, run: dict[str, Any], state: AgentRunState, intent: IntentPlan) -> StepOutcomeValue:
         staged = state.data.get("staged_app") or {}
         schema_effect_key = f"agent-run:{run['id']}:schema_promote"
         schema_change: dict[str, Any] | None = None
@@ -1337,9 +1338,7 @@ class DurableAgentWorkflow:
                     state.data["effect_in_flight"] = "app_atomic_promote"
                     await asyncio.to_thread(promote_opencode_staging, staged_result)
                     state.data.pop("effect_in_flight", None)
-                state.artifact_refs.append(
-                    {"type": "app", "id": staged_result.app_id, "sha256": artifact_hash}
-                )
+                state.artifact_refs.append({"type": "app", "id": staged_result.app_id, "sha256": artifact_hash})
         except (Exception, asyncio.CancelledError):
             if schema_change is not None:
                 self.graph_db.restore_schema_snapshot(
@@ -1357,6 +1356,15 @@ class DurableAgentWorkflow:
                 code="published_artifact_missing",
                 effect_state="unknown",
             )
+        storage = self._run_storage(state)
+        canvas = storage.get_canvas_config()
+        published_app_id = str(widget.get("id") or intent.app_id or "")
+        canvas["open_app_ids"] = [
+            *[app_id for app_id in canvas["open_app_ids"] if app_id != published_app_id],
+            published_app_id,
+        ]
+        canvas["active_app_id"] = published_app_id
+        storage.save_canvas_config(canvas)
         report = str(state.data.get("verification_report") or "Explicit verification override approved")
         output = str(staged.get("output") or "")
         coding_agent = str(staged.get("coding_agent") or state.model_snapshot.get("coding_agent") or "opencode")
@@ -1365,7 +1373,6 @@ class DurableAgentWorkflow:
 
         from backend.agent_parser import serialize_widget_to_text
 
-        storage = self._run_storage(state)
         code_message = ChatMessage(
             session_id=state.session_id,
             role="code",

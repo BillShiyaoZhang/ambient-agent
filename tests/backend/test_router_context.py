@@ -49,6 +49,34 @@ def test_graph_snapshot_schema_manifest_present(tmp_path):
     assert {"Task", "Event", "Note"}.issubset(ids)
 
 
+def test_graph_snapshot_uses_backend_neutral_adapter_contract():
+    class SnapshotOnlyGraphAdapter:
+        def routing_snapshot(self, recent_per_type):
+            assert recent_per_type == 2
+            return {
+                "type_counts": {"Place": 1},
+                "recent_nodes_by_type": {
+                    "Place": [
+                        {
+                            "id": "place-1",
+                            "type": "Place",
+                            "properties": {"name": "上海"},
+                            "created_at": "2026-07-20T00:00:00+00:00",
+                        }
+                    ]
+                },
+                "schema_manifest": [{"id": "Place"}],
+                "node_count": 1,
+                "edge_count": 0,
+            }
+
+    snap = GraphSnapshot.from_db(SnapshotOnlyGraphAdapter(), recent_per_type=2)
+
+    assert snap.type_counts == {"Place": 1}
+    assert snap.recent_nodes_by_type["Place"][0]["properties"]["name"] == "上海"
+    assert snap.schema_manifest == [{"id": "Place"}]
+
+
 def test_router_context_build(tmp_path, monkeypatch):
     workspace_dir = str(tmp_path / "workspace")
     os.makedirs(workspace_dir, exist_ok=True)

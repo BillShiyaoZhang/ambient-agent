@@ -30,6 +30,10 @@ Each durable reducer invocation advances one step and returns one `StepOutcome`:
 
 The default total budget is eight model turns, 300 seconds of active wall time, 64,000 tokens, and USD 5. Usage is accumulated into the checkpoint after every model response, and exceeding any limit fails with `budget_exhausted`. Context keeps recent messages in stable order; messages outside the window become a deterministic extractive summary whose content and `sha256:` reference are persisted together. LLM audit rows also record prompt, tool-schema, and retrieved-artifact hashes.
 
+An explicit retry creates a new Run attempt and resumes from the prior checkpoint. The new attempt resets its active wall-time counter so time consumed by an infrastructure failure cannot make recovery fail immediately; model-turn, token, and cost counters remain cumulative to preserve the reasoning and spending limits for the overall task. If a Widget Run is checkpointed in `verify`, `wait_override`, or `promote` but failure cleanup left no retained staging artifact, retry returns to `stage_code`, preserves the approved plan/schema, and clears verification reports, overrides, and code feedback that referred to the deleted artifact.
+
+After a Widget is published, the backend adds the App to the workspace Canvas `open_app_ids` and makes it the `active_app_id` before emitting the live `widget` projection. A disconnected or refreshed browser therefore does not depend on receiving a transient WebSocket event to recover the newly generated App.
+
 ## 2. State, claims, and recovery
 
 ```mermaid

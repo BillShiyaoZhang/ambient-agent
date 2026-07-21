@@ -24,22 +24,22 @@ services:
     env_file:
       - .env
     environment:
-      CODEX_HOST_BRIDGE_URL: ${CODEX_HOST_BRIDGE_URL:-http://host.docker.internal:8765}
-      CODEX_HOST_BRIDGE_TOKEN: ${CODEX_HOST_BRIDGE_TOKEN:-}
+      CODING_AGENT_RUNTIME_DIR: /var/lib/ambient/coding-agents
       GRAPH_DATABASE_BACKEND: neo4j
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-ambient-agent-dev}
       NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
       GRAPH_MIGRATE_SQLITE: ${GRAPH_MIGRATE_SQLITE:-0}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    security_opt:
+      - seccomp=unconfined
     volumes:
       - ./backend:/app/backend
       - ./forward:/app/forward
       - ./scripts:/app/scripts
       - ./workspace:/app/workspace
       - ./tests:/app/tests
+      - coding_agent_data:/var/lib/ambient/coding-agents
     depends_on:
       neo4j:
         condition: service_healthy
@@ -61,4 +61,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  coding_agent_data:
   neo4j_data:

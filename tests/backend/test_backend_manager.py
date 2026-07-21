@@ -628,9 +628,7 @@ async def test_http_agent_has_total_deadline_and_unknown_cancel_state(tmp_worksp
 
     manager.http_agent_timeout_seconds = 60
     entered_stream.clear()
-    task = asyncio.create_task(
-        manager.handle_agent_message(manifest.id, manifest, {"message": "hello"}, emit)
-    )
+    task = asyncio.create_task(manager.handle_agent_message(manifest.id, manifest, {"message": "hello"}, emit))
     await asyncio.wait_for(entered_stream.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

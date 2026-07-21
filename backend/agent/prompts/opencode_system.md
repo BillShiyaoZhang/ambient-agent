@@ -13,8 +13,9 @@ Please inspect the directory, check any existing source files there, apply the m
 Ensure the layout and logic are functional, visually premium, and directly modify the correct file.
 
 # File Strategy (CRITICAL)
-You must NOT generate `index.html`, `style.css`, `layout.json`, or `index.jsx`. Instead, you MUST generate/modify exactly ONE file in the target directory:
-1. `controller.js`: The React component (containing both state/logic and View/HTM layout).
+You must NOT generate `index.html`, `style.css`, `layout.json`, or `index.jsx`. You may generate/modify only these files:
+1. `controller.js`: required React component containing state, logic, and View/HTM layout.
+2. `manifest.json`: only when declaring or updating App metadata or `data_sources`. Preserve valid existing fields.
 
 Do NOT put any XML <ambient-widget> tags inside controller.js. Write only raw JavaScript.
 
@@ -42,8 +43,54 @@ The `controller.js` must export a default React component function.
   `;
   ```
 - **React State & Graph DB Sync**: Use standard React hooks for state, and `ambient.graph.subscribe` inside `useEffect` for real-time synchronization with the database. Always return the unsubscribe function.
+- **HTM closing syntax is strict**: close every dynamic component with `<//>`. Never write React-like `</${Card}>`, `</${Row}>`, or malformed `</${Row>`. Before finishing, search the entire `controller.js` for `</${` and fix every occurrence.
 - **Mutations & Events**: Submit modifications via `ambient.graph.mutate`.
 - **MCP Tools**: Call system tools using `ambient.mcp.callTool(toolName, args)`.
+
+## Runtime and Network Boundary (CRITICAL)
+- NEVER use `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `window`, `document`, `navigator`, `localStorage`, or `sessionStorage`. These globals are unavailable and mandatory staging verification rejects them.
+- For a credential-free public HTTPS JSON API, declare an App-scoped connector in `manifest.json` and call it through `ambient.net.request(sourceId, request)`. Ambient does not preinstall business-specific sources; you create the logical source id for this App.
+- `ambient.net.request` accepts `{ path, method, query, body }`. `path` must exactly match an `allowed_paths` entry and `sourceId` must be a string literal declared under `data_sources`.
+- V1 data sources support `GET` and `POST`, JSON responses, public HTTPS origins, no redirects, and no credentials. For OAuth, API secrets, signatures, or a proprietary SDK, use an explicitly provided `ambient.mcp.callTool`/Capability; never invent a tool or embed credentials.
+- Do not silently replace requested live data with sample data. Use a declared public connector when possible. If the requirement needs authentication or another unsupported facility, keep the previous live App unchanged and clearly report the missing runtime capability in your final message.
+- Do not read environment variables, credentials, arbitrary files, or host APIs. The only supported runtime surface is the injected `ambient` SDK described here.
+
+Example public JSON connector in `manifest.json`:
+```json
+{
+  "manifest_version": 1,
+  "id": "<app-id matching the target directory>",
+  "title": "App title",
+  "description": "",
+  "app_version": "0.1.0",
+  "intents": [],
+  "schema_refs": [],
+  "data_sources": {
+    "forecast": {
+      "type": "http",
+      "base_url": "https://api.open-meteo.com",
+      "allowed_paths": ["/v1/forecast"],
+      "methods": ["GET"],
+      "response_format": "json",
+      "response_limit": 1048576
+    }
+  }
+}
+```
+
+Example controller call with actionable error UI:
+```javascript
+try {
+  const data = await ambient.net.request("forecast", {
+    path: "/v1/forecast",
+    method: "GET",
+    query: { latitude, longitude, hourly: "temperature_2m" }
+  });
+  setWeather(data);
+} catch (error) {
+  setError(`${error.message}${error.hint ? ` — ${error.hint}` : ""}`);
+}
+```
 
 #### Example `controller.js`:
 ```javascript

@@ -232,6 +232,36 @@ def test_staging_verifier_rejects_invalid_or_host_capable_controller(tmp_path, s
         validate_opencode_staging(result)
 
 
+def test_staging_verifier_requires_ambient_net_source_to_be_declared(tmp_path):
+    apps_dir = tmp_path / "apps"
+    apps_dir.mkdir()
+    staging_dir = apps_dir / f".weather-app.staging-{'a' * 32}"
+    staging_dir.mkdir()
+    (staging_dir / "controller.js").write_text(
+        'export default async function App() { await ambient.net.request("forecast", { path: "/v1/forecast" }); return null; }',
+        encoding="utf-8",
+    )
+    (staging_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "id": "weather-app",
+                "title": "Weather",
+                "description": "",
+                "app_version": "0.1.0",
+                "intents": [],
+                "schema_refs": [],
+                "data_sources": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = OpenCodeStagedResult("", "weather-app", staging_dir, apps_dir / "weather-app")
+
+    with pytest.raises(OpenCodeArtifactError, match=r"forecast.*data_sources"):
+        validate_opencode_staging(result)
+
+
 @pytest.mark.asyncio
 async def test_client_fs_operations(tmp_path):
     # 1. Setup target workspace dir
@@ -333,11 +363,10 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
     mock_conn = AsyncMock()
     mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
     mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-xyz"))
+
     async def generate_controller(*args, **kwargs):
         staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
-        (staging_dir / "controller.js").write_text(
-            "export default function App() { return null; }", encoding="utf-8"
-        )
+        (staging_dir / "controller.js").write_text("export default function App() { return null; }", encoding="utf-8")
         return PromptResponse(stop_reason="end_turn")
 
     mock_conn.prompt = AsyncMock(side_effect=generate_controller)
@@ -544,9 +573,7 @@ async def test_terminal_rejects_shell_syntax_and_cwd_escape(tmp_path):
 
     escaped = workspace_root / "escaped-from-arg"
     with pytest.raises(RequestError):
-        await client.create_terminal(
-            session_id="sess", command="echo", args=[f"safe; touch {escaped}"]
-        )
+        await client.create_terminal(session_id="sess", command="echo", args=[f"safe; touch {escaped}"])
     assert not (workspace_root / "escaped").exists()
     assert not escaped.exists()
 
@@ -573,8 +600,7 @@ async def test_terminal_uses_environment_allowlist_and_output_limit(tmp_path, mo
     monkeypatch.setenv("AMBIENT_TEST_SECRET", "must-not-leak")
     client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
     code = (
-        "import os; print(os.getenv('AMBIENT_TEST_SECRET', 'missing')); "
-        "print(os.getenv('NODE_ENV')); print('x' * 100)"
+        "import os; print(os.getenv('AMBIENT_TEST_SECRET', 'missing')); print(os.getenv('NODE_ENV')); print('x' * 100)"
     )
 
     response = await client.create_terminal(

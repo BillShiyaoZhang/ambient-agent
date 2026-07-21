@@ -9,15 +9,22 @@ from backend.llm_config import ModelSelection
 
 _primary_model: ContextVar[ModelSelection | None] = ContextVar("primary_llm_model", default=None)
 _fast_model: ContextVar[ModelSelection | None] = ContextVar("fast_llm_model", default=None)
+_coding_model: ContextVar[ModelSelection | None] = ContextVar("coding_llm_model", default=None)
 
 
 @contextmanager
-def use_model_selections(primary: ModelSelection, fast: ModelSelection | None = None) -> Iterator[None]:
+def use_model_selections(
+    primary: ModelSelection,
+    fast: ModelSelection | None = None,
+    coding: ModelSelection | None = None,
+) -> Iterator[None]:
     primary_token = _primary_model.set(primary)
     fast_token = _fast_model.set(fast or primary)
+    coding_token = _coding_model.set(coding or primary)
     try:
         yield
     finally:
+        _coding_model.reset(coding_token)
         _fast_model.reset(fast_token)
         _primary_model.reset(primary_token)
 
@@ -28,6 +35,10 @@ def primary_selection() -> ModelSelection | None:
 
 def fast_selection() -> ModelSelection | None:
     return _fast_model.get() or _primary_model.get()
+
+
+def coding_selection() -> ModelSelection | None:
+    return _coding_model.get() or _primary_model.get()
 
 
 def selection_ids(selection: ModelSelection | None) -> tuple[str, str]:

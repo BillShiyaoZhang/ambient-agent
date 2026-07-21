@@ -77,9 +77,7 @@ class GraphDatabase:
                     created_at TEXT NOT NULL
                 )
             """)
-            existing_columns = {
-                row["name"] for row in conn.execute("PRAGMA table_info(graph_schemas)").fetchall()
-            }
+            existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(graph_schemas)").fetchall()}
             ontology_columns = {
                 "ontology_id": "TEXT NOT NULL DEFAULT 'ambient-context'",
                 "ontology_iri": "TEXT",
@@ -437,6 +435,37 @@ class GraphDatabase:
                 for row in rows
             ]
 
+    def routing_snapshot(self, recent_per_type: int = 5) -> dict[str, Any]:
+        """Return bounded graph context without exposing adapter internals."""
+        recent_by_type: dict[str, list[dict[str, Any]]] = {}
+        with self.get_conn() as conn:
+            count_rows = conn.execute("SELECT type, COUNT(*) AS c FROM graph_nodes GROUP BY type").fetchall()
+            type_counts = {row["type"]: row["c"] for row in count_rows}
+            node_row = conn.execute("SELECT COUNT(*) AS c FROM graph_nodes").fetchone()
+            edge_row = conn.execute("SELECT COUNT(*) AS c FROM graph_edges").fetchone()
+            rows = conn.execute(
+                "SELECT id, type, properties, created_at FROM graph_nodes ORDER BY created_at DESC, id ASC"
+            ).fetchall()
+            for row in rows:
+                items = recent_by_type.setdefault(row["type"], [])
+                if len(items) >= recent_per_type:
+                    continue
+                items.append(
+                    {
+                        "id": row["id"],
+                        "type": row["type"],
+                        "properties": json.loads(row["properties"] or "{}"),
+                        "created_at": row["created_at"],
+                    }
+                )
+        return {
+            "type_counts": type_counts,
+            "recent_nodes_by_type": recent_by_type,
+            "schema_manifest": self.list_schemas(),
+            "node_count": node_row["c"] if node_row else 0,
+            "edge_count": edge_row["c"] if edge_row else 0,
+        }
+
     # --- Node/Edge Property Validation ---
 
     def validate_properties(self, node_type: str, properties: dict[str, Any]) -> dict[str, Any]:
@@ -598,9 +627,7 @@ class GraphDatabase:
         }
 
     @staticmethod
-    def _edge_from_conn(
-        conn: sqlite3.Connection, from_id: str, to_id: str, edge_type: str
-    ) -> dict[str, Any] | None:
+    def _edge_from_conn(conn: sqlite3.Connection, from_id: str, to_id: str, edge_type: str) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT from_id, to_id, type, properties, created_at FROM graph_edges "
             "WHERE from_id=? AND to_id=? AND type=?",
@@ -717,9 +744,7 @@ class GraphDatabase:
                            properties=excluded.properties, namespace=excluded.namespace""",
                         (node_id, node_type, json.dumps(validated), namespace, now),
                     )
-                    normalized.append(
-                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
-                    )
+                    normalized.append({"action": kind, "id": node_id, "type": node_type, "properties": validated})
 
                 elif kind in {"update_node_property", "replace_node"}:
                     node_id = self._required_text(action, "id")
@@ -739,19 +764,13 @@ class GraphDatabase:
                     if not isinstance(incoming, dict):
                         raise ValueError(f"{kind}.properties must be an object")
                     node_type = action.get("type", old_node["type"])
-                    properties = (
-                        dict(incoming)
-                        if kind == "replace_node"
-                        else {**old_node["properties"], **incoming}
-                    )
+                    properties = dict(incoming) if kind == "replace_node" else {**old_node["properties"], **incoming}
                     validated = self._validate_properties_in_conn(conn, node_type, properties)
                     conn.execute(
                         "UPDATE graph_nodes SET type=?, properties=?, namespace=? WHERE id=?",
                         (node_type, json.dumps(validated), validated.get("namespace"), node_id),
                     )
-                    normalized.append(
-                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
-                    )
+                    normalized.append({"action": kind, "id": node_id, "type": node_type, "properties": validated})
 
                 elif kind == "delete_node":
                     node_id = self._required_text(action, "id")
@@ -759,8 +778,7 @@ class GraphDatabase:
                     if old_node is None:
                         raise ValueError(f"Node with ID '{node_id}' does not exist")
                     edge_rows = conn.execute(
-                        "SELECT from_id,to_id,type,properties,created_at FROM graph_edges "
-                        "WHERE from_id=? OR to_id=?",
+                        "SELECT from_id,to_id,type,properties,created_at FROM graph_edges WHERE from_id=? OR to_id=?",
                         (node_id, node_id),
                     ).fetchall()
                     edges = [
@@ -892,9 +910,7 @@ class GraphDatabase:
                             "DELETE FROM graph_edges WHERE from_id=? AND to_id=? AND type=?",
                             (from_id, to_id, edge_type),
                         )
-                        normalized.append(
-                            {"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type}
-                        )
+                        normalized.append({"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type})
                 else:
                     raise ValueError(f"Unsupported graph mutation action: {kind}")
 
@@ -960,9 +976,7 @@ class GraphDatabase:
                         raise ValueError("create_node.properties must be an object")
                     validated = self._validate_properties_in_conn(conn, node_type, properties)
                     nodes[node_id] = {"type": node_type, "properties": validated}
-                    normalized.append(
-                        {"action": kind, "id": node_id, "type": node_type, "properties": validated}
-                    )
+                    normalized.append({"action": kind, "id": node_id, "type": node_type, "properties": validated})
                 elif kind == "update_node_property":
                     node_id = self._required_text(action, "id")
                     node = nodes.get(node_id)
@@ -1013,9 +1027,7 @@ class GraphDatabase:
                         if edge_key not in edges:
                             raise ValueError(f"Edge '{from_id}->{to_id}:{edge_type}' does not exist")
                         edges.remove(edge_key)
-                        normalized.append(
-                            {"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type}
-                        )
+                        normalized.append({"action": kind, "from_id": from_id, "to_id": to_id, "type": edge_type})
                 else:
                     raise ValueError(f"Unsupported graph mutation action: {kind}")
         return normalized
@@ -1080,8 +1092,7 @@ class GraphDatabase:
         for key, value in extension.items():
             if key in current and current[key] != value:
                 raise ValueError(
-                    f"Ontology entity '{entity_id}' cannot change property '{key}' "
-                    f"from '{current[key]}' to '{value}'"
+                    f"Ontology entity '{entity_id}' cannot change property '{key}' from '{current[key]}' to '{value}'"
                 )
         return {**current, **extension}
 
@@ -1110,9 +1121,7 @@ class GraphDatabase:
             )
         for item in normalized["new_schemas"]:
             if item["id"] in schemas:
-                raise ValueError(
-                    f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead"
-                )
+                raise ValueError(f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead")
             schemas[item["id"]] = {**item, "is_core": False}
         return [schemas[key] for key in sorted(schemas)]
 
@@ -1142,9 +1151,7 @@ class GraphDatabase:
                         raise ValueError("Schema idempotency key was reused with a different proposal")
                     return json.loads(existing_effect["result_json"])
             for item in normalized["new_schemas"]:
-                existing_schema = conn.execute(
-                    "SELECT id FROM graph_schemas WHERE id=?", (item["id"],)
-                ).fetchone()
+                existing_schema = conn.execute("SELECT id FROM graph_schemas WHERE id=?", (item["id"],)).fetchone()
                 if existing_schema is not None:
                     raise ValueError(
                         f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead"

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Docker Desktop; or local Python 3.11–3.13, `uv`, Node.js, and npm. The host Codex bridge also requires local Python and `uv`.
+- Docker Desktop; or local Python 3.11–3.13, `uv`, Node.js, and npm.
 - VS Code with the Dev Containers extension when using the development container.
 
 ## Option 1: Docker Compose
@@ -20,19 +20,16 @@ Docker Compose also starts Neo4j for the canonical knowledge graph; its Browser 
 
 `.env` contains process-level settings such as coding-agent commands and timeouts. Configure LLM providers, credentials, default models, and the OpenCode/Codex choice in the app's “Models & Providers” UI. Provider credentials are stored in the Git-ignored `workspace/llm/secrets.json`, not in `.env`.
 
-Codex is not installed in the Docker container. To reuse the host Codex login and ChatGPT subscription:
+Coding-agent CLIs are not all preinstalled in the image. Open “Models & Providers” to install Codex on demand; binaries and native credentials persist in the `coding_agent_data` volume. After installation, select “Sign in with ChatGPT,” open the device-code page, and enter the one-time code. The UI then loads the models available to the signed-in Codex account dynamically. Removing the volume removes both the managed CLI and its container login state.
 
-1. Confirm that `codex login status` succeeds on the host.
-2. Run `openssl rand -hex 32` and put the result in `.env` as `CODEX_HOST_BRIDGE_TOKEN`.
-3. From the repository root, start `uv run python -m scripts.codex_host_bridge` and keep it running.
-4. Start Docker Compose and select Codex in the UI; its card reports the host bridge and login status.
+Provider connections and credentials remain centralized, while model bindings are scoped to each consumer. Ambient uses primary and fast roles; OpenCode inherits the Ambient primary model by default or selects a dedicated provider model; Codex uses its own native login and optional native model and never receives Ambient provider credentials.
 
-The bridge listens only on `127.0.0.1:8765` by default, requires a bearer token, and accepts only randomized staging directories created by the backend under the shared `workspace/apps` directory. No Codex credentials are stored in the container.
+The chat composer shows the `Ambient` primary model used for request understanding, routing, and planning. Code generation uses the separately displayed `Coding Agent` and its model; seeing an Ambient model name does not mean Codex uses that provider.
 
 ## Option 2: Dev Container
 
 1. Open the repository in VS Code and run **Dev Containers: Reopen in Container**.
-2. Dev Containers starts both the development workspace and a Neo4j sidecar from `.devcontainer/docker-compose.yml`; the `postCreateCommand` runs `uv sync` and installs npm dependencies for `frontend/` and `docs/`.
+2. Dev Containers starts both the development workspace and a Neo4j sidecar from `.devcontainer/docker-compose.yml`; the `postCreateCommand` runs `uv sync` and installs npm dependencies for `frontend/` and `docs/`. The Python environment lives in a container-only `python_env` volume instead of the bind-mounted project `.venv`, preventing macOS and Linux interpreters from overwriting one another.
 3. Start the backend and frontend separately in development-container terminals:
 
 ```bash

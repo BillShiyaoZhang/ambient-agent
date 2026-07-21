@@ -173,6 +173,8 @@ flowchart LR
 
 `ToolGateway` currently unifies model-requested local Python tools. Capability, MCP, remote-Agent, and ACP execution retain separate adapter/permission policies. OpenCode now has path, argv, environment, output, process-group, and staging controls, but not an OS-level filesystem/network sandbox.
 
+The backend image must include both Node.js and the `@babel/standalone` version pinned by the frontend lockfile. `validate_opencode_staging` applies Babel parsing, host/network-global rejection, and a restricted-VM smoke test to the staging shared by OpenCode and Codex. A missing or failed verifier must never be promoted to a live App.
+
 ## 6. Event and recovery boundaries
 
 Run event payloads are redacted and bounded before insertion, while the envelope records duration, model usage, and `redacted` metadata; terminal events are retained for 30 days by default. A Graph effect ledger closes the checkpoint window against duplicate writes, and an App promotion marker distinguishes published artifacts from staging awaiting publication. Only saga steps with complete compensation data are rolled back automatically.
@@ -183,6 +185,7 @@ Run event payloads are redacted and bounded before insertion, while the envelope
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
         +apply_schema_proposal_atomic(proposal)
@@ -205,3 +208,22 @@ classDiagram
 ```
 
 `create_graph_database()` is the runtime factory: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. Both adapters enforce the same `ambient-context` ontology contract; unknown entities, abstract entities, and unknown properties cannot be written as records.
+
+## 8. Coding Agent Runtime and model ownership
+
+```mermaid
+flowchart LR
+    Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]
+    Runtime -->|on-demand install / status / auth / model-list| Codex[codex_service.py: run_codex_agent]
+    Settings --> Dispatch[coding_agent.py: run_coding_agent]
+    Dispatch --> Codex
+    Dispatch --> OpenCode[opencode_service.py: run_opencode_agent_acp]
+
+    Provider[Central Provider Registry] --> Ambient[primary / fast]
+    Provider -->|per-agent shared binding| OpenCode
+    Native[Codex-native login and subscription] --> Codex
+```
+
+Built-in adapters form a trusted capability catalog, while each CLI is downloaded to a dedicated persistent volume only after the user requests installation. Installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
+
+Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.

@@ -214,6 +214,52 @@ def test_compute_diff_type_mismatch_when_schema_says_integer_code_says_string_of
     assert ("Task", "due_date") not in mismatches
 
 
+def test_compute_diff_recognizes_explicit_number_coercion():
+    schemas = [
+        {
+            "id": "Place",
+            "properties": {"name": "string", "latitude": "number"},
+        }
+    ]
+    js = """
+    await ambient.graph.mutate([
+      { action: 'create_node', id: 'p', type: 'Place',
+        properties: { name: place.name, latitude: Number(place.latitude) } }
+    ]);
+    """
+
+    diff = diff_controller_js(js, schemas)
+
+    assert diff.type_mismatches == []
+
+
+def test_compute_diff_defers_dynamic_member_expression_type_to_runtime_preflight():
+    schemas = [
+        {
+            "id": "Place",
+            "properties": {
+                "name": "string",
+                "latitude": "number",
+                "longitude": "number",
+            },
+        }
+    ]
+    js = """
+    await ambient.graph.mutate([
+      { action: 'create_node', id: 'p', type: 'Place',
+        properties: {
+          name: next.name,
+          latitude: next.latitude,
+          longitude: next.longitude,
+        } }
+    ]);
+    """
+
+    diff = diff_controller_js(js, schemas)
+
+    assert diff.type_mismatches == []
+
+
 def test_compute_diff_handles_missing_type():
     """create_node with no ``type`` field should not crash."""
     js = """
