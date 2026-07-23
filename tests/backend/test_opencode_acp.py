@@ -30,6 +30,7 @@ from acp.schema import (
 )
 
 from backend.opencode_service import (
+    CodingAgentDraftError,
     FastAPIACPClient,
     OpenCodeACPInputError,
     OpenCodeACPProtocolError,
@@ -703,6 +704,43 @@ async def test_acp_protocol_failure_leaves_existing_app_untouched(monkeypatch, t
 
     assert (live_dir / "controller.js").read_text(encoding="utf-8") == old_source
     assert list(tmp_path.glob(".weather-card.staging-*")) == []
+
+
+@pytest.mark.asyncio
+async def test_durable_acp_protocol_failure_transfers_generated_draft(monkeypatch, tmp_path):
+    mock_conn = AsyncMock()
+    mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-xyz"))
+
+    async def failed_prompt(*args, **kwargs):
+        staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
+        (staging_dir / "controller.js").write_text(
+            "export default function GeneratedDraft() { return null; }",
+            encoding="utf-8",
+        )
+        raise RuntimeError("malformed ACP response")
+
+    mock_conn.prompt = failed_prompt
+
+    @contextlib.asynccontextmanager
+    async def mock_spawn(to_client, command, *args, **kwargs):
+        to_client.on_connect(mock_conn)
+        yield mock_conn, MagicMock(returncode=0)
+
+    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+
+    with pytest.raises(CodingAgentDraftError) as captured:
+        await run_opencode_agent_acp(
+            app_id="weather-card",
+            instruction="modify",
+            promote=False,
+        )
+
+    draft = captured.value.staged_result
+    assert captured.value.error_code == "OpenCodeACPProtocolError"
+    assert draft.staging_dir.is_dir()
+    assert "GeneratedDraft" in (draft.staging_dir / "controller.js").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

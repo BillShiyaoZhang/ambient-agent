@@ -120,4 +120,31 @@ describe("canonical RunEvent chat projection", () => {
     expect(await screen.findByText("Projected exactly once")).toBeDefined();
     expect(screen.queryByText("Must not leak across sessions")).toBeNull();
   });
+
+  it("creates only one default session under React StrictMode", async () => {
+    let createdSession: { id: string; title: string; language: string } | null = null;
+    let createCalls = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/sessions") && init?.method === "POST") {
+        createCalls += 1;
+        const body = JSON.parse(String(init.body));
+        createdSession = body;
+        return response(body);
+      }
+      if (url.endsWith("/api/sessions")) return response(createdSession ? [createdSession] : []);
+      if (url.includes("/messages")) return response([]);
+      if (url.endsWith("/api/canvas")) {
+        return response({ version: 3, open_app_ids: [], active_app_id: null, windows: {} });
+      }
+      if (url.endsWith("/api/llm/catalog") || url.endsWith("/api/llm/providers")) return response([]);
+      if (url.endsWith("/api/llm/settings")) return response({ default_model: null, fast_model: null });
+      return response({});
+    }));
+
+    render(<React.StrictMode><App /></React.StrictMode>);
+
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    expect(createCalls).toBe(1);
+  });
 });

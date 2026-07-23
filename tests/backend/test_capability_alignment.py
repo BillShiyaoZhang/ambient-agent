@@ -17,6 +17,16 @@ class Provider:
         return json.dumps(self.response)
 
 
+class SequenceProvider:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def generate(self, messages, **_kwargs):
+        self.calls.append(messages)
+        return json.dumps(self.responses.pop(0))
+
+
 @pytest.mark.asyncio
 async def test_schema_alignment_proposes_capabilities_from_the_shared_ontology(tmp_path, monkeypatch):
     provider = Provider(
@@ -75,3 +85,62 @@ async def test_schema_alignment_rejects_unknown_capability_output(tmp_path, monk
             GraphDatabase(str(tmp_path / "workspace")),
             language="en",
         )
+
+
+@pytest.mark.asyncio
+async def test_schema_alignment_repairs_invalid_capability_scope_with_validation_feedback(tmp_path, monkeypatch):
+    base = {
+        "reused_schemas": [
+            {
+                "id": "Place",
+                "reason": "Weather location",
+                "extended_properties": {},
+                "data_scope": "user_context",
+            }
+        ],
+        "new_schemas": [],
+    }
+    provider = SequenceProvider(
+        [
+            {
+                **base,
+                "capabilities": [
+                    {"id": "network.request", "scope": {"sources": ["weather-api"]}},
+                ],
+            },
+            {
+                **base,
+                "capabilities": [
+                    {
+                        "id": "network.request",
+                        "scope": {
+                            "sources": {
+                                "weather-api": {
+                                    "base_url": "https://api.example.com",
+                                    "paths": ["/v1/forecast"],
+                                    "methods": ["GET"],
+                                    "response_limit": 1_048_576,
+                                }
+                            }
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+    monkeypatch.setattr(alignment_module, "get_llm_provider", lambda *_args: provider)
+    monkeypatch.setattr(alignment_module, "primary_selection", lambda: object())
+    monkeypatch.setattr(alignment_module, "selection_ids", lambda _selection: ("provider", "model"))
+
+    proposal = await SchemaAlignmentService.align_schemas(
+        "Build weather",
+        "weather-app",
+        GraphDatabase(str(tmp_path / "workspace")),
+        language="en",
+    )
+
+    assert len(provider.calls) == 2
+    correction = provider.calls[1][-1]["content"]
+    assert "network.request sources must be a non-empty object" in correction
+    assert "Do not broaden the requested capabilities" in correction
+    assert proposal["capabilities"][0]["scope"]["sources"]["weather-api"]["paths"] == ["/v1/forecast"]

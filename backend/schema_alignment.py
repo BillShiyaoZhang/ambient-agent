@@ -14,6 +14,79 @@ from backend.llm_runtime import primary_selection, selection_ids
 logger = logging.getLogger("schema_alignment")
 
 
+def _parse_and_validate_proposal(
+    raw_response: str,
+    catalog: SystemCapabilityCatalog,
+) -> dict[str, Any]:
+    cleaned = raw_response.strip()
+    code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
+    if code_block_match:
+        cleaned = code_block_match.group(1).strip()
+    else:
+        code_block_match = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
+        if code_block_match:
+            cleaned = code_block_match.group(1).strip()
+    start_idx = cleaned.find("{")
+    end_idx = cleaned.rfind("}")
+    if start_idx != -1 and end_idx != -1:
+        cleaned = cleaned[start_idx : end_idx + 1]
+
+    proposal = json.loads(cleaned)
+    if not isinstance(proposal, dict):
+        raise ValueError("Schema proposal must be a JSON object")
+    proposal.setdefault("reused_schemas", [])
+    proposal.setdefault("new_schemas", [])
+    if not isinstance(proposal["reused_schemas"], list) or not isinstance(proposal["new_schemas"], list):
+        raise ValueError("Schema proposal reused_schemas and new_schemas must be arrays")
+    normalized_grants = normalize_grants(proposal.get("capabilities", []))
+    graph_entity_ids = {
+        str(item.get("id"))
+        for item in [*proposal["reused_schemas"], *proposal["new_schemas"]]
+        if isinstance(item, dict) and item.get("id")
+    }
+    catalog.validate_grants(normalized_grants, graph_entity_ids=graph_entity_ids)
+    proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
+    return proposal
+
+
+async def _generate_validated_proposal(
+    provider: Any,
+    messages: list[dict[str, str]],
+    *,
+    catalog: SystemCapabilityCatalog,
+    db_session: Any,
+    budget: ToolLoopBudget | None,
+    audit_context: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    raw_response = await provider.generate(
+        messages,
+        db_session=db_session,
+        budget=budget,
+        audit_context=audit_context,
+    )
+    try:
+        return _parse_and_validate_proposal(raw_response, catalog), raw_response
+    except Exception as validation_error:
+        repair_prompt = (
+            "Your previous JSON violated the supplied Capability Ontology scope contract.\n"
+            f"Validation error: {str(validation_error)[:1_000]}\n"
+            "Return the complete corrected JSON object only. Preserve the requested schemas and least-privilege intent. "
+            "Do not broaden the requested capabilities, invent placeholders, or omit required nested fields."
+        )
+        repair_messages = [
+            *messages,
+            {"role": "assistant", "content": raw_response[-12_000:]},
+            {"role": "user", "content": repair_prompt},
+        ]
+        repaired_response = await provider.generate(
+            repair_messages,
+            db_session=db_session,
+            budget=budget,
+            audit_context={**audit_context, "stage": f"{audit_context.get('stage', 'schema_alignment')}_repair"},
+        )
+        return _parse_and_validate_proposal(repaired_response, catalog), repaired_response
+
+
 class SchemaAlignmentService:
     @staticmethod
     async def align_schemas(
@@ -55,7 +128,7 @@ Your task is to analyze a widget request and match only its user-context facts a
 4. **Property Extensions**: If you reuse an existing entity, propose extra context fields under `extended_properties`.
 5. **New Entities**: Propose a new entity only if the concept is genuinely new. Attach it to an existing `subclass_of` parent (normally `Thing`) and provide established external `equivalent_to` IRIs when available.
 6. **Supported Data Types**: Property fields must use one of: "string", "integer", "number", "boolean".
-7. **Capability Ontology**: Propose the smallest required Widget grants from the supplied Capability Ontology. Do not invent category ids, scope fields, sources, entity types, catalog ids, or actions. An empty array is valid.
+7. **Capability Ontology**: Propose the smallest required Widget grants from the supplied Capability Ontology and follow each category's complete `scope_contract`. Do not invent category ids, scope fields, entity types, installed catalog ids, or installed actions. For `network.request`, propose full public HTTPS source definitions rather than placeholder names. An empty capabilities array is valid.
 
 {rendered_capability_catalog}
 
@@ -116,47 +189,14 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
         raw_response = ""
         try:
-            raw_response = await provider.generate(
+            proposal, raw_response = await _generate_validated_proposal(
+                provider,
                 messages,
+                catalog=catalog,
                 db_session=db_session,
                 budget=budget,
                 audit_context={**(audit_context or {}), "stage": "schema_alignment"},
             )
-
-            # Clean response and parse JSON
-            cleaned = raw_response.strip()
-            # If wrapped in codeblock, extract it
-            code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
-            if code_block_match:
-                cleaned = code_block_match.group(1).strip()
-            else:
-                # If wrapped in simple code block
-                code_block_match2 = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
-                if code_block_match2:
-                    cleaned = code_block_match2.group(1).strip()
-
-            # Find the first '{' and last '}'
-            start_idx = cleaned.find("{")
-            end_idx = cleaned.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                cleaned = cleaned[start_idx : end_idx + 1]
-
-            proposal = json.loads(cleaned)
-
-            # Validate format integrity
-            if "reused_schemas" not in proposal:
-                proposal["reused_schemas"] = []
-            if "new_schemas" not in proposal:
-                proposal["new_schemas"] = []
-            normalized_grants = normalize_grants(proposal.get("capabilities", []))
-            graph_entity_ids = {
-                str(item.get("id"))
-                for item in [*proposal["reused_schemas"], *proposal["new_schemas"]]
-                if isinstance(item, dict) and item.get("id")
-            }
-            catalog.validate_grants(normalized_grants, graph_entity_ids=graph_entity_ids)
-            proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
-
             return proposal
 
         except (LLMConfigError, BudgetExhaustedError):
@@ -204,7 +244,7 @@ Your task is to refine an `ambient-context` ontology proposal based on direct na
 3. Implement exactly what the user requests in their feedback.
 4. Keep all entities in the single canonical ontology and preserve `subclass_of`/`equivalent_to` alignments.
 5. Never model App-only runtime data; caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay in the App directory.
-6. Refine capability grants from the supplied Capability Ontology with least privilege. Do not invent category ids or scope fields.
+6. Refine capability grants from the supplied Capability Ontology with least privilege and follow every complete `scope_contract`. Do not invent category ids, scope fields, installed catalog ids, or installed actions. Declare full public HTTPS source objects for `network.request`.
 
 {rendered_capability_catalog}
 
@@ -270,38 +310,14 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
 
         raw_response = ""
         try:
-            raw_response = await provider.generate(
+            proposal, raw_response = await _generate_validated_proposal(
+                provider,
                 messages,
+                catalog=catalog,
                 db_session=db_session,
                 budget=budget,
                 audit_context={**(audit_context or {}), "stage": "schema_alignment_refine"},
             )
-            cleaned = raw_response.strip()
-            code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
-            if code_block_match:
-                cleaned = code_block_match.group(1).strip()
-            else:
-                code_block_match2 = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
-                if code_block_match2:
-                    cleaned = code_block_match2.group(1).strip()
-            start_idx = cleaned.find("{")
-            end_idx = cleaned.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                cleaned = cleaned[start_idx : end_idx + 1]
-
-            proposal = json.loads(cleaned)
-            if "reused_schemas" not in proposal:
-                proposal["reused_schemas"] = []
-            if "new_schemas" not in proposal:
-                proposal["new_schemas"] = []
-            normalized_grants = normalize_grants(proposal.get("capabilities", []))
-            graph_entity_ids = {
-                str(item.get("id"))
-                for item in [*proposal["reused_schemas"], *proposal["new_schemas"]]
-                if isinstance(item, dict) and item.get("id")
-            }
-            catalog.validate_grants(normalized_grants, graph_entity_ids=graph_entity_ids)
-            proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
             return proposal
         except (LLMConfigError, BudgetExhaustedError):
             raise

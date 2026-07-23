@@ -39,7 +39,9 @@ SystemCapabilityCatalog
     └── id -> availability + model mode + artifact policy
 ```
 
-每个条目至少包含稳定 ID、说明、availability、effect、input contract、approval 要求和限制。Secret、凭据、绝对路径、完整 Graph 记录和无界历史绝不进入 Catalog。
+每个条目至少包含稳定 ID、说明、availability、effect、机器可读的 `scope_contract`、approval 要求和限制。`scope_contract` 同时声明 required/optional 字段、类型、枚举或数值边界及一个最小合法示例；Schema Alignment Agent 不需要从字段名猜测嵌套结构。Secret、凭据、绝对路径、完整 Graph 记录和无界历史绝不进入 Catalog。
+
+`graph.mutate.edge_types` 是可选字段：省略或空数组都规范化为“仅允许获批 entity 的节点操作，不允许任何边操作”。`network.request.sources` 不是字符串列表，而是以 kebab-case source ID 为键的对象；每个值必须完整声明无凭据 HTTPS origin、精确 path/method 白名单和响应大小上限。文件 scope 使用 `app://data` 下的相对路径模式，不携带 `app://data/` 前缀。
 
 ## 3. 按角色投影
 
@@ -75,6 +77,9 @@ Renderer 必须：
 - 对条目数量、schema 深度和文本长度设上限；超限时给摘要和可检索 ID。
 - 明确区分 `available`、`unavailable`、`approval_required` 和 `unsupported`。
 - 告诉 Agent 正确替代路径，例如认证网络访问应申请已安装 capability，而不是在 Widget 中嵌入 secret。
+- 输出每个类目的完整 `scope_contract`，包括 `network.request.sources` 的嵌套对象结构、文件相对路径规则、Graph operation 枚举和大小上限；不能只输出字段名。
+
+Schema 对齐返回的 JSON 若第一次违反该 contract，服务会把有界的具体校验错误和原响应反馈给同一模型修正一次。修正仍必须重新经过同一个后端 normalizer/authorizer；它不是放宽校验，也不会猜测或自动扩大权限。
 
 ## 5. Runtime Contract 给 Coding Agent
 

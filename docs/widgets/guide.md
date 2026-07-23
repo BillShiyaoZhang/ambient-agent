@@ -64,7 +64,7 @@ export default function TaskList({ ambient }) {
 5. Graph 使用与有效 schema 一致；
 6. artifact hash、grants digest、Run version 和 effect/idempotency 记录。
 
-全部通过后才将 staging 原子提升。失败、取消或拒绝不会覆盖现有 App。
+全部通过后才将 staging 原子提升。失败、取消或拒绝不会覆盖现有 App。promotion 前发生 Coding Agent 内部校验失败、超时或系统错误时，失败草稿连同错误一起保留在不可执行的隐藏 staging 中；用户重试会在该目录原地修复或继续校验，而不是先删除再生成。若错误来自 Controller 与 Manifest grant 不一致，修复 turn 会再次获得已批准 Runtime Contract，只能修正现有 `controller.js`/`manifest.json` 使其匹配，不能申请或扩大权限。只有显式取消、返工或超过草稿保留期后才会清理该 staging。
 
 ## 5. 调试
 

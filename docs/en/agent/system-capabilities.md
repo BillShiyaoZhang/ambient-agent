@@ -39,7 +39,9 @@ SystemCapabilityCatalog
     └── id -> availability + model mode + artifact policy
 ```
 
-Every item includes at least a stable ID, description, availability, effect, input contract, approval requirement, and limits. Secrets, credentials, absolute paths, full Graph records, and unbounded history never enter the Catalog.
+Every item includes at least a stable ID, description, availability, effect, a machine-readable `scope_contract`, approval requirements, and limits. The `scope_contract` declares required and optional fields, types, enum or numeric bounds, and one minimal valid example, so the Schema Alignment Agent never has to infer nested shapes from field names. Secrets, credentials, absolute paths, full Graph records, and unbounded history never enter the Catalog.
+
+`graph.mutate.edge_types` is optional: omission and an empty array both normalize to node-only mutation over approved entities, with no edge authority. `network.request.sources` is an object keyed by kebab-case source IDs, not a string list; each value fully declares a credential-free HTTPS origin, exact path/method allowlists, and a response-size limit. File scopes use relative patterns below `app://data` and do not include the `app://data/` prefix.
 
 ## 3. Role-specific projections
 
@@ -75,6 +77,9 @@ The renderer must:
 - Bound item count, schema depth, and text length; overflow becomes a summary with retrievable IDs.
 - Distinguish `available`, `unavailable`, `approval_required`, and `unsupported`.
 - Explain supported alternatives, such as requesting an installed capability for authenticated network access rather than embedding a secret in a Widget.
+- Emit the complete `scope_contract` for every category, including the nested `network.request.sources` object, relative file-path rules, Graph operation enums, and size bounds; field names alone are insufficient.
+
+If the first schema-alignment JSON violates this contract, the service gives the same model one bounded correction attempt containing the concrete validation error and its previous response. The correction still passes through the same backend normalizer and authorizer; it never relaxes validation, guesses authority, or expands scope automatically.
 
 ## 5. Runtime Contract for a Coding Agent
 

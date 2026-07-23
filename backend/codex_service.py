@@ -15,11 +15,13 @@ from typing import Any
 
 from backend.coding_agent_runtime import CodingAgentRuntime
 from backend.opencode_service import (
+    CodingAgentDraftError,
     CodingAgentStagedResult,
     OpenCodeArtifactError,
     _prepare_staging_app,
     _terminate_process,
     promote_coding_agent_staging,
+    resume_coding_agent_staging,
     validate_coding_agent_staging,
 )
 
@@ -265,6 +267,16 @@ def _codex_prompt(app_id: str, instruction: str, language: str) -> str:
     )
 
 
+def _approved_runtime_contract_excerpt(instruction: str) -> str:
+    marker = "[APPROVED RUNTIME CONTRACT — COPY EXACTLY INTO MANIFEST V2]"
+    start = instruction.find(marker)
+    if start < 0:
+        return ""
+    end = instruction.find("\n\n[SYSTEM CAPABILITIES]", start)
+    excerpt = instruction[start : end if end >= 0 else None]
+    return excerpt[:24_000]
+
+
 async def run_codex_agent(
     app_id: str,
     instruction: str,
@@ -274,6 +286,7 @@ async def run_codex_agent(
     promote: bool = True,
     runtime: CodingAgentRuntime | None = None,
     native_model: str | None = None,
+    staged_result: CodingAgentStagedResult | None = None,
 ) -> str | CodingAgentStagedResult:
     """Generate a Widget with the managed container Codex runtime."""
     timeout = _codex_timeout()
@@ -283,10 +296,18 @@ async def run_codex_agent(
     if command is None:
         raise CodexAgentStartupError("Codex is not installed")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
-    live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
+    owns_staging = staged_result is None
+    if staged_result is None:
+        live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
+    else:
+        if staged_result.app_id != app_id:
+            raise CodexAgentInputError("Retained staging App ID does not match the requested App")
+        live_dir, staging_dir = resume_coding_agent_staging(staged_result)
     retain_staging = False
+    output = ""
     try:
         prompt = _codex_prompt(app_id, instruction, language)
+        approved_contract = _approved_runtime_contract_excerpt(instruction)
         result: CodingAgentStagedResult | None = None
         for attempt in range(_MAX_CODEX_VALIDATION_REPAIRS + 1):
             output = await _run_codex_exec(
@@ -314,14 +335,16 @@ async def run_codex_agent(
                     on_update,
                     "\n🔧 Codex generated code that failed mandatory validation; asking it to repair the staging App in place.",
                 )
+                contract_context = f"\n\n{approved_contract}" if approved_contract else ""
                 prompt = (
-                    "The existing controller.js failed mandatory validation. Fix that file in place, "
-                    "do not create any other files, and preserve the requested functionality while obeying "
+                    "The staged App failed mandatory validation. Fix the existing controller.js and/or manifest.json "
+                    "in place, do not create any other files, and preserve the requested functionality while obeying "
                     "the Widget runtime and network boundary. Inspect the whole files for the same class of "
                     "mistake, not only the reported line. HTM component closing syntax is `<//>`; never emit "
                     "React-like `</${Component}>` or malformed `</${Component>`. Re-run your own inspection "
-                    "before finishing.\n\n"
-                    f"[VALIDATION ERROR]\n{diagnostic}"
+                    "before finishing. If capability use and Manifest grants disagree, make both match the approved "
+                    "Runtime Contract exactly; never add unapproved entities, operations, sources, paths, or actions.\n\n"
+                    f"[VALIDATION ERROR]\n{diagnostic}{contract_context}"
                 )
         if result is None:  # pragma: no cover - the bounded loop always executes
             raise CodexAgentProtocolError("Codex did not produce a staging result")
@@ -330,6 +353,24 @@ async def run_codex_agent(
             return result
         promote_coding_agent_staging(result)
         return output
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not promote:
+            retain_staging = True
+            if isinstance(exc, CodingAgentDraftError):
+                raise
+            raise CodingAgentDraftError(
+                str(exc),
+                staged_result=CodingAgentStagedResult(
+                    output=output[-64_000:],
+                    app_id=app_id,
+                    staging_dir=staging_dir,
+                    live_dir=live_dir,
+                ),
+                error_code=str(getattr(exc, "code", type(exc).__name__)),
+            ) from exc
+        raise
     finally:
-        if not retain_staging and staging_dir.exists():
+        if owns_staging and not retain_staging and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)

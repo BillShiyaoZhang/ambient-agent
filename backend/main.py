@@ -34,6 +34,7 @@ from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
 from backend.llm_service import set_default_llm_store
 from backend.opencode_service import (
+    CodingAgentStagedResult,
     cleanup_orphaned_opencode_staging,
     recover_interrupted_opencode_promotions,
     run_opencode_agent_acp,
@@ -48,6 +49,21 @@ legacy_run_projection_websockets: set[WebSocket] = set()
 
 # Set of active session IDs currently running generation tasks
 active_running_sessions: set[str] = set()
+
+
+async def _accept_websocket_safely(websocket: WebSocket) -> bool:
+    """Accept one handshake while tolerating a client-aborted duplicate connection."""
+
+    try:
+        await websocket.accept()
+    except WebSocketDisconnect:
+        return False
+    except RuntimeError as exc:
+        message = str(exc)
+        if "websocket.accept" in message and "websocket.send" in message and "websocket.close" in message:
+            return False
+        raise
+    return True
 
 
 async def send_to_session(session_id: str, data: Any):
@@ -152,16 +168,19 @@ async def _run_coding_agent_staged(
     promote: bool = True,
     coding_agent: str | None = None,
     coding_agent_model: dict[str, Any] | None = None,
+    staged_result: CodingAgentStagedResult | None = None,
 ):
     selected = coding_agent or coding_agent_config_store.get_settings()["default_agent"]
     # Keep the long-standing module injection point for local hosts and tests.
     if selected == "opencode":
+        staging_kwargs = {"staged_result": staged_result} if staged_result is not None else {}
         return await run_opencode_agent_acp(
             app_id,
             instruction,
             language=language,
             on_update=on_update,
             promote=promote,
+            **staging_kwargs,
         )
     return await run_coding_agent(
         app_id,
@@ -172,6 +191,7 @@ async def _run_coding_agent_staged(
         coding_agent=selected,
         runtime=coding_agent_config_store.runtime,
         model_config=coding_agent_model or coding_agent_config_store.model_config(selected),
+        staged_result=staged_result,
     )
 
 
@@ -310,16 +330,12 @@ async def lifespan(app: FastAPI):
         recover_interrupted_opencode_promotions(app_manager.apps_dir)
     except (OSError, ValueError):
         pass
-    staging_references: set[str] = set()
-    for active_run in run_store.list_runs(status=",".join(sorted(ACTIVE_STATUSES)), limit=500):
-        active_state = active_run.get("state") if isinstance(active_run.get("state"), dict) else {}
-        active_data = active_state.get("data") if isinstance(active_state.get("data"), dict) else {}
-        for handle_key in ("staged_app", "staged_app_cleanup_pending"):
-            staged_app = active_data.get(handle_key) if isinstance(active_data.get(handle_key), dict) else {}
-            if staged_app.get("staging_dir"):
-                staging_references.add(str(staged_app["staging_dir"]))
     try:
         staging_grace = float(os.getenv("OPENCODE_STAGING_GRACE_SECONDS", "3600"))
+        failed_staging_retention = float(os.getenv("FAILED_STAGING_RETENTION_SECONDS", str(7 * 24 * 60 * 60)))
+        staging_references = run_store.retained_staging_paths(
+            failed_retention_seconds=failed_staging_retention,
+        )
         cleanup_orphaned_opencode_staging(
             app_manager.apps_dir,
             referenced_staging_paths=staging_references,
@@ -819,7 +835,8 @@ async def stop_runtime(runtime_id: str):
 
 @app.websocket("/ws/runs")
 async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_epoch: str | None = None):
-    await websocket.accept()
+    if not await _accept_websocket_safely(websocket):
+        return
     sequence = max(0, after_sequence)
     stream = run_store.stream_info()
     if stream_epoch is not None and stream_epoch != stream["stream_epoch"]:
@@ -1196,7 +1213,8 @@ async def websocket_chat(
     projection: str = "legacy",
     session: WorkspaceStorage = Depends(get_db),
 ):
-    await websocket.accept()
+    if not await _accept_websocket_safely(websocket):
+        return
 
     if not session_id:
         session_id = "default-session"

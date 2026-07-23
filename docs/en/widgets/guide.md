@@ -64,7 +64,7 @@ Publication checks, in order:
 5. Graph use matches effective schemas;
 6. artifact hash, grants digest, Run version, and effect/idempotency records.
 
-Only then is staging atomically promoted. Failure, cancellation, or denial preserves the existing App.
+Only then is staging atomically promoted. Failure, cancellation, or denial preserves the existing App. An internal Coding Agent validation failure, timeout, or system error before promotion retains the failed draft together with its error in non-executable hidden staging; retry repairs that directory in place or continues verification instead of deleting and regenerating it. When the Controller and Manifest grants disagree, the repair turn receives the approved Runtime Contract again and may only edit the existing `controller.js`/`manifest.json` to match it; it cannot request or broaden authority. Only explicit cancellation, rework, or expiry of the draft-retention period may clean that staging.
 
 ## 5. Debugging
 

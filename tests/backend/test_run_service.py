@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -509,6 +510,216 @@ def test_widget_retry_without_retained_staging_restarts_code_generation(tmp_path
         "code_feedback",
     ):
         assert stale_key not in retried["state"]["data"]
+
+
+def test_widget_retry_drops_missing_stage_code_handle_before_regeneration(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    missing_staging = tmp_path / "apps" / f".weather-app.staging-{'d' * 32}"
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="stage_code",
+        data={
+            "approved_plan": "Build it",
+            "staged_app": {
+                "output": "lost",
+                "app_id": "weather-app",
+                "staging_dir": str(missing_staging),
+                "live_dir": str(tmp_path / "apps" / "weather-app"),
+            },
+            "staged_app_status": {"state": "failed_draft"},
+            "code_feedback": "stale validation error",
+        },
+        last_error={"code": "capability_contract_error", "message": "invalid", "effect_state": "none"},
+    )
+    store = RunStore(str(tmp_path))
+    run = create(
+        store,
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    failed = store.transition(
+        run["id"],
+        "failed",
+        error={"code": "capability_contract_error", "message": "invalid", "effect_state": "none"},
+    )
+
+    retried = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace()).retry(failed["id"])
+
+    assert retried["state"]["phase"] == "stage_code"
+    assert "staged_app" not in retried["state"]["data"]
+    assert "staged_app_status" not in retried["state"]["data"]
+    assert "code_feedback" not in retried["state"]["data"]
+
+
+def test_widget_retry_reuses_retained_failed_draft_from_verification(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    apps_dir = tmp_path / "apps"
+    staging_dir = apps_dir / f".weather-app.staging-{'a' * 32}"
+    live_dir = apps_dir / "weather-app"
+    staging_dir.mkdir(parents=True)
+    (staging_dir / "controller.js").write_text("// retained", encoding="utf-8")
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="wait_override",
+        data={
+            "active_seconds": 321.0,
+            "approved_plan": "Build the weather app",
+            "approved_schema": {"capabilities": []},
+            "staged_app": {
+                "output": "generated",
+                "app_id": "weather-app",
+                "staging_dir": str(staging_dir),
+                "live_dir": str(live_dir),
+            },
+            "staged_app_status": {
+                "state": "failed_draft",
+                "phase": "wait_override",
+                "error_code": "budget_exhausted",
+                "retryable": False,
+            },
+            "verification_report": "stale report",
+            "verification_options": ["rework_code"],
+            "verification_override": False,
+        },
+        last_error={"code": "budget_exhausted", "message": "Active time exhausted", "effect_state": "none"},
+    )
+    store = RunStore(str(tmp_path))
+    run = create(
+        store,
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    failed = store.transition(
+        run["id"],
+        "failed",
+        error={"code": "budget_exhausted", "message": "Active time exhausted", "effect_state": "none"},
+    )
+
+    retried = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace()).retry(failed["id"])
+
+    assert retried["state"]["phase"] == "verify"
+    assert retried["state"]["data"]["active_seconds"] == 0.0
+    assert retried["state"]["data"]["staged_app"]["staging_dir"] == str(staging_dir)
+    assert "staged_app_status" not in retried["state"]["data"]
+    assert "verification_report" not in retried["state"]["data"]
+    assert "verification_options" not in retried["state"]["data"]
+    assert "verification_override" not in retried["state"]["data"]
+    assert staging_dir.is_dir()
+
+
+def test_widget_retry_regenerates_when_retained_draft_has_expired(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    missing_staging = tmp_path / "apps" / f".weather-app.staging-{'b' * 32}"
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="promote",
+        data={
+            "approved_plan": "Build it",
+            "approved_schema": {"capabilities": []},
+            "staged_app": {
+                "output": "generated",
+                "app_id": "weather-app",
+                "staging_dir": str(missing_staging),
+                "live_dir": str(tmp_path / "apps" / "weather-app"),
+            },
+            "staged_app_status": {"state": "failed_draft"},
+            "verification_passed": True,
+        },
+        last_error={"code": "budget_exhausted", "message": "Active time exhausted", "effect_state": "none"},
+    )
+    store = RunStore(str(tmp_path))
+    run = create(
+        store,
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    failed = store.transition(
+        run["id"],
+        "failed",
+        error={"code": "budget_exhausted", "message": "Active time exhausted", "effect_state": "none"},
+    )
+
+    retried = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace()).retry(failed["id"])
+
+    assert retried["state"]["phase"] == "stage_code"
+    assert "staged_app" not in retried["state"]["data"]
+    assert "staged_app_status" not in retried["state"]["data"]
+    assert "verification_passed" not in retried["state"]["data"]
+
+
+def test_failed_draft_references_expire_independently_from_active_staging(tmp_path):
+    store = RunStore(str(tmp_path))
+    now = datetime.now(UTC)
+
+    def widget_state(path: str) -> AgentRunState:
+        return AgentRunState(
+            workflow_type="widget_create",
+            workflow_version=2,
+            session_id=path,
+            phase="verify",
+            data={
+                "staged_app": {
+                    "app_id": "weather-app",
+                    "staging_dir": path,
+                    "live_dir": str(tmp_path / "apps" / "weather-app"),
+                }
+            },
+        )
+
+    active_path = str(tmp_path / "apps" / f".active-app.staging-{'a' * 32}")
+    recent_path = str(tmp_path / "apps" / f".recent-app.staging-{'b' * 32}")
+    expired_path = str(tmp_path / "apps" / f".expired-app.staging-{'c' * 32}")
+    active = create(store, status="waiting_user", state=widget_state(active_path), source_id=active_path)
+    recent = create(store, state=widget_state(recent_path), source_id=recent_path)
+    expired = create(store, state=widget_state(expired_path), source_id=expired_path)
+    store.transition(recent["id"], "failed", error={"code": "temporary", "effect_state": "none"})
+    store.transition(expired["id"], "failed", error={"code": "temporary", "effect_state": "none"})
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE runs SET updated_at=?, finished_at=? WHERE id=?",
+            (
+                (now - timedelta(days=8)).isoformat(),
+                (now - timedelta(days=8)).isoformat(),
+                expired["id"],
+            ),
+        )
+
+    references = store.retained_staging_paths(
+        failed_retention_seconds=7 * 24 * 60 * 60,
+        now=now,
+    )
+
+    assert active_path in references
+    assert recent_path in references
+    assert expired_path not in references
+    assert store.get_run(active["id"])["status"] == "waiting_user"
 
 
 def test_agent_state_and_step_outcomes_are_strictly_serializable():

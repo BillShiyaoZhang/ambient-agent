@@ -88,6 +88,7 @@ function App() {
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [isChatOpen, setIsChatOpen] = useState(false);
   const chatOpenRef = useRef(false);
+  const creatingSessionRef = useRef(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const themeControllerRef = useRef<ReturnType<typeof createThemeController> | null>(null);
   if (!themeControllerRef.current) themeControllerRef.current = createThemeController();
@@ -658,6 +659,8 @@ function App() {
   }, [activeSessionId, language, refreshLLMConfiguration, saveCanvasConfig]);
 
   const handleCreateSession = async () => {
+    if (creatingSessionRef.current) return;
+    creatingSessionRef.current = true;
     const newId = Math.random().toString(36).substring(2, 15);
     const newTitle = language === "zh" ? "新对话" : "New conversation";
     try {
@@ -672,6 +675,8 @@ function App() {
       }
     } catch (err) {
       console.error("Error creating session:", err);
+    } finally {
+      creatingSessionRef.current = false;
     }
   };
 

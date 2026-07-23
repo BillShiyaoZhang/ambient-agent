@@ -13,6 +13,15 @@ def test_catalog_is_structured_versioned_and_uses_the_capability_ontology():
     assert payload["context_graph"]["ontology_id"] == "ambient-context"
     assert "widget_runtime" in payload
 
+    categories = {item["id"]: item for item in payload["widget_runtime"]["capability_categories"]}
+    graph_mutate = categories["graph.mutate"]["scope_contract"]
+    assert graph_mutate["optional"] == ["edge_types"]
+    assert graph_mutate["fields"]["edge_types"]["empty_means"] == "no edge authority"
+    network_sources = categories["network.request"]["scope_contract"]
+    assert network_sources["fields"]["sources"]["type"] == "object"
+    assert network_sources["example"]["sources"]["weather-api"]["base_url"] == "https://api.example.com"
+    assert network_sources["example"]["sources"]["weather-api"]["paths"] == ["/v1/forecast"]
+
 
 def test_role_projection_uses_least_information_and_rendering_is_deterministic():
     catalog = SystemCapabilityCatalog.build()

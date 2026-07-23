@@ -19,7 +19,7 @@ from backend.app_manifest import AppManifest
 from backend.capabilities.models import RuntimeContract
 from backend.graph_db import GraphDatabase
 from backend.models import ChatMessage, ChatSession
-from backend.opencode_service import OpenCodeStagedResult
+from backend.opencode_service import CodingAgentDraftError, OpenCodeStagedResult
 from backend.run_service import AgentRunState, Continue, Failed, RunCoordinator, RunStore, Succeeded, Wait
 from backend.schema_diff import VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
@@ -559,6 +559,135 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
     canvas = WorkspaceStorage(str(tmp_path)).get_canvas_config()
     assert canvas["open_app_ids"] == ["durable-app"]
     assert canvas["active_app_id"] == "durable-app"
+
+
+@pytest.mark.asyncio
+async def test_terminal_widget_failure_retains_isolated_draft_and_live_app(tmp_path: Path) -> None:
+    apps_dir = tmp_path / "apps"
+    live_dir = apps_dir / "weather-app"
+    staging_dir = apps_dir / f".weather-app.staging-{'a' * 32}"
+    live_dir.mkdir(parents=True)
+    staging_dir.mkdir()
+    (live_dir / "controller.js").write_text("// published", encoding="utf-8")
+    (staging_dir / "controller.js").write_text("// generated draft", encoding="utf-8")
+
+    store = RunStore(str(tmp_path))
+    workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)))
+    state = _state(
+        phase="verify",
+        workflow_type="widget_modify",
+        intent=IntentPlan(kind=IntentKind.WIDGET_MODIFY, app_id="weather-app", instruction="update it"),
+        data={
+            "staged_app": {
+                "output": "generated",
+                "app_id": "weather-app",
+                "staging_dir": str(staging_dir),
+                "live_dir": str(live_dir),
+            }
+        },
+    )
+
+    failed = await workflow._failure(
+        state,
+        code="budget_exhausted",
+        message="Active time exhausted",
+        retryable=False,
+        effect_state="none",
+    )
+
+    assert failed.summary == "Agent task failed; staged App retained"
+    assert staging_dir.is_dir()
+    assert (staging_dir / "controller.js").read_text(encoding="utf-8") == "// generated draft"
+    assert (live_dir / "controller.js").read_text(encoding="utf-8") == "// published"
+    assert state.data["staged_app"]["staging_dir"] == str(staging_dir)
+    assert state.data["staged_app_status"] == {
+        "state": "failed_draft",
+        "phase": "verify",
+        "error_code": "budget_exhausted",
+        "retryable": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it_in_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apps_dir = tmp_path / "apps"
+    live_dir = apps_dir / "weather-app"
+    staging_dir = apps_dir / f".weather-app.staging-{'b' * 32}"
+    live_dir.mkdir(parents=True)
+    staging_dir.mkdir()
+    (live_dir / "controller.js").write_text("// published", encoding="utf-8")
+    (staging_dir / "controller.js").write_text("// invalid generated draft", encoding="utf-8")
+    contract = _runtime_contract("weather-app")
+    calls: list[OpenCodeStagedResult | None] = []
+
+    async def runner(
+        app_id: str,
+        instruction: str,
+        *,
+        language: str,
+        on_update: Any,
+        promote: bool,
+        staged_result: OpenCodeStagedResult | None = None,
+    ) -> OpenCodeStagedResult:
+        del instruction, language, on_update
+        assert app_id == "weather-app"
+        assert promote is False
+        calls.append(staged_result)
+        result = staged_result or OpenCodeStagedResult(
+            output="generated",
+            app_id=app_id,
+            staging_dir=staging_dir,
+            live_dir=live_dir,
+        )
+        if staged_result is None:
+            raise CodingAgentDraftError(
+                "Capability contract: graph operation 'update' is not approved",
+                staged_result=result,
+                error_code="capability_contract_error",
+            )
+        (staging_dir / "controller.js").write_text("// repaired draft", encoding="utf-8")
+        _write_manifest(staging_dir, app_id, contract)
+        return result
+
+    monkeypatch.setattr(
+        durable_workflow_module,
+        "validate_opencode_staging",
+        lambda result: result.staging_dir / "controller.js",
+    )
+    store = RunStore(str(tmp_path))
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="build it"),
+        data={
+            "language": "en",
+            "approved_plan": "Build and verify it",
+            "approved_schema": {"reused_schemas": [], "new_schemas": [], "capabilities": []},
+            "runtime_contract": contract,
+        },
+    )
+    workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)), coding_agent_runner=runner)
+    run = _create_run(store, state, content="build it")
+
+    failed = await workflow(run, state)
+
+    assert isinstance(failed, Failed)
+    assert failed.error_code == "capability_contract_error"
+    assert failed.summary == "Agent task failed; staged App retained"
+    assert state.data["staged_app"]["staging_dir"] == str(staging_dir)
+    assert state.data["code_feedback"].startswith("Capability contract")
+    assert staging_dir.is_dir()
+    assert (live_dir / "controller.js").read_text(encoding="utf-8") == "// published"
+
+    repaired = await workflow(run, state)
+
+    assert isinstance(repaired, Continue)
+    assert repaired.next_phase == "verify"
+    assert calls == [None, workflow._staged_result(state.data["staged_app"])]
+    assert (staging_dir / "controller.js").read_text(encoding="utf-8") == "// repaired draft"
 
 
 @pytest.mark.asyncio

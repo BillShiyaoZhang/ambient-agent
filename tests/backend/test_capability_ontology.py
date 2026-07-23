@@ -55,6 +55,32 @@ def test_grants_are_canonical_and_have_a_deterministic_digest():
     assert grants_digest(left).startswith("sha256:")
 
 
+def test_empty_graph_edge_scope_normalizes_to_node_only_authority():
+    with_empty_edges = CapabilityGrant.from_dict(
+        {
+            "id": "graph.mutate",
+            "scope": {
+                "entities": ["Place"],
+                "operations": ["create", "update", "delete"],
+                "edge_types": [],
+            },
+        }
+    )
+    without_edges = CapabilityGrant.from_dict(
+        {
+            "id": "graph.mutate",
+            "scope": {"entities": ["Place"], "operations": ["create", "update", "delete"]},
+        }
+    )
+
+    assert with_empty_edges == without_edges
+    assert with_empty_edges.to_dict()["scope"] == {
+        "entities": ["Place"],
+        "operations": ["create", "delete", "update"],
+    }
+    assert grants_digest([with_empty_edges]) == grants_digest([without_edges])
+
+
 @pytest.mark.parametrize(
     "raw, message",
     [

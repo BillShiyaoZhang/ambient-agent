@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from backend.codex_service import run_codex_agent
 from backend.coding_agent_runtime import CodingAgentRuntime, SPECS, model_capability, spec_for
-from backend.opencode_service import run_opencode_agent_acp
+from backend.opencode_service import CodingAgentStagedResult, run_opencode_agent_acp
 
 CodingAgentId = Literal["opencode", "codex"]
 
@@ -180,14 +180,17 @@ async def run_coding_agent(
     coding_agent: str = "opencode",
     runtime: CodingAgentRuntime | None = None,
     model_config: dict[str, Any] | None = None,
+    staged_result: CodingAgentStagedResult | None = None,
 ):
     if coding_agent == "opencode":
+        staging_kwargs = {"staged_result": staged_result} if staged_result is not None else {}
         return await run_opencode_agent_acp(
             app_id,
             instruction,
             language=language,
             on_update=on_update,
             promote=promote,
+            **staging_kwargs,
         )
     if coding_agent == "codex":
         return await run_codex_agent(
@@ -198,5 +201,6 @@ async def run_coding_agent(
             promote=promote,
             runtime=runtime,
             native_model=str((model_config or {}).get("native_model") or "") or None,
+            staged_result=staged_result,
         )
     raise CodingAgentConfigError("Unknown coding agent", code="coding_agent_not_found")

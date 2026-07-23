@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app, app_manager, get_db
+from backend.main import _accept_websocket_safely, app, app_manager, get_db
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -53,6 +53,17 @@ def test_websocket_chat_flow(test_session, monkeypatch):
             assert "Hello Agent" in reply["message"]["content"]
             assert websocket.receive_json()["status"] == "idle"
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_aborted_or_duplicate_websocket_handshake_is_ignored_without_asgi_error():
+    class StaleHandshake:
+        async def accept(self):
+            raise RuntimeError(
+                "Expected ASGI message 'websocket.send' or 'websocket.close', but got 'websocket.accept'."
+            )
+
+    assert await _accept_websocket_safely(StaleHandshake()) is False
 
 
 def test_websocket_converse_rejects_unverified_inline_widget(test_session, monkeypatch):

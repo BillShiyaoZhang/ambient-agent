@@ -29,6 +29,7 @@ from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_runtime import use_model_selections
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import (
+    CodingAgentDraftError,
     CodingAgentStagedResult,
     discard_coding_agent_staging as discard_opencode_staging,
     promote_coding_agent_staging as promote_opencode_staging,
@@ -533,15 +534,11 @@ class DurableAgentWorkflow:
         if may_retry:
             # Keep already committed saga steps intact.  They have durable
             # effect ledgers and compensation data, so retrying only the
-            # current phase must not silently roll earlier results back.
+            # current phase must not silently roll earlier results back.  A
+            # staged App is also part of the checkpoint: a transient verifier
+            # failure must retry that artifact instead of deleting and
+            # regenerating it.
             retries[state.phase] = phase_retries + 1
-            staged = state.data.get("staged_app")
-            if staged:
-                try:
-                    discard_opencode_staging(self._staged_result(staged))
-                    state.data.pop("staged_app", None)
-                except Exception:
-                    logger.warning("Unable to discard retry staging", exc_info=True)
             return Failed(
                 summary="Retrying agent step",
                 error_code=code,
@@ -588,16 +585,36 @@ class DurableAgentWorkflow:
             }:
                 state.data.pop(key, None)
 
+        retained_staged_app = False
         staged = state.data.get("staged_app")
-        if staged:
-            try:
-                discard_opencode_staging(self._staged_result(staged))
-                state.data.pop("staged_app", None)
-            except Exception:
-                logger.warning("Unable to discard failed staged App", exc_info=True)
+        if isinstance(staged, dict) and not state.data.get("non_compensable_effect"):
+            raw_staging_dir = staged.get("staging_dir")
+            if isinstance(raw_staging_dir, str) and raw_staging_dir:
+                staging_dir = Path(raw_staging_dir)
+                try:
+                    retained_staged_app = staging_dir.is_dir() and not staging_dir.is_symlink()
+                except OSError:
+                    retained_staged_app = False
+            if retained_staged_app:
+                # A failed draft remains hidden from App discovery and cannot
+                # execute or promote without passing the regular verifier.
+                # Keeping the durable handle lets an explicit retry resume at
+                # verification with a fresh active-time window.
+                state.data["staged_app_status"] = {
+                    "state": "failed_draft",
+                    "phase": state.phase,
+                    "error_code": code,
+                    "retryable": False,
+                }
 
         return Failed(
-            summary="Agent task failed",
+            summary=(
+                "任务失败；生成草稿已保留，可重试继续验证"
+                if retained_staged_app and state.data.get("language") == "zh"
+                else "Agent task failed; staged App retained"
+                if retained_staged_app
+                else "Agent task failed"
+            ),
             error_code=code,
             message=message,
             retryable=False,
@@ -1144,9 +1161,7 @@ class DurableAgentWorkflow:
         if not intent.app_id:
             return Failed(summary="Missing App ID", error_code="app_id_missing", message="Widget intent has no app_id")
         previous = state.data.get("staged_app")
-        if previous:
-            discard_opencode_staging(self._staged_result(previous))
-            state.data.pop("staged_app", None)
+        retained_draft = self._staged_result(previous) if previous else None
 
         self._consume_model_turn(state, 1)
         contract = state.data.get("runtime_contract")
@@ -1189,30 +1204,55 @@ class DurableAgentWorkflow:
             supports_promote = "promote" in runner_parameters
             supports_coding_agent = "coding_agent" in runner_parameters
             supports_coding_agent_model = "coding_agent_model" in runner_parameters
+            supports_staged_result = "staged_result" in runner_parameters
         except (TypeError, ValueError):
             supports_promote = True
             supports_coding_agent = True
             supports_coding_agent_model = True
+            supports_staged_result = True
         if supports_promote:
             kwargs["promote"] = False
         if supports_coding_agent:
             kwargs["coding_agent"] = coding_agent
         if supports_coding_agent_model:
             kwargs["coding_agent_model"] = dict(state.model_snapshot.get("coding_agent_config") or {})
-        generated = await self.coding_agent_runner(intent.app_id, instruction, **kwargs)
+        if retained_draft is not None:
+            if not supports_staged_result:
+                raise WorkflowError(
+                    "Configured coding agent cannot resume the retained failed draft",
+                    code="staged_artifact_resume_unsupported",
+                )
+            kwargs["staged_result"] = retained_draft
+        try:
+            generated = await self.coding_agent_runner(intent.app_id, instruction, **kwargs)
+        except CodingAgentDraftError as exc:
+            self._record_staged_app(state, exc.staged_result, coding_agent, validation_error=str(exc))
+            raise WorkflowError(str(exc), code=exc.error_code) from exc
         if isinstance(generated, CodingAgentStagedResult):
+            self._record_staged_app(state, generated, coding_agent)
             validate_opencode_staging(generated)
             self._assert_staged_runtime_contract(generated.staging_dir, contract)
-            state.data["staged_app"] = {
-                "output": generated.output[-64_000:],
-                "app_id": generated.app_id,
-                "staging_dir": str(generated.staging_dir),
-                "live_dir": str(generated.live_dir),
-                "coding_agent": coding_agent,
-            }
         else:
             raise WorkflowError("Coding agent did not return a staged artifact", code="staged_artifact_missing")
         return Continue(next_phase="verify", summary="Staged App generated")
+
+    @staticmethod
+    def _record_staged_app(
+        state: AgentRunState,
+        result: CodingAgentStagedResult,
+        coding_agent: str,
+        *,
+        validation_error: str | None = None,
+    ) -> None:
+        state.data["staged_app"] = {
+            "output": result.output[-64_000:],
+            "app_id": result.app_id,
+            "staging_dir": str(result.staging_dir),
+            "live_dir": str(result.live_dir),
+            "coding_agent": coding_agent,
+        }
+        if validation_error:
+            state.data["code_feedback"] = validation_error[:12_000]
 
     @staticmethod
     def _staged_result(data: dict[str, Any]) -> CodingAgentStagedResult:

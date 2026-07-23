@@ -164,10 +164,14 @@ flowchart LR
     Stage[stage_code] --> Prepare[opencode_service.py: _prepare_staging_app]
     Prepare --> ACP[opencode_service.py: run_opencode_agent_acp]
     ACP --> Validate[opencode_service.py: validate_opencode_staging]
-    Validate --> Verify[verify reads staging]
+    Validate -->|pass| Verify[verify reads staging]
+    Validate -->|adapter error + handle| Retain[retain non-executable failed draft]
     Verify -->|pass / approved override| Marker[durable promotion marker]
     Marker --> Promote[opencode_service.py: promote_opencode_staging]
-    Verify -->|failure / rework / cancel| Discard[opencode_service.py: discard_opencode_staging]
+    Verify -->|failure| Retain
+    Retain -->|retry internal validation| Stage
+    Retain -->|retry later verification| Verify
+    Verify -->|rework / cancel / retention expiry| Discard[opencode_service.py: discard_opencode_staging]
     Promote --> Live[Live App]
 ```
 

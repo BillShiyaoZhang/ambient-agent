@@ -123,7 +123,11 @@ def _normalize_scope(category_id: str, value: Any) -> dict[str, Any]:
             raise ValueError("graph.mutate operations supports only create, update, and delete")
         result: dict[str, Any] = {"entities": entities, "operations": operations}
         if "edge_types" in value:
-            result["edge_types"] = _string_list(value["edge_types"], field="graph.mutate edge_types")
+            raw_edge_types = value["edge_types"]
+            if not isinstance(raw_edge_types, list):
+                raise ValueError("graph.mutate edge_types must be an array with at most 100 items")
+            if raw_edge_types:
+                result["edge_types"] = _string_list(raw_edge_types, field="graph.mutate edge_types")
         return result
     if category_id == "network.request":
         return {"sources": _network_sources(value.get("sources"))}

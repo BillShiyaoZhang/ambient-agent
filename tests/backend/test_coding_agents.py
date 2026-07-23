@@ -9,7 +9,7 @@ import backend.main as main_module
 from backend.coding_agent import CodingAgentConfigStore
 from backend.coding_agent_runtime import CodingAgentRuntime
 from backend.codex_service import _codex_environment, _codex_prompt, _event_update, run_codex_agent
-from backend.opencode_service import OpenCodeArtifactError, OpenCodeStagedResult
+from backend.opencode_service import CodingAgentDraftError, OpenCodeArtifactError, OpenCodeStagedResult
 
 
 @pytest.fixture(autouse=True)
@@ -219,9 +219,11 @@ async def test_codex_runner_repairs_sequential_validation_failures_in_place(tmp_
 
     monkeypatch.setattr("backend.codex_service.validate_coding_agent_staging", validate_until_third_attempt)
 
+    approved_contract = '{"app_id":"repair-widget","capabilities":[{"id":"graph.mutate"}]}'
     result = await run_codex_agent(
         "repair-widget",
-        "build it",
+        "build it\n\n[APPROVED RUNTIME CONTRACT — COPY EXACTLY INTO MANIFEST V2]\n"
+        f"{approved_contract}\n\n[SYSTEM CAPABILITIES]\n...",
         language="en",
         promote=False,
         runtime=runtime,
@@ -232,8 +234,65 @@ async def test_codex_runner_repairs_sequential_validation_failures_in_place(tmp_
     repair_prompt = (result.staging_dir / "prompt-2.txt").read_text(encoding="utf-8")
     assert "failed mandatory validation" in repair_prompt
     assert "data source id must use kebab-case" in repair_prompt
+    assert "controller.js and/or manifest.json" in repair_prompt
+    assert approved_contract in repair_prompt
     second_repair_prompt = (result.staging_dir / "prompt-3.txt").read_text(encoding="utf-8")
     assert 'Unexpected token, expected "}"' in second_repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_transfers_invalid_draft_and_repairs_same_directory_on_retry(tmp_path, monkeypatch):
+    fake_codex = tmp_path / "fake_codex.py"
+    fake_codex.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        "sys.stdin.read()\n"
+        "count_path = pathlib.Path('count.txt')\n"
+        "count = int(count_path.read_text() or '0') + 1 if count_path.exists() else 1\n"
+        "count_path.write_text(str(count), encoding='utf-8')\n"
+        "pathlib.Path('controller.js').write_text('export default function Draft() { return null; }', encoding='utf-8')\n"
+        "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'drafted'}}))\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+    apps_dir = tmp_path / "apps"
+    monkeypatch.setenv("CODEX_COMMAND", str(fake_codex))
+    monkeypatch.setenv("APPS_DIR", str(apps_dir))
+    runtime = CodingAgentRuntime(tmp_path / "workspace")
+
+    def reject_draft(_result):
+        raise OpenCodeArtifactError("Capability contract: graph operation 'update' is not approved")
+
+    monkeypatch.setattr("backend.codex_service.validate_coding_agent_staging", reject_draft)
+
+    with pytest.raises(CodingAgentDraftError) as captured:
+        await run_codex_agent(
+            "weather-widget",
+            "build it",
+            language="en",
+            promote=False,
+            runtime=runtime,
+        )
+
+    draft = captured.value.staged_result
+    assert captured.value.error_code == "OpenCodeArtifactError"
+    assert draft.staging_dir.is_dir()
+    assert (draft.staging_dir / "controller.js").is_file()
+    assert (draft.staging_dir / "count.txt").read_text(encoding="utf-8") == "4"
+
+    monkeypatch.setattr("backend.codex_service.validate_coding_agent_staging", lambda _result: None)
+    repaired = await run_codex_agent(
+        "weather-widget",
+        "repair it",
+        language="en",
+        promote=False,
+        runtime=runtime,
+        staged_result=draft,
+    )
+
+    assert isinstance(repaired, OpenCodeStagedResult)
+    assert repaired.staging_dir == draft.staging_dir
+    assert (repaired.staging_dir / "count.txt").read_text(encoding="utf-8") == "5"
 
 
 @pytest.mark.asyncio

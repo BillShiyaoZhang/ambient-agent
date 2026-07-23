@@ -104,12 +104,27 @@ class OpenCodeArtifactError(OpenCodeACPError):
 
 @dataclass(frozen=True, slots=True)
 class OpenCodeStagedResult:
-    """A validated staged App whose caller must either promote or discard."""
+    """A constrained staged App handle whose caller must retain, promote, or discard."""
 
     output: str
     app_id: str
     staging_dir: Path
     live_dir: Path
+
+
+class CodingAgentDraftError(OpenCodeACPError):
+    """Return a failed durable generation together with its retained draft handle."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        staged_result: OpenCodeStagedResult,
+        error_code: str,
+    ) -> None:
+        super().__init__(message)
+        self.staged_result = staged_result
+        self.error_code = error_code
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -470,6 +485,12 @@ def validate_opencode_staging(result: OpenCodeStagedResult) -> Path:
     return staging_dir / "controller.js"
 
 
+def resume_opencode_staging(result: OpenCodeStagedResult) -> tuple[Path, Path]:
+    """Validate an existing draft handle without requiring its artifacts to pass verification."""
+
+    return _validated_staging_handle(result, require_exists=True)
+
+
 def promote_opencode_staging(result: OpenCodeStagedResult) -> Path:
     """Revalidate and promote a retained staging result to its live App directory."""
     live_dir, staging_dir = _validated_staging_handle(result, require_exists=True)
@@ -514,6 +535,7 @@ def discard_opencode_staging(result: OpenCodeStagedResult) -> None:
 # Provider-neutral names for the shared staging contract. The OpenCode names
 # remain public compatibility aliases for existing extensions and checkpoints.
 CodingAgentStagedResult = OpenCodeStagedResult
+resume_coding_agent_staging = resume_opencode_staging
 validate_coding_agent_staging = validate_opencode_staging
 promote_coding_agent_staging = promote_opencode_staging
 validate_coding_agent_promotion = validate_opencode_promotion
@@ -1104,6 +1126,7 @@ async def run_opencode_agent_acp(
     on_update: Callable[[str], None] = None,
     *,
     promote: bool = True,
+    staged_result: OpenCodeStagedResult | None = None,
 ) -> str | OpenCodeStagedResult:
     """
     Spawns OpenCode agent in ACP mode, runs its loop, and streams the output/logs back via on_update callback.
@@ -1120,7 +1143,13 @@ async def run_opencode_agent_acp(
 
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
-    live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
+    owns_staging = staged_result is None
+    if staged_result is None:
+        live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
+    else:
+        if staged_result.app_id != app_id:
+            raise OpenCodeACPInputError("Retained staging App ID does not match the requested App")
+        live_dir, staging_dir = resume_opencode_staging(staged_result)
     client = FastAPIACPClient(workspace_root=staging_dir, on_update_callback=on_update)
     session_id: str | None = None
     proc: asyncio.subprocess.Process | None = None
@@ -1205,11 +1234,29 @@ async def run_opencode_agent_acp(
             return staged_result
         promote_opencode_staging(staged_result)
         return output
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not promote:
+            retain_staging = True
+            if isinstance(exc, CodingAgentDraftError):
+                raise
+            raise CodingAgentDraftError(
+                str(exc),
+                staged_result=OpenCodeStagedResult(
+                    output="".join(client.output_buffer)[-64_000:],
+                    app_id=app_id,
+                    staging_dir=staging_dir,
+                    live_dir=live_dir,
+                ),
+                error_code=str(getattr(exc, "code", type(exc).__name__)),
+            ) from exc
+        raise
     finally:
         if proc is not None and proc.returncode is None:
             try:
                 await _terminate_process(proc, process_group=True)
             except Exception:
                 logger.warning("Unable to terminate OpenCode ACP process during cleanup", exc_info=True)
-        if not retain_staging and staging_dir.exists():
+        if owns_staging and not retain_staging and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)

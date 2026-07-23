@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import os
 import sqlite3
 import uuid
@@ -941,6 +942,57 @@ class RunStore:
                 f"SELECT * FROM runs {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?", params
             ).fetchall()
         return [_decode_row(row) or {} for row in rows]
+
+    def retained_staging_paths(
+        self,
+        *,
+        failed_retention_seconds: float = 7 * 24 * 60 * 60,
+        now: datetime | None = None,
+    ) -> set[str]:
+        """Return staging handles protected from the startup orphan reaper.
+
+        Active Run checkpoints are protected without a time limit.  Failed
+        Widget drafts remain protected only for the configured retention
+        window; once that window expires the existing constrained reaper may
+        delete them and a later retry will regenerate code.
+        """
+
+        if not isinstance(failed_retention_seconds, (int, float)) or not math.isfinite(failed_retention_seconds):
+            raise ValueError("failed staging retention must be a finite number")
+        if failed_retention_seconds < 0:
+            raise ValueError("failed staging retention must be non-negative")
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("staging retention time must be timezone-aware")
+        current = current.astimezone(UTC)
+        cutoff = (current - timedelta(seconds=float(failed_retention_seconds))).isoformat()
+        statuses = sorted(ACTIVE_STATUSES)
+        placeholders = ",".join("?" for _ in statuses)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""SELECT status, state_json FROM runs
+                    WHERE state_json IS NOT NULL AND (
+                        status IN ({placeholders})
+                        OR (status='failed' AND COALESCE(finished_at, updated_at)>=?)
+                    )""",
+                (*statuses, cutoff),
+            ).fetchall()
+
+        references: set[str] = set()
+        for row in rows:
+            try:
+                state = json.loads(row["state_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            data = state.get("data") if isinstance(state, dict) else None
+            if not isinstance(data, dict):
+                continue
+            for handle_key in ("staged_app", "staged_app_cleanup_pending"):
+                handle = data.get(handle_key)
+                staging_dir = handle.get("staging_dir") if isinstance(handle, dict) else None
+                if isinstance(staging_dir, str) and staging_dir:
+                    references.add(staging_dir)
+        return references
 
     def events_after(self, sequence: int, limit: int = 500) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -2985,20 +3037,40 @@ class RunCoordinator:
             normalized_retry_state.last_error = None
             normalized_retry_state.data.pop("phase_retries", None)
             normalized_retry_state.data["active_seconds"] = 0.0
-            if (
-                normalized_retry_state.workflow_type.startswith("widget")
-                and normalized_retry_state.phase in {"verify", "wait_override", "promote"}
-                and not normalized_retry_state.data.get("staged_app")
-            ):
-                normalized_retry_state.phase = "stage_code"
-                for key in (
-                    "verification_report",
-                    "verification_options",
-                    "verification_passed",
-                    "verification_override",
-                    "code_feedback",
-                ):
-                    normalized_retry_state.data.pop(key, None)
+            if normalized_retry_state.workflow_type.startswith("widget"):
+                staged = normalized_retry_state.data.get("staged_app")
+                raw_staging_path = staged.get("staging_dir") if isinstance(staged, dict) else None
+                staging_path = Path(raw_staging_path) if isinstance(raw_staging_path, str) and raw_staging_path else None
+                try:
+                    staged_exists = bool(
+                        staging_path is not None and staging_path.is_dir() and not staging_path.is_symlink()
+                    )
+                except OSError:
+                    staged_exists = False
+                normalized_retry_state.data.pop("staged_app_status", None)
+                if normalized_retry_state.phase in {"stage_code", "verify", "wait_override", "promote"} and not staged_exists:
+                    normalized_retry_state.data.pop("staged_app", None)
+                    normalized_retry_state.phase = "stage_code"
+                    for key in (
+                        "verification_report",
+                        "verification_options",
+                        "verification_passed",
+                        "verification_override",
+                        "code_feedback",
+                    ):
+                        normalized_retry_state.data.pop(key, None)
+                elif normalized_retry_state.phase in {"verify", "wait_override"} and staged_exists:
+                    # A failed wait cannot reuse an old human response.  Rerun
+                    # verification and create a fresh interaction if findings
+                    # still require a decision.
+                    normalized_retry_state.phase = "verify"
+                    for key in (
+                        "verification_report",
+                        "verification_options",
+                        "verification_passed",
+                        "verification_override",
+                    ):
+                        normalized_retry_state.data.pop(key, None)
             if original["status"] == "cancelled":
                 preserved = {
                     key: normalized_retry_state.data[key]
