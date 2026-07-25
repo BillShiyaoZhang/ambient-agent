@@ -48,7 +48,7 @@ from backend.run_service import (
     Succeeded,
     Wait,
 )
-from backend.schema_alignment import SchemaAlignmentService
+from backend.schema_alignment import SchemaAlignmentService, validate_schema_capability_proposal
 from backend.schema_verification import SchemaVerificationService
 from backend.workspace_storage import WorkspaceStorage
 
@@ -70,8 +70,11 @@ class DurableAgentWorkflow:
     }
     _WIDGET_KEYS = {
         "plan_candidate",
+        "plan_rework_feedback",
+        "plan_schema_context",
         "approved_plan",
         "schema_candidate",
+        "schema_validation_errors",
         "approved_schema",
         "runtime_contract",
         "code_feedback",
@@ -1017,10 +1020,16 @@ class DurableAgentWorkflow:
             return Failed(summary="Missing App ID", error_code="app_id_missing", message="Widget intent has no app_id")
         candidate = state.data.get("plan_candidate")
         if not candidate:
+            rework_feedback = str(state.data.pop("plan_rework_feedback", "") or "").strip()
+            plan_instruction = intent.instruction or ""
+            if rework_feedback:
+                plan_instruction = (
+                    f"{plan_instruction}\n\n[PLAN REWORK FEEDBACK]\n{rework_feedback[:12_000]}"
+                )
             candidate = await PlanGenerationService.generate_plan(
-                instruction=intent.instruction or "",
+                instruction=plan_instruction,
                 app_id=intent.app_id,
-                schemas_context="",
+                schemas_context=str(state.data.get("plan_schema_context") or "")[:16_000],
                 db_session=self._run_storage(state),
                 language=str(state.data.get("language") or "zh"),
                 audit_context=self._run_context(run, state).audit_context(),
@@ -1059,7 +1068,7 @@ class DurableAgentWorkflow:
             refined = await PlanGenerationService.refine_plan(
                 instruction=intent.instruction or "",
                 app_id=intent.app_id or "",
-                schemas_context="",
+                schemas_context=str(state.data.get("plan_schema_context") or "")[:16_000],
                 current_plan=str(response.get("plan") or candidate),
                 feedback=str(response.get("feedback") or ""),
                 db_session=self._run_storage(state),
@@ -1101,6 +1110,7 @@ class DurableAgentWorkflow:
                 proposal,
                 state.data.get("pre_extend_schema_props") or {},
             )
+            state.data.pop("pre_extend_schema_props", None)
             self.graph_db.effective_schemas(proposal)
             state.data["schema_candidate"] = proposal
         await self._emit(
@@ -1113,7 +1123,12 @@ class DurableAgentWorkflow:
             state,
             kind="schema_approval",
             prompt="Approve database schema proposal",
-            payload={"type": "schema_approval_request", "app_id": intent.app_id, "proposal": proposal},
+            payload={
+                "type": "schema_approval_request",
+                "app_id": intent.app_id,
+                "plan": str(state.data.get("approved_plan") or ""),
+                "proposal": proposal,
+            },
         )
 
     async def _phase_wait_schema(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
@@ -1124,19 +1139,42 @@ class DurableAgentWorkflow:
         action = self._approval(response)
         proposal = state.data.get("schema_candidate") or {}
         if action == "approve":
-            approved = json.loads(json.dumps(response.get("proposal") or proposal))
+            edited_proposal = json.loads(json.dumps(response.get("proposal") or proposal))
+            try:
+                approved = validate_schema_capability_proposal(
+                    edited_proposal,
+                    self.capability_catalog_factory(),
+                )
+                effective_schemas = self.graph_db.effective_schemas(approved)
+            except ValueError as exc:
+                # Approval payloads are editable in the UI.  A dependency
+                # error (for example deleting a schema while leaving it in a
+                # Graph grant) is a correctable design issue, not a terminal
+                # workflow failure.  Keep the edited draft and ask again with
+                # an actionable deterministic diagnostic.
+                diagnostic = " ".join(str(exc).strip().split())[:2_000]
+                state.data["schema_candidate"] = edited_proposal
+                state.data["schema_validation_errors"] = [diagnostic]
+                state.phase = "wait_schema"
+                return await self._wait(
+                    run,
+                    state,
+                    kind="schema_approval",
+                    prompt="Fix schema and capability proposal dependencies",
+                    payload={
+                        "type": "schema_approval_request",
+                        "app_id": intent.app_id,
+                        "plan": str(state.data.get("approved_plan") or ""),
+                        "proposal": edited_proposal,
+                        "validation_errors": [diagnostic],
+                    },
+                )
             approved_schema_ids = {
                 str(item.get("id"))
                 for item in [*approved.get("reused_schemas", []), *approved.get("new_schemas", [])]
                 if item.get("id")
             }
-            normalized_grants = normalize_grants(approved.get("capabilities", []))
-            self.capability_catalog_factory().validate_grants(
-                normalized_grants,
-                graph_entity_ids=approved_schema_ids,
-            )
-            approved["capabilities"] = [grant.to_dict() for grant in normalized_grants]
-            effective_schemas = self.graph_db.effective_schemas(approved)
+            state.data.pop("schema_validation_errors", None)
             state.data["approved_schema"] = approved
             effective_by_id = {item["id"]: item for item in effective_schemas}
             schemas = [effective_by_id[schema_id] for schema_id in sorted(approved_schema_ids)]
@@ -1145,12 +1183,25 @@ class DurableAgentWorkflow:
                 schemas=schemas,
                 capabilities=approved["capabilities"],
             ).to_dict()
+            state.data.pop("plan_schema_context", None)
+            state.data.pop("plan_rework_feedback", None)
             return Continue(next_phase="stage_code", summary="Schema proposal approved")
         if action == "rework_plan":
+            edited_proposal = response.get("proposal") or proposal
+            rework_feedback = str(response.get("feedback") or "").strip() or (
+                "Revise the plan so every feature is feasible with the user-edited "
+                "schema and capability proposal."
+            )
             state.data.pop("plan_candidate", None)
             state.data.pop("approved_plan", None)
             state.data.pop("schema_candidate", None)
             state.data.pop("runtime_contract", None)
+            state.data["plan_rework_feedback"] = rework_feedback[:12_000]
+            state.data["plan_schema_context"] = json.dumps(
+                edited_proposal,
+                ensure_ascii=False,
+                sort_keys=True,
+            )[:16_000]
             return Continue(next_phase="plan", summary="Returning to development plan")
         if action == "refine":
             refined = await SchemaAlignmentService.refine_proposal(
@@ -1174,7 +1225,12 @@ class DurableAgentWorkflow:
                 state,
                 kind="schema_approval",
                 prompt="Approve refined database schema proposal",
-                payload={"type": "schema_approval_request", "app_id": intent.app_id, "proposal": refined},
+                payload={
+                    "type": "schema_approval_request",
+                    "app_id": intent.app_id,
+                    "plan": str(state.data.get("approved_plan") or ""),
+                    "proposal": refined,
+                },
             )
         return Failed(
             summary="Schema proposal denied",
@@ -1435,7 +1491,6 @@ class DurableAgentWorkflow:
         )
 
     async def _phase_wait_override(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
-        del run
         staged = state.data.get("staged_app")
         if not staged:
             raise WorkflowError("Verification override has no staged artifact", code="staged_artifact_missing")
@@ -1444,23 +1499,77 @@ class DurableAgentWorkflow:
             raise WorkflowError("Verification response is missing", code="interaction_unresolved")
         action = self._approval(response)
         if action == "approve":
-            state.data["verification_override"] = True
-            return Continue(next_phase="promote", summary="Verification override approved")
+            # Schema/capability findings predict runtime authorization or
+            # ontology failures. Publishing them as an "override" only turns
+            # a deterministic build error into a user-facing runtime error.
+            # Keep the draft and require an explicit repair path.
+            diagnostic = (
+                "Schema and capability verification findings cannot be bypassed; "
+                "rework the code, schema, or development plan."
+            )
+            state.data.pop("verification_override", None)
+            state.phase = "wait_override"
+            return await self._wait(
+                run,
+                state,
+                kind="verification_approval",
+                prompt="Choose a repair path for mandatory verification findings",
+                payload={
+                    "type": "verification_approval_request",
+                    "app_id": self._current_intent(state).app_id,
+                    "report": str(state.data.get("verification_report") or ""),
+                    "options": state.data.get("verification_options") or [],
+                    "validation_errors": [diagnostic],
+                    "allowed_actions": ["rework_code", "rework_schema", "rework_plan"],
+                },
+            )
         if action == "rework_code":
             state.data["code_feedback"] = str(response.get("feedback") or state.data.get("verification_report") or "")
             discard_opencode_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
+            for key in (
+                "verification_report",
+                "verification_options",
+                "verification_passed",
+                "verification_override",
+            ):
+                state.data.pop(key, None)
             return Continue(next_phase="stage_code", summary="Reworking staged code")
         if action == "rework_schema":
+            extensions = self._selected_schema_extensions(
+                response.get("approved_options"),
+                state.data.get("verification_options"),
+            )
+            if extensions:
+                state.data["pre_extend_schema_props"] = extensions
             discard_opencode_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
-            state.data.pop("schema_candidate", None)
-            state.data.pop("approved_schema", None)
+            for key in (
+                "schema_candidate",
+                "schema_validation_errors",
+                "approved_schema",
+                "runtime_contract",
+                "verification_report",
+                "verification_options",
+                "verification_passed",
+                "verification_override",
+            ):
+                state.data.pop(key, None)
             return Continue(next_phase="align_schema", summary="Reworking schema proposal")
         if action == "rework_plan":
+            plan_rework_feedback = str(
+                response.get("feedback") or state.data.get("verification_report") or ""
+            ).strip()
+            plan_schema_context = json.dumps(
+                state.data.get("approved_schema") or {},
+                ensure_ascii=False,
+                sort_keys=True,
+            )[:16_000]
             discard_opencode_staging(self._staged_result(staged))
-            for key in self._WIDGET_KEYS:
+            for key in self._WIDGET_KEYS | {"pre_extend_schema_props"}:
                 state.data.pop(key, None)
+            state.data["plan_rework_feedback"] = plan_rework_feedback[:12_000]
+            state.data["plan_schema_context"] = plan_schema_context
             return Continue(next_phase="plan", summary="Reworking development plan")
         return Failed(
             summary="Verification override denied",
@@ -1468,8 +1577,47 @@ class DurableAgentWorkflow:
             message=f"Verification action was denied or unknown: {action}",
         )
 
+    @staticmethod
+    def _selected_schema_extensions(
+        raw_selected: Any,
+        raw_available: Any,
+    ) -> dict[str, dict[str, str]]:
+        """Compile UI selections from server-issued verification findings.
+
+        The client selects only `(node_type, property_name)` pairs. Types and
+        actions always come from the checkpointed server findings so a forged
+        response cannot introduce arbitrary ontology fields.
+        """
+
+        if not isinstance(raw_selected, list) or not isinstance(raw_available, list):
+            return {}
+        selected = {
+            (str(item.get("node_type") or ""), str(item.get("property_name") or ""))
+            for item in raw_selected
+            if isinstance(item, dict)
+        }
+        allowed_types = {"string", "integer", "number", "boolean"}
+        extensions: dict[str, dict[str, str]] = {}
+        for item in raw_available:
+            if not isinstance(item, dict):
+                continue
+            node_type = str(item.get("node_type") or "")
+            property_name = str(item.get("property_name") or "")
+            detected_type = str(item.get("detected_type") or "")
+            if (
+                (node_type, property_name) not in selected
+                or not node_type
+                or not property_name
+                or property_name == "*"
+                or item.get("action") != "extend_schema"
+                or detected_type not in allowed_types
+            ):
+                continue
+            extensions.setdefault(node_type, {})[property_name] = detected_type
+        return extensions
+
     async def _phase_promote(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
-        if not state.data.get("verification_passed") and not state.data.get("verification_override"):
+        if not state.data.get("verification_passed"):
             raise WorkflowError(
                 "An unverified artifact cannot be promoted",
                 code="artifact_not_verified",
@@ -1542,7 +1690,7 @@ class DurableAgentWorkflow:
         ]
         canvas["active_app_id"] = published_app_id
         storage.save_canvas_config(canvas)
-        report = str(state.data.get("verification_report") or "Explicit verification override approved")
+        report = str(state.data.get("verification_report") or "Verification report unavailable")
         output = str(staged.get("output") or "")
         coding_agent = str(staged.get("coding_agent") or state.model_snapshot.get("coding_agent") or "opencode")
         coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"

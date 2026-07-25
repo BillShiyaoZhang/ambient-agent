@@ -14,6 +14,41 @@ from backend.llm_runtime import primary_selection, selection_ids
 logger = logging.getLogger("schema_alignment")
 
 
+def validate_schema_capability_proposal(
+    raw_proposal: dict[str, Any],
+    catalog: SystemCapabilityCatalog,
+) -> dict[str, Any]:
+    """Canonicalize and validate an editable schema + capability proposal.
+
+    Model output and user-edited approval payloads must pass through the same
+    validator.  In particular, Graph grants may reference only entities that
+    remain in the proposal after an edit.
+    """
+
+    if not isinstance(raw_proposal, dict):
+        raise ValueError("Schema proposal must be a JSON object")
+    proposal = json.loads(json.dumps(raw_proposal))
+    proposal.setdefault("reused_schemas", [])
+    proposal.setdefault("new_schemas", [])
+    if not isinstance(proposal["reused_schemas"], list) or not isinstance(proposal["new_schemas"], list):
+        raise ValueError("Schema proposal reused_schemas and new_schemas must be arrays")
+
+    schema_entries = [*proposal["reused_schemas"], *proposal["new_schemas"]]
+    if any(not isinstance(item, dict) for item in schema_entries):
+        raise ValueError("Schema proposal entries must be objects")
+    schema_ids = [str(item.get("id") or "").strip() for item in schema_entries]
+    if any(not schema_id for schema_id in schema_ids):
+        raise ValueError("Every schema proposal entry must have a non-empty id")
+    duplicate_ids = sorted({schema_id for schema_id in schema_ids if schema_ids.count(schema_id) > 1})
+    if duplicate_ids:
+        raise ValueError(f"Duplicate schema proposal entities: {', '.join(duplicate_ids)}")
+
+    normalized_grants = normalize_grants(proposal.get("capabilities", []))
+    catalog.validate_grants(normalized_grants, graph_entity_ids=set(schema_ids))
+    proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
+    return proposal
+
+
 def _parse_and_validate_proposal(
     raw_response: str,
     catalog: SystemCapabilityCatalog,
@@ -32,21 +67,7 @@ def _parse_and_validate_proposal(
         cleaned = cleaned[start_idx : end_idx + 1]
 
     proposal = json.loads(cleaned)
-    if not isinstance(proposal, dict):
-        raise ValueError("Schema proposal must be a JSON object")
-    proposal.setdefault("reused_schemas", [])
-    proposal.setdefault("new_schemas", [])
-    if not isinstance(proposal["reused_schemas"], list) or not isinstance(proposal["new_schemas"], list):
-        raise ValueError("Schema proposal reused_schemas and new_schemas must be arrays")
-    normalized_grants = normalize_grants(proposal.get("capabilities", []))
-    graph_entity_ids = {
-        str(item.get("id"))
-        for item in [*proposal["reused_schemas"], *proposal["new_schemas"]]
-        if isinstance(item, dict) and item.get("id")
-    }
-    catalog.validate_grants(normalized_grants, graph_entity_ids=graph_entity_ids)
-    proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
-    return proposal
+    return validate_schema_capability_proposal(proposal, catalog)
 
 
 async def _generate_validated_proposal(

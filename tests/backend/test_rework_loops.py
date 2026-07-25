@@ -50,10 +50,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
 
     # 2. Mock Plan Generation
     plan_counter = 0
+    plan_inputs = []
 
     async def mock_generate_plan(*args, **kwargs):
         nonlocal plan_counter
         plan_counter += 1
+        plan_inputs.append(kwargs)
         return f"Plan Version {plan_counter}"
 
     monkeypatch.setattr("backend.plan_generation.PlanGenerationService.generate_plan", mock_generate_plan)
@@ -207,6 +209,8 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
         plan_req_2 = websocket.receive_json()
         assert plan_req_2["type"] == "plan_approval_request"
         assert plan_req_2["plan"] == "Plan Version 2"
+        assert "Please rework plan to be simpler" in plan_inputs[1]["instruction"]
+        assert '"reused_schemas"' in plan_inputs[1]["schemas_context"]
         plan_request_id_2 = plan_req_2["request_id"]
 
         assert "等待开发计划" in websocket.receive_json()["message"]["content"]

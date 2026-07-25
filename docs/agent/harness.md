@@ -90,7 +90,6 @@ stateDiagram-v2
     stage_code --> verify: retained staging artifact
     verify --> promote: clean
     verify --> wait_override: findings
-    wait_override --> promote: explicit approve
     wait_override --> stage_code: rework code
     wait_override --> align_schema: rework schema
     wait_override --> plan: rework plan

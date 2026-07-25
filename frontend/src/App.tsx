@@ -20,8 +20,12 @@ import { mergeIncomingMessage } from "./lib/messages";
 import {
   createCustomOntologyEntity,
   parseEquivalentOntologyIris,
-  type OntologyProposalEntity,
 } from "./lib/ontology";
+import {
+  reconcileProposalGraphEntity,
+  schemaProposalDependencyErrors,
+  type WidgetSchemaProposal,
+} from "./lib/widgetDesign";
 import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
@@ -184,23 +188,13 @@ function App() {
     setPendingBackendPermission(null);
   };
 
-  interface SchemaProposal {
-    reused_schemas: Array<{
-      id: string;
-      reason: string;
-      extended_properties: Record<string, string>;
-      data_scope?: "user_context";
-    }>;
-    new_schemas: OntologyProposalEntity[];
-    capabilities: Array<{
-      id: string;
-      scope: Record<string, unknown>;
-    }>;
-  }
+  type SchemaProposal = WidgetSchemaProposal;
   interface SchemaApprovalRequest {
     request_id: string;
     app_id: string;
+    plan?: string;
     proposal: SchemaProposal;
+    validation_errors?: string[];
   }
 
   interface PlanApprovalRequest {
@@ -215,6 +209,8 @@ function App() {
     request_id: string;
     app_id: string;
     report: string;
+    validation_errors?: string[];
+    allowed_actions?: Array<"rework_code" | "rework_schema" | "rework_plan">;
     options?: Array<{
       node_type: string;
       property_name: string;
@@ -250,6 +246,10 @@ function App() {
       setVerificationFeedback("");
     }
   }, [pendingVerificationRequest]);
+
+  const schemaDependencyErrors = editedProposal
+    ? schemaProposalDependencyErrors(editedProposal)
+    : [];
 
   const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
     if (!pendingSchemaRequest) return;
@@ -394,6 +394,8 @@ function App() {
       if (schema.ontology_iri === `urn:ambient:ontology:${previousId}`) {
         schema.ontology_iri = `urn:ambient:ontology:${val}`;
       }
+      setEditedProposal(reconcileProposalGraphEntity(updated, previousId, val));
+      return;
     }
     setEditedProposal(updated);
   };
@@ -408,8 +410,11 @@ function App() {
   const handleRemoveNewSchema = (schemaIndex: number) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
+    const removedId = updated.new_schemas[schemaIndex]?.id;
     updated.new_schemas.splice(schemaIndex, 1);
-    setEditedProposal(updated);
+    setEditedProposal(
+      removedId ? reconcileProposalGraphEntity(updated, removedId, null) : updated,
+    );
   };
 
   const handleAddNewSchema = () => {
@@ -973,6 +978,36 @@ function App() {
         <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
           <div className="system-dialog-body flex flex-col gap-4">
 
+            {pendingSchemaRequest.plan && (
+              <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                  {language === "zh" ? "当前已批准 Plan（用于核对设计覆盖）" : "Current approved Plan (for coverage review)"}
+                </h4>
+                <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed text-slate-300">
+                  {pendingSchemaRequest.plan}
+                </div>
+              </div>
+            )}
+
+            {((pendingSchemaRequest.validation_errors?.length || 0) > 0 || schemaDependencyErrors.length > 0) && (
+              <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4">
+                <h4 className="text-xs font-semibold text-red-300">
+                  {language === "zh" ? "设计依赖尚未对齐" : "Design dependencies are not aligned"}
+                </h4>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  {language === "zh"
+                    ? "Schema 修改会同步影响 Graph grant。请修复下列问题，或使用自然语言让 Agent 重新对齐后再批准。"
+                    : "Schema edits affect Graph grants. Fix the issues below, or ask the agent to realign the proposal before approval."}
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-red-200">
+                  {[...new Set([
+                    ...(pendingSchemaRequest.validation_errors || []),
+                    ...schemaDependencyErrors,
+                  ])].map((error) => <li key={error}>{error}</li>)}
+                </ul>
+              </div>
+            )}
+
             {/* Reused Schemas list */}
             {editedProposal.reused_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
@@ -1242,7 +1277,11 @@ function App() {
                 )}
                 <button
                   onClick={() => handleResolveSchemaRequest(true)}
-                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
+                  disabled={schemaDependencyErrors.length > 0}
+                  title={schemaDependencyErrors.length > 0
+                    ? (language === "zh" ? "请先修复 Schema 与 Graph grant 的依赖" : "Fix Schema and Graph grant dependencies first")
+                    : undefined}
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-40 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
                 >
                   {language === "zh" ? "确认对齐并编码 (Approve)" : "Approve"}
                 </button>
@@ -1317,6 +1356,14 @@ function App() {
         <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 校验未完全对齐" : "Schema Alignment Warning"} description={language === "zh" ? `应用 ${pendingVerificationRequest.app_id} 的代码在 Graph DB 校验中发现不一致，请选择处理方式。` : `Discrepancies found in Graph DB validation for app ${pendingVerificationRequest.app_id}. Choose an action.`}>
           <div className="system-dialog-body flex flex-col gap-4">
 
+            {(pendingVerificationRequest.validation_errors?.length || 0) > 0 && (
+              <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4 text-[11px] text-red-200">
+                {(pendingVerificationRequest.validation_errors || []).map((error) => (
+                  <p key={error}>{error}</p>
+                ))}
+              </div>
+            )}
+
             {/* Verification Report content */}
             <div className="border border-red-500/20 bg-red-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
               <h4 className="text-xs font-semibold text-red-400 uppercase tracking-wider font-sans">
@@ -1379,13 +1426,6 @@ function App() {
 
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
-              <button
-                onClick={() => handleResolveVerificationRequest("approve", verificationFeedback, [])}
-                className="px-3.5 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-white/5 transition-colors text-xs font-sans"
-              >
-                {language === "zh" ? "直接忽略并保存 (Bypass & Save)" : "Bypass & Save"}
-              </button>
-
               <div className="flex items-center gap-2.5 ml-auto">
                 <button
                   onClick={() => {

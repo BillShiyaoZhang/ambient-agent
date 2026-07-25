@@ -21,6 +21,10 @@ def test_catalog_is_structured_versioned_and_uses_the_capability_ontology():
     assert network_sources["fields"]["sources"]["type"] == "object"
     assert network_sources["example"]["sources"]["weather-api"]["base_url"] == "https://api.example.com"
     assert network_sources["example"]["sources"]["weather-api"]["paths"] == ["/v1/forecast"]
+    graph_sdk = payload["widget_runtime"]["sdk_contracts"]["graph.mutate"]
+    assert graph_sdk["actions"]["create_node"]["operation"] == "create"
+    assert graph_sdk["actions"]["create_node"]["example"]["action"] == "create_node"
+    assert graph_sdk["forbidden_shorthand"]["action"] == ["create", "update", "delete"]
 
 
 def test_role_projection_uses_least_information_and_rendering_is_deterministic():
@@ -35,6 +39,7 @@ def test_role_projection_uses_least_information_and_rendering_is_deterministic()
     rendered = catalog.render(AgentRole.CODING_AGENT)
     assert "[SYSTEM CAPABILITY CATALOG v1]" in rendered
     assert "graph.query" in rendered
+    assert "create_node" in rendered
     assert "secret" not in rendered.lower()
 
 

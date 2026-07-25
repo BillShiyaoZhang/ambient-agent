@@ -27,11 +27,19 @@ useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
 
 ```javascript
 await ambient.graph.mutate([{
+  action: "create_node",
+  type: "Task",
+  properties: { title: "准备周报", status: "open" }
+}]);
+
+await ambient.graph.mutate([{
   action: "update_node_property",
   id: taskId,
   properties: { status: "done" }
 }]);
 ```
+
+`action` 必须使用完整 DSL 名称：`create_node`、`update_node_property`、`delete_node`、`create_edge` 或 `delete_edge`。Manifest grant 中的 `create` / `update` / `delete` 是授权 operation，不是 action payload；不得写成 `action: "create"`，也不要添加 `operation` 字段。静态校验要求 `ambient.graph.mutate` 的第一个参数是数组字面量、每项是对象字面量，action 与实体/edge type 直接使用字符串字面量。
 
 SDK 自动绑定当前 App identity 和 idempotency key。后端先解析节点真实类型并授权，再进入 Graph durable effect/interaction 流程。
 

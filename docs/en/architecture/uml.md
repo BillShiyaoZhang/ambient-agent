@@ -135,7 +135,6 @@ flowchart TB
     Stage --> Verify[verify]
     Verify -->|clean| Promote[promote]
     Verify -->|findings| Override[wait_override]
-    Override -->|approve| Promote
     Override -->|rework code| Stage
     Override -->|rework schema| Align
     Override -->|rework plan| Plan
@@ -166,7 +165,7 @@ flowchart LR
     ACP --> Validate[opencode_service.py: validate_opencode_staging]
     Validate -->|pass| Verify[verify reads staging]
     Validate -->|adapter error + handle| Retain[retain non-executable failed draft]
-    Verify -->|pass / approved override| Marker[durable promotion marker]
+    Verify -->|pass| Marker[durable promotion marker]
     Marker --> Promote[opencode_service.py: promote_opencode_staging]
     Verify -->|failure| Retain
     Retain -->|retry internal validation| Stage

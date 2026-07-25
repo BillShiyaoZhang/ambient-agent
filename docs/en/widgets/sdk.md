@@ -27,11 +27,19 @@ useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
 
 ```javascript
 await ambient.graph.mutate([{
+  action: "create_node",
+  type: "Task",
+  properties: { title: "Prepare weekly report", status: "open" }
+}]);
+
+await ambient.graph.mutate([{
   action: "update_node_property",
   id: taskId,
   properties: { status: "done" }
 }]);
 ```
+
+`action` uses one of the complete DSL names: `create_node`, `update_node_property`, `delete_node`, `create_edge`, or `delete_edge`. The Manifest grant values `create`, `update`, and `delete` are authorization operations, not action payloads; never write `action: "create"` or add an `operation` field. Static verification requires an array literal passed directly to `ambient.graph.mutate`, object-literal entries, and literal action/entity/edge-type identifiers.
 
 The SDK binds current App identity and an idempotency key. The backend resolves actual node types and authorizes before entering the durable Graph effect/interaction flow.
 

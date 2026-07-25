@@ -5,6 +5,7 @@
 
 - **Understand the System**
   - [System and Request Flow](/en/architecture/overview.md)
+  - [Widget Generation Information Contract](/en/architecture/widget-generation.md)
   - [Widget Capability Security](/en/architecture/capability-security.md)
   - [Workspace UX](/en/architecture/workspace-ux.md)
   - [Widgets and App Center](/en/architecture/apps.md)

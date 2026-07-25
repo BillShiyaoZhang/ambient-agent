@@ -140,3 +140,23 @@ def test_verifier_checks_graph_network_and_file_scope_literals(tmp_path):
     )
     assert denied.returncode != 0
     assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+
+
+def test_verifier_explains_graph_action_dsl_instead_of_misreporting_grant_scope(tmp_path):
+    completed = verify(
+        tmp_path,
+        """
+        export default function App() {
+          ambient.graph.mutate([{ action: 'create', type: 'Task', properties: {} }]);
+          return null;
+        }
+        """,
+        [{"id": "graph.mutate", "scope": {"entities": ["Task"], "operations": ["create"]}}],
+    )
+
+    assert completed.returncode != 0
+    diagnostic = json.loads(completed.stderr)
+    assert diagnostic["code"] == "capability_contract_error"
+    assert "action 'create' is invalid" in diagnostic["message"]
+    assert "create_node" in diagnostic["message"]
+    assert "authorization values" in diagnostic["hint"]

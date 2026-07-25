@@ -25,7 +25,13 @@ Use the complete object under `[REQUIRED MANIFEST V2 TEMPLATE]` as the file shap
 - The host injects only capability namespaces granted by Manifest V2. A namespace or method not in the approved Runtime Contract does not exist.
 - Use only literal resource identifiers so staging verification can prove scope:
   - `graph.query` → `ambient.graph.subscribe({ type: "ApprovedType" }, callback)`; unsubscribe on cleanup.
-  - `graph.mutate` → `ambient.graph.mutate(actions)` using only approved entity types, edge types, and operations.
+  - `graph.mutate` → pass an array literal containing object literals directly to `ambient.graph.mutate([...])`. The exact action DSL is:
+    - create: `{ action: "create_node", type: "ApprovedType", properties: { ... } }`
+    - update: `{ action: "update_node_property", id: nodeId, properties: { ... } }`
+    - delete: `{ action: "delete_node", id: nodeId }`
+    - create edge: `{ action: "create_edge", from_id: fromId, to_id: toId, type: "APPROVED_EDGE", properties: { ... } }`
+    - delete edge: `{ action: "delete_edge", from_id: fromId, to_id: toId, type: "APPROVED_EDGE" }`
+    Never use shorthand such as `action: "create"`, `action: "update"`, or an `operation` field. Grant operations (`create`, `update`, `delete`) authorize the corresponding exact action names above; they are not action payload values.
   - `network.request` → `ambient.net.request("approved-source", { path, method, query, body })`.
   - `file.read` → `ambient.files.read(path)` / `ambient.files.list(path)` below `app://data`.
   - `file.write` → `ambient.files.write(path, text)` below `app://data`.

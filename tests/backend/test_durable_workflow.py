@@ -21,7 +21,7 @@ from backend.graph_db import GraphDatabase
 from backend.models import ChatMessage, ChatSession
 from backend.opencode_service import CodingAgentDraftError, OpenCodeStagedResult
 from backend.run_service import AgentRunState, Continue, Failed, RunCoordinator, RunStore, Succeeded, Wait
-from backend.schema_diff import VerificationDiff
+from backend.schema_diff import UnknownProperty, VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -104,6 +104,33 @@ def test_staged_runtime_contract_rejects_backend_adapter_declarations(tmp_path: 
 
     with pytest.raises(durable_workflow_module.WorkflowError, match="backend adapters"):
         DurableAgentWorkflow._assert_staged_runtime_contract(tmp_path, contract)
+
+
+def test_verification_schema_selections_use_only_server_issued_safe_fields() -> None:
+    selected = [
+        {"node_type": "Document", "property_name": "temperature", "detected_type": "string"},
+        {"node_type": "Forged", "property_name": "secret", "detected_type": "string"},
+    ]
+    available = [
+        {
+            "node_type": "Document",
+            "property_name": "temperature",
+            "detected_type": "number",
+            "action": "extend_schema",
+            "risk": "safe",
+        },
+        {
+            "node_type": "Document",
+            "property_name": "*",
+            "detected_type": "object",
+            "action": "register_new_type",
+            "risk": "needs_review",
+        },
+    ]
+
+    assert DurableAgentWorkflow._selected_schema_extensions(selected, available) == {
+        "Document": {"temperature": "number"}
+    }
 
 
 def _state(
@@ -705,6 +732,181 @@ async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it
     assert repaired.next_phase == "verify"
     assert calls == [None, workflow._staged_result(state.data["staged_app"])]
     assert (staging_dir / "controller.js").read_text(encoding="utf-8") == "// repaired draft"
+
+
+@pytest.mark.asyncio
+async def test_invalid_user_edited_schema_grants_return_to_approval_instead_of_failing_run(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    valid_proposal = {
+        "reused_schemas": [
+            {
+                "id": "Place",
+                "reason": "Weather location",
+                "extended_properties": {},
+                "data_scope": "user_context",
+            }
+        ],
+        "new_schemas": [
+            {
+                "id": "WeatherObservation",
+                "name": "Weather observation",
+                "description": "Weather facts",
+                "properties": {"temperature": "number"},
+                "subclass_of": "Thing",
+                "ontology_iri": "urn:ambient:ontology:WeatherObservation",
+                "equivalent_to": [],
+                "data_scope": "user_context",
+            }
+        ],
+        "capabilities": [
+            {
+                "id": "graph.mutate",
+                "scope": {
+                    "entities": ["Place", "WeatherObservation"],
+                    "operations": ["create"],
+                },
+            }
+        ],
+    }
+    intent = IntentPlan(
+        kind=IntentKind.WIDGET_CREATE,
+        app_id="weather-app",
+        instruction="Build weather",
+    )
+    state = _state(
+        phase="align_schema",
+        workflow_type="widget_create",
+        intent=intent,
+        data={
+            "language": "en",
+            "approved_plan": "Build weather",
+            "schema_candidate": valid_proposal,
+        },
+    )
+    run = _create_run(store, state, content="Build weather")
+
+    requested, waiting, _ = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-request",
+    )
+    assert isinstance(requested, Wait)
+    first_interaction = store.get_interaction(requested.interaction_id)
+    assert first_interaction is not None
+    assert first_interaction["payload"]["plan"] == "Build weather"
+    invalid_edit = json.loads(json.dumps(valid_proposal))
+    invalid_edit["new_schemas"] = []
+    store.resolve_interaction(
+        requested.interaction_id,
+        {"approved": True, "proposal": invalid_edit},
+        expected_run_version=waiting["version"],
+    )
+
+    rejected, waiting_again, edited_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-validation",
+    )
+
+    assert isinstance(rejected, Wait)
+    assert waiting_again["status"] == "waiting_user"
+    assert waiting_again["error"] is None
+    assert edited_state.phase == "wait_schema"
+    assert edited_state.data["schema_candidate"] == invalid_edit
+    assert "WeatherObservation" in edited_state.data["schema_validation_errors"][0]
+    interaction = store.get_interaction(rejected.interaction_id)
+    assert interaction is not None
+    assert interaction["payload"]["plan"] == "Build weather"
+    assert interaction["payload"]["proposal"] == invalid_edit
+    assert "WeatherObservation" in interaction["payload"]["validation_errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_schema_verification_findings_cannot_be_bypassed_into_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apps_dir = tmp_path / "apps"
+    staging_dir = apps_dir / f".weather-app.staging-{'c' * 32}"
+    live_dir = apps_dir / "weather-app"
+    staging_dir.mkdir(parents=True)
+    store = RunStore(str(tmp_path))
+    workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)))
+    intent = IntentPlan(
+        kind=IntentKind.WIDGET_CREATE,
+        app_id="weather-app",
+        instruction="Build weather",
+    )
+    state = _state(
+        phase="verify",
+        workflow_type="widget_create",
+        intent=intent,
+        data={
+            "language": "en",
+            "runtime_contract": _runtime_contract("weather-app"),
+            "staged_app": {
+                "output": "generated",
+                "app_id": "weather-app",
+                "staging_dir": str(staging_dir),
+                "live_dir": str(live_dir),
+            },
+        },
+    )
+    run = _create_run(store, state, content="Build weather")
+    monkeypatch.setattr(workflow, "_staged_widget_code", lambda _state: {"js": "export default () => null"})
+
+    async def dirty_diff(**_kwargs: Any) -> VerificationDiff:
+        return VerificationDiff(
+            unknown_props=[
+                UnknownProperty(
+                    node_type="Document",
+                    property_name="temperature",
+                    sample_value_repr="20",
+                    occurrences=1,
+                )
+            ]
+        )
+
+    monkeypatch.setattr(durable_workflow_module.SchemaVerificationService, "diff", dirty_diff)
+
+    requested, waiting, _ = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-verify-request",
+    )
+    assert isinstance(requested, Wait)
+    store.resolve_interaction(
+        requested.interaction_id,
+        {"approved": "approve"},
+        expected_run_version=waiting["version"],
+    )
+
+    rejected, waiting_again, edited_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-verify-bypass",
+    )
+
+    assert isinstance(rejected, Wait)
+    assert waiting_again["status"] == "waiting_user"
+    assert edited_state.phase == "wait_override"
+    assert edited_state.data.get("verification_override") is None
+    interaction = store.get_interaction(rejected.interaction_id)
+    assert interaction is not None
+    assert interaction["payload"]["allowed_actions"] == [
+        "rework_code",
+        "rework_schema",
+        "rework_plan",
+    ]
+    assert "cannot be bypassed" in interaction["payload"]["validation_errors"][0]
 
 
 @pytest.mark.asyncio

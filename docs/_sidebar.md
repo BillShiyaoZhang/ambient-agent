@@ -5,6 +5,7 @@
 
 - **理解系统**
   - [系统与请求链路](/architecture/overview.md)
+  - [Widget 生成信息契约](/architecture/widget-generation.md)
   - [Widget 能力安全架构](/architecture/capability-security.md)
   - [工作区交互](/architecture/workspace-ux.md)
   - [Widget 与应用中心](/architecture/apps.md)

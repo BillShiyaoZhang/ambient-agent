@@ -51,6 +51,58 @@ class SystemCapabilityCatalog:
                     "capability_categories": [
                         CAPABILITY_ONTOLOGY[category_id].to_dict() for category_id in capability_category_ids()
                     ],
+                    "sdk_contracts": {
+                        "graph.subscribe": {
+                            "capability": "graph.query",
+                            "call": 'ambient.graph.subscribe({ type: "ApprovedEntity" }, callback)',
+                            "literal_fields": ["type", "include[].target_type"],
+                        },
+                        "graph.mutate": {
+                            "capability": "graph.mutate",
+                            "call": "ambient.graph.mutate([actionObjectLiteral])",
+                            "array_literal_required": True,
+                            "action_object_literal_required": True,
+                            "actions": {
+                                "create_node": {
+                                    "operation": "create",
+                                    "required_fields": ["action", "type", "properties"],
+                                    "example": {
+                                        "action": "create_node",
+                                        "type": "Task",
+                                        "properties": {"title": "Example"},
+                                    },
+                                },
+                                "update_node_property": {
+                                    "operation": "update",
+                                    "required_fields": ["action", "id", "properties"],
+                                },
+                                "delete_node": {
+                                    "operation": "delete",
+                                    "required_fields": ["action", "id"],
+                                },
+                                "create_edge": {
+                                    "operation": "create",
+                                    "required_fields": ["action", "from_id", "to_id", "type", "properties"],
+                                },
+                                "delete_edge": {
+                                    "operation": "delete",
+                                    "required_fields": ["action", "from_id", "to_id", "type"],
+                                },
+                            },
+                            "forbidden_shorthand": {
+                                "action": ["create", "update", "delete"],
+                                "fields": ["operation"],
+                            },
+                        },
+                        "net.request": {
+                            "capability": "network.request",
+                            "call": (
+                                'ambient.net.request("approved-source", '
+                                '{ path: "/approved-path", method: "GET", query: {} })'
+                            ),
+                            "literal_fields": ["source", "path", "method"],
+                        },
+                    },
                     "forbidden_apis": [
                         "ambient.mcp",
                         "eval",

@@ -190,8 +190,14 @@ const securityPlugin = ({ types: t }) => ({
           if (!t.isObjectExpression(action)) capabilityError("graph mutation entries must be object literals");
           const actionName = stringLiteral(objectProperty(action, "action")?.value, "graph mutation action");
           const operation = actionOperations[actionName];
-          if (!operation || !scope.operations?.includes(operation)) {
-            capabilityError(`graph operation '${operation || actionName}' is not approved`);
+          if (!operation) {
+            capabilityError(
+              `graph mutation action '${actionName}' is invalid; use create_node, update_node_property, ` +
+              "delete_node, create_edge, or delete_edge"
+            );
+          }
+          if (!scope.operations?.includes(operation)) {
+            capabilityError(`graph operation '${operation}' required by action '${actionName}' is not approved`);
           }
           if (actionName === "create_node") {
             const entity = stringLiteral(objectProperty(action, "type")?.value, "created graph entity type");
@@ -307,7 +313,9 @@ try {
   let hint = "Fix controller.js according to the Widget Runtime Contract, then rerun validation.";
   if (message.includes("Capability contract")) {
     code = "capability_contract_error";
-    hint = "Use only literal operations covered by the approved Manifest V2 capability grants.";
+    hint = message.includes("graph mutation")
+      ? "Use an array of object literals with exact actions such as create_node; grant operations like create are authorization values, not action payloads."
+      : "Use only literal resources and operations covered by the approved Manifest V2 capability grants.";
   } else if (message.includes("Forbidden host or network global")) {
     code = "forbidden_runtime_api";
     hint = "Use ambient.net.request, ambient.graph, ambient.files, or an exact approved ambient.capabilities action.";
