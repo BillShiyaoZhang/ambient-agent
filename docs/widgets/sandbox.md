@@ -68,7 +68,7 @@ Runtime 使用 `Page.startScreencast` 获取画面，并在每帧处理后发送
 }
 ```
 
-Frontend 只渲染最新帧；慢客户端不能形成无界队列。鼠标、触摸、滚轮、按键、文本输入、焦点与 viewport resize 被归一化后发送到 Backend，再由 Runtime 转换为 CDP `Input.*`。输入消息不允许携带 capability 身份。
+Frontend 只渲染最新帧；慢客户端不能形成无界队列。鼠标、触摸、滚轮、按键、文本输入、焦点与 viewport resize 被归一化后发送到 Backend，再由 Runtime 转换为 CDP `Input.*`。输入消息不允许携带 capability 身份。Runtime WebSocket 只在 App 身份、revision 或 grants digest 改变时重建；父组件 render 或事件回调引用变化不能中断正在建立或已建立的连接。基础设施断连使用有上限的指数退避自动重连，不要求用户刷新页面。
 
 默认预算：
 
@@ -77,6 +77,7 @@ Frontend 只渲染最新帧；慢客户端不能形成无界队列。鼠标、�
 - 帧率和 JPEG 质量按交互/静止状态自适应；
 - Context 数、viewport、消息大小、RPC 并发、CPU、内存和会话时长都有硬上限；
 - Chromium 退出、Context 崩溃、协议错误或预算超限产生结构化 `runtime_error`，并清理该 session 的订阅和 pending RPC。
+- 同一 Runtime socket 上的 `start`、输入、RPC response、subscription event、`close` 和断连清理必须串行执行。断连清理只能在正在执行的 `start` 完成或取消后关闭 Context，不能与 Playwright 创建 Page/CDP session 并发。
 
 MVP 使用 CDP screencast，先保证隔离和跨浏览器一致性。若后续对视频效率或输入法支持要求更高，可以在不改变 capability 边界的前提下替换为 WebRTC 编码和数据通道。
 

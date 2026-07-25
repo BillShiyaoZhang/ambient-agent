@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import * as Babel from "@babel/standalone";
 import { chromium } from "playwright-core";
 
+import { SerialTaskQueue } from "./serial_task_queue.mjs";
+
 
 const PROTOCOL_VERSION = 1;
 const SOCKET_PATH =
@@ -719,6 +721,7 @@ async function startScreencast(session) {
 
 async function openSession(socket, message) {
   validateStart(message);
+  if (socket.runtimeClosed || socket.destroyed) return;
   if (sessions.size >= MAX_CONTEXTS) {
     throw new Error("Widget Runtime context limit reached");
   }
@@ -738,8 +741,16 @@ async function openSession(socket, message) {
     serviceWorkers: "block",
     acceptDownloads: false,
   });
+  if (socket.runtimeClosed || socket.destroyed) {
+    await context.close().catch(() => {});
+    return;
+  }
   await context.route("**/*", (route) => route.abort("blockedbyclient"));
   const page = await context.newPage();
+  if (socket.runtimeClosed || socket.destroyed) {
+    await context.close().catch(() => {});
+    return;
+  }
   const session = {
     id: message.session_id,
     appId: message.app_id,
@@ -783,7 +794,15 @@ async function openSession(socket, message) {
   try {
     const transformed = transformController(message.controller_source);
     await installPageRuntime(page, session, transformed);
+    if (socket.runtimeClosed || socket.destroyed) {
+      await closeSession(session);
+      return;
+    }
     await startScreencast(session);
+    if (socket.runtimeClosed || socket.destroyed) {
+      await closeSession(session);
+      return;
+    }
     send(socket, { type: "ready", session_id: session.id });
   } catch (error) {
     send(
@@ -945,6 +964,8 @@ function createSocketServer() {
     socket.setNoDelay(true);
     socket.buffer = Buffer.alloc(0);
     socket.sessionId = undefined;
+    socket.runtimeClosed = false;
+    socket.taskQueue = new SerialTaskQueue();
 
     socket.on("data", (chunk) => {
       socket.buffer = Buffer.concat([socket.buffer, chunk]);
@@ -980,25 +1001,32 @@ function createSocketServer() {
           socket.destroy();
           return;
         }
-        void handleSessionMessage(socket, message).catch((error) => {
-          send(
-            socket,
-            runtimeError(
-              "runtime_protocol_failed",
-              error?.message ?? error,
-              "operator",
-            ),
-          );
-          if (socket.sessionId) {
-            void closeSession(sessions.get(socket.sessionId));
+        void socket.taskQueue.enqueue(async () => {
+          try {
+            await handleSessionMessage(socket, message);
+          } catch (error) {
+            send(
+              socket,
+              runtimeError(
+                "runtime_protocol_failed",
+                error?.message ?? error,
+                "operator",
+              ),
+            );
+            if (socket.sessionId) {
+              await closeSession(sessions.get(socket.sessionId));
+            }
           }
         });
       }
     });
     socket.on("close", () => {
-      if (socket.sessionId) {
-        void closeSession(sessions.get(socket.sessionId));
-      }
+      socket.runtimeClosed = true;
+      void socket.taskQueue.enqueue(async () => {
+        if (socket.sessionId) {
+          await closeSession(sessions.get(socket.sessionId));
+        }
+      }).catch(() => {});
     });
     socket.on("error", () => {});
   });

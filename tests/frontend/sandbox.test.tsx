@@ -57,10 +57,12 @@ const widget = (overrides: Partial<Widget> = {}): Widget => ({
 describe("SandboxWidget rendering and containment", () => {
   beforeEach(() => {
     RuntimeSocket.instances = [];
+    vi.useFakeTimers();
     vi.stubGlobal("WebSocket", RuntimeSocket);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     delete (globalThis as any).__hostControllerExecuted;
   });
@@ -84,6 +86,7 @@ describe("SandboxWidget rendering and containment", () => {
 
   it("never evaluates Controller source in the host page", () => {
     render(<SandboxWidget widget={widget()} />);
+    act(() => vi.runOnlyPendingTimers());
 
     expect((globalThis as any).__hostControllerExecuted).toBeUndefined();
     expect(RuntimeSocket.instances).toHaveLength(1);
@@ -93,6 +96,7 @@ describe("SandboxWidget rendering and containment", () => {
   it("replaces a failed runtime session when the published revision changes", () => {
     const original = widget();
     const { rerender } = render(<SandboxWidget widget={original} />);
+    act(() => vi.runOnlyPendingTimers());
     const first = RuntimeSocket.instances[0];
     act(() => {
       first.open();
@@ -112,6 +116,7 @@ describe("SandboxWidget rendering and containment", () => {
         })}
       />,
     );
+    act(() => vi.runOnlyPendingTimers());
 
     expect(first.readyState).toBe(RuntimeSocket.CLOSED);
     expect(RuntimeSocket.instances).toHaveLength(2);

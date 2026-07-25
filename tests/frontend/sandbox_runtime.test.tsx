@@ -81,16 +81,19 @@ describe("SandboxWidget remote runtime player", () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
     MockResizeObserver.instances = [];
+    vi.useFakeTimers();
     vi.stubGlobal("WebSocket", MockWebSocket);
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   it("opens an app-scoped runtime stream without sending Controller source or grants", () => {
     render(<SandboxWidget widget={widget} />);
+    act(() => vi.runOnlyPendingTimers());
 
     expect(MockWebSocket.instances).toHaveLength(1);
     const socket = MockWebSocket.instances[0];
@@ -112,6 +115,7 @@ describe("SandboxWidget remote runtime player", () => {
 
   it("renders only runtime frames and surfaces structured runtime errors", () => {
     render(<SandboxWidget widget={widget} />);
+    act(() => vi.runOnlyPendingTimers());
     const socket = MockWebSocket.instances[0];
 
     act(() => {
@@ -140,6 +144,7 @@ describe("SandboxWidget remote runtime player", () => {
 
   it("normalizes pointer input without app identity fields", () => {
     render(<SandboxWidget widget={widget} />);
+    act(() => vi.runOnlyPendingTimers());
     const socket = MockWebSocket.instances[0];
     act(() => socket.open());
     socket.sent = [];
@@ -162,5 +167,54 @@ describe("SandboxWidget remote runtime player", () => {
     });
     expect(socket.sent.join("\n")).not.toContain("notes-app");
     expect(socket.sent.join("\n")).not.toContain("manifest_revision");
+  });
+
+  it("keeps the same runtime connection when parent callback references change", () => {
+    const { rerender } = render(
+      <SandboxWidget
+        widget={widget}
+        onFullscreen={() => undefined}
+        onMinimize={() => undefined}
+      />,
+    );
+    act(() => vi.runOnlyPendingTimers());
+    const socket = MockWebSocket.instances[0];
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        onFullscreen={() => undefined}
+        onMinimize={() => undefined}
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(MockWebSocket.CONNECTING);
+  });
+
+  it("does not create a throwaway socket during StrictMode effect replay", () => {
+    render(
+      <React.StrictMode>
+        <SandboxWidget widget={widget} />
+      </React.StrictMode>,
+    );
+    act(() => vi.runOnlyPendingTimers());
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it("reconnects after an unexpected runtime disconnect", () => {
+    render(<SandboxWidget widget={widget} />);
+    act(() => vi.runOnlyPendingTimers());
+    const first = MockWebSocket.instances[0];
+    act(() => {
+      first.open();
+      first.close();
+    });
+
+    act(() => vi.runOnlyPendingTimers());
+
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.instances[1].url).toBe(first.url);
   });
 });

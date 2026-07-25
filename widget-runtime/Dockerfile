@@ -32,7 +32,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /app
 COPY --chown=10001:10001 widget-runtime/package.json widget-runtime/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
-COPY --chown=10001:10001 widget-runtime/runtime.mjs ./
+COPY --chown=10001:10001 \
+  widget-runtime/runtime.mjs \
+  widget-runtime/serial_task_queue.mjs \
+  ./
 
 USER 10001:10001
 CMD ["node", "runtime.mjs"]

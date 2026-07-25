@@ -68,7 +68,7 @@ The Runtime captures frames with `Page.startScreencast` and acknowledges process
 }
 ```
 
-The Frontend renders only the newest frame; a slow client cannot create an unbounded queue. Mouse, touch, wheel, key, text, focus, and viewport-resize events are normalized, sent to the Backend, and translated to CDP `Input.*` by the Runtime. Input messages cannot carry a capability identity.
+The Frontend renders only the newest frame; a slow client cannot create an unbounded queue. Mouse, touch, wheel, key, text, focus, and viewport-resize events are normalized, sent to the Backend, and translated to CDP `Input.*` by the Runtime. Input messages cannot carry a capability identity. The Runtime WebSocket is recreated only when the App identity, revision, or grants digest changes; parent renders and callback-reference changes must not interrupt an opening or established connection. Infrastructure disconnects reconnect automatically with bounded exponential backoff and do not require a page refresh.
 
 Default budgets:
 
@@ -77,6 +77,7 @@ Default budgets:
 - frame rate and JPEG quality adapt between interactive and idle states;
 - Context count, viewport, message size, concurrent RPC, CPU, memory, and session duration have hard limits;
 - Chromium exit, Context crash, protocol failure, or budget exhaustion emits a structured `runtime_error` and clears subscriptions and pending RPC for that session.
+- `start`, input, RPC responses, subscription events, `close`, and disconnect cleanup on one Runtime socket must execute serially. Disconnect cleanup may close a Context only after an in-progress `start` completes or is cancelled; it must not race Playwright Page/CDP creation.
 
 The MVP uses CDP screencast to establish isolation and consistent cross-browser behavior. WebRTC encoding and data channels may replace this transport later for video efficiency or IME fidelity without changing the capability boundary.
 

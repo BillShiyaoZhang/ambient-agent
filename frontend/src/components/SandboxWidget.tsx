@@ -58,6 +58,8 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
 }) => {
   const playerRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const hostCallbacksRef = useRef({ onFullscreen, onMinimize });
+  hostCallbacksRef.current = { onFullscreen, onMinimize };
   const viewportRef = useRef<Viewport>({
     width: 640,
     height: 480,
@@ -82,75 +84,109 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     setFrame(null);
     setFailure(null);
     setStatus("connecting");
-    const socket = new WebSocket(runtimeWebSocketUrl(widget.id));
-    socketRef.current = socket;
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let connectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let scheduleConnect: (delayMs: number) => void;
+    const connect = () => {
+      connectTimer = null;
+      if (disposed) return;
+      socket = new WebSocket(runtimeWebSocketUrl(widget.id));
+      socketRef.current = socket;
 
-    socket.onopen = () => {
-      setStatus("ready");
-      sendViewport();
-      send({
-        type: "visibility",
-        visible: document.visibilityState !== "hidden",
-      });
-    };
-    socket.onmessage = (event) => {
-      let message: Record<string, any>;
-      try {
-        message = JSON.parse(String(event.data));
-      } catch {
+      socket.onopen = () => {
+        setStatus("ready");
+        setFailure(null);
+        sendViewport();
+        send({
+          type: "visibility",
+          visible: document.visibilityState !== "hidden",
+        });
+      };
+      socket.onmessage = (event) => {
+        let message: Record<string, any>;
+        try {
+          message = JSON.parse(String(event.data));
+        } catch {
+          setFailure({
+            code: "runtime_protocol_invalid",
+            message: "Widget Runtime returned an invalid message",
+            classification: "operator",
+          });
+          return;
+        }
+        if (message.type === "frame" && typeof message.data === "string") {
+          reconnectAttempt = 0;
+          setFrame({
+            format: message.format === "png" ? "png" : "jpeg",
+            data: message.data,
+            width: Number(message.width) || viewportRef.current.width,
+            height: Number(message.height) || viewportRef.current.height,
+          });
+          setFailure(null);
+          return;
+        }
+        if (message.type === "runtime_error") {
+          const error = message.error && typeof message.error === "object" ? message.error : {};
+          setFailure({
+            code: String(error.code || "widget_runtime_failed"),
+            message: String(error.message || "Widget Runtime failed"),
+            classification: error.classification ? String(error.classification) : undefined,
+          });
+          return;
+        }
+        if (message.type === "host_event") {
+          if (message.event === "fullscreen") {
+            hostCallbacksRef.current.onFullscreen?.(widget.id);
+          }
+          if (message.event === "minimize") {
+            hostCallbacksRef.current.onMinimize?.(widget.id);
+          }
+          if (message.event === "send_message" && typeof message.text === "string") {
+            wsService.sendMessage({ sender: "user", content: message.text });
+          }
+        }
+      };
+      socket.onerror = () => {
         setFailure({
-          code: "runtime_protocol_invalid",
-          message: "Widget Runtime returned an invalid message",
+          code: "widget_runtime_unavailable",
+          message: "Widget Runtime is unavailable",
           classification: "operator",
         });
-        return;
-      }
-      if (message.type === "frame" && typeof message.data === "string") {
-        setFrame({
-          format: message.format === "png" ? "png" : "jpeg",
-          data: message.data,
-          width: Number(message.width) || viewportRef.current.width,
-          height: Number(message.height) || viewportRef.current.height,
-        });
-        setFailure(null);
-        return;
-      }
-      if (message.type === "runtime_error") {
-        const error = message.error && typeof message.error === "object" ? message.error : {};
-        setFailure({
-          code: String(error.code || "widget_runtime_failed"),
-          message: String(error.message || "Widget Runtime failed"),
-          classification: error.classification ? String(error.classification) : undefined,
-        });
-        return;
-      }
-      if (message.type === "host_event") {
-        if (message.event === "fullscreen") onFullscreen?.(widget.id);
-        if (message.event === "minimize") onMinimize?.(widget.id);
-        if (message.event === "send_message" && typeof message.text === "string") {
-          wsService.sendMessage({ sender: "user", content: message.text });
+      };
+      socket.onclose = () => {
+        setStatus("closed");
+        if (socketRef.current === socket) socketRef.current = null;
+        if (!disposed) {
+          reconnectAttempt += 1;
+          scheduleConnect(Math.min(250 * (2 ** (reconnectAttempt - 1)), 4_000));
         }
-      }
+      };
     };
-    socket.onerror = () => {
-      setFailure({
-        code: "widget_runtime_unavailable",
-        message: "Widget Runtime is unavailable",
-        classification: "operator",
-      });
+    scheduleConnect = (delayMs) => {
+      if (disposed) return;
+      if (connectTimer !== null) window.clearTimeout(connectTimer);
+      connectTimer = window.setTimeout(connect, delayMs);
     };
-    socket.onclose = () => {
-      setStatus("closed");
-      if (socketRef.current === socket) socketRef.current = null;
-    };
+    scheduleConnect(0);
 
     return () => {
+      disposed = true;
+      if (connectTimer !== null) window.clearTimeout(connectTimer);
+      if (!socket) return;
       if (socketRef.current === socket) socketRef.current = null;
-      socket.close();
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        socket.onopen = () => socket?.close();
+      } else {
+        socket.onopen = null;
+        socket.close();
+      }
     };
   }, [
-    onFullscreen,
-    onMinimize,
     send,
     sendViewport,
     widget.grants_digest,

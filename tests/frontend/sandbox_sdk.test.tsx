@@ -71,6 +71,7 @@ const privilegedWidget: Widget = {
 describe("SandboxWidget SDK boundary", () => {
   beforeEach(() => {
     RuntimeSocket.instances = [];
+    vi.useFakeTimers();
     vi.stubGlobal("WebSocket", RuntimeSocket);
     vi.stubGlobal("fetch", vi.fn());
     vi.spyOn(wsService, "registerPersistentMessage");
@@ -79,12 +80,14 @@ describe("SandboxWidget SDK boundary", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
   it("does not construct Graph, Network, Files, or Run SDKs in the host realm", () => {
     render(<SandboxWidget widget={privilegedWidget} />);
+    act(() => vi.runOnlyPendingTimers());
     const socket = RuntimeSocket.instances[0];
     act(() => socket.open());
 
@@ -106,6 +109,7 @@ describe("SandboxWidget SDK boundary", () => {
         onMinimize={onMinimize}
       />,
     );
+    act(() => vi.runOnlyPendingTimers());
     const socket = RuntimeSocket.instances[0];
 
     act(() => {
@@ -130,6 +134,7 @@ describe("SandboxWidget SDK boundary", () => {
 
   it("never sends manifest revision, grant digest, capability scopes, or source", () => {
     render(<SandboxWidget widget={privilegedWidget} />);
+    act(() => vi.runOnlyPendingTimers());
     const socket = RuntimeSocket.instances[0];
     act(() => socket.open());
     const outbound = socket.sent.join("\n");
