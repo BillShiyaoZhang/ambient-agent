@@ -2,7 +2,7 @@
   "name": "Ambient Agent Developer Environment",
   "dockerComposeFile": "docker-compose.yml",
   "service": "workspace",
-  "runServices": ["workspace", "neo4j"],
+  "runServices": ["workspace", "neo4j", "widget-runtime"],
   "workspaceFolder": "/workspaces/ambient-agent",
   "shutdownAction": "stopCompose",
   "customizations": {

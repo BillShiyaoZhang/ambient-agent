@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app, app_manager, coding_agent_config_store, get_db
 from backend.models import ChatSession
-from backend.opencode_service import OpenCodeStagedResult
+from backend.coding_agent_acp import OpenCodeStagedResult
 from backend.schema_diff import VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
 
@@ -67,6 +67,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch, client):
         language="zh",
         on_update=None,
         promote=True,
+        **_kwargs,
     ):
         assert instruction
         assert language == "zh"
@@ -102,7 +103,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch, client):
             live_dir=apps_dir / app_id,
         )
 
-    monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
+    monkeypatch.setattr("backend.main.run_coding_agent", mock_run_opencode)
 
     # Mock Schema Verification to pass
     async def mock_diff(*args, **kwargs):

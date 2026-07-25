@@ -11,9 +11,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from backend.codex_service import run_codex_agent
-from backend.coding_agent_runtime import CodingAgentRuntime, SPECS, model_capability, spec_for
-from backend.opencode_service import CodingAgentStagedResult, run_opencode_agent_acp
+from backend.coding_agent_runtime import (
+    CodingAgentRuntime,
+    CodingAgentRuntimeError,
+    SPECS,
+    model_capability,
+    spec_for,
+)
+from backend.coding_agent_acp import CodingAgentStagedResult, _opencode_runtime_env, run_coding_agent_acp
 
 CodingAgentId = Literal["opencode", "codex"]
 
@@ -152,6 +157,8 @@ class CodingAgentConfigStore:
                     "install_operation": None,
                     "command_env": spec.command_env,
                     "execution_target": "container",
+                    "execution_protocol": "acp",
+                    "acp_transport": spec.acp_transport,
                     "authenticated": None if not spec.auth_methods else False,
                     "auth_state": "not_required" if not spec.auth_methods else "signed_out",
                     "version": "",
@@ -181,26 +188,29 @@ async def run_coding_agent(
     runtime: CodingAgentRuntime | None = None,
     model_config: dict[str, Any] | None = None,
     staged_result: CodingAgentStagedResult | None = None,
+    artifact_validator: Any = None,
+    repair_decider: Any = None,
 ):
-    if coding_agent == "opencode":
-        staging_kwargs = {"staged_result": staged_result} if staged_result is not None else {}
-        return await run_opencode_agent_acp(
-            app_id,
-            instruction,
-            language=language,
-            on_update=on_update,
-            promote=promote,
-            **staging_kwargs,
-        )
-    if coding_agent == "codex":
-        return await run_codex_agent(
-            app_id,
-            instruction,
-            language=language,
-            on_update=on_update,
-            promote=promote,
-            runtime=runtime,
-            native_model=str((model_config or {}).get("native_model") or "") or None,
-            staged_result=staged_result,
-        )
-    raise CodingAgentConfigError("Unknown coding agent", code="coding_agent_not_found")
+    try:
+        spec = spec_for(coding_agent)
+    except CodingAgentRuntimeError as exc:
+        raise CodingAgentConfigError("Unknown coding agent", code="coding_agent_not_found") from exc
+
+    resolved_runtime = runtime or CodingAgentRuntime(os.getenv("WORKSPACE_DIR", "workspace"))
+    extra_environment = _opencode_runtime_env() if spec.default_model_mode == "shared_binding" else None
+    launch = resolved_runtime.acp_launch(
+        coding_agent,
+        native_model=str((model_config or {}).get("native_model") or "") or None,
+        extra_environment=extra_environment,
+    )
+    return await run_coding_agent_acp(
+        app_id,
+        instruction,
+        language=language,
+        on_update=on_update,
+        launch=launch,
+        promote=promote,
+        staged_result=staged_result,
+        artifact_validator=artifact_validator,
+        repair_decider=repair_decider,
+    )

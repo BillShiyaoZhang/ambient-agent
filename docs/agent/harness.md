@@ -20,7 +20,7 @@ flowchart TB
 
     Workflow --> Domain[harness.py: AgentOrchestrator]
     Workflow --> Gateway[tools.py: ToolGateway]
-    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Workflow --> ACP[coding_agent_acp.py: run_coding_agent_acp]
     Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
 ```
 
@@ -31,7 +31,7 @@ flowchart TB
 - `DurableAgentWorkflow`：版本 2 的 chat reducer；每次调用只推进一个 phase，并返回 typed `StepOutcome`。
 - `RunContext`：每一步显式传递 run/session/step/attempt/trace 与冻结模型标识；LLM 和 Tool audit 不从占位 helper 猜测这些值。
 - `AgentOrchestrator`：保留部分路由、Converse 和格式化 domain helper；不再拥有 `/ws/chat` 的运行生命周期。
-- `ToolGateway`、MCP client 和 OpenCode ACP：分别强制本地模型工具、外部 JSON-RPC 和代码生成边界。
+- `ToolGateway`、MCP client 和 Coding Agent ACP：分别强制本地模型工具、外部 JSON-RPC 和代码生成边界。OpenCode 的原生 ACP server 与 Codex ACP bridge 使用完全相同的 Ambient session、权限、staging、验证和 repair 状态机。
 
 ## 2. Reducer 协议
 
@@ -133,7 +133,7 @@ Run event envelope 包含 `event_id`、`sequence`、`schema_version`、`stream_e
 
 `needs_attention` 不能直接改成 cancelled；`POST /api/runs/{id}/reconcile` 必须持久记录 `confirmed_not_committed`、`compensated` 或 `confirmed_committed` 后才能关闭人工审查。Promise 兼容调用把 `projection_type + call_id` 放入 Run correlation，并把 call ID 纳入 idempotency identity，重连后可由 durable Run/event 重建响应关联。
 
-Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction，不使用全局 Future。OpenCode ACP 只执行 strict policy 中的精确 argv；policy 外请求直接拒绝，不挂起 worker 等待进程内审批。
+Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction，不使用全局 Future。Coding Agent ACP 只执行 strict policy 中的精确 argv；policy 外请求直接拒绝，不挂起 worker 等待进程内审批。
 
 ## 6. 确定性评测
 

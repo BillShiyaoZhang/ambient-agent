@@ -1,6 +1,6 @@
 # Widget 格式与生命周期
 
-当前 Widget 使用 Manifest V2 + 单文件 React/HTM Controller。不要生成内联 XML Widget、`index.html`、`style.css` 或已删除的旧 SDK。
+当前 Widget 使用 Manifest V2 + 单文件 React/HTM Controller。Controller 在 Docker 内的隔离 Chromium 执行，用户浏览器只播放画面。不要生成内联 XML Widget、`index.html`、`style.css` 或已删除的旧 SDK。
 
 ## 1. 唯一承载形式
 
@@ -66,13 +66,13 @@ Runtime Contract 是发布协调器使用的审批信封，不是 `manifest.json
 5. Graph 使用与有效 schema 一致；
 6. artifact hash、grants digest、Run version 和 effect/idempotency 记录。
 
-全部通过后才将 staging 原子提升。失败、取消或拒绝不会覆盖现有 App。promotion 前发生 Coding Agent 内部校验失败、超时或系统错误时，失败草稿连同错误一起保留在不可执行的隐藏 staging 中；用户重试会在该目录原地修复或继续校验，而不是先删除再生成。若错误来自 Controller 与 Manifest grant 不一致，修复 turn 会再次获得已批准 Runtime Contract，只能修正现有 `controller.js`/`manifest.json` 使其匹配，不能申请或扩大权限。只有显式取消、返工或超过草稿保留期后才会清理该 staging。
+全部通过后才将 staging 原子提升。失败、取消或拒绝不会覆盖现有 App。校验错误若被确定性策略判定为只需改代码且不改变批准 contract，Coding Agent 会在同一 staging 中自动进行最多三轮修复；OpenCode 优先复用仍存活的 ACP session。基础设施错误、需要扩权/改 schema 的错误，以及重复 finding 不会被盲目交给 Coding Agent。promotion 前仍未解决的内部校验失败、超时或系统错误会连同草稿一起保留在不可执行的隐藏 staging 中；用户重试会在该目录原地修复或继续校验，而不是先删除再生成。若错误来自 Controller 与 Manifest grant 不一致，修复 turn 会再次获得已批准 Runtime Contract，只能修正现有 `controller.js`/`manifest.json` 使其匹配，不能申请或扩大权限。只有显式取消、返工或超过草稿保留期后才会清理该 staging。
 
 ## 5. 调试
 
-- 编译/渲染错误显示在 Widget 区域并写入浏览器 console。
+- 编译/渲染错误由 Widget Runtime 以结构化 `runtime_error` 返回并显示在 Widget 区域；Controller console 不进入宿主页面 realm。
 - 生成失败时，聊天会显示 App ID、失败阶段、错误码和原因；直接回复 `/repair <app-id> [补充说明]` 可在保留草稿上继续修复。
 - `capability_denied` 先检查 Manifest grant 的 entity/operation/source/path/action scope。
 - 有 interaction 或 `needs_attention` 时到任务抽屉处理。
 - 静态检查运行 `node scripts/verify_widget_controller.mjs <controller.js>`。
-- 完整 API 见 [ambient SDK](/widgets/sdk.md)，授权模型见 [Widget 能力安全架构](/architecture/capability-security.md)。
+- 完整 API 见 [ambient SDK](/widgets/sdk.md)，隔离模型见 [Widget 隔离运行时](/widgets/sandbox.md)，授权模型见 [Widget 能力安全架构](/architecture/capability-security.md)。

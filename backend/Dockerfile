@@ -14,7 +14,12 @@ WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
-# ---------- Stage 3: Python runtime ----------
+# ---------- Stage 3: build the pinned Codex-to-ACP bridge ----------
+FROM node:22-bookworm-slim AS coding-agent-acp
+WORKDIR /opt/coding-agent-acp
+RUN npm install --omit=dev --ignore-scripts @agentclientprotocol/codex-acp@1.1.7
+
+# ---------- Stage 4: Python runtime ----------
 FROM python:3.11-slim-bookworm
 
 # Prevent Python from writing .pyc files and buffer output
@@ -42,6 +47,9 @@ COPY --from=opencode /root/.opencode/bin/opencode /usr/local/bin/opencode
 # runtime pieces from the lockfile-backed build stage, not all frontend deps.
 COPY --from=widget-verifier /usr/local/bin/node /usr/local/bin/node
 COPY --from=widget-verifier /build/frontend/node_modules/@babel/standalone /app/frontend/node_modules/@babel/standalone
+# Codex itself stays managed/on-demand. This pinned bridge only maps its
+# app-server protocol into the same ACP boundary used by native ACP agents.
+COPY --from=coding-agent-acp /opt/coding-agent-acp /opt/coding-agent-acp
 
 # Copy only the necessary project configurations first to leverage layer caching
 COPY pyproject.toml README.md /app/

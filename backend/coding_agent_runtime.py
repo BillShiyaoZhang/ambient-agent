@@ -18,16 +18,19 @@ from typing import Any, Literal
 
 import httpx
 
-from backend.opencode_service import _terminate_process
+from backend.coding_agent_acp import _terminate_process
 
 InstallState = Literal["not_installed", "installing", "installed", "failed"]
 AuthState = Literal["not_required", "signed_out", "starting", "waiting", "signed_in", "failed", "cancelled", "expired"]
 ModelMode = Literal["native", "shared_binding", "hybrid", "none"]
+ACPTransport = Literal["native", "bridge"]
 
 _INSTALL_SCRIPT_LIMIT = 2 * 1024 * 1024
 _OUTPUT_LIMIT = 64 * 1024
 _APP_SERVER_OUTPUT_LIMIT = 1024 * 1024
 _APP_SERVER_TIMEOUT = 15.0
+_CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.1.7"
+_CODEX_ACP_IMAGE_ENTRYPOINT = Path("/opt/coding-agent-acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js")
 _DEVICE_CODE_RE = re.compile(r"\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b")
 _URL_RE = re.compile(r"https://[^\s\x1b]+")
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -77,6 +80,21 @@ class CodingAgentSpec:
     default_model_mode: ModelMode
     model_selection: Literal["none", "optional", "required"]
     catalog_source: Literal["none", "agent", "provider_registry"]
+    acp_transport: ACPTransport
+    acp_command_env: str | None
+    timeout_env: str
+
+
+@dataclass(frozen=True)
+class ACPLaunchDescriptor:
+    """Complete, provider-neutral description for starting one ACP server."""
+
+    agent_id: str
+    agent_name: str
+    argv: tuple[str, ...]
+    environment: dict[str, str]
+    timeout_seconds: float
+    transport: ACPTransport
 
 
 SPECS: tuple[CodingAgentSpec, ...] = (
@@ -93,6 +111,9 @@ SPECS: tuple[CodingAgentSpec, ...] = (
         default_model_mode="shared_binding",
         model_selection="required",
         catalog_source="provider_registry",
+        acp_transport="native",
+        acp_command_env=None,
+        timeout_env="OPENCODE_TIMEOUT",
     ),
     CodingAgentSpec(
         id="codex",
@@ -107,6 +128,9 @@ SPECS: tuple[CodingAgentSpec, ...] = (
         default_model_mode="native",
         model_selection="optional",
         catalog_source="agent",
+        acp_transport="bridge",
+        acp_command_env="CODEX_ACP_COMMAND",
+        timeout_env="CODEX_TIMEOUT",
     ),
 )
 
@@ -190,6 +214,110 @@ class CodingAgentRuntime:
             environment.update({"CODEX_HOME": str(state_dir), "HOME": str(state_dir)})
         return environment
 
+    @staticmethod
+    def _resolve_configured_command(value: str, *, setting: str) -> list[str]:
+        try:
+            argv = shlex.split(value, posix=os.name != "nt")
+        except ValueError as exc:
+            raise CodingAgentRuntimeError(
+                f"Invalid {setting}: {exc!s}",
+                code="coding_agent_command_invalid",
+            ) from exc
+        if not argv:
+            raise CodingAgentRuntimeError(
+                f"{setting} must name an executable",
+                code="coding_agent_command_invalid",
+            )
+        executable = argv[0]
+        if Path(executable).is_absolute():
+            if not Path(executable).is_file():
+                raise CodingAgentRuntimeError(
+                    f"{setting} executable does not exist",
+                    code="coding_agent_acp_unavailable",
+                )
+            return argv
+        resolved = shutil.which(executable)
+        if resolved is None:
+            raise CodingAgentRuntimeError(
+                f"{setting} executable is unavailable",
+                code="coding_agent_acp_unavailable",
+            )
+        return [resolved, *argv[1:]]
+
+    def _bridge_command(self, spec: CodingAgentSpec) -> list[str]:
+        if spec.acp_command_env and (configured := os.getenv(spec.acp_command_env, "").strip()):
+            return self._resolve_configured_command(configured, setting=spec.acp_command_env)
+
+        node = shutil.which("node")
+        if node and _CODEX_ACP_IMAGE_ENTRYPOINT.is_file():
+            return [node, str(_CODEX_ACP_IMAGE_ENTRYPOINT)]
+        if global_bridge := shutil.which("codex-acp"):
+            return [global_bridge]
+        raise CodingAgentRuntimeError(
+            f"{spec.name} requires the pinned {_CODEX_ACP_PACKAGE} bridge; install it or set {spec.acp_command_env}",
+            code="coding_agent_acp_unavailable",
+        )
+
+    def acp_launch(
+        self,
+        agent_id: str,
+        *,
+        native_model: str | None = None,
+        extra_environment: dict[str, str] | None = None,
+    ) -> ACPLaunchDescriptor:
+        """Resolve an Agent into the single ACP execution contract."""
+
+        spec = spec_for(agent_id)
+        command = self.command(agent_id)
+        if command is None:
+            raise CodingAgentRuntimeError("Coding agent is not installed", code="coding_agent_not_installed")
+
+        if spec.acp_transport == "native":
+            argv = [*command, "acp"]
+        else:
+            if len(command) != 1:
+                raise CodingAgentRuntimeError(
+                    f"{spec.command_env} must resolve to one executable for the ACP bridge",
+                    code="coding_agent_command_invalid",
+                )
+            argv = self._bridge_command(spec)
+
+        environment = self.process_environment(agent_id)
+        if extra_environment:
+            environment.update(extra_environment)
+        if agent_id == "codex":
+            environment.update(
+                {
+                    "CODEX_PATH": command[0],
+                    "INITIAL_AGENT_MODE": "agent",
+                    "NO_BROWSER": "1",
+                }
+            )
+            if native_model:
+                environment["CODEX_CONFIG"] = json.dumps({"model": native_model}, separators=(",", ":"))
+
+        raw_timeout = os.getenv(spec.timeout_env, "600.0")
+        try:
+            timeout_seconds = float(raw_timeout)
+        except ValueError as exc:
+            raise CodingAgentRuntimeError(
+                f"{spec.timeout_env} must be a number",
+                code="coding_agent_configuration_error",
+            ) from exc
+        if timeout_seconds <= 0:
+            raise CodingAgentRuntimeError(
+                f"{spec.timeout_env} must be positive",
+                code="coding_agent_configuration_error",
+            )
+        return ACPLaunchDescriptor(
+            agent_id=agent_id,
+            agent_name=spec.name,
+            argv=tuple(argv),
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            transport=spec.acp_transport,
+        )
+
     async def _run_probe(self, argv: list[str], *, agent_id: str) -> tuple[int, str]:
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -236,11 +364,18 @@ class CodingAgentRuntime:
             active_auth = self._auth_sessions.get(agent_id)
             if active_auth and active_auth["status"] in {"starting", "waiting"}:
                 auth_state = active_auth["status"]
+        available = installed
+        if installed and spec.acp_transport == "bridge":
+            try:
+                self._bridge_command(spec)
+            except CodingAgentRuntimeError as exc:
+                available = False
+                detail = str(exc)
         return {
             "installed": installed,
             "install_state": "installed" if installed else "failed",
             "install_operation": self._active_install(agent_id),
-            "available": installed,
+            "available": available,
             "authenticated": authenticated,
             "auth_state": auth_state,
             "version": version if installed else "",

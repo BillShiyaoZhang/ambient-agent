@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 from contextlib import asynccontextmanager
@@ -33,15 +34,19 @@ from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
 from backend.llm_service import set_default_llm_store
-from backend.opencode_service import (
+from backend.coding_agent_acp import (
     CodingAgentStagedResult,
-    cleanup_orphaned_opencode_staging,
-    recover_interrupted_opencode_promotions,
-    run_opencode_agent_acp,
+    cleanup_orphaned_coding_agent_staging,
+    recover_interrupted_coding_agent_promotions,
 )
 from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
 from backend.session_title import is_placeholder_title, sanitize_title
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
+from backend.widget_runtime import (
+    WidgetRuntimeBinding,
+    WidgetRuntimeGateway,
+)
+from backend.widget_runtime_smoke import WidgetRuntimeSmokeTester
 
 # Global registry of active WebSockets mapping session_id -> Set[WebSocket]
 active_websockets: dict[str, set[WebSocket]] = {}
@@ -132,6 +137,7 @@ def _system_capability_catalog() -> SystemCapabilityCatalog:
         coding_agents=coding_agent_config_store.catalog(),
     )
 
+
 from backend.graph_db import create_graph_database
 
 graph_db = create_graph_database(WORKSPACE_DIR)
@@ -169,19 +175,21 @@ async def _run_coding_agent_staged(
     coding_agent: str | None = None,
     coding_agent_model: dict[str, Any] | None = None,
     staged_result: CodingAgentStagedResult | None = None,
+    artifact_validator: Any = None,
+    repair_decider: Any = None,
 ):
     selected = coding_agent or coding_agent_config_store.get_settings()["default_agent"]
-    # Keep the long-standing module injection point for local hosts and tests.
-    if selected == "opencode":
-        staging_kwargs = {"staged_result": staged_result} if staged_result is not None else {}
-        return await run_opencode_agent_acp(
-            app_id,
-            instruction,
-            language=language,
-            on_update=on_update,
-            promote=promote,
-            **staging_kwargs,
-        )
+    effective_artifact_validator = artifact_validator
+    if os.getenv("WIDGET_RUNTIME_SMOKE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+
+        async def validate_with_runtime(result: CodingAgentStagedResult) -> None:
+            if artifact_validator is not None:
+                validation = artifact_validator(result)
+                if inspect.isawaitable(validation):
+                    await validation
+            await WidgetRuntimeSmokeTester(graph_db=graph_db).verify(result)
+
+        effective_artifact_validator = validate_with_runtime
     return await run_coding_agent(
         app_id,
         instruction,
@@ -192,6 +200,8 @@ async def _run_coding_agent_staged(
         runtime=coding_agent_config_store.runtime,
         model_config=coding_agent_model or coding_agent_config_store.model_config(selected),
         staged_result=staged_result,
+        artifact_validator=effective_artifact_validator,
+        repair_decider=repair_decider,
     )
 
 
@@ -327,7 +337,7 @@ async def lifespan(app: FastAPI):
     active_running_sessions.update(_active_chat_session_ids())
     db_storage.cleanup_audit_logs()
     try:
-        recover_interrupted_opencode_promotions(app_manager.apps_dir)
+        recover_interrupted_coding_agent_promotions(app_manager.apps_dir)
     except (OSError, ValueError):
         pass
     try:
@@ -336,7 +346,7 @@ async def lifespan(app: FastAPI):
         staging_references = run_store.retained_staging_paths(
             failed_retention_seconds=failed_staging_retention,
         )
-        cleanup_orphaned_opencode_staging(
+        cleanup_orphaned_coding_agent_staging(
             app_manager.apps_dir,
             referenced_staging_paths=staging_references,
             grace_seconds=staging_grace,
@@ -502,6 +512,11 @@ async def update_coding_agent_settings(data: CodingAgentSettingsUpdateRequest):
         if not status["installed"]:
             raise CodingAgentRuntimeError(
                 "Install the coding agent before selecting it", code="coding_agent_not_installed"
+            )
+        if not status["available"]:
+            raise CodingAgentRuntimeError(
+                status["status_detail"] or "Coding Agent ACP adapter is unavailable",
+                code="coding_agent_acp_unavailable",
             )
         if spec.auth_methods and not status["authenticated"]:
             raise CodingAgentRuntimeError(
@@ -947,7 +962,7 @@ async def get_app_files(app_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if files:
-        return files
+        return {key: value for key, value in files.items() if key != "js"}
     raise HTTPException(status_code=404, detail="App not found")
 
 
@@ -1077,6 +1092,30 @@ class GraphMutateRequest(BaseModel):
     grants_digest: str | None = None
 
 
+async def _send_graph_subscription_payload(target: Any, payload: dict[str, Any]) -> None:
+    """Project Graph updates to chat sockets or isolated Runtime sessions."""
+
+    try:
+        if isinstance(target, WidgetRuntimeBinding):
+            if payload.get("type") == "graph_query_update":
+                runtime_payload = {
+                    "type": "subscription_event",
+                    "subscription_id": payload.get("subscription_id"),
+                    "data": payload.get("data"),
+                }
+            else:
+                runtime_payload = {
+                    "type": "subscription_event",
+                    "subscription_id": payload.get("subscription_id"),
+                    "error": payload.get("error"),
+                }
+            await widget_runtime_gateway.send_to_runtime(target.session_id, runtime_payload)
+            return
+        await target.send_json(payload)
+    except Exception:
+        pass
+
+
 async def _run_approved_graph_mutation(
     actions: list[dict[str, Any]],
     *,
@@ -1167,13 +1206,11 @@ async def mutate_graph(data: GraphMutateRequest):
         # Broadcast changes to all websocket subscribers
         from backend.graph_subscription import subscription_manager
 
-        async def send_ws(ws, payload):
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                pass
-
-        await subscription_manager.broadcast_updates(graph_db, send_ws, authorizer=capability_authorizer)
+        await subscription_manager.broadcast_updates(
+            graph_db,
+            _send_graph_subscription_payload,
+            authorizer=capability_authorizer,
+        )
         return {
             "status": "success",
             "run_id": completed["id"],
@@ -1189,7 +1226,10 @@ async def mutate_app_graph(app_id: str, data: GraphMutateRequest):
     if not data.manifest_revision or not data.grants_digest:
         raise HTTPException(
             status_code=422,
-            detail={"code": "capability_snapshot_required", "message": "Manifest revision and grants digest are required"},
+            detail={
+                "code": "capability_snapshot_required",
+                "message": "Manifest revision and grants digest are required",
+            },
         )
     try:
         capability_authorizer.authorize_graph_mutation(
@@ -1201,6 +1241,268 @@ async def mutate_app_graph(app_id: str, data: GraphMutateRequest):
     except CapabilityDenied as exc:
         raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
     return await mutate_graph(data)
+
+
+async def _wait_for_widget_capability_run(run_id: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        current = run_store.get_run(run_id)
+        if current is None:
+            raise RuntimeError("Widget capability Run disappeared")
+        if current["status"] in {"succeeded", "failed", "cancelled", "needs_attention", "waiting_user"}:
+            return current
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(f"Widget capability Run {run_id} did not finish in {timeout:g}s")
+        await asyncio.sleep(0.05)
+
+
+async def _handle_widget_runtime_rpc(
+    binding: WidgetRuntimeBinding,
+    method: str,
+    params: dict[str, Any],
+) -> Any:
+    """Dispatch one Runtime RPC using only server-bound App identity."""
+
+    if method == "graph.subscribe":
+        from backend.graph_subscription import subscription_manager
+
+        subscription_id = str(params.get("subscription_id") or "")
+        query = params.get("query")
+        if not subscription_id or len(subscription_id) > 200 or not isinstance(query, dict):
+            raise ValueError("graph.subscribe requires a bounded subscription_id and query object")
+        capability_authorizer.authorize_graph_query(
+            binding.app_id,
+            query,
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+        return subscription_manager.register(
+            binding,
+            subscription_id,
+            query,
+            graph_db,
+            app_id=binding.app_id,
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+
+    if method == "graph.unsubscribe":
+        from backend.graph_subscription import subscription_manager
+
+        subscription_manager.unregister(binding, str(params.get("subscription_id") or ""))
+        return {"status": "ok"}
+
+    if method == "graph.mutate":
+        actions = params.get("actions")
+        if not isinstance(actions, list):
+            raise ValueError("graph.mutate requires an actions array")
+        capability_authorizer.authorize_graph_mutation(
+            binding.app_id,
+            actions,
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+        invocation_id = str(params.get("invocation_id") or hashlib.sha256(
+            json.dumps(actions, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest())
+        completed = await _run_approved_graph_mutation(
+            actions,
+            session_id=f"widget-runtime:{binding.session_id}",
+            idempotency_key=f"widget:{binding.app_id}:{invocation_id[:200]}",
+            title=f"{binding.app_id} Graph mutation",
+        )
+        if completed["status"] != "succeeded":
+            error = completed.get("error") or {}
+            raise RuntimeError(error.get("message", completed["status"]))
+        mutation = completed.get("result") or {}
+        from backend.graph_subscription import subscription_manager
+
+        await subscription_manager.broadcast_updates(
+            graph_db,
+            _send_graph_subscription_payload,
+            authorizer=capability_authorizer,
+        )
+        return {
+            "status": "success",
+            "run_id": completed["id"],
+            "ticket_id": mutation.get("ticket_id"),
+            "actions": mutation.get("actions", []),
+        }
+
+    if method == "net.request":
+        source_id = str(params.get("source_id") or "")
+        request = params.get("request")
+        if not source_id or not isinstance(request, dict):
+            raise ValueError("net.request requires source_id and a request object")
+        return await app_data_source_gateway.request(
+            binding.app_id,
+            source_id,
+            {
+                **request,
+                "manifest_revision": binding.manifest_revision,
+                "grants_digest": binding.grants_digest,
+            },
+        )
+
+    if method == "files.read":
+        return app_file_gateway.read_text(
+            binding.app_id,
+            str(params.get("path") or ""),
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+    if method == "files.list":
+        return app_file_gateway.list_files(
+            binding.app_id,
+            str(params.get("path") or ""),
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+    if method == "files.write":
+        app_file_gateway.write_text(
+            binding.app_id,
+            str(params.get("path") or ""),
+            params.get("text"),
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+        return {"status": "ok"}
+    if method == "files.delete":
+        app_file_gateway.delete(
+            binding.app_id,
+            str(params.get("path") or ""),
+            manifest_revision=binding.manifest_revision,
+            grants_digest=binding.grants_digest,
+        )
+        return {"status": "ok"}
+
+    if method == "capabilities.invoke":
+        catalog_id = str(params.get("catalog_id") or "")
+        action_id = str(params.get("action_id") or "")
+        invocation_id = str(params.get("invocation_id") or "")
+        input_data = params.get("input")
+        if not catalog_id or not action_id or not invocation_id or len(invocation_id) > 200:
+            raise ValueError(
+                "capabilities.invoke requires catalog_id, action_id, and a bounded invocation_id"
+            )
+        capability_authorizer.authorize_invocation(
+            binding.app_id,
+            catalog_id,
+            action_id,
+            binding.manifest_revision,
+            binding.grants_digest,
+        )
+        run = run_coordinator.submit(
+            catalog_id,
+            action_id,
+            {} if input_data is None else input_data,
+            source_type="widget",
+            source_id=binding.app_id,
+            idempotency_key=(
+                f"widget:{binding.app_id}:{catalog_id}:{action_id}:{invocation_id}"
+            ),
+            correlation={"widget_runtime_session": binding.session_id},
+        )
+        return await _wait_for_widget_capability_run(run["id"])
+
+    raise ValueError(f"Unsupported Widget Runtime RPC method: {method}")
+
+
+widget_runtime_gateway = WidgetRuntimeGateway(
+    app_manager=app_manager,
+    rpc_handler=_handle_widget_runtime_rpc,
+)
+
+
+@app.websocket("/ws/widgets/{app_id}/runtime")
+async def websocket_widget_runtime(
+    websocket: WebSocket,
+    app_id: str,
+    width: int = 640,
+    height: int = 480,
+    device_scale_factor: float = 1.0,
+):
+    if not await _accept_websocket_safely(websocket):
+        return
+
+    binding: WidgetRuntimeBinding | None = None
+    frontend_task: asyncio.Task | None = None
+    runtime_task: asyncio.Task | None = None
+    try:
+        binding = await widget_runtime_gateway.open_session(
+            app_id,
+            {
+                "width": width,
+                "height": height,
+                "device_scale_factor": device_scale_factor,
+            },
+        )
+
+        async def frontend_to_runtime() -> None:
+            while True:
+                message = await websocket.receive_json()
+                await widget_runtime_gateway.forward_input(binding.session_id, message)
+
+        async def runtime_to_frontend() -> None:
+            while True:
+                message = await widget_runtime_gateway.receive_runtime_message(binding.session_id)
+                projected = await widget_runtime_gateway.handle_runtime_message(
+                    binding.session_id,
+                    message,
+                )
+                if projected is not None:
+                    await websocket.send_json(projected)
+
+        frontend_task = asyncio.create_task(frontend_to_runtime())
+        runtime_task = asyncio.create_task(runtime_to_frontend())
+        done, pending = await asyncio.wait(
+            {frontend_task, runtime_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    except WebSocketDisconnect:
+        pass
+    except KeyError:
+        await websocket.send_json(
+            {
+                "type": "runtime_error",
+                "error": {
+                    "code": "app_not_found",
+                    "message": f"App '{app_id}' was not found",
+                    "classification": "authorization_or_design",
+                },
+            }
+        )
+    except Exception as exc:
+        try:
+            await websocket.send_json(
+                {
+                    "type": "runtime_error",
+                    "error": {
+                        "code": "widget_runtime_unavailable",
+                        "message": str(exc),
+                        "classification": "operator",
+                    },
+                }
+            )
+        except Exception:
+            pass
+    finally:
+        for task in (frontend_task, runtime_task):
+            if task is not None and not task.done():
+                task.cancel()
+        if binding is not None:
+            from backend.graph_subscription import subscription_manager
+
+            subscription_manager.unregister_all(binding)
+            await widget_runtime_gateway.close_session(binding.session_id)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # --- WebSocket Chat Handler ---
@@ -1579,6 +1881,7 @@ async def websocket_chat(
                 sub_id = data.get("subscription_id")
                 query = data.get("query", {})
                 from backend.graph_subscription import subscription_manager
+
                 try:
                     if not data.get("manifest_revision") or not data.get("grants_digest"):
                         raise CapabilityDenied(

@@ -122,12 +122,53 @@ Grant operation 与 SDK action 必须分别表达。例如 `graph.mutate.operati
 2. Controller syntax 与禁止 API。
 3. Capability AST subset。
 4. Schema/entity/property/type diff。
-5. 可选的受控 smoke test。
+5. 通过生产 `WidgetRuntimeGateway` 的隔离 Chromium smoke test。
 6. promotion 前重新计算 artifact、contract 与 grants digest。
 
 所有自动修复在同一 staging、同一 Run 中有界执行。finding 必须进入 repair prompt，并记录 signature；同一 signature 连续出现时升级策略：第一次局部修复，第二次要求全文件同类扫描，第三次判定 contract/design 不可满足并返回联合设计，而不是无限生成或要求用户反复输入 `/repair`。
 
 Capability、安全边界和未知实体错误不可 bypass。只有不影响 Graph 写入合法性的展示级警告可以由用户显式接受。
+
+自动修复的授权判定属于 durable workflow，ACP session 生命周期和 follow-up prompt 属于统一 Coding Agent runner。所有 Agent 都必须经过相同的 `initialize → new_session → prompt → verify → follow-up prompt` 状态机；注册表只提供 ACP launch descriptor，不能用 provider 专用 loop 改变行为。Adapter 可以优先复用仍存活的 session，但 session handle 只是易失的执行优化；正确性只依赖已持久化的 Runtime Contract、staging revision、finding 与独立 verifier。session 丢失时可以用这些信息构造 repair capsule 并在新 session 继续，不能因此扩大权限或跳过验证。
+
+Verifier/adapter 统一输出 `RepairFinding`：
+
+- `code`、`stage`、`message`、`signature`、`attempt`；
+- `repairability`：`deterministic`、`code_only`、`design_change`、`operator`；
+- `contract_impact`：`none`、`subset_only`、`expansion`、`unknown`；
+- `expected`、`observed`、`locations` 与 artifact revision/hash。
+
+策略固定为：
+
+1. `deterministic` 由系统修复，不调用模型；
+2. `code_only + none` 可在原 session 自动修复；
+3. `subset_only` 只有在不损害批准验收目标时才自动修复，否则返回设计；
+4. `design_change`、`expansion` 或 `unknown` 不发送给 Coding Agent，必须重新审批；
+5. verifier/runtime 基础设施错误进入 `operator`，不会用代码生成掩盖；
+6. 每个 adapter 最多自动修复三轮；同一 signature 连续两次、产物 hash 不变或预算耗尽时立即停止并保留 failed draft。
+
+### 7.1 ACP 兼容策略
+
+- 原生兼容的 Agent 直接启动其 ACP server，例如 `opencode acp`。
+- 不原生兼容的 Agent 只能通过固定版本、可审计的 bridge 接入。Codex 使用 `@agentclientprotocol/codex-acp`，bridge 通过 `CODEX_PATH` 复用受管理的 Codex CLI 和原生登录，并将官方 app-server 映射为 ACP。
+- 生产镜像预装并固定 bridge 版本，不在每次生成时从网络下载；本地开发可以通过显式命令覆盖。
+- bridge 不拥有授权决策、staging、自动修复预算或发布权。它只翻译协议；Ambient 的 ACP client 与 durable workflow 始终是控制平面。
+- `acpx` 一类外部 ACP runtime 可作为 Agent 命令目录、恢复和互操作参考，但当前不嵌入执行路径，避免出现第二套 session store、queue、权限和取消语义。
+
+Codex bridge 选择 [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp)：它由 ACP 组织维护并进入官方 Registry，直接把 Codex app-server 映射为 stdio ACP，还支持用 `CODEX_PATH` 复用 Ambient 管理的 CLI。调研过的 [openclaw/acpx](https://github.com/openclaw/acpx) 更适合作为通用 headless ACP client/runtime，但嵌入它会重复 Ambient 已有的 session、queue、取消和权限控制；[cola-io/codex-acp](https://github.com/cola-io/codex-acp) 与 [beyond5959/acp-adapter](https://github.com/beyond5959/acp-adapter) 可作为互操作参考，但不作为当前生产依赖。
+
+### 7.2 Runtime 错误与人工介入
+
+staging smoke test 和已发布 Widget 使用同一隔离 Runtime 协议。`runtime_error` 先由 orchestration 分类，再决定是否把 finding 发回 Coding Agent：
+
+| 分类 | 例子 | 动作 |
+| --- | --- | --- |
+| `code_only` | 编译、render、hook、确定性的 Controller exception | 将结构化错误、artifact hash 和批准 contract 发送到同一 ACP session 自动修复 |
+| `authorization_or_design` | capability denied、schema 不匹配、需要新数据源/权限 | 不让 Coding Agent 猜测或扩权；回到联合 design/schema/capability 审批 |
+| `operator` | Runtime 不可达、Chromium 崩溃、协议版本不匹配、宿主资源耗尽 | 重启/退避并保留草稿；持续失败后提示运维，不修改 App 代码 |
+| `abuse_or_budget` | 无限循环、消息洪泛、资源配额超限 | 立即终止 session；只有能定位为有限代码修复且不降低配额时才自动修复 |
+
+同 session 自动修复只用于 `code_only + contract_impact=none`，且继续遵守三轮预算、重复 signature、artifact hash 不变与总时限规则。Runtime 日志在进入模型前必须去除源码外的秘密、宿主路径和其他 session 数据，并限制 console、stack、DOM snapshot 与 frame 的大小。已发布 App 运行时出错时，系统可以创建保留当前 live 版本的新 staging repair Run；修复通过完整 verifier + smoke test 前不得覆盖 live App。
 
 ## 8. Durable state
 
@@ -147,6 +188,6 @@ Widget checkpoint 应保存：
 1. 立即：Schema 编辑同步 Graph grant 引用；后端把无效编辑返回审批而非终止 Run；Catalog 与 prompt 发布精确 SDK grammar。
 2. 近期：引入 `WidgetDesignSpec`、统一 lint 与 design digest；现有两个审批框先改为读取同一 design candidate。
 3. 中期：合并为一个原子 Design Approval，并加入 feature/data-flow/coverage UI。
-4. 后续：结构化 repair finding、同 Run 自动修复、受控 smoke test与运行诊断回流。
+4. 后续：把 CDP screencast 替换为更高效的 WebRTC transport，并提供可选的每 App 容器 `strict` 隔离；不改变 Gateway capability 协议。
 
 第一阶段不改变授权边界，只减少无效审批和错误诊断；第二、三阶段需要提升 durable workflow version，并为等待中的旧 Run 保留兼容 reducer。

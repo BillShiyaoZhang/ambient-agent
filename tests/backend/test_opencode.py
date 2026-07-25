@@ -35,11 +35,11 @@ def test_app_slash_command_uses_durable_router_without_opencode_bypass(test_sess
             clarification_message="Please describe the app requirements.",
         )
 
-    async def unexpected_opencode(*_args, **_kwargs):
-        pytest.fail("WebSocket input must not bypass the durable workflow into OpenCode")
+    async def unexpected_coding_agent(*_args, **_kwargs):
+        pytest.fail("WebSocket input must not bypass the durable workflow into a Coding Agent")
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
-    monkeypatch.setattr("backend.main.run_opencode_agent_acp", unexpected_opencode)
+    monkeypatch.setattr("backend.main.run_coding_agent", unexpected_coding_agent)
 
     # Override get_db dependency
     def override_get_db():

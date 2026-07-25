@@ -19,7 +19,7 @@ from backend.app_manifest import AppManifest
 from backend.capabilities.models import RuntimeContract
 from backend.graph_db import GraphDatabase
 from backend.models import ChatMessage, ChatSession
-from backend.opencode_service import CodingAgentDraftError, OpenCodeStagedResult
+from backend.coding_agent_acp import CodingAgentDraftError, OpenCodeStagedResult
 from backend.run_service import AgentRunState, Continue, Failed, RunCoordinator, RunStore, Succeeded, Wait
 from backend.schema_diff import UnknownProperty, VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
@@ -531,8 +531,8 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
     async def clean_diff(**_kwargs: Any) -> VerificationDiff:
         return VerificationDiff()
 
-    monkeypatch.setattr(durable_workflow_module, "validate_opencode_staging", validate_staging)
-    monkeypatch.setattr(durable_workflow_module, "promote_opencode_staging", promote_staging)
+    monkeypatch.setattr(durable_workflow_module, "validate_coding_agent_staging", validate_staging)
+    monkeypatch.setattr(durable_workflow_module, "promote_coding_agent_staging", promote_staging)
     monkeypatch.setattr(durable_workflow_module.SchemaVerificationService, "diff", clean_diff)
 
     workflow = _workflow(
@@ -691,6 +691,14 @@ async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it
                 "Capability contract: graph operation 'update' is not approved",
                 staged_result=result,
                 error_code="capability_contract_error",
+                repair_action="human",
+                finding={
+                    "code": "capability_contract_error",
+                    "stage": "static_verify",
+                    "signature": "repeated-capability-finding",
+                    "repairability": "code_only",
+                    "contract_impact": "none",
+                },
             )
         (staging_dir / "controller.js").write_text("// repaired draft", encoding="utf-8")
         _write_manifest(staging_dir, app_id, contract)
@@ -698,7 +706,7 @@ async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it
 
     monkeypatch.setattr(
         durable_workflow_module,
-        "validate_opencode_staging",
+        "validate_coding_agent_staging",
         lambda result: result.staging_dir / "controller.js",
     )
     store = RunStore(str(tmp_path))
@@ -723,6 +731,8 @@ async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it
     assert failed.summary == "Agent task failed; staged App retained"
     assert state.data["staged_app"]["staging_dir"] == str(staging_dir)
     assert state.data["code_feedback"].startswith("Capability contract")
+    assert state.data["repair_decision"]["action"] == "human"
+    assert state.data["repair_decision"]["finding"]["signature"] == "repeated-capability-finding"
     assert staging_dir.is_dir()
     assert (live_dir / "controller.js").read_text(encoding="utf-8") == "// published"
 
@@ -732,6 +742,93 @@ async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it
     assert repaired.next_phase == "verify"
     assert calls == [None, workflow._staged_result(state.data["staged_app"])]
     assert (staging_dir / "controller.js").read_text(encoding="utf-8") == "// repaired draft"
+
+
+@pytest.mark.asyncio
+async def test_stage_code_supplies_runtime_contract_validator_and_persists_repairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apps_dir = tmp_path / "apps"
+    live_dir = apps_dir / "contract-app"
+    staging_dir = apps_dir / f".contract-app.staging-{'c' * 32}"
+    apps_dir.mkdir()
+    staging_dir.mkdir()
+    contract = _runtime_contract("contract-app")
+    contract_failures = 0
+
+    async def runner(
+        app_id: str,
+        instruction: str,
+        *,
+        language: str,
+        on_update: Any,
+        promote: bool,
+        artifact_validator: Any,
+    ) -> OpenCodeStagedResult:
+        del instruction, language, on_update
+        nonlocal contract_failures
+        assert app_id == "contract-app"
+        assert promote is False
+        (staging_dir / "controller.js").write_text(
+            "export default function App() { return null; }",
+            encoding="utf-8",
+        )
+        bad_contract = _runtime_contract(
+            app_id,
+            [{"id": "graph.query", "scope": {"entities": ["Thing"]}}],
+        )
+        _write_manifest(staging_dir, app_id, bad_contract)
+        candidate = OpenCodeStagedResult("", app_id, staging_dir, live_dir)
+        with pytest.raises(durable_workflow_module.WorkflowError, match="capabilities differ"):
+            artifact_validator(candidate)
+        contract_failures += 1
+        _write_manifest(staging_dir, app_id, contract)
+        artifact_validator(candidate)
+        return OpenCodeStagedResult(
+            "",
+            app_id,
+            staging_dir,
+            live_dir,
+            repair_attempts=1,
+            repair_findings=(
+                {
+                    "code": "runtime_contract_mismatch",
+                    "stage": "runtime_contract",
+                    "signature": "contract-signature",
+                },
+            ),
+            artifact_hash="artifact-revision",
+        )
+
+    monkeypatch.setattr(
+        durable_workflow_module,
+        "validate_coding_agent_staging",
+        lambda result: result.staging_dir / "controller.js",
+    )
+    store = RunStore(str(tmp_path))
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="contract-app", instruction="build it"),
+        data={
+            "language": "en",
+            "approved_plan": "Build and verify it",
+            "approved_schema": {"reused_schemas": [], "new_schemas": [], "capabilities": []},
+            "runtime_contract": contract,
+        },
+    )
+    workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)), coding_agent_runner=runner)
+    run = _create_run(store, state, content="build it")
+
+    outcome = await workflow(run, state)
+
+    assert isinstance(outcome, Continue)
+    assert outcome.next_phase == "verify"
+    assert contract_failures == 1
+    assert state.data["staged_app"]["repair_attempts"] == 1
+    assert state.data["staged_app"]["artifact_hash"] == "artifact-revision"
+    assert state.data["verification_findings"][0]["code"] == "runtime_contract_mismatch"
 
 
 @pytest.mark.asyncio
@@ -1005,8 +1102,8 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
         "align_schemas",
         scripted_schema,
     )
-    monkeypatch.setattr(durable_workflow_module, "validate_opencode_staging", validate_staging)
-    monkeypatch.setattr(durable_workflow_module, "promote_opencode_staging", promote_staging)
+    monkeypatch.setattr(durable_workflow_module, "validate_coding_agent_staging", validate_staging)
+    monkeypatch.setattr(durable_workflow_module, "promote_coding_agent_staging", promote_staging)
     monkeypatch.setattr(durable_workflow_module.SchemaVerificationService, "diff", clean_diff)
 
     workflow = _workflow(

@@ -3,7 +3,7 @@ import json
 from backend.llm_config import LLMConfigStore, ModelSelection
 from backend.llm_runtime import use_model_selections
 from backend.llm_service import set_default_llm_store
-from backend.opencode_service import _opencode_runtime_env
+from backend.coding_agent_acp import _opencode_runtime_env
 
 
 def test_opencode_runtime_config_uses_run_model_snapshot_and_private_credentials(tmp_path, monkeypatch):

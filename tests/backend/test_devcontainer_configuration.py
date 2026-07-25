@@ -11,14 +11,28 @@ def test_devcontainer_runs_workspace_with_neo4j_sidecar() -> None:
     assert config["dockerComposeFile"] == "docker-compose.yml"
     assert config["service"] == "workspace"
     assert config["workspaceFolder"] == "/workspaces/ambient-agent"
-    assert config["runServices"] == ["workspace", "neo4j"]
+    assert config["runServices"] == ["workspace", "neo4j", "widget-runtime"]
     assert config["shutdownAction"] == "stopCompose"
     assert {8000, 5173, 5174, "neo4j:7474", "neo4j:7687"} <= set(config["forwardPorts"])
 
     compose = (REPOSITORY_ROOT / ".devcontainer/docker-compose.yml").read_text(encoding="utf-8")
     assert "workspace:" in compose
     assert "neo4j:" in compose
+    assert "widget-runtime:" in compose
     assert "GRAPH_DATABASE_BACKEND: neo4j" in compose
     assert "NEO4J_URI: bolt://neo4j:7687" in compose
     assert "NEO4J_AUTH: neo4j/ambient-agent-dev" in compose
     assert "condition: service_healthy" in compose
+    assert compose.count("condition: service_healthy") >= 2
+    assert "createConnection(\"/run/ambient-widget-runtime/runtime.sock\")" in compose
+    assert "network_mode: none" in compose
+    assert "widget_runtime_socket:/run/ambient-widget-runtime" in compose
+
+
+def test_devcontainer_pins_the_same_codex_acp_bridge_as_production() -> None:
+    dev_dockerfile = (REPOSITORY_ROOT / ".devcontainer/Dockerfile").read_text(encoding="utf-8")
+    production_dockerfile = (REPOSITORY_ROOT / "backend/Dockerfile").read_text(encoding="utf-8")
+
+    for dockerfile in (dev_dockerfile, production_dockerfile):
+        assert "@agentclientprotocol/codex-acp@1.1.7" in dockerfile
+        assert "/opt/coding-agent-acp" in dockerfile

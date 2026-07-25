@@ -22,19 +22,21 @@ from backend.app_manager import AppManager
 from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.capabilities.models import RuntimeContract, normalize_grants
+from backend.coding_agent_repair import decide_widget_repair
+from backend.coding_agent_runtime import spec_for
 from backend.context_manager import ContextManager
 from backend.graph_db import GraphDatabase
 from backend.graph_query_engine import execute_graph_query
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_runtime import use_model_selections
 from backend.models import ChatMessage, ChatSession
-from backend.opencode_service import (
+from backend.coding_agent_acp import (
     CodingAgentDraftError,
     CodingAgentStagedResult,
-    discard_coding_agent_staging as discard_opencode_staging,
-    promote_coding_agent_staging as promote_opencode_staging,
-    validate_coding_agent_promotion as validate_opencode_promotion,
-    validate_coding_agent_staging as validate_opencode_staging,
+    discard_coding_agent_staging,
+    promote_coding_agent_staging,
+    validate_coding_agent_promotion,
+    validate_coding_agent_staging,
 )
 from backend.plan_generation import PlanGenerationService
 from backend.run_service import (
@@ -675,7 +677,7 @@ class DurableAgentWorkflow:
         staged = normalized.data.get("staged_app")
         if staged and not normalized.data.get("non_compensable_effect"):
             try:
-                discard_opencode_staging(self._staged_result(staged))
+                discard_coding_agent_staging(self._staged_result(staged))
                 normalized.data.pop("staged_app", None)
             except Exception:
                 logger.warning("Unable to discard abandoned staged App", exc_info=True)
@@ -1023,9 +1025,7 @@ class DurableAgentWorkflow:
             rework_feedback = str(state.data.pop("plan_rework_feedback", "") or "").strip()
             plan_instruction = intent.instruction or ""
             if rework_feedback:
-                plan_instruction = (
-                    f"{plan_instruction}\n\n[PLAN REWORK FEEDBACK]\n{rework_feedback[:12_000]}"
-                )
+                plan_instruction = f"{plan_instruction}\n\n[PLAN REWORK FEEDBACK]\n{rework_feedback[:12_000]}"
             candidate = await PlanGenerationService.generate_plan(
                 instruction=plan_instruction,
                 app_id=intent.app_id,
@@ -1189,8 +1189,7 @@ class DurableAgentWorkflow:
         if action == "rework_plan":
             edited_proposal = response.get("proposal") or proposal
             rework_feedback = str(response.get("feedback") or "").strip() or (
-                "Revise the plan so every feature is feasible with the user-edited "
-                "schema and capability proposal."
+                "Revise the plan so every feature is feasible with the user-edited schema and capability proposal."
             )
             state.data.pop("plan_candidate", None)
             state.data.pop("approved_plan", None)
@@ -1327,7 +1326,7 @@ class DurableAgentWorkflow:
                 )
         language = str(state.data.get("language") or "zh")
         coding_agent = str(state.model_snapshot.get("coding_agent") or "opencode")
-        coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"
+        coding_agent_name = spec_for(coding_agent).name
         await self._emit(
             run,
             f"🛠️ 正在启动 {coding_agent_name} 开发者智能体并生成隔离 staging App..."
@@ -1342,17 +1341,28 @@ class DurableAgentWorkflow:
             supports_coding_agent = "coding_agent" in runner_parameters
             supports_coding_agent_model = "coding_agent_model" in runner_parameters
             supports_staged_result = "staged_result" in runner_parameters
+            supports_artifact_validator = "artifact_validator" in runner_parameters
+            supports_repair_decider = "repair_decider" in runner_parameters
         except (TypeError, ValueError):
             supports_promote = True
             supports_coding_agent = True
             supports_coding_agent_model = True
             supports_staged_result = True
+            supports_artifact_validator = True
+            supports_repair_decider = True
         if supports_promote:
             kwargs["promote"] = False
         if supports_coding_agent:
             kwargs["coding_agent"] = coding_agent
         if supports_coding_agent_model:
             kwargs["coding_agent_model"] = dict(state.model_snapshot.get("coding_agent_config") or {})
+        if supports_artifact_validator:
+            kwargs["artifact_validator"] = lambda result: self._assert_staged_runtime_contract(
+                result.staging_dir,
+                contract,
+            )
+        if supports_repair_decider:
+            kwargs["repair_decider"] = decide_widget_repair
         if retained_draft is not None:
             if not supports_staged_result:
                 raise WorkflowError(
@@ -1364,11 +1374,16 @@ class DurableAgentWorkflow:
             generated = await self.coding_agent_runner(intent.app_id, instruction, **kwargs)
         except CodingAgentDraftError as exc:
             self._record_staged_app(state, exc.staged_result, coding_agent, validation_error=str(exc))
+            state.data["repair_decision"] = {
+                "action": exc.repair_action,
+                "finding": exc.finding,
+            }
             raise WorkflowError(str(exc), code=exc.error_code) from exc
         if isinstance(generated, CodingAgentStagedResult):
             self._record_staged_app(state, generated, coding_agent)
-            validate_opencode_staging(generated)
+            validate_coding_agent_staging(generated)
             self._assert_staged_runtime_contract(generated.staging_dir, contract)
+            state.data.pop("repair_decision", None)
         else:
             raise WorkflowError("Coding agent did not return a staged artifact", code="staged_artifact_missing")
         return Continue(next_phase="verify", summary="Staged App generated")
@@ -1387,7 +1402,13 @@ class DurableAgentWorkflow:
             "staging_dir": str(result.staging_dir),
             "live_dir": str(result.live_dir),
             "coding_agent": coding_agent,
+            "repair_attempts": result.repair_attempts,
+            "repair_findings": list(result.repair_findings),
+            "artifact_hash": result.artifact_hash,
         }
+        if result.repair_findings:
+            state.data["verification_findings"] = list(result.repair_findings)
+            state.data["repair_count"] = result.repair_attempts
         if validation_error:
             state.data["code_feedback"] = validation_error[:12_000]
 
@@ -1400,12 +1421,15 @@ class DurableAgentWorkflow:
             app_id=str(data["app_id"]),
             staging_dir=Path(str(data["staging_dir"])),
             live_dir=Path(str(data["live_dir"])),
+            repair_attempts=int(data.get("repair_attempts") or 0),
+            repair_findings=tuple(data.get("repair_findings") or ()),
+            artifact_hash=str(data.get("artifact_hash") or ""),
         )
 
     def _staged_widget_code(self, state: AgentRunState) -> dict[str, str]:
         staged = state.data.get("staged_app") or {}
         result = self._staged_result(staged)
-        controller = validate_opencode_staging(result)
+        controller = validate_coding_agent_staging(result)
         return {"js": controller.read_text(encoding="utf-8")}
 
     @staticmethod
@@ -1525,7 +1549,7 @@ class DurableAgentWorkflow:
             )
         if action == "rework_code":
             state.data["code_feedback"] = str(response.get("feedback") or state.data.get("verification_report") or "")
-            discard_opencode_staging(self._staged_result(staged))
+            discard_coding_agent_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
             for key in (
                 "verification_report",
@@ -1542,7 +1566,7 @@ class DurableAgentWorkflow:
             )
             if extensions:
                 state.data["pre_extend_schema_props"] = extensions
-            discard_opencode_staging(self._staged_result(staged))
+            discard_coding_agent_staging(self._staged_result(staged))
             state.data.pop("staged_app", None)
             for key in (
                 "schema_candidate",
@@ -1557,15 +1581,13 @@ class DurableAgentWorkflow:
                 state.data.pop(key, None)
             return Continue(next_phase="align_schema", summary="Reworking schema proposal")
         if action == "rework_plan":
-            plan_rework_feedback = str(
-                response.get("feedback") or state.data.get("verification_report") or ""
-            ).strip()
+            plan_rework_feedback = str(response.get("feedback") or state.data.get("verification_report") or "").strip()
             plan_schema_context = json.dumps(
                 state.data.get("approved_schema") or {},
                 ensure_ascii=False,
                 sort_keys=True,
             )[:16_000]
-            discard_opencode_staging(self._staged_result(staged))
+            discard_coding_agent_staging(self._staged_result(staged))
             for key in self._WIDGET_KEYS | {"pre_extend_schema_props"}:
                 state.data.pop(key, None)
             state.data["plan_rework_feedback"] = plan_rework_feedback[:12_000]
@@ -1633,7 +1655,7 @@ class DurableAgentWorkflow:
         contract = state.data.get("runtime_contract")
         if not isinstance(contract, dict):
             raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
-        recovered_controller = validate_opencode_promotion(staged_result, run["id"])
+        recovered_controller = validate_coding_agent_promotion(staged_result, run["id"])
         contract_dir = staged_result.live_dir if recovered_controller is not None else staged_result.staging_dir
         self._assert_staged_runtime_contract(contract_dir, contract)
         if state.data.get("approved_schema"):
@@ -1652,7 +1674,7 @@ class DurableAgentWorkflow:
             state.data.pop("effect_in_flight", None)
             state.data["schema_snapshot"] = schema_change["snapshot"]
         try:
-            controller = recovered_controller or validate_opencode_staging(staged_result)
+            controller = recovered_controller or validate_coding_agent_staging(staged_result)
             artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
             if recovered_controller is None:
                 marker = staged_result.staging_dir / ".ambient-promotion.json"
@@ -1661,7 +1683,7 @@ class DurableAgentWorkflow:
                     encoding="utf-8",
                 )
                 state.data["effect_in_flight"] = "app_atomic_promote"
-                await asyncio.to_thread(promote_opencode_staging, staged_result)
+                await asyncio.to_thread(promote_coding_agent_staging, staged_result)
                 state.data.pop("effect_in_flight", None)
             state.artifact_refs.append({"type": "app", "id": staged_result.app_id, "sha256": artifact_hash})
         except (Exception, asyncio.CancelledError):
@@ -1693,7 +1715,7 @@ class DurableAgentWorkflow:
         report = str(state.data.get("verification_report") or "Verification report unavailable")
         output = str(staged.get("output") or "")
         coding_agent = str(staged.get("coding_agent") or state.model_snapshot.get("coding_agent") or "opencode")
-        coding_agent_name = "Codex" if coding_agent == "codex" else "OpenCode"
+        coding_agent_name = spec_for(coding_agent).name
         content = f"{coding_agent_name} Execution Log:\n\n```\n{output}\n```\n\n### 🔍 Database Schema Verification Report\n\n{report}"
 
         code_message = ChatMessage(

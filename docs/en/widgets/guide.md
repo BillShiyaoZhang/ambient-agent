@@ -1,6 +1,6 @@
 # Widget Format and Lifecycle
 
-Current Widgets use Manifest V2 plus a single React/HTM Controller. Do not generate inline XML Widgets, `index.html`, `style.css`, or removed legacy SDK APIs.
+Current Widgets use Manifest V2 plus a single React/HTM Controller. The Controller executes in isolated Chromium inside Docker; the user's browser only displays frames. Do not generate inline XML Widgets, `index.html`, `style.css`, or removed legacy SDK APIs.
 
 ## 1. One carrier form
 
@@ -66,13 +66,13 @@ Publication checks, in order:
 5. Graph use matches effective schemas;
 6. artifact hash, grants digest, Run version, and effect/idempotency records.
 
-Only then is staging atomically promoted. Failure, cancellation, or denial preserves the existing App. An internal Coding Agent validation failure, timeout, or system error before promotion retains the failed draft together with its error in non-executable hidden staging; retry repairs that directory in place or continues verification instead of deleting and regenerating it. When the Controller and Manifest grants disagree, the repair turn receives the approved Runtime Contract again and may only edit the existing `controller.js`/`manifest.json` to match it; it cannot request or broaden authority. Only explicit cancellation, rework, or expiry of the draft-retention period may clean that staging.
+Only then is staging atomically promoted. Failure, cancellation, or denial preserves the existing App. When deterministic policy classifies a validation error as code-only with no approved-contract change, the Coding Agent automatically gets at most three repair turns in the same staging directory; OpenCode prefers the still-live ACP session. Infrastructure failures, errors requiring broader authority or Schema changes, and repeated findings are not blindly sent to the Coding Agent. Any unresolved internal validation failure, timeout, or system error before promotion retains the failed draft together with its error in non-executable hidden staging; retry repairs that directory in place or continues verification instead of deleting and regenerating it. When the Controller and Manifest grants disagree, the repair turn receives the approved Runtime Contract again and may only edit the existing `controller.js`/`manifest.json` to match it; it cannot request or broaden authority. Only explicit cancellation, rework, or expiry of the draft-retention period may clean that staging.
 
 ## 5. Debugging
 
-- Compilation/render failures appear in the Widget and browser console.
+- The Widget Runtime returns compilation/render failures as structured `runtime_error` events displayed in the Widget; Controller console output never enters the host-page realm.
 - Generation failures appear in chat with the App ID, failed phase, error code, and cause. Reply with `/repair <app-id> [feedback]` to continue from the retained draft.
 - For `capability_denied`, first check Manifest entity/operation/source/path/action scope.
 - Handle interactions and `needs_attention` in the Task Drawer.
 - Run `node scripts/verify_widget_controller.mjs <controller.js>` for static verification.
-- See [ambient SDK](/en/widgets/sdk.md) for APIs and [Widget Capability Security](/en/architecture/capability-security.md) for authorization.
+- See [ambient SDK](/en/widgets/sdk.md) for APIs, [Widget Isolation Runtime](/en/widgets/sandbox.md) for execution isolation, and [Widget Capability Security](/en/architecture/capability-security.md) for authorization.

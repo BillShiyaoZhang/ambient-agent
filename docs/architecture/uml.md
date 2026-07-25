@@ -20,7 +20,7 @@ flowchart TB
 
     Workflow --> Domain[harness.py: AgentOrchestrator]
     Workflow --> Tools[tools.py: ToolGateway]
-    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Workflow --> ACP[coding_agent_acp.py: run_coding_agent_acp]
     Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
     Coordinator --> Remote[backend_manager.py: handle_agent_message]
 
@@ -148,7 +148,7 @@ flowchart TB
 
 所有 wait phase 都先持久化 interaction 再返回 `Wait`。resolve 以 `expected_run_version` 检查并原子记录 response、关闭同 Run 其他 pending interaction、重新入队和追加 events。
 
-## 5. Tool、MCP 与 OpenCode 边界
+## 5. Tool、MCP 与 Coding Agent ACP 边界
 
 ```mermaid
 flowchart LR
@@ -160,23 +160,49 @@ flowchart LR
     Backend --> MCP[backend_manager.py: StdioJsonRpcClient]
     MCP -->|initialize / deadline / cancel / bounded I/O| Process[MCP 子进程]
 
-    Stage[stage_code] --> Prepare[opencode_service.py: _prepare_staging_app]
-    Prepare --> ACP[opencode_service.py: run_opencode_agent_acp]
-    ACP --> Validate[opencode_service.py: validate_opencode_staging]
+    Stage[stage_code] --> Prepare[coding_agent_acp.py: _prepare_staging_app]
+    Prepare --> ACP[coding_agent_acp.py: run_coding_agent_acp]
+    ACP --> Validate[coding_agent_acp.py: validate_coding_agent_staging]
+    Validate -->|repairable + budget| ACP
     Validate -->|pass| Verify[verify reads staging]
-    Validate -->|adapter error + handle| Retain[保留不可执行 failed draft]
+    Validate -->|design/operator/repeated + handle| Retain[保留不可执行 failed draft]
     Verify -->|pass| Marker[持久 promotion marker]
-    Marker --> Promote[opencode_service.py: promote_opencode_staging]
+    Marker --> Promote[coding_agent_acp.py: promote_coding_agent_staging]
     Verify -->|failure| Retain
     Retain -->|retry internal validation| Stage
     Retain -->|retry later verification| Verify
-    Verify -->|rework / cancel / retention expiry| Discard[opencode_service.py: discard_opencode_staging]
+    Verify -->|rework / cancel / retention expiry| Discard[coding_agent_acp.py: discard_coding_agent_staging]
     Promote --> Live[Live App]
 ```
 
-`ToolGateway` 当前统一模型请求的本地 Python tools；Capability、MCP、远端 Agent 与 ACP 仍各自保留 adapter/permission policy。OpenCode 已有 path、argv、environment、output、process-group 和 staging 约束，但并非 OS 级网络/文件系统 sandbox。
+`ToolGateway` 当前统一模型请求的本地 Python tools；Capability、MCP、远端 Agent 与 ACP 仍各自保留 adapter/permission policy。所有 Coding Agent 都通过同一个 ACP client、session、文件/终端权限、输出上限、process-group、staging、验证和 repair 状态机执行；这些约束并非 OS 级网络/文件系统 sandbox。
 
-Backend 镜像必须同时包含 Node.js 与由前端 lockfile 固定的 `@babel/standalone`。`validate_opencode_staging` 对 OpenCode/Codex 共用的 staging 执行 Babel 解析、host/network global 拒绝和受限 VM smoke test；verifier 缺失或失败时 staging 不得提升为 live App。
+Backend 镜像必须同时包含 Node.js 与由前端 lockfile 固定的 `@babel/standalone`。`validate_coding_agent_staging` 对所有 Coding Agent 共用的 staging 执行 Babel 解析、host/network global 拒绝和受限 VM smoke test；verifier 缺失或失败时 staging 不得提升为 live App。
+
+### 5.1 Widget 隔离 Runtime
+
+```mermaid
+flowchart LR
+    Player[用户浏览器帧播放器] <-->|frame / input| Gateway[FastAPI WidgetRuntimeGateway]
+    Gateway <-->|NDJSON / Unix socket| Supervisor[零网络 widget-runtime]
+    Supervisor --> Chromium[固定 Chromium browser process]
+    Chromium --> A[App A BrowserContext]
+    Chromium --> B[App B BrowserContext]
+    Gateway -->|server-side session identity| Authorizer[CapabilityAuthorizer]
+    Authorizer --> Adapters[Graph / HTTP / Files / Capability adapters]
+```
+
+```mermaid
+classDiagram
+    class WidgetRuntimeGateway {
+        +open_session(app_id, viewport)
+        +close_session(session_id)
+        +forward_input(session_id, message)
+        +handle_runtime_message(session_id, message)
+    }
+```
+
+`WidgetRuntimeGateway` 是浏览器连接、Unix socket 和 capability adapter 之间的唯一桥。它持久读取 Manifest 并在内存中绑定 `session_id -> app_id/revision/grants_digest/artifact_digest`；所有 Controller payload 身份字段都被忽略。Runtime 不挂载工作区且使用 `network_mode: none`，因此 Controller 只能通过 Gateway 的 RPC 获得外部能力。每个 App 使用独立 BrowserContext；默认共享 Chromium 以控制个人笔记本的启动与内存成本。
 
 ## 6. 事件与恢复边界
 
@@ -217,16 +243,20 @@ classDiagram
 ```mermaid
 flowchart LR
     Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]
-    Runtime -->|按需安装 / 状态 / 登录 / model-list| Codex[codex_service.py: run_codex_agent]
+    Runtime -->|ACP launch descriptor| ACP[coding_agent_acp.py: run_coding_agent_acp]
     Settings --> Dispatch[coding_agent.py: run_coding_agent]
-    Dispatch --> Codex
-    Dispatch --> OpenCode[opencode_service.py: run_opencode_agent_acp]
+    Dispatch --> ACP
+    Runtime --> OpenCode[OpenCode native ACP server]
+    Runtime --> Bridge[@agentclientprotocol/codex-acp]
+    Bridge --> AppServer[Codex app-server]
 
     Provider[中心 Provider Registry] --> Ambient[primary / fast]
     Provider -->|per-agent shared binding| OpenCode
-    Native[Codex 原生登录与订阅] --> Codex
+    Native[Codex 原生登录与订阅] --> AppServer
 ```
 
-内置 Adapter 是受信任的能力清单，但 CLI 只有在用户选择安装时才下载到独立持久卷。安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
+ACP 是唯一的代码生成 orchestration 边界。内置 Adapter 只声明受信任的 launch descriptor：ACP server 命令、底层 CLI、环境、模型配置与版本来源；不能另写一套 prompt loop、权限或 repair 行为。OpenCode 启动原生 `opencode acp`。Codex 使用镜像中固定版本的 `@agentclientprotocol/codex-acp`，通过 `CODEX_PATH` 连接 Ambient 管理的 Codex CLI，再由后者启动官方 app-server。若新增 Agent 不原生支持 ACP，必须优先选择 ACP Registry 中可审计、版本固定、维护活跃的 bridge；bridge 只做协议映射，权限与生命周期仍由 Ambient ACP client 所有。
+
+CLI 只有在用户选择安装时才下载到独立持久卷。安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
 
 Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。

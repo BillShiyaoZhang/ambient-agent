@@ -16,12 +16,13 @@ ambient-agent/
 │       ├── lib/           # Pure window-state and message-merging logic
 │       ├── services/      # HTTP, WebSocket, Run, LLM, theme, and i18n clients
 │       └── types/         # Run event types generated from the backend contract
+├── widget-runtime/        # Zero-network Chromium supervisor and isolated Controller renderer
 ├── docs/                  # Docsify docs; Chinese at root, English under docs/en/
 ├── scripts/               # Contract generation, UML/docs/Widget checks, evaluation
 ├── tests/backend/         # Pytest backend tests
 ├── tests/frontend/        # Vitest + Testing Library frontend tests
 ├── workspace/             # Local runtime data, ignored by Git
-├── docker-compose.yml     # Local Neo4j + backend + frontend orchestration
+├── docker-compose.yml     # Local Neo4j + backend + frontend + widget-runtime orchestration
 └── pyproject.toml         # Python versions, dependencies, and Ruff configuration
 ```
 
@@ -43,7 +44,8 @@ ambient-agent/
 | `backend/schema_*` | Produces schema + capability alignment proposals and verifies that staging cannot expand the approved contract |
 | `backend/app_manager.py` | Artifact I/O and safe paths under `workspace/apps/<app-id>/` |
 | `backend/app_store.py` | Unified catalog and layout for apps, skills, and MCP capabilities |
-| `backend/opencode_service.py` | Generates Widgets through ACP in isolated staging, then verifies and promotes artifacts |
+| `backend/coding_agent_acp.py` | Generates Widgets through ACP in isolated staging, then verifies and promotes artifacts |
+| `backend/widget_runtime.py` | Runtime sessions, Unix-socket protocol, frame/input proxying, and capability-RPC identity binding |
 | `backend/llm_config.py` | Provider profiles, credentials, model catalog, and default/session selections |
 | `backend/workspace_storage.py` | Workspace file storage for session messages, Canvas, and audit logs |
 
@@ -55,7 +57,7 @@ ambient-agent/
 | `AppWorkspace.tsx` | Desktop chrome, window move/resize/snap/maximize, and responsive modes |
 | `AppCenter.tsx` | Unified capability catalog, search, folders, ordering, and UI generation entry point |
 | `TaskDrawer.tsx` | Run history, pending interactions, and runtime controls |
-| `SandboxWidget.tsx` | Compiles `controller.js`, constructs a minimal approved-grant `ambient` membrane, and renders React Widgets |
+| `SandboxWidget.tsx` | Widget Runtime frame player; normalizes input/viewport and never loads or executes a Controller |
 | `services/runs.ts` | Run REST client, versioned event stream, and cursor recovery after disconnects |
 | `lib/windowManager.ts` | Canvas V3 migration, normalized window coordinates, and layout algorithms |
 
@@ -76,6 +78,8 @@ workspace/
 ```
 
 `workspace/` is local state and must not be committed. The deployed canonical ontology and context graph live in Neo4j; App-private runtime data lives under `workspace/apps/<app-id>/data/`. The new version does not load V1 Apps or old three-file Widgets; migration explicitly repeats schema/capability alignment and publishes Manifest V2.
+
+`widget-runtime` never mounts `workspace/`. The Backend sends verified Controller contents and an artifact digest over the Unix socket; the shared named volume holds only the socket inode, never Apps or credentials.
 
 ## Common change entry points
 

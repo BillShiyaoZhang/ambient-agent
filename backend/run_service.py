@@ -232,7 +232,7 @@ def _decode_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
 def _discard_staged_app_from_state(state: dict[str, Any]) -> str | None:
     """Delete one retained staging directory and remove its durable handle.
 
-    The OpenCode boundary validates that the directory is a recognized sibling
+    The Coding Agent boundary validates that the directory is a recognized sibling
     of the declared live App before deleting it.  A legacy-promoted handle is
     deliberately rejected: it may already represent a live external effect
     and therefore requires reconciliation rather than staging cleanup.
@@ -251,10 +251,10 @@ def _discard_staged_app_from_state(state: dict[str, Any]) -> str | None:
     staging_dir = Path(str(staged.get("staging_dir") or ""))
     live_dir = Path(str(staged.get("live_dir") or ""))
     if staging_dir.exists() or staging_dir.is_symlink():
-        from backend.opencode_service import OpenCodeStagedResult, discard_opencode_staging
+        from backend.coding_agent_acp import CodingAgentStagedResult, discard_coding_agent_staging
 
-        discard_opencode_staging(
-            OpenCodeStagedResult(
+        discard_coding_agent_staging(
+            CodingAgentStagedResult(
                 output=str(staged.get("output") or ""),
                 app_id=app_id,
                 staging_dir=staging_dir,
@@ -1912,7 +1912,7 @@ class RunStore:
 
         Filesystem deletion intentionally occurs *after* the tombstone commit.
         A crash before deletion leaves a recoverable marker; a crash after
-        deletion is also safe because ``discard_opencode_staging`` accepts an
+        deletion is also safe because ``discard_coding_agent_staging`` accepts an
         already-missing, otherwise valid staging path.
         """
 
@@ -2116,18 +2116,15 @@ class RunStore:
                     staged = state_data.get("staged_app")
                     if not isinstance(staged, dict):
                         raise ValueError("staged_app checkpoint must be an object")
-                    from backend.opencode_service import (
-                        OpenCodeStagedResult,
-                        validate_opencode_promotion,
-                    )
+                    from backend.coding_agent_acp import CodingAgentStagedResult, validate_coding_agent_promotion
 
-                    staged_result = OpenCodeStagedResult(
+                    staged_result = CodingAgentStagedResult(
                         output=str(staged.get("output") or ""),
                         app_id=str(staged.get("app_id") or ""),
                         staging_dir=Path(str(staged.get("staging_dir") or "")),
                         live_dir=Path(str(staged.get("live_dir") or "")),
                     )
-                    promoted_effect_detected = validate_opencode_promotion(staged_result, run_id) is not None
+                    promoted_effect_detected = validate_coding_agent_promotion(staged_result, run_id) is not None
                     if promoted_effect_detected:
                         state_data["effects_committed"] = True
                         state_data["non_compensable_effect"] = True
@@ -3046,7 +3043,9 @@ class RunCoordinator:
             if normalized_retry_state.workflow_type.startswith("widget"):
                 staged = normalized_retry_state.data.get("staged_app")
                 raw_staging_path = staged.get("staging_dir") if isinstance(staged, dict) else None
-                staging_path = Path(raw_staging_path) if isinstance(raw_staging_path, str) and raw_staging_path else None
+                staging_path = (
+                    Path(raw_staging_path) if isinstance(raw_staging_path, str) and raw_staging_path else None
+                )
                 try:
                     staged_exists = bool(
                         staging_path is not None and staging_path.is_dir() and not staging_path.is_symlink()
@@ -3054,7 +3053,10 @@ class RunCoordinator:
                 except OSError:
                     staged_exists = False
                 normalized_retry_state.data.pop("staged_app_status", None)
-                if normalized_retry_state.phase in {"stage_code", "verify", "wait_override", "promote"} and not staged_exists:
+                if (
+                    normalized_retry_state.phase in {"stage_code", "verify", "wait_override", "promote"}
+                    and not staged_exists
+                ):
                     normalized_retry_state.data.pop("staged_app", None)
                     normalized_retry_state.phase = "stage_code"
                     for key in (

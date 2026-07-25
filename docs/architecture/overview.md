@@ -4,11 +4,12 @@
 
 ```mermaid
 flowchart LR
-    Browser[表现层：React 工作区] -->|REST / WebSocket| API[组合根：FastAPI]
+    Browser[表现层：React 工作区与帧播放器] -->|REST / WebSocket| API[组合根：FastAPI]
     API --> Workflow[应用层：Use Case / Durable Workflow]
     Workflow --> Domain[领域层：Run / Ontology / Capability Policy]
     Workflow --> Infra[基础设施层：Graph / Files / HTTP / MCP / LLM]
     Infra --> Workspace[workspace 持久状态]
+    API <-->|Unix socket| Runtime[隔离 widget-runtime + Chromium]
 ```
 
 `backend/main.py` 是组合根，只创建并连接 `WorkspaceStorage`、graph adapter、App/Capability 服务、`RunCoordinator` 和 Workflow。业务规则属于领域/应用对象，route 不直接决定授权或操作存储。完整依赖规则见 [Widget 能力安全架构](/architecture/capability-security.md)。
@@ -29,7 +30,7 @@ flowchart LR
 
 Widget 只有一条发布路径：durable workflow 先确认计划，再让用户批准 schema 与 capability proposal；随后用户选择的 OpenCode 或 Codex 在 staging 目录生成 manifest V2 与 controller。只有当代码使用是批准 grants 的子集、manifest grants 与批准值完全相等，并通过语法/安全/schema 校验后，产物才会原子提升。对话内联 XML Widget 与未验证直写路径已退出新版本。
 
-前端从 `/api/apps/{id}` 获取应用与批准 grants。`SandboxWidget` 使用 Babel 转译 controller，并根据 grants 构造最小 `ambient` membrane。后端 adapter 在每次访问时再次授权；前端 API surface 不能替代后端 policy。
+前端从 `/api/apps/{id}` 获取应用元数据，但不执行 Controller。`SandboxWidget` 通过 `/ws/widgets/{id}/runtime` 连接 Backend 的 `WidgetRuntimeGateway`，只显示隔离 Chromium 的画面并转发输入。Controller、Babel 和 renderer 在无 Docker 网络、无工作区挂载的 `widget-runtime` 容器中执行；每个打开的 App 使用独立 BrowserContext。Graph、Network、Files 和 capability RPC 回到 Backend，由 server-side runtime session 绑定 App 身份并逐次授权。
 
 ## 4. 数据与通信职责
 
@@ -43,6 +44,8 @@ Widget 只有一条发布路径：durable workflow 先确认计划，再让用�
 | REST `/api/apps/{id}/files/*` | `app://data/` 内经过 path grant 授权的文件操作 |
 | REST `/api/apps/{id}/data-sources/*` | `network.request` grant 中声明的公共 HTTPS JSON source |
 | `/ws/chat` | 聊天命令与 App-scoped Graph 订阅 |
+| `/ws/widgets/{id}/runtime` | Widget 帧、输入和生命周期；不接收客户端声明的 capability 身份 |
+| Unix socket `widget-runtime.sock` | Backend 与零网络 Widget Runtime 之间的 start/frame/input/RPC 协议 |
 | `/ws/runs` | 带 sequence、event ID 和 stream epoch 的可恢复事件流 |
 | `workspace/sessions/*.json` | 会话与消息 |
 | `workspace/.ambient/runs.db` | Run、step、interaction 和 canonical event |
@@ -52,13 +55,15 @@ Widget 只有一条发布路径：durable workflow 先确认计划，再让用�
 ## 5. 安全与一致性原则
 
 - Provider 密钥不返回给前端，凭据文件位于 Git 忽略的工作区。
-- Coding Agent Runtime 使用可信内置 Adapter，将 CLI 按需安装到专用持久卷，并统一管理安装、认证、动态模型发现、模型绑定与运行状态。Codex 通过容器内设备码登录使用自己的 ChatGPT 订阅，并通过官方 app-server `model/list` 返回当前账号可选模型；OpenCode 引用中心 Provider Registry 的模型绑定。后端不会把 Ambient Provider 密钥或模型绑定传给 native 模式的 Codex。
+- Coding Agent Runtime 使用可信内置 Adapter，将 CLI 按需安装到专用持久卷，并统一管理安装、认证、动态模型发现、模型绑定与运行状态。代码生成只经过一个 ACP orchestration：OpenCode 提供原生 ACP server；Codex 由固定版本的 ACP Registry bridge 映射到官方 app-server。两者共用 Ambient 的 session、权限、staging、验证和同 session repair 状态机。Codex 通过容器内设备码登录使用自己的 ChatGPT 订阅，并通过 app-server `model/list` 返回当前账号可选模型；后端不会把 Ambient Provider 密钥或模型绑定传给 native 模式的 Codex。
 - Docker Compose 放开默认 seccomp 对非特权 user namespace 的拦截，使 Codex 能在容器边界内继续使用自己的 bubblewrap `workspace-write` 沙箱；不授予 `SYS_ADMIN`，也不切换到 `danger-full-access`。
 - Backend 镜像内置与前端锁文件一致的 Node.js 与 `@babel/standalone` verifier runtime。所有 Coding Agent 生成的 `controller.js` 只有通过语法、禁用 host/network global 与受限 VM 执行检查后才会从 staging 提升为 live App；校验器缺失时必须失败关闭，不能发布未验证代码。
 - Coding Agent 只接收从 [Agent 系统能力目录](/agent/system-capabilities.md) 生成的角色投影和不可变 Runtime Contract。生成契约禁止 `fetch`、浏览器 host global、直接 MCP 和未批准访问；staging 校验失败时只返回有界诊断进行修复。
 - Graph mutation 必须通过规范本体预检，并在一个 Neo4j transaction 中原子提交。
 - Widget 外部访问由 Capability Ontology、批准 grant、静态 verifier、SDK membrane 与后端 authorizer 共同约束；MCP、工具和 Coding Agent 仍叠加各自的 adapter policy。
+- 不可信 Widget 代码只在独立 `widget-runtime` 容器中执行。该容器无网络、无宿主/工作区/Docker socket/凭据挂载，使用只读 rootfs、tmpfs、非 root 用户和资源上限；用户浏览器与 Backend 都不求值 Controller。
+- Runtime session 在 Backend 绑定 `app_id + manifest revision + grants digest + artifact digest`。Controller payload 中的身份字段一律忽略；撤权或 revision/digest 改变会终止旧 session。
 - 有副作用的 durable step 使用 effect/idempotency 记录、interaction 和 fencing，避免恢复或并发造成重复提交。
 - Run event 是版本化契约；前端保留未知事件以兼容未来版本。
 
-下一步可阅读 [Widget 能力安全架构](/architecture/capability-security.md)、[Agent 系统能力目录](/agent/system-capabilities.md)、[持久 Run](/architecture/runs.md)或[图数据库](/architecture/graph-db.md)。
+下一步可阅读 [Widget 隔离运行时](/widgets/sandbox.md)、[Widget 能力安全架构](/architecture/capability-security.md)、[Agent 系统能力目录](/agent/system-capabilities.md)、[持久 Run](/architecture/runs.md)或[图数据库](/architecture/graph-db.md)。

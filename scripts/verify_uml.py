@@ -50,6 +50,7 @@ CLASS_TO_FILE = {
     "TaskResult": "backend/agent/dag.py",
     "BackendManager": "backend/backend_manager.py",
     "StdioJsonRpcClient": "backend/backend_manager.py",
+    "WidgetRuntimeGateway": "backend/widget_runtime.py",
 }
 
 

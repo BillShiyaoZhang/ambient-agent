@@ -122,12 +122,53 @@ Verification order is fixed:
 2. Controller syntax and forbidden APIs.
 3. Capability AST subset.
 4. Schema/entity/property/type diff.
-5. Optional controlled smoke test.
+5. Isolated-Chromium smoke test through the production `WidgetRuntimeGateway`.
 6. Recompute artifact, contract, and grants digests before promotion.
 
 All automatic repairs run with bounds in the same staging directory and Run. Findings enter the repair prompt and receive a signature. If the same signature repeats, strategy escalates: local repair first, full-file same-class scan second, and contract/design-unsatisfied classification third. The workflow returns to joint design instead of generating forever or requiring repeated `/repair` input.
 
 Capability, security-boundary, and unknown-entity failures cannot be bypassed. Only presentation-level warnings that cannot make Graph writes invalid may be explicitly accepted.
+
+The durable workflow owns repair authorization decisions, while the unified Coding Agent runner owns ACP session lifetime and follow-up prompts. Every Agent must use the same `initialize → new_session → prompt → verify → follow-up prompt` state machine; the registry only supplies an ACP launch descriptor and cannot change behavior with a provider-specific loop. An adapter may prefer a still-live session, but its session handle is only an ephemeral execution optimization. Correctness depends on the persisted Runtime Contract, staging revision, findings, and independent verifier. If the session is lost, those facts form a repair capsule for a new session; losing a session never broadens authority or skips verification.
+
+Verifier and adapter diagnostics share one `RepairFinding` shape:
+
+- `code`, `stage`, `message`, `signature`, and `attempt`;
+- `repairability`: `deterministic`, `code_only`, `design_change`, or `operator`;
+- `contract_impact`: `none`, `subset_only`, `expansion`, or `unknown`;
+- `expected`, `observed`, `locations`, and artifact revision/hash.
+
+The policy is deterministic:
+
+1. `deterministic` findings are fixed by the system without a model call;
+2. `code_only + none` findings may be repaired automatically in the original session;
+3. `subset_only` findings are automatic only when approved acceptance coverage remains intact; otherwise they return to design;
+4. `design_change`, `expansion`, or `unknown` findings never go to the Coding Agent and require reapproval;
+5. verifier/runtime infrastructure failures are `operator` findings and are not hidden by code generation;
+6. each adapter gets at most three automatic repair turns; the loop stops immediately when the same signature repeats twice, the artifact hash does not change, or the budget is exhausted, retaining a failed draft.
+
+### 7.1 ACP compatibility policy
+
+- Agents with native ACP support start their ACP server directly, such as `opencode acp`.
+- A non-native Agent may only enter through a pinned, auditable bridge. Codex uses `@agentclientprotocol/codex-acp`; the bridge reuses the managed Codex CLI and native login through `CODEX_PATH` and maps the official app-server to ACP.
+- Production images preinstall and pin bridge versions instead of downloading them for each generation. Local development may use an explicit command override.
+- A bridge never owns authorization decisions, staging, the automatic-repair budget, or publication. It only translates protocols; Ambient's ACP client and durable workflow remain the control plane.
+- External ACP runtimes such as `acpx` are useful references for Agent command catalogs, recovery, and interoperability, but are not embedded in the current execution path because doing so would add a second session store, queue, permission model, and cancellation contract.
+
+The selected Codex bridge is [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp): it is maintained under the ACP organization, published through the official Registry, maps Codex app-server directly to stdio ACP, and can reuse Ambient's managed CLI through `CODEX_PATH`. [openclaw/acpx](https://github.com/openclaw/acpx) is a useful general headless ACP client/runtime, but embedding it would duplicate Ambient's existing session, queue, cancellation, and permission controls. [cola-io/codex-acp](https://github.com/cola-io/codex-acp) and [beyond5959/acp-adapter](https://github.com/beyond5959/acp-adapter) remain interoperability references rather than current production dependencies.
+
+### 7.2 Runtime errors and human intervention
+
+Staging smoke tests and published Widgets use the same isolated Runtime protocol. Orchestration classifies a `runtime_error` before deciding whether to send a finding back to the Coding Agent:
+
+| Class | Examples | Action |
+| --- | --- | --- |
+| `code_only` | compile, render, hook, or deterministic Controller exception | Send the structured error, artifact hash, and approved contract to the same ACP session for automatic repair |
+| `authorization_or_design` | capability denial, schema mismatch, new data source/authority required | Never let the Coding Agent guess or broaden authority; return to joint design/schema/capability approval |
+| `operator` | Runtime unavailable, Chromium crash, protocol mismatch, host resource exhaustion | Restart/back off and retain the draft; request operator attention after persistent failure without modifying App code |
+| `abuse_or_budget` | infinite loop, message flood, resource-quota exhaustion | Terminate the session immediately; auto-repair only when a bounded code fix is identifiable without relaxing the quota |
+
+Same-session automatic repair is limited to `code_only + contract_impact=none` and still observes the three-turn budget, repeated-signature, unchanged-artifact-hash, and total-time limits. Before Runtime diagnostics enter a model, they are stripped of non-source secrets, host paths, and other-session data, with hard bounds on console, stack, DOM snapshot, and frame sizes. A runtime failure in a published App may create a new staging repair Run while preserving the current live revision; that staging cannot replace live until it passes the full verifier and smoke test.
 
 ## 8. Durable state
 
@@ -147,6 +188,6 @@ The state machine no longer treats Plan and Schema as independent facts. Legacy 
 1. Immediate: synchronize Schema edits with Graph grant references; return invalid edits to approval instead of terminating the Run; publish exact SDK grammar through Catalog and prompts.
 2. Near term: introduce `WidgetDesignSpec`, shared lint, and a design digest; keep two existing dialogs temporarily while they read one design candidate.
 3. Medium term: merge them into one atomic Design Approval with feature/data-flow/coverage UI.
-4. Later: structured repair findings, same-Run automatic repair, controlled smoke tests, and runtime diagnostic feedback.
+4. Later: replace CDP screencast with a more efficient WebRTC transport and add optional per-App-container `strict` isolation without changing the Gateway capability protocol.
 
 Phase one does not change authorization boundaries; it only prevents invalid approvals and misleading diagnostics. Phases two and three require a durable workflow version bump and a compatibility reducer for old waiting Runs.

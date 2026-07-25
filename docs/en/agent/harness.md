@@ -20,7 +20,7 @@ flowchart TB
 
     Workflow --> Domain[harness.py: AgentOrchestrator]
     Workflow --> Gateway[tools.py: ToolGateway]
-    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Workflow --> ACP[coding_agent_acp.py: run_coding_agent_acp]
     Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
 ```
 
@@ -31,7 +31,7 @@ Responsibilities:
 - `DurableAgentWorkflow`: version 2 chat reducer; each invocation advances exactly one phase and returns a typed `StepOutcome`.
 - `RunContext`: explicitly carries run/session/step/attempt/trace and frozen model IDs into every LLM and tool audit call.
 - `AgentOrchestrator`: retained routing, Converse, and formatting domain helpers; it no longer owns `/ws/chat` execution lifecycle.
-- `ToolGateway`, the MCP client, and OpenCode ACP: enforcement boundaries for local model tools, external JSON-RPC, and code generation respectively.
+- `ToolGateway`, the MCP client, and Coding Agent ACP: enforcement boundaries for local model tools, external JSON-RPC, and code generation respectively. OpenCode's native ACP server and the Codex ACP bridge use exactly the same Ambient session, permission, staging, verification, and repair state machine.
 
 ## 2. Reducer protocol
 
@@ -133,7 +133,7 @@ A same-session `waiting_user` Run releases its worker slot but retains the FIFO 
 
 `needs_attention` cannot be changed directly to cancelled. `POST /api/runs/{id}/reconcile` must durably record `confirmed_not_committed`, `compensated`, or `confirmed_committed` before manual review closes. Promise-compatible calls store `projection_type + call_id` in Run correlation and include the call ID in idempotency identity, so reconnect handling can reconstruct response correlation from durable Runs/events.
 
-Plan, schema, verification, and MCP/Agent permission all use Run interactions rather than global Futures. OpenCode ACP executes only exact argv admitted by strict policy; an out-of-policy request fails closed instead of holding a worker on process-local approval.
+Plan, schema, verification, and MCP/Agent permission all use Run interactions rather than global Futures. Coding Agent ACP executes only exact argv admitted by strict policy; an out-of-policy request fails closed instead of holding a worker on process-local approval.
 
 ## 6. Deterministic evaluation
 

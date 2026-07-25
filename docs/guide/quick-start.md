@@ -20,7 +20,7 @@ Docker Compose 也会为规范知识图谱启动 Neo4j，其 Browser 位于 `htt
 
 `.env` 只保存 Coding Agent 等进程级参数。LLM Provider、密钥、默认模型和 OpenCode/Codex 选择在应用的“模型与 Provider”界面配置；密钥写入被 Git 忽略的 `workspace/llm/secrets.json`，不会写入 `.env`。
 
-Coding Agent CLI 不全部预装在镜像中。打开“模型与 Provider”后可按需安装 Codex；安装产物和原生凭据保存在 `coding_agent_data` volume。安装完成后点击“使用 ChatGPT 登录”，在浏览器打开设备码页面并输入一次性代码；成功后界面会从 Codex 动态加载当前账号可用模型。删除该 volume 会同时删除已安装 CLI 和容器内登录状态。
+Coding Agent CLI 不全部预装在镜像中。打开“模型与 Provider”后可按需安装 Codex；安装产物和原生凭据保存在 `coding_agent_data` volume。安装完成后点击“使用 ChatGPT 登录”，在浏览器打开设备码页面并输入一次性代码；成功后界面会从 Codex 动态加载当前账号可用模型。删除该 volume 会同时删除已安装 CLI 和容器内登录状态。生产镜像与 Dev Container 都固定并预装 Codex ACP bridge；直接在宿主机运行后端时，需要安装 `@agentclientprotocol/codex-acp` 并用 `CODEX_ACP_COMMAND` 指向其可执行命令。更新 bridge 配置后必须重建 Dev Container，单纯重启不会刷新镜像层。
 
 Provider Connection 与凭据集中管理，但模型绑定按消费者隔离：Ambient 使用主模型和快速模型；OpenCode 默认继承 Ambient 主模型，也可选择专用 Provider 模型；Codex 使用自己的原生登录和可选原生模型，不接收 Ambient Provider 凭据。
 

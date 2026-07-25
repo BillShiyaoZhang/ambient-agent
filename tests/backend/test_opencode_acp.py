@@ -29,7 +29,7 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
-from backend.opencode_service import (
+from backend.coding_agent_acp import (
     CodingAgentDraftError,
     FastAPIACPClient,
     OpenCodeACPInputError,
@@ -426,7 +426,7 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
 
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     updates = []
@@ -451,6 +451,112 @@ async def test_run_opencode_agent_acp(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_acp_repairs_contract_validation_failure_in_the_same_session(monkeypatch, tmp_path):
+    mock_conn = AsyncMock()
+    mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-repair"))
+
+    async def generate_controller(*args, **kwargs):
+        staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
+        (staging_dir / "controller.js").write_text(
+            "export default function App() { return null; }",
+            encoding="utf-8",
+        )
+        _write_manifest(staging_dir, "weather-card")
+        return PromptResponse(stop_reason="end_turn")
+
+    mock_conn.prompt = AsyncMock(side_effect=generate_controller)
+
+    @contextlib.asynccontextmanager
+    async def mock_spawn(to_client, command, *args, **kwargs):
+        to_client.on_connect(mock_conn)
+        yield mock_conn, MagicMock(returncode=0)
+
+    validations = 0
+
+    def validate_contract(_result):
+        nonlocal validations
+        validations += 1
+        if validations == 1:
+            raise OpenCodeArtifactError(
+                "Staged App capabilities differ from the approved Runtime Contract",
+                code="runtime_contract_mismatch",
+                stage="runtime_contract",
+            )
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+
+    result = await run_opencode_agent_acp(
+        app_id="weather-card",
+        instruction=(
+            "build\n\n[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]\n"
+            '{"app_id":"weather-card","capabilities":[]}\n\n[SYSTEM CAPABILITIES]\n...'
+        ),
+        promote=False,
+        artifact_validator=validate_contract,
+    )
+
+    assert isinstance(result, OpenCodeStagedResult)
+    assert result.repair_attempts == 1
+    assert result.repair_findings[0]["code"] == "runtime_contract_mismatch"
+    assert validations == 2
+    assert mock_conn.new_session.await_count == 1
+    assert mock_conn.prompt.await_count == 2
+    assert {call.kwargs["session_id"] for call in mock_conn.prompt.await_args_list} == {"sess-repair"}
+    repair_prompt = mock_conn.prompt.await_args_list[1].kwargs["prompt"][0].text
+    assert "runtime_contract_mismatch" in repair_prompt
+    assert "never add or broaden capabilities" in repair_prompt
+    assert "APPROVED RUNTIME CONTRACT" in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_acp_does_not_send_operator_failure_back_to_coding_agent(monkeypatch, tmp_path):
+    mock_conn = AsyncMock()
+    mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-operator"))
+
+    async def generate_controller(*args, **kwargs):
+        staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
+        (staging_dir / "controller.js").write_text(
+            "export default function App() { return null; }",
+            encoding="utf-8",
+        )
+        _write_manifest(staging_dir, "weather-card")
+        return PromptResponse(stop_reason="end_turn")
+
+    mock_conn.prompt = AsyncMock(side_effect=generate_controller)
+
+    @contextlib.asynccontextmanager
+    async def mock_spawn(to_client, command, *args, **kwargs):
+        to_client.on_connect(mock_conn)
+        yield mock_conn, MagicMock(returncode=0)
+
+    def unavailable_verifier(_result):
+        raise OpenCodeArtifactError(
+            "Widget syntax/runtime verifier is unavailable",
+            code="widget_verifier_unavailable",
+            stage="static_verify",
+        )
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+
+    with pytest.raises(CodingAgentDraftError) as captured:
+        await run_opencode_agent_acp(
+            app_id="weather-card",
+            instruction="build",
+            promote=False,
+            artifact_validator=unavailable_verifier,
+        )
+
+    assert mock_conn.prompt.await_count == 1
+    assert captured.value.repair_action == "operator"
+    assert captured.value.finding is not None
+    assert captured.value.finding["code"] == "widget_verifier_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
     # Mock spawn_agent_process
     mock_conn = AsyncMock()
@@ -468,7 +574,7 @@ async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
         to_client.on_connect(mock_conn)
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     monkeypatch.setenv("OPENCODE_TIMEOUT", "0.01")
@@ -538,7 +644,7 @@ def test_permission_policy_manager(tmp_path):
 @pytest.mark.asyncio
 async def test_out_of_policy_permission_fails_closed_without_callback(tmp_path, monkeypatch):
     # Mock PermissionPolicyManager to deny execution by default
-    from backend.opencode_service import PermissionPolicyManager
+    from backend.coding_agent_acp import PermissionPolicyManager
 
     monkeypatch.setattr(PermissionPolicyManager, "validate_argv", lambda self, argv: False)
 
@@ -689,7 +795,7 @@ async def test_acp_startup_failure_is_typed_and_cleans_staging(monkeypatch, tmp_
         raise FileNotFoundError("opencode missing")
         yield  # pragma: no cover
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", broken_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", broken_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     with pytest.raises(OpenCodeACPStartupError, match="Unable to start"):
@@ -724,7 +830,7 @@ async def test_acp_protocol_failure_leaves_existing_app_untouched(monkeypatch, t
         to_client.on_connect(mock_conn)
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     with pytest.raises(OpenCodeACPProtocolError, match="protocol failed"):
@@ -755,7 +861,7 @@ async def test_durable_acp_protocol_failure_transfers_generated_draft(monkeypatc
         to_client.on_connect(mock_conn)
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     with pytest.raises(CodingAgentDraftError) as captured:
@@ -766,7 +872,7 @@ async def test_durable_acp_protocol_failure_transfers_generated_draft(monkeypatc
         )
 
     draft = captured.value.staged_result
-    assert captured.value.error_code == "OpenCodeACPProtocolError"
+    assert captured.value.error_code == "CodingAgentACPProtocolError"
     assert draft.staging_dir.is_dir()
     assert "GeneratedDraft" in (draft.staging_dir / "controller.js").read_text(encoding="utf-8")
 
@@ -783,7 +889,7 @@ async def test_acp_missing_artifact_fails_closed(monkeypatch, tmp_path):
         to_client.on_connect(mock_conn)
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     with pytest.raises(OpenCodeArtifactError, match=r"required controller\.js"):
@@ -817,7 +923,7 @@ async def test_acp_can_retain_validate_and_promote_staging(monkeypatch, tmp_path
         to_client.on_connect(mock_conn)
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     result = await run_opencode_agent_acp(app_id="weather-card", instruction="modify", promote=False)
@@ -857,7 +963,7 @@ async def test_discard_retained_staging_preserves_live_app(monkeypatch, tmp_path
         to_client.on_connect(mock_conn)
         yield mock_conn, MagicMock(returncode=0)
 
-    monkeypatch.setattr("backend.opencode_service.spawn_agent_process", mock_spawn)
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
     monkeypatch.setenv("APPS_DIR", str(tmp_path))
 
     result = await run_opencode_agent_acp(app_id="weather-card", instruction="modify", promote=False)

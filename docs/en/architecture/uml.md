@@ -20,7 +20,7 @@ flowchart TB
 
     Workflow --> Domain[harness.py: AgentOrchestrator]
     Workflow --> Tools[tools.py: ToolGateway]
-    Workflow --> ACP[opencode_service.py: run_opencode_agent_acp]
+    Workflow --> ACP[coding_agent_acp.py: run_coding_agent_acp]
     Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
     Coordinator --> Remote[backend_manager.py: handle_agent_message]
 
@@ -148,7 +148,7 @@ flowchart TB
 
 Every wait phase persists its interaction before returning `Wait`. Resolution checks `expected_run_version` and atomically stores the response, closes sibling pending interactions, requeues the Run, and appends events.
 
-## 5. Tool, MCP, and OpenCode boundaries
+## 5. Tool, MCP, and Coding Agent ACP boundaries
 
 ```mermaid
 flowchart LR
@@ -160,23 +160,49 @@ flowchart LR
     Backend --> MCP[backend_manager.py: StdioJsonRpcClient]
     MCP -->|initialize / deadline / cancel / bounded I/O| Process[MCP subprocess]
 
-    Stage[stage_code] --> Prepare[opencode_service.py: _prepare_staging_app]
-    Prepare --> ACP[opencode_service.py: run_opencode_agent_acp]
-    ACP --> Validate[opencode_service.py: validate_opencode_staging]
+    Stage[stage_code] --> Prepare[coding_agent_acp.py: _prepare_staging_app]
+    Prepare --> ACP[coding_agent_acp.py: run_coding_agent_acp]
+    ACP --> Validate[coding_agent_acp.py: validate_coding_agent_staging]
+    Validate -->|repairable + budget| ACP
     Validate -->|pass| Verify[verify reads staging]
-    Validate -->|adapter error + handle| Retain[retain non-executable failed draft]
+    Validate -->|design/operator/repeated + handle| Retain[retain non-executable failed draft]
     Verify -->|pass| Marker[durable promotion marker]
-    Marker --> Promote[opencode_service.py: promote_opencode_staging]
+    Marker --> Promote[coding_agent_acp.py: promote_coding_agent_staging]
     Verify -->|failure| Retain
     Retain -->|retry internal validation| Stage
     Retain -->|retry later verification| Verify
-    Verify -->|rework / cancel / retention expiry| Discard[opencode_service.py: discard_opencode_staging]
+    Verify -->|rework / cancel / retention expiry| Discard[coding_agent_acp.py: discard_coding_agent_staging]
     Promote --> Live[Live App]
 ```
 
-`ToolGateway` currently unifies model-requested local Python tools. Capability, MCP, remote-Agent, and ACP execution retain separate adapter/permission policies. OpenCode now has path, argv, environment, output, process-group, and staging controls, but not an OS-level filesystem/network sandbox.
+`ToolGateway` currently unifies model-requested local Python tools. Capability, MCP, remote-Agent, and ACP execution retain separate adapter/permission policies. Every Coding Agent runs through the same ACP client, session, file/terminal permissions, output bounds, process group, staging, verification, and repair state machine. These controls are not an OS-level filesystem/network sandbox.
 
-The backend image must include both Node.js and the `@babel/standalone` version pinned by the frontend lockfile. `validate_opencode_staging` applies Babel parsing, host/network-global rejection, and a restricted-VM smoke test to the staging shared by OpenCode and Codex. A missing or failed verifier must never be promoted to a live App.
+The backend image must include both Node.js and the `@babel/standalone` version pinned by the frontend lockfile. `validate_coding_agent_staging` applies Babel parsing, host/network-global rejection, and a restricted-VM smoke test to staging shared by every Coding Agent. A missing or failed verifier must never be promoted to a live App.
+
+### 5.1 Widget isolation runtime
+
+```mermaid
+flowchart LR
+    Player[User-browser frame player] <-->|frame / input| Gateway[FastAPI WidgetRuntimeGateway]
+    Gateway <-->|NDJSON / Unix socket| Supervisor[Zero-network widget-runtime]
+    Supervisor --> Chromium[Pinned Chromium browser process]
+    Chromium --> A[App A BrowserContext]
+    Chromium --> B[App B BrowserContext]
+    Gateway -->|server-side session identity| Authorizer[CapabilityAuthorizer]
+    Authorizer --> Adapters[Graph / HTTP / Files / Capability adapters]
+```
+
+```mermaid
+classDiagram
+    class WidgetRuntimeGateway {
+        +open_session(app_id, viewport)
+        +close_session(session_id)
+        +forward_input(session_id, message)
+        +handle_runtime_message(session_id, message)
+    }
+```
+
+`WidgetRuntimeGateway` is the only bridge among the browser connection, Unix socket, and capability adapters. It reloads the persistent Manifest and binds `session_id -> app_id/revision/grants_digest/artifact_digest` in memory; all Controller-supplied identity fields are ignored. The Runtime has no workspace mount and uses `network_mode: none`, so a Controller can reach external authority only through Gateway RPC. Each App gets an independent BrowserContext, while the default shared Chromium keeps startup and memory cost practical on personal laptops.
 
 ## 6. Event and recovery boundaries
 
@@ -217,16 +243,20 @@ classDiagram
 ```mermaid
 flowchart LR
     Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]
-    Runtime -->|on-demand install / status / auth / model-list| Codex[codex_service.py: run_codex_agent]
+    Runtime -->|ACP launch descriptor| ACP[coding_agent_acp.py: run_coding_agent_acp]
     Settings --> Dispatch[coding_agent.py: run_coding_agent]
-    Dispatch --> Codex
-    Dispatch --> OpenCode[opencode_service.py: run_opencode_agent_acp]
+    Dispatch --> ACP
+    Runtime --> OpenCode[OpenCode native ACP server]
+    Runtime --> Bridge[@agentclientprotocol/codex-acp]
+    Bridge --> AppServer[Codex app-server]
 
     Provider[Central Provider Registry] --> Ambient[primary / fast]
     Provider -->|per-agent shared binding| OpenCode
-    Native[Codex-native login and subscription] --> Codex
+    Native[Codex-native login and subscription] --> AppServer
 ```
 
-Built-in adapters form a trusted capability catalog, while each CLI is downloaded to a dedicated persistent volume only after the user requests installation. Installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
+ACP is the only code-generation orchestration boundary. A built-in adapter declares only a trusted launch descriptor: ACP server command, underlying CLI, environment, model configuration, and version source. It cannot implement another prompt loop, permission model, or repair behavior. OpenCode starts native `opencode acp`. Codex uses the image-pinned `@agentclientprotocol/codex-acp`, points it at the Ambient-managed Codex CLI through `CODEX_PATH`, and that CLI starts the official app-server. A future non-native Agent must prefer an auditable, pinned, actively maintained bridge from the ACP Registry; the bridge only maps protocols while Ambient's ACP client owns permission and lifecycle behavior.
+
+Each CLI is downloaded to a dedicated persistent volume only after the user requests installation. Installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
 
 Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.

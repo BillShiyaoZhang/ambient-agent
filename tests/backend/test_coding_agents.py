@@ -1,5 +1,4 @@
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -8,8 +7,7 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 from backend.coding_agent import CodingAgentConfigStore
 from backend.coding_agent_runtime import CodingAgentRuntime
-from backend.codex_service import _codex_environment, _codex_prompt, _event_update, run_codex_agent
-from backend.opencode_service import CodingAgentDraftError, OpenCodeArtifactError, OpenCodeStagedResult
+from backend.codex_service import _codex_environment, _codex_prompt, run_codex_agent
 
 
 @pytest.fixture(autouse=True)
@@ -124,17 +122,6 @@ def test_coding_agent_models_api_returns_native_catalog_and_rejects_shared_catal
     assert discovered.json()["default_model"] == "gpt-default"
 
 
-def test_codex_event_projection_extracts_messages_and_progress():
-    message, update = _event_update(
-        {"type": "item.completed", "item": {"type": "agent_message", "text": "Widget complete"}}
-    )
-    assert message == "Widget complete"
-    assert update == "Widget complete"
-    assert _event_update(
-        {"type": "item.started", "item": {"type": "command_execution", "command": "inspect files"}}
-    ) == (None, "\n🛠️ Codex: inspect files")
-
-
 def test_codex_prompt_explains_the_supported_app_scoped_data_path():
     prompt = _codex_prompt("weather-app", "show live weather", "en")
 
@@ -159,156 +146,43 @@ def test_codex_prompt_explains_the_supported_app_scoped_data_path():
 
 
 @pytest.mark.asyncio
-async def test_codex_runner_uses_managed_container_runtime(tmp_path, monkeypatch):
-    fake_codex = tmp_path / "fake_codex.py"
-    fake_codex.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, pathlib, sys\n"
-        "sys.stdin.read()\n"
-        "pathlib.Path('README.md').write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
-        "pathlib.Path('controller.js').write_text(\"export default function App() { return null; }\", encoding='utf-8')\n"
-        "pathlib.Path('manifest.json').write_text(json.dumps({'manifest_version': 2, 'id': 'codex-widget', 'title': 'Codex Widget', 'description': '', 'app_version': '0.1.0', 'intents': [], 'schema_refs': [], 'capabilities': []}), encoding='utf-8')\n"
-        "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'done'}}))\n",
-        encoding="utf-8",
-    )
-    fake_codex.chmod(0o755)
-    apps_dir = tmp_path / "apps"
-    monkeypatch.setenv("CODEX_COMMAND", str(fake_codex))
-    monkeypatch.setenv("APPS_DIR", str(apps_dir))
+async def test_legacy_codex_entrypoint_delegates_to_the_unified_acp_runner(tmp_path, monkeypatch):
     runtime = CodingAgentRuntime(tmp_path / "workspace")
-    updates = []
+    calls = []
+
+    async def fake_unified_runner(app_id, instruction, **kwargs):
+        calls.append((app_id, instruction, kwargs))
+        return "acp-result"
+
+    monkeypatch.setattr("backend.coding_agent.run_coding_agent", fake_unified_runner)
 
     result = await run_codex_agent(
         "codex-widget",
         "build it",
         language="en",
-        on_update=updates.append,
         promote=False,
         runtime=runtime,
         native_model="gpt-test",
     )
 
-    assert isinstance(result, OpenCodeStagedResult)
-    assert result.output == "done"
-    invocation = json.loads((result.staging_dir / "README.md").read_text(encoding="utf-8"))
-    assert invocation[0] == "exec"
-    assert "--model" in invocation
-    assert invocation[invocation.index("--model") + 1] == "gpt-test"
-    assert updates[-1] == "done"
-
-
-@pytest.mark.asyncio
-async def test_codex_runner_repairs_sequential_validation_failures_in_place(tmp_path, monkeypatch):
-    fake_codex = tmp_path / "fake_codex.py"
-    fake_codex.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, pathlib, sys\n"
-        "prompt = sys.stdin.read()\n"
-        "count_path = pathlib.Path('count.txt')\n"
-        "count = int(count_path.read_text() or '0') + 1 if count_path.exists() else 1\n"
-        "count_path.write_text(str(count), encoding='utf-8')\n"
-        "pathlib.Path('prompt-' + str(count) + '.txt').write_text(prompt, encoding='utf-8')\n"
-        "pathlib.Path('controller.js').write_text('export default function App() { return null; }', encoding='utf-8')\n"
-        "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'done'}}))\n",
-        encoding="utf-8",
-    )
-    fake_codex.chmod(0o755)
-    apps_dir = tmp_path / "apps"
-    monkeypatch.setenv("CODEX_COMMAND", str(fake_codex))
-    monkeypatch.setenv("APPS_DIR", str(apps_dir))
-    runtime = CodingAgentRuntime(tmp_path / "workspace")
-    validations = 0
-
-    def validate_until_third_attempt(result):
-        nonlocal validations
-        validations += 1
-        if validations == 1:
-            raise OpenCodeArtifactError("App manifest validation failed: data source id must use kebab-case")
-        if validations == 2:
-            raise OpenCodeArtifactError('Unexpected token, expected "}" in controller.js')
-
-    monkeypatch.setattr("backend.codex_service.validate_coding_agent_staging", validate_until_third_attempt)
-
-    approved_contract = '{"app_id":"repair-widget","capabilities":[{"id":"graph.mutate"}]}'
-    result = await run_codex_agent(
-        "repair-widget",
-        "build it\n\n[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]\n"
-        f"{approved_contract}\n\n[REQUIRED MANIFEST V2 TEMPLATE]\n"
-        '{"manifest_version":2,"id":"repair-widget","title":"Repair Widget","description":"","app_version":"0.1.0",'
-        '"intents":[],"schema_refs":[],"capabilities":[{"id":"graph.mutate"}]}'
-        "\n\n[SYSTEM CAPABILITIES]\n...",
-        language="en",
-        promote=False,
-        runtime=runtime,
-    )
-
-    assert isinstance(result, OpenCodeStagedResult)
-    assert (result.staging_dir / "count.txt").read_text(encoding="utf-8") == "3"
-    repair_prompt = (result.staging_dir / "prompt-2.txt").read_text(encoding="utf-8")
-    assert "failed mandatory validation" in repair_prompt
-    assert "data source id must use kebab-case" in repair_prompt
-    assert "controller.js and/or manifest.json" in repair_prompt
-    assert approved_contract in repair_prompt
-    assert "approval envelope fields" in repair_prompt
-    assert "REQUIRED MANIFEST V2 TEMPLATE" in repair_prompt
-    assert "`intents` must be an array of unique, non-empty strings; never objects" in repair_prompt
-    second_repair_prompt = (result.staging_dir / "prompt-3.txt").read_text(encoding="utf-8")
-    assert 'Unexpected token, expected "}"' in second_repair_prompt
-
-
-@pytest.mark.asyncio
-async def test_codex_runner_transfers_invalid_draft_and_repairs_same_directory_on_retry(tmp_path, monkeypatch):
-    fake_codex = tmp_path / "fake_codex.py"
-    fake_codex.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, pathlib, sys\n"
-        "sys.stdin.read()\n"
-        "count_path = pathlib.Path('count.txt')\n"
-        "count = int(count_path.read_text() or '0') + 1 if count_path.exists() else 1\n"
-        "count_path.write_text(str(count), encoding='utf-8')\n"
-        "pathlib.Path('controller.js').write_text('export default function Draft() { return null; }', encoding='utf-8')\n"
-        "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'drafted'}}))\n",
-        encoding="utf-8",
-    )
-    fake_codex.chmod(0o755)
-    apps_dir = tmp_path / "apps"
-    monkeypatch.setenv("CODEX_COMMAND", str(fake_codex))
-    monkeypatch.setenv("APPS_DIR", str(apps_dir))
-    runtime = CodingAgentRuntime(tmp_path / "workspace")
-
-    def reject_draft(_result):
-        raise OpenCodeArtifactError("Capability contract: graph operation 'update' is not approved")
-
-    monkeypatch.setattr("backend.codex_service.validate_coding_agent_staging", reject_draft)
-
-    with pytest.raises(CodingAgentDraftError) as captured:
-        await run_codex_agent(
-            "weather-widget",
+    assert result == "acp-result"
+    assert calls == [
+        (
+            "codex-widget",
             "build it",
-            language="en",
-            promote=False,
-            runtime=runtime,
+            {
+                "language": "en",
+                "on_update": None,
+                "promote": False,
+                "coding_agent": "codex",
+                "runtime": runtime,
+                "model_config": {"mode": "native", "native_model": "gpt-test"},
+                "staged_result": None,
+                "artifact_validator": None,
+                "repair_decider": None,
+            },
         )
-
-    draft = captured.value.staged_result
-    assert captured.value.error_code == "OpenCodeArtifactError"
-    assert draft.staging_dir.is_dir()
-    assert (draft.staging_dir / "controller.js").is_file()
-    assert (draft.staging_dir / "count.txt").read_text(encoding="utf-8") == "4"
-
-    monkeypatch.setattr("backend.codex_service.validate_coding_agent_staging", lambda _result: None)
-    repaired = await run_codex_agent(
-        "weather-widget",
-        "repair it",
-        language="en",
-        promote=False,
-        runtime=runtime,
-        staged_result=draft,
-    )
-
-    assert isinstance(repaired, OpenCodeStagedResult)
-    assert repaired.staging_dir == draft.staging_dir
-    assert (repaired.staging_dir / "count.txt").read_text(encoding="utf-8") == "5"
+    ]
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,14 @@ RUN ARCH=$(uname -m) && \
     tar -xJf node.tar.xz -C /usr/local --strip-components=1 && \
     rm node.tar.xz
 
+# Keep the development execution boundary identical to the production image.
+# Codex itself remains managed/on-demand; this package only bridges its
+# app-server protocol to ACP at the path resolved by CodingAgentRuntime.
+RUN npm install --prefix /opt/coding-agent-acp \
+    --omit=dev \
+    --ignore-scripts \
+    @agentclientprotocol/codex-acp@1.1.7
+
 # Install uv globally
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 

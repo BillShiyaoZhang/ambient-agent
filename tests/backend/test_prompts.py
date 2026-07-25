@@ -32,7 +32,7 @@ def test_agent_system_prompt_inclusion():
 def test_opencode_system_prompt_inclusion():
     pm = PromptManager()
     prompt = pm.get_prompt(
-        "opencode_system.md", app_id="weather-app", target_dir="/some/path", instruction="make weather blue"
+        "coding_agent_system.md", app_id="weather-app", target_dir="/some/path", instruction="make weather blue"
     )
 
     assert "weather-app" in prompt

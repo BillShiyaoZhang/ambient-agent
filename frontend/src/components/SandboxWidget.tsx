@@ -1,282 +1,8 @@
-import React, { useEffect, useRef, useState, useMemo } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+
 import type { Widget } from "./DashboardCanvas";
 import wsService from "../services/websocket";
-import { runService } from "../services/runs";
-import * as Babel from "@babel/standalone";
-import { ErrorBoundary } from "./ErrorBoundary";
-import htm from "htm";
 
-// HTM can hand React interpolated or adjacent children as nested arrays. React
-// treats those arrays as dynamic lists and warns unless their elements have
-// keys, even when the Widget authored only static siblings. Normalize each
-// array at the SDK boundary so generated Widgets do not need host-specific key
-// workarounds; explicit keys from genuine lists are preserved.
-const ambientCreateElement = (type: any, props: any, ...children: any[]) =>
-  React.createElement(
-    type,
-    props,
-    ...React.Children.toArray(children),
-  );
-
-const html = htm.bind(ambientCreateElement);
-const API_BASE = `http://${window.location.hostname}:8000`;
-
-// Pre-defined React components for ambient.components unified scheme
-const Column = ({ children, gap, padding, align, justify, wrap, style, onClick, ...rest }: any) => {
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: gap,
-        padding: padding,
-        alignItems: align === "center" ? "center" : align === "end" ? "flex-end" : align === "start" ? "flex-start" : align,
-        justifyContent: justify,
-        flexWrap: wrap ? "wrap" : undefined,
-        cursor: onClick ? "pointer" : undefined,
-        ...style
-      }}
-      {...rest}
-    >
-      {children}
-    </div>
-  );
-};
-
-const Row = ({ children, gap, padding, align, justify, wrap, style, onClick, ...rest }: any) => {
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        gap: gap,
-        padding: padding,
-        alignItems: align === "center" ? "center" : align === "end" ? "flex-end" : "flex-start",
-        justifyContent: justify,
-        flexWrap: wrap ? "wrap" : undefined,
-        cursor: onClick ? "pointer" : undefined,
-        ...style
-      }}
-      {...rest}
-    >
-      {children}
-    </div>
-  );
-};
-
-const Card = ({ title, children, style, onClick, ...rest }: any) => {
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        border: "1px solid var(--widget-border, rgba(255,255,255,0.08))",
-        borderRadius: "12px",
-        padding: "16px",
-        color: "var(--widget-text, rgba(255,255,255,0.9))",
-        backgroundColor: "var(--widget-surface, rgba(30,41,59,0.3))",
-        cursor: onClick ? "pointer" : undefined,
-        ...style
-      }}
-      {...rest}
-    >
-      {title && <h3 style={{ fontSize: "14px", fontWeight: "600", marginBottom: "12px", color: "var(--widget-text, rgba(255,255,255,0.9))", borderBottom: "1px solid var(--widget-border, rgba(255,255,255,0.06))", paddingBottom: "6px" }}>{title}</h3>}
-      {children}
-    </div>
-  );
-};
-
-const Text = ({ text, style, onClick, ...rest }: any) => {
-  return (
-    <span
-      onClick={onClick}
-      style={{
-        cursor: onClick ? "pointer" : undefined,
-        ...style
-      }}
-      {...rest}
-    >
-      {text}
-    </span>
-  );
-};
-
-const Button = ({ label, variant, style, onClick, ...rest }: any) => {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "6px 14px",
-        borderRadius: "6px",
-        cursor: "pointer",
-        border: "none",
-        fontWeight: "600",
-        fontSize: "13px",
-        backgroundColor: variant === "danger" ? "#ef4444" : variant === "secondary" ? "var(--widget-control, #475569)" : "var(--accent, #2563eb)",
-        color: "#ffffff",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        ...style
-      }}
-      {...rest}
-    >
-      {label}
-    </button>
-  );
-};
-
-const TextField = ({ label, placeholder, value, onChange, onEnter, style, ...rest }: any) => {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "6px", ...style }}>
-      {label && <label style={{ fontSize: "12px", fontWeight: "500", color: "var(--widget-muted, rgba(255,255,255,0.5))" }}>{label}</label>}
-      <input
-        type="text"
-        placeholder={placeholder}
-        value={value ?? ""}
-        onChange={onChange}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && onEnter) {
-            onEnter(e.currentTarget.value);
-          }
-        }}
-        style={{
-          padding: "8px 12px",
-          borderRadius: "6px",
-          backgroundColor: "var(--widget-input, rgba(15,23,42,0.4))",
-          border: "1px solid var(--widget-border, rgba(255,255,255,0.08))",
-          color: "var(--widget-text, #ffffff)",
-          fontSize: "13px",
-          outline: "none",
-          width: "100%"
-        }}
-        {...rest}
-      />
-    </div>
-  );
-};
-
-const Checkbox = ({ label, checked, onChange, style, ...rest }: any) => {
-  return (
-    <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", ...style }}>
-      <input
-        type="checkbox"
-        checked={!!checked}
-        onChange={(e) => onChange && onChange(e.target.checked)}
-        style={{ cursor: "pointer" }}
-        {...rest}
-      />
-      <span style={{ fontSize: "13px", color: "var(--widget-text, rgba(255,255,255,0.8))" }}>{label}</span>
-    </label>
-  );
-};
-
-const List = ({ items, itemStyle, onItemClick, style, ...rest }: any) => {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "6px", ...style }} {...rest}>
-      {(items || []).map((item: any, idx: number) => {
-        const handleItemClick = () => {
-          if (onItemClick) onItemClick(item, idx);
-        };
-        
-        const currentItemStyle = {
-          padding: "8px 12px",
-          borderRadius: "6px",
-          backgroundColor: "var(--widget-surface-soft, rgba(255,255,255,0.02))",
-          border: "1px solid var(--widget-border, rgba(255,255,255,0.03))",
-          fontSize: "13px",
-          cursor: onItemClick ? "pointer" : "default",
-          ...itemStyle
-        };
-
-        let itemContent;
-        if (typeof item === "string" || typeof item === "number") {
-          itemContent = item;
-        } else if (item && typeof item === "object") {
-          if ("label" in item) {
-            itemContent = <span>{String(item.label)}</span>;
-          } else if ("name" in item) {
-            itemContent = <span>{String(item.name)}</span>;
-          } else {
-            itemContent = (
-              <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                {Object.entries(item).filter(([k]) => k !== "id" && k !== "type").map(([k, v]) => (
-                  <span key={k} style={{ marginRight: "12px" }}><strong>{k}:</strong> {String(v)}</span>
-                ))}
-              </div>
-            );
-          }
-        }
-
-        return (
-          <div key={idx} onClick={handleItemClick} style={currentItemStyle}>
-            {itemContent}
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
-const Table = ({ columns, rows, onRowClick, style, ...rest }: any) => {
-  return (
-    <div style={{ overflowX: "auto", width: "100%", ...style }} {...rest}>
-      <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "13px" }}>
-        <thead>
-          <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.15)" }}>
-            {(columns || []).map((col: string, idx: number) => (
-              <th key={idx} style={{ padding: "8px", fontWeight: "600", color: "rgba(255,255,255,0.6)" }}>{col}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {(rows || []).map((row: any, rIdx: number) => {
-            const cells = Array.isArray(row) ? row : Object.values(row);
-            const handleRowClick = () => {
-              if (onRowClick) onRowClick(row, rIdx);
-            };
-            return (
-              <tr
-                key={rIdx}
-                onClick={handleRowClick}
-                style={{
-                  borderBottom: "1px solid rgba(255,255,255,0.05)",
-                  cursor: onRowClick ? "pointer" : "default",
-                  transition: "background-color 0.2s"
-                }}
-                onMouseEnter={(e) => {
-                  if (onRowClick) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.02)";
-                }}
-                onMouseLeave={(e) => {
-                  if (onRowClick) e.currentTarget.style.backgroundColor = "";
-                }}
-              >
-                {cells.map((cell: any, cIdx: number) => (
-                  <td key={cIdx} style={{ padding: "8px", color: "rgba(255,255,255,0.8)" }}>{String(cell)}</td>
-                ))}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-};
-
-const ambientComponents = {
-  Column,
-  Row,
-  Card,
-  Text,
-  Button,
-  TextField,
-  Checkbox,
-  List,
-  Table
-};
-
-// --- SandboxWidget Prop Interface ---
 
 interface SandboxWidgetProps {
   widget: Widget;
@@ -284,245 +10,296 @@ interface SandboxWidgetProps {
   onMinimize?: (id: string) => void;
 }
 
+interface RuntimeFrame {
+  format: "jpeg" | "png";
+  data: string;
+  width: number;
+  height: number;
+}
+
+interface RuntimeFailure {
+  code: string;
+  message: string;
+  classification?: string;
+}
+
+interface Viewport {
+  width: number;
+  height: number;
+  device_scale_factor: number;
+}
+
+
+const runtimeWebSocketUrl = (appId: string) => {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.hostname}:8000/ws/widgets/${encodeURIComponent(appId)}/runtime`;
+};
+
+const pointerButton = (button: number) => {
+  if (button === 0) return "left";
+  if (button === 1) return "middle";
+  if (button === 2) return "right";
+  if (button === 3) return "back";
+  if (button === 4) return "forward";
+  return "none";
+};
+
+const keyboardModifiers = (event: React.KeyboardEvent) =>
+  (event.altKey ? 1 : 0) |
+  (event.ctrlKey ? 2 : 0) |
+  (event.metaKey ? 4 : 0) |
+  (event.shiftKey ? 8 : 0);
+
+
 export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   widget,
   onFullscreen,
   onMinimize,
 }) => {
-  const onFullscreenRef = useRef(onFullscreen);
-  const onMinimizeRef = useRef(onMinimize);
+  const playerRef = useRef<HTMLDivElement>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const viewportRef = useRef<Viewport>({
+    width: 640,
+    height: 480,
+    device_scale_factor: Math.min(window.devicePixelRatio || 1, 2),
+  });
+  const [frame, setFrame] = useState<RuntimeFrame | null>(null);
+  const [failure, setFailure] = useState<RuntimeFailure | null>(null);
+  const [status, setStatus] = useState<"connecting" | "ready" | "closed">("connecting");
 
-  useEffect(() => {
-    onFullscreenRef.current = onFullscreen;
-    onMinimizeRef.current = onMinimize;
-  }, [onFullscreen, onMinimize]);
-
-  const customListenersRef = useRef<{ event: string; handler: EventListener }[]>([]);
-
-  const ambientProps = useMemo(() => {
-    const grants = new Map((widget.capabilities || []).map((grant) => [grant.id, grant.scope]));
-    const sdk: Record<string, any> = {
-      sendMessage: (text: string) => {
-        wsService.sendMessage({
-          sender: "user",
-          content: text,
-        });
-      },
-      fullscreen: () => {
-        if (onFullscreenRef.current) {
-          onFullscreenRef.current(widget.id);
-        }
-      },
-      minimize: () => {
-        if (onMinimizeRef.current) {
-          onMinimizeRef.current(widget.id);
-        }
-      },
-      theme: {
-        get preference() {
-          return document.documentElement.dataset.themePreference || "system";
-        },
-        get effective() {
-          return document.documentElement.dataset.theme || "dark";
-        },
-      },
-      html: html,
-      components: Object.freeze(ambientComponents),
-      react: Object.freeze({
-        useState,
-        useEffect,
-        useMemo,
-        useRef,
-        useCallback: React.useCallback,
-        useContext: React.useContext,
-        useReducer: React.useReducer
-      }),
-    };
-
-    const graph: Record<string, any> = {};
-    if (grants.has("graph.query")) {
-      graph.subscribe = (query: any, callback: (data: any) => void) => {
-        const subId = `sub-${Math.random().toString(36).substring(2, 11)}`;
-        const handler = (e: Event) => {
-          callback((e as CustomEvent).detail);
-        };
-        const eventName = `graph_query_update:${subId}`;
-        window.addEventListener(eventName, handler);
-        customListenersRef.current.push({ event: eventName, handler });
-
-        const registrationKey = `graph:${subId}`;
-        wsService.registerPersistentMessage(registrationKey, {
-          type: "graph_subscribe",
-          subscription_id: subId,
-          app_id: widget.id,
-          manifest_revision: widget.manifest_revision,
-          grants_digest: widget.grants_digest,
-          query,
-        });
-
-        return () => {
-          window.removeEventListener(eventName, handler);
-          const idx = customListenersRef.current.findIndex(l => l.event === eventName && l.handler === handler);
-          if (idx !== -1) customListenersRef.current.splice(idx, 1);
-          wsService.unregisterPersistentMessage(registrationKey, {
-            type: "graph_unsubscribe",
-            subscription_id: subId,
-          });
-        };
-      };
+  const send = useCallback((message: Record<string, unknown>) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(message));
     }
-    if (grants.has("graph.mutate")) {
-      graph.mutate = async (actions: any[]) => {
-        const invocationId = typeof crypto.randomUUID === "function"
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const res = await fetch(`${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/graph/mutate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            actions,
-            manifest_revision: widget.manifest_revision,
-            grants_digest: widget.grants_digest,
-            idempotency_key: `widget:${widget.id}:${invocationId}`,
-          }),
-        });
-        const payload = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(payload?.detail?.message || "Failed to mutate graph");
-        return payload;
-      };
-    }
-    if (Object.keys(graph).length > 0) sdk.graph = Object.freeze(graph);
-
-    if (grants.has("network.request")) {
-      sdk.net = Object.freeze({
-        request: async (sourceId: string, request: any) => {
-          const res = await fetch(
-            `${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/data-sources/${encodeURIComponent(sourceId)}/request`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                ...(request || {}),
-                manifest_revision: widget.manifest_revision,
-                grants_digest: widget.grants_digest,
-              }),
-            },
-          );
-          const payload = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            const detail = payload?.detail && typeof payload.detail === "object" ? payload.detail : {};
-            const error = new Error(detail.message || `Data source request failed (${res.status})`) as Error & {
-              code?: string;
-              hint?: string;
-              details?: Record<string, unknown>;
-            };
-            error.code = detail.code;
-            error.hint = detail.hint;
-            error.details = detail.details;
-            throw error;
-          }
-          return payload.data;
-        },
-      });
-    }
-
-    if (grants.has("capability.invoke")) {
-      sdk.capabilities = Object.freeze({
-        invoke: async (catalogId: string, input: any, actionId: string) => {
-          const run = await runService.start(catalogId, actionId, input, {
-            appId: widget.id,
-            manifestRevision: widget.manifest_revision,
-            grantsDigest: widget.grants_digest,
-          });
-          return runService.wait(run.id);
-        },
-      });
-    }
-
-    const files: Record<string, any> = {};
-    const fileRequest = async (operation: string, body: Record<string, unknown>) => {
-      const res = await fetch(`${API_BASE}/api/apps/${encodeURIComponent(widget.id)}/files/${operation}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...body,
-          manifest_revision: widget.manifest_revision,
-          grants_digest: widget.grants_digest,
-        }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(payload?.detail?.message || `File ${operation} failed`);
-      return payload;
-    };
-    if (grants.has("file.read")) {
-      files.read = async (path: string) => (await fileRequest("read", { path })).text;
-      files.list = async (path: string) => (await fileRequest("list", { path })).files;
-    }
-    if (grants.has("file.write")) {
-      files.write = (path: string, text: string) => fileRequest("write", { path, text });
-    }
-    if (grants.has("file.delete")) {
-      files.delete = (path: string) => fileRequest("delete", { path });
-    }
-    if (Object.keys(files).length > 0) sdk.files = Object.freeze(files);
-
-    return Object.freeze(sdk);
-  }, [widget.id, widget.manifest_revision, widget.grants_digest, widget.capabilities]);
-
-  useEffect(() => {
-    const listeners = customListenersRef.current;
-    return () => {
-      listeners.forEach(({ event, handler }) => {
-        window.removeEventListener(event, handler);
-      });
-    };
   }, []);
 
-  // --- React + Tailwind Dynamic Compilation ---
-  const DynamicReactComponent = useMemo(() => {
-    try {
-      // Unified HTM Mode
-      const scriptJs = widget.js || "";
-      const transpileScript = Babel.transform(scriptJs, {
-        presets: [["react", { runtime: "classic" }]],
-        plugins: ["transform-modules-commonjs"],
-        filename: "widget.js"
-      }).code;
+  const sendViewport = useCallback(() => {
+    send({ type: "viewport", ...viewportRef.current });
+  }, [send]);
 
-      const exportsObj: any = {};
-      const runScript = new Function("exports", "React", "ambient", transpileScript || "");
-      runScript(exportsObj, React, ambientProps);
+  useEffect(() => {
+    setFrame(null);
+    setFailure(null);
+    setStatus("connecting");
+    const socket = new WebSocket(runtimeWebSocketUrl(widget.id));
+    socketRef.current = socket;
 
-      const WidgetComponent = exportsObj.default || Object.values(exportsObj)[0];
-      if (!WidgetComponent) {
-        throw new Error("widget.js does not export a default component");
+    socket.onopen = () => {
+      setStatus("ready");
+      sendViewport();
+      send({
+        type: "visibility",
+        visible: document.visibilityState !== "hidden",
+      });
+    };
+    socket.onmessage = (event) => {
+      let message: Record<string, any>;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        setFailure({
+          code: "runtime_protocol_invalid",
+          message: "Widget Runtime returned an invalid message",
+          classification: "operator",
+        });
+        return;
       }
+      if (message.type === "frame" && typeof message.data === "string") {
+        setFrame({
+          format: message.format === "png" ? "png" : "jpeg",
+          data: message.data,
+          width: Number(message.width) || viewportRef.current.width,
+          height: Number(message.height) || viewportRef.current.height,
+        });
+        setFailure(null);
+        return;
+      }
+      if (message.type === "runtime_error") {
+        const error = message.error && typeof message.error === "object" ? message.error : {};
+        setFailure({
+          code: String(error.code || "widget_runtime_failed"),
+          message: String(error.message || "Widget Runtime failed"),
+          classification: error.classification ? String(error.classification) : undefined,
+        });
+        return;
+      }
+      if (message.type === "host_event") {
+        if (message.event === "fullscreen") onFullscreen?.(widget.id);
+        if (message.event === "minimize") onMinimize?.(widget.id);
+        if (message.event === "send_message" && typeof message.text === "string") {
+          wsService.sendMessage({ sender: "user", content: message.text });
+        }
+      }
+    };
+    socket.onerror = () => {
+      setFailure({
+        code: "widget_runtime_unavailable",
+        message: "Widget Runtime is unavailable",
+        classification: "operator",
+      });
+    };
+    socket.onclose = () => {
+      setStatus("closed");
+      if (socketRef.current === socket) socketRef.current = null;
+    };
 
-      return WidgetComponent as React.ComponentType<{ ambient: any }>;
-    } catch (err: any) {
-      console.error("Compilation error in React/HTM widget:", err);
-      return () => (
-        <div className="p-4 bg-red-950/40 border border-red-500/20 text-red-400 rounded-xl text-xs font-mono">
-          <strong className="block mb-1">React/HTM Compiling Error:</strong>
-          {err.message}
-        </div>
-      );
+    return () => {
+      if (socketRef.current === socket) socketRef.current = null;
+      socket.close();
+    };
+  }, [
+    onFullscreen,
+    onMinimize,
+    send,
+    sendViewport,
+    widget.grants_digest,
+    widget.id,
+    widget.manifest_revision,
+  ]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+    if (typeof ResizeObserver === "undefined") {
+      const measure = () => {
+        const bounds = player.getBoundingClientRect();
+        viewportRef.current = {
+          width: Math.max(64, Math.round(bounds.width || 640)),
+          height: Math.max(64, Math.round(bounds.height || 480)),
+          device_scale_factor: Math.min(window.devicePixelRatio || 1, 2),
+        };
+        sendViewport();
+      };
+      measure();
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
     }
-  }, [widget.js, ambientProps]);
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries.at(-1);
+      if (!entry) return;
+      const width = Math.max(64, Math.round(entry.contentRect.width));
+      const height = Math.max(64, Math.round(entry.contentRect.height));
+      viewportRef.current = {
+        width,
+        height,
+        device_scale_factor: Math.min(window.devicePixelRatio || 1, 2),
+      };
+      sendViewport();
+    });
+    observer.observe(player);
+    return () => observer.disconnect();
+  }, [sendViewport]);
 
-  const Component = DynamicReactComponent;
+  useEffect(() => {
+    const handleVisibility = () => {
+      send({
+        type: "visibility",
+        visible: document.visibilityState !== "hidden",
+      });
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [send]);
+
+  const point = (clientX: number, clientY: number) => {
+    const bounds = playerRef.current?.getBoundingClientRect();
+    return {
+      x: clientX - (bounds?.left ?? 0),
+      y: clientY - (bounds?.top ?? 0),
+    };
+  };
+
+  const sendPointer = (
+    event: React.PointerEvent<HTMLDivElement>,
+    kind: "mousePressed" | "mouseReleased" | "mouseMoved",
+  ) => {
+    const coordinates = point(event.clientX, event.clientY);
+    send({
+      type: "pointer",
+      event: kind,
+      ...coordinates,
+      button: pointerButton(event.button),
+      buttons: event.buttons,
+      click_count: kind === "mouseMoved" ? 0 : 1,
+    });
+  };
+
   return (
     <div
+      ref={playerRef}
       id={widget.id}
       data-testid={`sandbox-${widget.id}`}
-      className="ambient-widget-root w-full h-full overflow-auto"
+      className="ambient-widget-root relative w-full h-full overflow-hidden outline-none bg-transparent"
+      role="application"
+      aria-label={widget.title}
+      tabIndex={0}
+      onPointerDown={(event) => {
+        event.currentTarget.focus();
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        sendPointer(event, "mousePressed");
+      }}
+      onPointerUp={(event) => sendPointer(event, "mouseReleased")}
+      onPointerMove={(event) => sendPointer(event, "mouseMoved")}
+      onWheel={(event) => {
+        const coordinates = point(event.clientX, event.clientY);
+        send({
+          type: "wheel",
+          ...coordinates,
+          delta_x: event.deltaX,
+          delta_y: event.deltaY,
+        });
+      }}
+      onKeyDown={(event) => {
+        send({
+          type: "key",
+          event: "keyDown",
+          key: event.key,
+          code: event.code,
+          text: event.key.length === 1 ? event.key : "",
+          modifiers: keyboardModifiers(event),
+        });
+      }}
+      onKeyUp={(event) => {
+        send({
+          type: "key",
+          event: "keyUp",
+          key: event.key,
+          code: event.code,
+          text: "",
+          modifiers: keyboardModifiers(event),
+        });
+      }}
+      onFocus={() => send({ type: "focus", focused: true })}
+      onBlur={() => send({ type: "focus", focused: false })}
+      onContextMenu={(event) => event.preventDefault()}
     >
-      {Component ? (
-        <ErrorBoundary key={widget.js}>
-          <Component ambient={ambientProps} />
-        </ErrorBoundary>
-      ) : (
-        <div className="p-4 text-slate-400 text-xs italic">Compiling React widget...</div>
+      {frame && (
+        <img
+          src={`data:image/${frame.format};base64,${frame.data}`}
+          alt={widget.title}
+          draggable={false}
+          className="block w-full h-full object-fill pointer-events-none select-none"
+          width={frame.width}
+          height={frame.height}
+        />
+      )}
+
+      {!frame && !failure && (
+        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-white/45">
+          {status === "closed" ? "Widget Runtime disconnected" : "Starting isolated Widget Runtime…"}
+        </div>
+      )}
+
+      {failure && (
+        <div className="absolute inset-0 overflow-auto p-4 bg-red-950/55 text-red-200 text-xs">
+          <strong className="block mb-1">Widget Runtime Error</strong>
+          <span>{failure.message}</span>
+          <span className="block mt-2 font-mono text-[10px] text-red-300/70">
+            {failure.code}
+            {failure.classification ? ` · ${failure.classification}` : ""}
+          </span>
+        </div>
       )}
     </div>
   );

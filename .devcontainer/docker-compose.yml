@@ -10,6 +10,7 @@ services:
       - ..:/workspaces/ambient-agent:cached
       - coding_agent_data:/var/lib/ambient/coding-agents
       - python_env:/var/lib/ambient/python-env
+      - widget_runtime_socket:/run/ambient-widget-runtime
     environment:
       CODING_AGENT_RUNTIME_DIR: /var/lib/ambient/coding-agents
       UV_PROJECT_ENVIRONMENT: /var/lib/ambient/python-env
@@ -19,11 +20,53 @@ services:
       NEO4J_PASSWORD: ambient-agent-dev
       NEO4J_DATABASE: neo4j
       GRAPH_MIGRATE_SQLITE: "0"
+      WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
+      WIDGET_RUNTIME_SMOKE_ENABLED: "1"
     security_opt:
       - seccomp=unconfined
     depends_on:
       neo4j:
         condition: service_healthy
+      widget-runtime:
+        condition: service_healthy
+
+  widget-runtime:
+    build:
+      context: ..
+      dockerfile: widget-runtime/Dockerfile
+    init: true
+    user: "10001:10001"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      # Keep Chromium's browser sandbox enabled; Docker's default seccomp
+      # profile blocks the unprivileged user-namespace setup it requires.
+      - seccomp=unconfined
+    pids_limit: 192
+    mem_limit: 1g
+    cpus: 2.0
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/widget:size=64m,uid=10001,gid=10001,mode=0700
+    environment:
+      WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
+      WIDGET_RUNTIME_MAX_CONTEXTS: "16"
+    volumes:
+      - widget_runtime_socket:/run/ambient-widget-runtime
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - require("node:net").createConnection("/run/ambient-widget-runtime/runtime.sock").on("connect",function(){process.exit(0)}).on("error",function(){process.exit(1)})
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
 
   neo4j:
     image: neo4j:5.26-community
@@ -42,3 +85,4 @@ volumes:
   coding_agent_data:
   python_env:
   neo4j_data:
+  widget_runtime_socket:

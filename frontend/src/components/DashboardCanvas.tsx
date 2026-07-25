@@ -4,7 +4,7 @@ import { getTranslation } from "../services/i18n";
 export interface Widget {
   id: string;
   title: string;
-  js: string;
+  js?: string;
   manifest_revision?: string;
   grants_digest?: string;
   capabilities?: Array<{ id: string; scope: Record<string, unknown> }>;

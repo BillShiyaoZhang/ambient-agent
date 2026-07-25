@@ -39,13 +39,22 @@ from acp.schema import (
 )
 
 from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
+from backend.coding_agent_repair import (
+    RepairDirective,
+    RepairFinding,
+    artifact_hash,
+    build_repair_prompt,
+    decide_widget_repair,
+    finding_from_exception,
+)
 
-logger = logging.getLogger("opencode_service")
+logger = logging.getLogger("coding_agent_acp")
 
 _DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT = 256 * 1024
 _MAX_TERMINAL_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
 _MAX_CONTROLLER_BYTES = 2 * 1024 * 1024
 _PROCESS_TERMINATION_GRACE_SECONDS = 2.0
+_MAX_AUTOMATIC_REPAIRS = 3
 _SHELL_CONTROL_PATTERN = re.compile(r"[\x00\r\n;&|<>`]|\$\(")
 _TERMINAL_INHERITED_ENV = {
     "HOME",
@@ -75,57 +84,87 @@ _TERMINAL_REQUEST_ENV = {
 }
 
 
-class OpenCodeAgentError(RuntimeError):
-    """Base error for a failed OpenCode execution."""
+class CodingAgentError(RuntimeError):
+    """Base error for a failed Coding Agent execution."""
 
 
-class OpenCodeACPError(OpenCodeAgentError):
-    """Base error for a failed OpenCode ACP execution."""
+class CodingAgentACPError(CodingAgentError):
+    """Base error for a failed Coding Agent ACP execution."""
 
 
-class OpenCodeACPInputError(OpenCodeACPError, ValueError):
+class CodingAgentACPInputError(CodingAgentACPError, ValueError):
     """Raised before execution when an App ID or path is unsafe."""
 
 
-class OpenCodeACPStartupError(OpenCodeACPError):
-    """Raised when the OpenCode ACP process cannot be started."""
+class CodingAgentACPStartupError(CodingAgentACPError):
+    """Raised when the Coding Agent ACP process cannot be started."""
 
 
-class OpenCodeACPTimeoutError(OpenCodeACPError, TimeoutError):
-    """Raised when the OpenCode ACP turn exceeds its deadline."""
+class CodingAgentACPTimeoutError(CodingAgentACPError, TimeoutError):
+    """Raised when a Coding Agent ACP turn exceeds its deadline."""
 
 
-class OpenCodeACPProtocolError(OpenCodeACPError):
+class CodingAgentACPProtocolError(CodingAgentACPError):
     """Raised when ACP initialization, session creation, or prompting fails."""
 
 
-class OpenCodeArtifactError(OpenCodeACPError):
+class CodingAgentArtifactError(CodingAgentACPError):
     """Raised when staged output is missing or malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "artifact_validation_failed",
+        stage: str = "artifact_validation",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
 
 
 @dataclass(frozen=True, slots=True)
-class OpenCodeStagedResult:
+class CodingAgentStagedResult:
     """A constrained staged App handle whose caller must retain, promote, or discard."""
 
     output: str
     app_id: str
     staging_dir: Path
     live_dir: Path
+    repair_attempts: int = 0
+    repair_findings: tuple[dict[str, object], ...] = ()
+    artifact_hash: str = ""
 
 
-class CodingAgentDraftError(OpenCodeACPError):
+class CodingAgentDraftError(CodingAgentACPError):
     """Return a failed durable generation together with its retained draft handle."""
 
     def __init__(
         self,
         message: str,
         *,
-        staged_result: OpenCodeStagedResult,
+        staged_result: CodingAgentStagedResult,
         error_code: str,
+        repair_action: str = "operator",
+        finding: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.staged_result = staged_result
         self.error_code = error_code
+        self.repair_action = repair_action
+        self.finding = finding
+
+
+# Public compatibility names for extensions that imported the original
+# OpenCode-specific adapter before ACP became the shared boundary.
+OpenCodeAgentError = CodingAgentError
+OpenCodeACPError = CodingAgentACPError
+OpenCodeACPInputError = CodingAgentACPInputError
+OpenCodeACPStartupError = CodingAgentACPStartupError
+OpenCodeACPTimeoutError = CodingAgentACPTimeoutError
+OpenCodeACPProtocolError = CodingAgentACPProtocolError
+OpenCodeArtifactError = CodingAgentArtifactError
+OpenCodeStagedResult = CodingAgentStagedResult
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -246,6 +285,7 @@ async def spawn_agent_process(
     env: Mapping[str, str] | None = None,
     cwd: str | Path | None = None,
     transport_kwargs: Mapping[str, Any] | None = None,
+    inherit_default_environment: bool = True,
     **connection_kwargs: Any,
 ) -> AsyncIterator[tuple[Any, asyncio.subprocess.Process]]:
     """Spawn an ACP process in an isolated process group with bounded shutdown."""
@@ -255,7 +295,7 @@ async def spawn_agent_process(
     if transport_options:
         raise ValueError(f"Unsupported ACP transport options: {', '.join(sorted(transport_options))}")
 
-    process_env = dict(default_environment())
+    process_env = dict(default_environment()) if inherit_default_environment else {}
     if env:
         process_env.update(env)
     process_kwargs: dict[str, Any] = {}
@@ -277,7 +317,7 @@ async def spawn_agent_process(
     )
     if proc.stdin is None or proc.stdout is None or proc.stderr is None:
         await _terminate_process(proc, process_group=True, grace_seconds=shutdown_timeout)
-        raise OpenCodeACPStartupError("OpenCode ACP process did not expose stdio pipes")
+        raise CodingAgentACPStartupError("Coding Agent ACP process did not expose stdio pipes")
 
     async def drain_stderr() -> None:
         while await proc.stderr.read(4096):
@@ -312,74 +352,80 @@ def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]
     try:
         validate_app_id(app_id)
     except ManifestValidationError as exc:
-        raise OpenCodeACPInputError(f"invalid app_id: {exc!s}") from exc
+        raise CodingAgentACPInputError(f"invalid app_id: {exc!s}") from exc
 
     try:
         apps_root = Path(apps_dir).resolve(strict=False)
         apps_root.mkdir(parents=True, exist_ok=True)
         live_dir = apps_root / app_id
         if _is_link_or_junction(live_dir):
-            raise OpenCodeACPInputError("App path must not be a symbolic link or junction")
+            raise CodingAgentACPInputError("App path must not be a symbolic link or junction")
         if live_dir.exists() and not live_dir.is_dir():
-            raise OpenCodeACPInputError("App path must be a directory")
+            raise CodingAgentACPInputError("App path must be a directory")
         if live_dir.resolve(strict=False).parent != apps_root:
-            raise OpenCodeACPInputError("App path must be a direct child of the Apps directory")
+            raise CodingAgentACPInputError("App path must be a direct child of the Apps directory")
 
         staging_dir = apps_root / f".{app_id}.staging-{uuid.uuid4().hex}"
         if live_dir.exists():
             for path in live_dir.rglob("*"):
                 if _is_link_or_junction(path):
-                    raise OpenCodeACPInputError(f"Existing App contains an unsafe link: {path.relative_to(live_dir)}")
+                    raise CodingAgentACPInputError(
+                        f"Existing App contains an unsafe link: {path.relative_to(live_dir)}"
+                    )
             shutil.copytree(live_dir, staging_dir)
         else:
             staging_dir.mkdir()
         return live_dir, staging_dir
-    except OpenCodeACPError:
+    except CodingAgentACPError:
         raise
     except (OSError, RuntimeError) as exc:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
-        raise OpenCodeACPStartupError(f"Unable to prepare coding-agent staging directory: {exc!s}") from exc
+        raise CodingAgentACPStartupError(f"Unable to prepare coding-agent staging directory: {exc!s}") from exc
 
 
 def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
     controller_path = _resolve_in_workspace("controller.js", staging_dir)
     if not controller_path.is_file():
-        raise OpenCodeArtifactError("Coding agent did not produce the required controller.js artifact")
+        raise CodingAgentArtifactError("Coding agent did not produce the required controller.js artifact")
     try:
         raw = controller_path.read_bytes()
     except OSError as exc:
-        raise OpenCodeArtifactError(f"Unable to read generated controller.js: {exc!s}") from exc
+        raise CodingAgentArtifactError(f"Unable to read generated controller.js: {exc!s}") from exc
     if not raw or len(raw) > _MAX_CONTROLLER_BYTES:
-        raise OpenCodeArtifactError("Generated controller.js is empty or exceeds the size limit")
+        raise CodingAgentArtifactError("Generated controller.js is empty or exceeds the size limit")
     try:
         source = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise OpenCodeArtifactError("Generated controller.js must be valid UTF-8") from exc
+        raise CodingAgentArtifactError("Generated controller.js must be valid UTF-8") from exc
     if "\x00" in source or re.search(r"\bexport\s+default\b", source) is None:
-        raise OpenCodeArtifactError("Generated controller.js must contain a default export")
+        raise CodingAgentArtifactError("Generated controller.js must contain a default export")
 
     manifest_path = staging_dir / "manifest.json"
     if not manifest_path.is_file():
-        raise OpenCodeArtifactError("Coding agent did not produce the required Manifest V2 artifact")
+        raise CodingAgentArtifactError("Coding agent did not produce the required Manifest V2 artifact")
     try:
         AppManifest.read(manifest_path, expected_app_id=app_id)
     except ManifestValidationError as exc:
-        raise OpenCodeArtifactError(
+        raise CodingAgentArtifactError(
             f"App manifest validation failed: {exc!s}. Fix manifest.json according to the App Runtime Contract."
         ) from exc
 
     allowed_names = {".ambient-promotion.json", "README.md", "controller.js", "data", "manifest.json"}
     unexpected = sorted(path.name for path in staging_dir.iterdir() if path.name not in allowed_names)
     if unexpected:
-        raise OpenCodeArtifactError(
+        raise CodingAgentArtifactError(
             f"App contains unsupported files outside the Runtime Contract: {', '.join(unexpected)}"
         )
 
     verifier = Path(__file__).resolve().parent.parent / "scripts" / "verify_widget_controller.mjs"
     node_executable = shutil.which("node")
     if node_executable is None or not verifier.is_file():
-        raise OpenCodeArtifactError("Widget syntax/runtime verifier is unavailable")
+        raise CodingAgentArtifactError(
+            "Widget syntax/runtime verifier is unavailable",
+            code="widget_verifier_unavailable",
+            stage="static_verify",
+        )
     try:
         completed = subprocess.run(
             [node_executable, str(verifier), str(controller_path)],
@@ -393,7 +439,11 @@ def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise OpenCodeArtifactError(f"Widget syntax/runtime verification failed: {exc!s}") from exc
+        raise CodingAgentArtifactError(
+            f"Widget syntax/runtime verification failed: {exc!s}",
+            code="widget_verifier_execution_failed",
+            stage="static_verify",
+        ) from exc
     if completed.returncode != 0:
         diagnostic = (completed.stderr or completed.stdout or "unknown verifier error").strip()
         try:
@@ -404,11 +454,15 @@ def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
             code = str(structured.get("code") or "widget_verification_failed")
             message = str(structured.get("message") or "Widget verification failed")
             hint = str(structured.get("hint") or "Fix the generated App and retry validation.")
-            raise OpenCodeArtifactError(
-                f"Widget syntax/runtime/security verification failed [{code}]: {message}\nSuggested fix: {hint}"
+            raise CodingAgentArtifactError(
+                f"Widget syntax/runtime/security verification failed [{code}]: {message}\nSuggested fix: {hint}",
+                code=code,
+                stage="static_verify",
             )
-        raise OpenCodeArtifactError(
-            f"Widget syntax/runtime/security verification failed: {diagnostic[:_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT]}"
+        raise CodingAgentArtifactError(
+            f"Widget syntax/runtime/security verification failed: {diagnostic[:_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT]}",
+            code="widget_verification_failed",
+            stage="static_verify",
         )
 
 
@@ -447,63 +501,63 @@ def _promote_staging_app(staging_dir: Path, live_dir: Path) -> None:
     except OSError:
         # The startup recovery pass will finish cleanup. Keeping the journal is
         # safer than guessing which directory is authoritative after a crash.
-        logger.warning("Unable to finalize OpenCode promotion journal %s", journal, exc_info=True)
+        logger.warning("Unable to finalize Coding Agent promotion journal %s", journal, exc_info=True)
 
 
-def _validated_staging_handle(result: OpenCodeStagedResult, *, require_exists: bool) -> tuple[Path, Path]:
-    if not isinstance(result, OpenCodeStagedResult):
-        raise TypeError("staged result must be an OpenCodeStagedResult")
+def _validated_staging_handle(result: CodingAgentStagedResult, *, require_exists: bool) -> tuple[Path, Path]:
+    if not isinstance(result, CodingAgentStagedResult):
+        raise TypeError("staged result must be an CodingAgentStagedResult")
     try:
         validate_app_id(result.app_id)
     except ManifestValidationError as exc:
-        raise OpenCodeACPInputError(f"invalid staged app_id: {exc!s}") from exc
+        raise CodingAgentACPInputError(f"invalid staged app_id: {exc!s}") from exc
 
     try:
         apps_root = result.live_dir.parent.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise OpenCodeACPInputError(f"Invalid Apps directory: {exc!s}") from exc
+        raise CodingAgentACPInputError(f"Invalid Apps directory: {exc!s}") from exc
     expected_live = apps_root / result.app_id
     if result.live_dir.resolve(strict=False) != expected_live:
-        raise OpenCodeACPInputError("Staged live path does not match its App ID")
+        raise CodingAgentACPInputError("Staged live path does not match its App ID")
 
     staging_dir = result.staging_dir
     expected_name = re.compile(rf"\.{re.escape(result.app_id)}\.staging-[0-9a-f]{{32}}")
     if staging_dir.parent.resolve(strict=False) != apps_root or expected_name.fullmatch(staging_dir.name) is None:
-        raise OpenCodeACPInputError("Staging path is not a recognized direct child of the Apps directory")
+        raise CodingAgentACPInputError("Staging path is not a recognized direct child of the Apps directory")
     if _is_link_or_junction(staging_dir):
-        raise OpenCodeACPInputError("Staging path must not be a symbolic link or junction")
+        raise CodingAgentACPInputError("Staging path must not be a symbolic link or junction")
     if require_exists and not staging_dir.is_dir():
-        raise OpenCodeACPInputError("Staging directory no longer exists")
+        raise CodingAgentACPInputError("Staging directory no longer exists")
     if _is_link_or_junction(expected_live):
-        raise OpenCodeACPInputError("Live App path must not be a symbolic link or junction")
+        raise CodingAgentACPInputError("Live App path must not be a symbolic link or junction")
     return expected_live, staging_dir
 
 
-def validate_opencode_staging(result: OpenCodeStagedResult) -> Path:
+def validate_coding_agent_staging(result: CodingAgentStagedResult) -> Path:
     """Validate a retained staging result and return its controller artifact path."""
     _, staging_dir = _validated_staging_handle(result, require_exists=True)
     _validate_staged_app(staging_dir, result.app_id)
     return staging_dir / "controller.js"
 
 
-def resume_opencode_staging(result: OpenCodeStagedResult) -> tuple[Path, Path]:
+def resume_coding_agent_staging(result: CodingAgentStagedResult) -> tuple[Path, Path]:
     """Validate an existing draft handle without requiring its artifacts to pass verification."""
 
     return _validated_staging_handle(result, require_exists=True)
 
 
-def promote_opencode_staging(result: OpenCodeStagedResult) -> Path:
+def promote_coding_agent_staging(result: CodingAgentStagedResult) -> Path:
     """Revalidate and promote a retained staging result to its live App directory."""
     live_dir, staging_dir = _validated_staging_handle(result, require_exists=True)
     _validate_staged_app(staging_dir, result.app_id)
     try:
         _promote_staging_app(staging_dir, live_dir)
     except Exception as exc:
-        raise OpenCodeArtifactError(f"Unable to promote generated App: {exc!s}") from exc
+        raise CodingAgentArtifactError(f"Unable to promote generated App: {exc!s}") from exc
     return live_dir
 
 
-def validate_opencode_promotion(result: OpenCodeStagedResult, run_id: str) -> Path | None:
+def validate_coding_agent_promotion(result: CodingAgentStagedResult, run_id: str) -> Path | None:
     """Return the promoted controller when a matching durable marker exists."""
 
     live_dir, staging_dir = _validated_staging_handle(result, require_exists=False)
@@ -515,35 +569,25 @@ def validate_opencode_promotion(result: OpenCodeStagedResult, run_id: str) -> Pa
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise OpenCodeACPProtocolError("Published App has an invalid promotion marker") from exc
+        raise CodingAgentACPProtocolError("Published App has an invalid promotion marker") from exc
     if payload.get("run_id") != run_id:
         return None
     _validate_staged_app(live_dir, result.app_id)
     controller = live_dir / "controller.js"
     artifact_hash = hashlib.sha256(controller.read_bytes()).hexdigest()
     if payload.get("artifact_hash") != artifact_hash:
-        raise OpenCodeACPProtocolError("Published App does not match its promotion marker")
+        raise CodingAgentACPProtocolError("Published App does not match its promotion marker")
     return controller
 
 
-def discard_opencode_staging(result: OpenCodeStagedResult) -> None:
+def discard_coding_agent_staging(result: CodingAgentStagedResult) -> None:
     """Idempotently discard a retained staging result without touching the live App."""
     _, staging_dir = _validated_staging_handle(result, require_exists=False)
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
 
 
-# Provider-neutral names for the shared staging contract. The OpenCode names
-# remain public compatibility aliases for existing extensions and checkpoints.
-CodingAgentStagedResult = OpenCodeStagedResult
-resume_coding_agent_staging = resume_opencode_staging
-validate_coding_agent_staging = validate_opencode_staging
-promote_coding_agent_staging = promote_opencode_staging
-validate_coding_agent_promotion = validate_opencode_promotion
-discard_coding_agent_staging = discard_opencode_staging
-
-
-def cleanup_orphaned_opencode_staging(
+def cleanup_orphaned_coding_agent_staging(
     apps_dir: str | Path,
     *,
     referenced_staging_paths: set[str | Path],
@@ -594,11 +638,11 @@ def cleanup_orphaned_opencode_staging(
             shutil.rmtree(candidate)
             removed.append(candidate)
         except (ManifestValidationError, OSError, RuntimeError):
-            logger.warning("Unable to clean orphan OpenCode staging directory %s", candidate, exc_info=True)
+            logger.warning("Unable to clean orphan Coding Agent staging directory %s", candidate, exc_info=True)
     return removed
 
 
-def recover_interrupted_opencode_promotions(apps_dir: str | Path) -> list[dict[str, str]]:
+def recover_interrupted_coding_agent_promotions(apps_dir: str | Path) -> list[dict[str, str]]:
     """Recover the two-rename promotion window using its durable journal."""
 
     root_path = Path(apps_dir)
@@ -645,7 +689,7 @@ def recover_interrupted_opencode_promotions(apps_dir: str | Path) -> list[dict[s
                 journal.unlink()
                 recovered.append({"app_id": app_id, "action": "cleared_unstarted_journal"})
         except (ManifestValidationError, OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
-            logger.error("OpenCode promotion journal requires manual attention: %s", journal, exc_info=True)
+            logger.error("Coding Agent promotion journal requires manual attention: %s", journal, exc_info=True)
     return recovered
 
 
@@ -733,8 +777,7 @@ def _opencode_runtime_env() -> dict[str, str]:
 class PermissionPolicyManager:
     def __init__(self, config_path: str = None):
         if config_path is None:
-            # Look in backend/opencode_permissions.json relative to this file
-            config_path = os.path.join(os.path.dirname(__file__), "opencode_permissions.json")
+            config_path = os.path.join(os.path.dirname(__file__), "coding_agent_permissions.json")
         self.config_path = config_path
         self.policy = self._load_policy()
 
@@ -949,7 +992,7 @@ class FastAPIACPClient(Client):
         return RequestPermissionResponse(
             outcome=DeniedOutcome(
                 outcome="cancelled",
-                message="Operation is outside the pre-approved OpenCode policy",
+                message="Operation is outside the pre-approved Coding Agent policy",
             )
         )
 
@@ -966,7 +1009,7 @@ class FastAPIACPClient(Client):
         try:
             argv = _parse_command_argv(command, args)
             if not PermissionPolicyManager().validate_argv(argv):
-                raise ValueError("Command is not allowed by the OpenCode terminal policy")
+                raise ValueError("Command is not allowed by the Coding Agent terminal policy")
             exec_cwd = _resolve_in_workspace(cwd or ".", self.workspace_root)
             if not exec_cwd.is_dir():
                 raise ValueError("Terminal cwd must be an existing directory")
@@ -1097,7 +1140,7 @@ class FastAPIACPClient(Client):
             u_type = update.session_update
             if u_type == "agent_thought_chunk":
                 if hasattr(update.content, "text"):
-                    logger.debug(f"OpenCode Thought: {update.content.text}")
+                    logger.debug("Coding Agent thought: %s", update.content.text)
             elif u_type == "agent_message_chunk":
                 if hasattr(update.content, "text"):
                     content_text = update.content.text
@@ -1119,27 +1162,30 @@ class FastAPIACPClient(Client):
                     await callback_result
 
 
-async def run_opencode_agent_acp(
+async def run_coding_agent_acp(
     app_id: str,
     instruction: str,
     language: str = "zh",
     on_update: Callable[[str], None] = None,
     *,
+    launch: Any,
     promote: bool = True,
-    staged_result: OpenCodeStagedResult | None = None,
-) -> str | OpenCodeStagedResult:
-    """
-    Spawns OpenCode agent in ACP mode, runs its loop, and streams the output/logs back via on_update callback.
-    """
-    opencode_command = os.getenv("OPENCODE_COMMAND", "opencode")
-    if os.name == "nt" and opencode_command == "opencode":
-        resolved = shutil.which("opencode")
-        if resolved:
-            opencode_command = resolved
-    try:
-        opencode_argv = _parse_command_argv(opencode_command)
-    except ValueError as exc:
-        raise OpenCodeACPInputError(f"Invalid OPENCODE_COMMAND: {exc!s}") from exc
+    staged_result: CodingAgentStagedResult | None = None,
+    artifact_validator: Callable[[CodingAgentStagedResult], Any] | None = None,
+    repair_decider: Callable[[RepairFinding, tuple[RepairFinding, ...]], RepairDirective] | None = None,
+) -> str | CodingAgentStagedResult:
+    """Run any registered Coding Agent through one ACP session and repair loop."""
+
+    agent_name = str(getattr(launch, "agent_name", "") or getattr(launch, "agent_id", "") or "Coding Agent")
+    launch_argv = tuple(getattr(launch, "argv", ()))
+    launch_environment = getattr(launch, "environment", None)
+    timeout_seconds = getattr(launch, "timeout_seconds", None)
+    if not launch_argv or not all(isinstance(item, str) and item for item in launch_argv):
+        raise CodingAgentACPInputError("Coding Agent ACP launch command is invalid")
+    if not isinstance(launch_environment, Mapping):
+        raise CodingAgentACPInputError("Coding Agent ACP launch environment is invalid")
+    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+        raise CodingAgentACPInputError("Coding Agent ACP timeout must be positive")
 
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
@@ -1148,24 +1194,28 @@ async def run_opencode_agent_acp(
         live_dir, staging_dir = _prepare_staging_app(apps_dir, app_id)
     else:
         if staged_result.app_id != app_id:
-            raise OpenCodeACPInputError("Retained staging App ID does not match the requested App")
-        live_dir, staging_dir = resume_opencode_staging(staged_result)
+            raise CodingAgentACPInputError("Retained staging App ID does not match the requested App")
+        live_dir, staging_dir = resume_coding_agent_staging(staged_result)
     client = FastAPIACPClient(workspace_root=staging_dir, on_update_callback=on_update)
     session_id: str | None = None
     proc: asyncio.subprocess.Process | None = None
     retain_staging = False
+    repair_findings: list[RepairFinding] = []
+    repair_attempts = 0
+    last_directive = RepairDirective("operator", "The Coding Agent failed before artifact repair was authorized.")
+    last_finding: RepairFinding | None = None
 
     try:
-        logger.info("Spawning OpenCode ACP agent for App %s inside staging directory", app_id)
+        logger.info("Spawning %s ACP agent for App %s inside staging directory", agent_name, app_id)
         try:
             async with spawn_agent_process(
                 client,
-                opencode_argv[0],
-                *opencode_argv[1:],
-                "acp",
+                launch_argv[0],
+                *launch_argv[1:],
                 cwd=staging_dir,
-                env=_opencode_runtime_env(),
+                env=launch_environment,
                 transport_kwargs={"shutdown_timeout": _PROCESS_TERMINATION_GRACE_SECONDS},
+                inherit_default_environment=False,
             ) as (conn, spawned_proc):
                 proc = spawned_proc
                 await conn.initialize(
@@ -1181,58 +1231,110 @@ async def run_opencode_agent_acp(
                 from backend.agent.prompts.manager import PromptManager
 
                 prompt_text = PromptManager().get_prompt(
-                    "opencode_system.md",
+                    "coding_agent_system.md",
                     app_id=app_id,
                     target_dir=str(staging_dir),
                     instruction=instruction,
                     language=language,
                 )
 
-                try:
-                    opencode_timeout = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
-                except ValueError as exc:
-                    raise OpenCodeACPInputError("OPENCODE_TIMEOUT must be a number") from exc
-                if opencode_timeout <= 0:
-                    raise OpenCodeACPInputError("OPENCODE_TIMEOUT must be positive")
-
-                try:
-                    prompt_response = await asyncio.wait_for(
-                        conn.prompt(session_id=session_id, prompt=[text_block(prompt_text)]),
-                        timeout=opencode_timeout,
+                decide_repair = repair_decider or (
+                    lambda finding, history: decide_widget_repair(
+                        finding,
+                        history,
+                        max_repairs=_MAX_AUTOMATIC_REPAIRS,
                     )
-                except TimeoutError as exc:
-                    logger.warning("OpenCode ACP agent timed out after %s seconds for App %s", opencode_timeout, app_id)
-                    await _terminate_process(spawned_proc, process_group=True)
-                    raise OpenCodeACPTimeoutError(
-                        f"OpenCode ACP agent timed out after {opencode_timeout:g} seconds"
-                    ) from exc
-                except asyncio.CancelledError:
-                    await _terminate_process(spawned_proc, process_group=True)
-                    raise
+                )
+                while True:
+                    try:
+                        prompt_response = await asyncio.wait_for(
+                            conn.prompt(session_id=session_id, prompt=[text_block(prompt_text)]),
+                            timeout=timeout_seconds,
+                        )
+                    except TimeoutError as exc:
+                        logger.warning(
+                            "%s ACP agent timed out after %s seconds for App %s",
+                            agent_name,
+                            timeout_seconds,
+                            app_id,
+                        )
+                        await _terminate_process(spawned_proc, process_group=True)
+                        raise CodingAgentACPTimeoutError(
+                            f"{agent_name} ACP agent timed out after {timeout_seconds:g} seconds"
+                        ) from exc
+                    except asyncio.CancelledError:
+                        await _terminate_process(spawned_proc, process_group=True)
+                        raise
 
-                if prompt_response.stop_reason != "end_turn":
-                    raise OpenCodeACPProtocolError(
-                        f"OpenCode ACP agent stopped before completion: {prompt_response.stop_reason}"
+                    if prompt_response.stop_reason != "end_turn":
+                        raise CodingAgentACPProtocolError(
+                            f"{agent_name} ACP agent stopped before completion: {prompt_response.stop_reason}"
+                        )
+
+                    output = "".join(client.output_buffer)
+                    candidate = CodingAgentStagedResult(
+                        output=output,
+                        app_id=app_id,
+                        staging_dir=staging_dir,
+                        live_dir=live_dir,
+                        repair_attempts=repair_attempts,
+                        repair_findings=tuple(item.to_dict() for item in repair_findings),
+                        artifact_hash=artifact_hash(staging_dir),
                     )
-        except (OpenCodeACPError, asyncio.CancelledError):
+                    try:
+                        await asyncio.to_thread(validate_coding_agent_staging, candidate)
+                        if artifact_validator is not None:
+                            validation_result = artifact_validator(candidate)
+                            if inspect.isawaitable(validation_result):
+                                await validation_result
+                        staged_result = candidate
+                        break
+                    except Exception as exc:
+                        revision = artifact_hash(staging_dir)
+                        finding = finding_from_exception(
+                            exc,
+                            attempt=repair_attempts + 1,
+                            artifact_revision=revision,
+                        )
+                        directive = decide_repair(finding, tuple(repair_findings))
+                        if directive.action == "repair" and repair_attempts >= _MAX_AUTOMATIC_REPAIRS:
+                            directive = RepairDirective("human", "The adapter repair budget is exhausted.")
+                        repair_findings.append(finding)
+                        last_finding = finding
+                        last_directive = directive
+                        if directive.action != "repair":
+                            if not isinstance(exc, CodingAgentACPError):
+                                raise CodingAgentArtifactError(
+                                    str(exc),
+                                    code=finding.code,
+                                    stage=finding.stage,
+                                ) from exc
+                            raise
+                        repair_attempts += 1
+                        if on_update is not None:
+                            update = (
+                                f"\n🔧 独立校验发现可自动修复的问题；正在同一 {agent_name} ACP session 中修复 staging App。"
+                                if language == "zh"
+                                else f"\n🔧 Independent validation found a repairable issue; repairing the staging App in the same {agent_name} ACP session."
+                            )
+                            callback_result = on_update(update)
+                            if inspect.isawaitable(callback_result):
+                                await callback_result
+                        prompt_text = build_repair_prompt(finding, instruction=instruction)
+        except (CodingAgentACPError, asyncio.CancelledError):
             raise
         except (FileNotFoundError, PermissionError, OSError) as exc:
-            raise OpenCodeACPStartupError(f"Unable to start OpenCode ACP agent: {exc!s}") from exc
+            raise CodingAgentACPStartupError(f"Unable to start {agent_name} ACP agent: {exc!s}") from exc
         except Exception as exc:
-            raise OpenCodeACPProtocolError(f"OpenCode ACP protocol failed: {exc!s}") from exc
+            raise CodingAgentACPProtocolError(f"{agent_name} ACP protocol failed: {exc!s}") from exc
 
         output = "".join(client.output_buffer)
-        staged_result = OpenCodeStagedResult(
-            output=output,
-            app_id=app_id,
-            staging_dir=staging_dir,
-            live_dir=live_dir,
-        )
-        validate_opencode_staging(staged_result)
+        if staged_result is None:  # pragma: no cover - validation either returns a candidate or raises
+            raise CodingAgentACPProtocolError(f"{agent_name} did not produce a staging result")
         if not promote:
             retain_staging = True
             return staged_result
-        promote_opencode_staging(staged_result)
+        promote_coding_agent_staging(staged_result)
         return output
     except asyncio.CancelledError:
         raise
@@ -1243,13 +1345,18 @@ async def run_opencode_agent_acp(
                 raise
             raise CodingAgentDraftError(
                 str(exc),
-                staged_result=OpenCodeStagedResult(
+                staged_result=CodingAgentStagedResult(
                     output="".join(client.output_buffer)[-64_000:],
                     app_id=app_id,
                     staging_dir=staging_dir,
                     live_dir=live_dir,
+                    repair_attempts=repair_attempts,
+                    repair_findings=tuple(item.to_dict() for item in repair_findings),
+                    artifact_hash=artifact_hash(staging_dir),
                 ),
                 error_code=str(getattr(exc, "code", type(exc).__name__)),
+                repair_action=last_directive.action,
+                finding=last_finding.to_dict() if last_finding is not None else None,
             ) from exc
         raise
     finally:
@@ -1257,6 +1364,74 @@ async def run_opencode_agent_acp(
             try:
                 await _terminate_process(proc, process_group=True)
             except Exception:
-                logger.warning("Unable to terminate OpenCode ACP process during cleanup", exc_info=True)
+                logger.warning("Unable to terminate %s ACP process during cleanup", agent_name, exc_info=True)
         if owns_staging and not retain_staging and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class _CompatibilityACPLaunch:
+    agent_id: str
+    agent_name: str
+    argv: tuple[str, ...]
+    environment: dict[str, str]
+    timeout_seconds: float
+    transport: str
+
+
+async def run_opencode_agent_acp(
+    app_id: str,
+    instruction: str,
+    language: str = "zh",
+    on_update: Callable[[str], None] = None,
+    *,
+    promote: bool = True,
+    staged_result: CodingAgentStagedResult | None = None,
+    artifact_validator: Callable[[CodingAgentStagedResult], Any] | None = None,
+    repair_decider: Callable[[RepairFinding, tuple[RepairFinding, ...]], RepairDirective] | None = None,
+) -> str | CodingAgentStagedResult:
+    """Compatibility entry point; production dispatch uses ``run_coding_agent_acp``."""
+
+    opencode_command = os.getenv("OPENCODE_COMMAND", "opencode")
+    if os.name == "nt" and opencode_command == "opencode":
+        resolved = shutil.which("opencode")
+        if resolved:
+            opencode_command = resolved
+    try:
+        opencode_argv = _parse_command_argv(opencode_command)
+        timeout_seconds = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
+    except ValueError as exc:
+        raise CodingAgentACPInputError(f"Invalid OpenCode ACP configuration: {exc!s}") from exc
+    if timeout_seconds <= 0:
+        raise CodingAgentACPInputError("OPENCODE_TIMEOUT must be positive")
+    environment = dict(default_environment())
+    environment.update(_opencode_runtime_env())
+    return await run_coding_agent_acp(
+        app_id,
+        instruction,
+        language=language,
+        on_update=on_update,
+        launch=_CompatibilityACPLaunch(
+            agent_id="opencode",
+            agent_name="OpenCode",
+            argv=(*opencode_argv, "acp"),
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            transport="native",
+        ),
+        promote=promote,
+        staged_result=staged_result,
+        artifact_validator=artifact_validator,
+        repair_decider=repair_decider,
+    )
+
+
+# Function aliases complete the same import compatibility without keeping a
+# provider-specific execution implementation.
+resume_opencode_staging = resume_coding_agent_staging
+validate_opencode_staging = validate_coding_agent_staging
+promote_opencode_staging = promote_coding_agent_staging
+validate_opencode_promotion = validate_coding_agent_promotion
+discard_opencode_staging = discard_coding_agent_staging
+cleanup_orphaned_opencode_staging = cleanup_orphaned_coding_agent_staging
+recover_interrupted_opencode_promotions = recover_interrupted_coding_agent_promotions
