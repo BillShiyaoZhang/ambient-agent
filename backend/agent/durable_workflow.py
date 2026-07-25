@@ -157,6 +157,7 @@ class DurableAgentWorkflow:
             if isinstance(outcome, Failed):
                 return await self._failure(
                     state,
+                    run=run,
                     code=outcome.error_code,
                     message=outcome.message,
                     retryable=outcome.retryable,
@@ -178,6 +179,7 @@ class DurableAgentWorkflow:
         except LLMConfigError as exc:
             return await self._failure(
                 state,
+                run=run,
                 code=exc.code,
                 message=str(exc),
                 retryable=False,
@@ -186,6 +188,7 @@ class DurableAgentWorkflow:
         except WorkflowError as exc:
             return await self._failure(
                 state,
+                run=run,
                 code=exc.code,
                 message=str(exc),
                 retryable=exc.retryable,
@@ -195,6 +198,7 @@ class DurableAgentWorkflow:
             logger.exception("Durable workflow phase %s failed", state.phase)
             return await self._failure(
                 state,
+                run=run,
                 code=type(exc).__name__,
                 message=str(exc),
                 retryable=False,
@@ -523,6 +527,7 @@ class DurableAgentWorkflow:
         self,
         state: AgentRunState,
         *,
+        run: dict[str, Any] | None = None,
         code: str,
         message: str,
         retryable: bool,
@@ -607,7 +612,7 @@ class DurableAgentWorkflow:
                     "retryable": False,
                 }
 
-        return Failed(
+        failure = Failed(
             summary=(
                 "任务失败；生成草稿已保留，可重试继续验证"
                 if retained_staged_app and state.data.get("language") == "zh"
@@ -620,6 +625,43 @@ class DurableAgentWorkflow:
             retryable=False,
             effect_state=effect_state if effect_state in {"none", "committed", "unknown"} else "unknown",
         )
+        if retained_staged_app and run is not None:
+            app_id = str(staged.get("app_id") or "")
+            if not app_id and isinstance(state.intent, dict):
+                app_id = str(state.intent.get("app_id") or "")
+            app_id = app_id or "unknown-app"
+            reason = " ".join(str(message).strip().split())[:2_000] or "Unknown generation failure"
+            if state.data.get("language") == "zh":
+                content = (
+                    f"Widget “{app_id}” 生成失败，尚未发布到应用中心。\n"
+                    f"失败阶段：{state.phase}\n"
+                    f"错误码：{code}\n"
+                    f"原因：{reason}\n"
+                    f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；"
+                    "也可以在命令后补充具体要求。"
+                )
+            else:
+                content = (
+                    f'Widget "{app_id}" failed and was not published to App Center.\n'
+                    f"Failed phase: {state.phase}\n"
+                    f"Error code: {code}\n"
+                    f"Cause: {reason}\n"
+                    f"The failed draft was retained safely. Reply with `/repair {app_id}` to continue, "
+                    "optionally followed by additional instructions."
+                )
+            try:
+                diagnostic, created = self._save_agent_message(run, state, content)
+                if created:
+                    failure.events.append(
+                        PendingRunEvent(
+                            type="reply",
+                            payload=self._reply_payload(diagnostic),
+                            project_to_chat=True,
+                        )
+                    )
+            except Exception:
+                logger.exception("Unable to persist the failed Widget diagnostic in chat")
+        return failure
 
     def cleanup_state(self, state: AgentRunState | dict[str, Any] | None) -> None:
         """Best-effort cleanup for cancelled/abandoned retained staging artifacts."""
@@ -1156,6 +1198,38 @@ class DurableAgentWorkflow:
                 )
         return merged
 
+    def _manifest_v2_template(self, contract: dict[str, Any]) -> dict[str, Any]:
+        app_id = str(contract.get("app_id") or "")
+        existing: AppManifest | None = None
+        get_manifest = getattr(self.app_manager, "get_manifest", None)
+        if callable(get_manifest):
+            try:
+                existing = get_manifest(app_id)
+            except Exception:
+                logger.warning("Unable to load the existing Manifest while preparing the coding prompt", exc_info=True)
+        if existing is not None:
+            template = existing.to_dict()
+        else:
+            template = {
+                "manifest_version": 2,
+                "id": app_id,
+                "title": " ".join(part.capitalize() for part in app_id.split("-")) or "Ambient App",
+                "description": "",
+                "app_version": "0.1.0",
+                "intents": [],
+                "schema_refs": [],
+                "capabilities": [],
+            }
+        template["manifest_version"] = 2
+        template["id"] = app_id
+        template["schema_refs"] = sorted(
+            str(item["id"]) for item in contract.get("schemas", []) if isinstance(item, dict) and item.get("id")
+        )
+        template["capabilities"] = [grant.to_dict() for grant in normalize_grants(contract.get("capabilities", []))]
+        for field in ("backend_type", "mcp_server", "agent_url"):
+            template.pop(field, None)
+        return template
+
     async def _phase_stage_code(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         intent = self._current_intent(state)
         if not intent.app_id:
@@ -1169,11 +1243,18 @@ class DurableAgentWorkflow:
             raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
         schemas = list(contract.get("schemas") or [])
         schema_text = "\n".join(f"- Type '{item['id']}': {json.dumps(item.get('properties', {}))}" for item in schemas)
+        manifest_template = self._manifest_v2_template(contract)
         instruction = (
             f"{intent.instruction or ''}\n\n[APPROVED DEVELOPMENT PLAN]\n"
             f"{state.data.get('approved_plan', '')}\n\n[GRAPH DATABASE SCHEMAS]\n{schema_text}"
-            "\n\n[APPROVED RUNTIME CONTRACT — COPY EXACTLY INTO MANIFEST V2]\n"
+            "\n\n[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]\n"
             f"{json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)}"
+            "\n\n[REQUIRED MANIFEST V2 TEMPLATE]\n"
+            f"{json.dumps(manifest_template, ensure_ascii=False, sort_keys=True, indent=2)}"
+            "\n\n[MANIFEST V2 FIELD RULES]\n"
+            "`intents` must be an array of unique, non-empty strings; never objects. "
+            "`schema_refs` must also be an array of unique, non-empty strings. "
+            "Keep every capability entry in the exact approved object shape."
             "\n\n[SYSTEM CAPABILITIES]\n"
             f"{self.capability_catalog_factory().render(AgentRole.CODING_AGENT)}"
         )

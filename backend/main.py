@@ -1278,6 +1278,33 @@ async def websocket_chat(
             },
         )
 
+        input_payload = {
+            "content": content_str,
+            "sender": sender_str,
+            "user_message_id": user_msg.id,
+        }
+        repair_run = run_coordinator.retry_failed_widget_from_chat(
+            session_id,
+            content_str,
+            input_data=input_payload,
+        )
+        if repair_run is not None:
+            user_msg.run_id = repair_run["id"]
+            session.add(user_msg)
+            session.commit()
+            if session_id not in active_running_sessions:
+                active_running_sessions.add(session_id)
+                await broadcast_global(
+                    {
+                        "type": "session_status_update",
+                        "session_id": session_id,
+                        "status": "running",
+                        "run_id": repair_run["id"],
+                    }
+                )
+            await update_session_title(content_str)
+            return repair_run
+
         model_snapshot = _snapshot_model_config(current_session)
 
         state = AgentRunState(
@@ -1296,7 +1323,7 @@ async def websocket_chat(
             action_id="chat",
             title="Agent task",
             session_id=session_id,
-            input_data={"content": content_str, "sender": sender_str, "user_message_id": user_msg.id},
+            input_data=input_payload,
             workflow_type=state.workflow_type,
             workflow_version=state.workflow_version,
             state=state,

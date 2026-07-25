@@ -836,7 +836,7 @@ function App() {
             canvas={canvasConfig}
             onCanvasChange={handleCanvasChange}
             renderWidgetContent={(widget) => (
-              <ErrorBoundary key={widget.id}>
+              <ErrorBoundary key={`${widget.id}:${widget.js}`}>
                 <SandboxWidget
                   widget={widget}
                   onFullscreen={(id) => setAppWindowMode(id, "maximized")}

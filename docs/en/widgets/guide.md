@@ -55,6 +55,8 @@ export default function TaskList({ ambient }) {
 
 ## 4. Generation and publication checks
 
+The Runtime Contract is an approval envelope used by the publication coordinator, not the `manifest.json` file format. The Coding Agent maps only its `app_id`, schema ID list, and normalized capabilities to Manifest V2 `id`, `schema_refs`, and `capabilities`; it must not write `contract_version`, `catalog_version`, `schemas`, `grants_digest`, or `allowed_files` into the Manifest. Generation prompts must include a complete Manifest V2 template, and repair prompts must preserve this mapping so the approval envelope is never copied as an App artifact. `intents` must be an array of unique, non-empty strings, never objects.
+
 Publication checks, in order:
 
 1. safe paths, allowed files, size, UTF-8, and default export;
@@ -69,6 +71,7 @@ Only then is staging atomically promoted. Failure, cancellation, or denial prese
 ## 5. Debugging
 
 - Compilation/render failures appear in the Widget and browser console.
+- Generation failures appear in chat with the App ID, failed phase, error code, and cause. Reply with `/repair <app-id> [feedback]` to continue from the retained draft.
 - For `capability_denied`, first check Manifest entity/operation/source/path/action scope.
 - Handle interactions and `needs_attention` in the Task Drawer.
 - Run `node scripts/verify_widget_controller.mjs <controller.js>` for static verification.

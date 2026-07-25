@@ -1,6 +1,6 @@
 You are creating or modifying Ambient App `{{ app_id }}` inside the isolated staging directory `{{ target_dir }}`.
 
-The user-approved instruction and Runtime Contract follow. Treat the Runtime Contract embedded in this text as immutable:
+The user-approved instruction and Runtime Contract follow. Treat the Runtime Contract embedded in this text as immutable. It is an approval envelope, not the `manifest.json` document:
 
 {{ instruction }}
 
@@ -15,9 +15,11 @@ The staging directory may contain only:
 
 Delete obsolete `index.html`, `style.css`, `layout.json`, `index.jsx`, metadata, and any other generated source. Never emit `<ambient-widget>` XML.
 
+Use the complete object under `[REQUIRED MANIFEST V2 TEMPLATE]` as the file shape. You may improve only `title`, `description`, `app_version`, and `intents`. `intents` must be an array of unique, non-empty strings; never objects. Keep `manifest_version`, `id`, `schema_refs`, and `capabilities` exactly as provided. Never copy Runtime Contract envelope fields such as `contract_version`, `catalog_version`, `app_id`, `schemas`, `grants_digest`, or `allowed_files` into `manifest.json`.
+
 # Widget runtime
 
-- Obtain hooks from `ambient.react` and UI primitives from `ambient.components`.
+- Obtain hooks from `ambient.react` and UI primitives from `ambient.components`. The only available components are `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`. The only available hooks are `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`. Never invent or assume another primitive or hook.
 - Render with the `ambient.html` tagged template. Close dynamic HTM components with `<//>` or use a self-closing tag.
 - Never import modules. Never use `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `window`, `document`, `navigator`, storage globals, `eval`, `Function`, Node APIs, environment variables, shell commands, or host filesystem APIs.
 - The host injects only capability namespaces granted by Manifest V2. A namespace or method not in the approved Runtime Contract does not exist.
@@ -29,6 +31,7 @@ Delete obsolete `index.html`, `style.css`, `layout.json`, `index.jsx`, metadata,
   - `file.write` → `ambient.files.write(path, text)` below `app://data`.
   - `file.delete` → `ambient.files.delete(path)` below `app://data`.
   - `capability.invoke` → `ambient.capabilities.invoke("approved-catalog-id", input, "approved-action")`.
+- Pass those string literals directly at each capability call. Do not hide a file path, source ID, catalog ID, action ID, entity type, or operation behind a variable or generic helper parameter.
 - `ambient.mcp`, `ambient.runs`, and generic host APIs are not part of the Widget SDK.
 - Do not replace requested live behavior with fake/sample data. If the approved contract cannot satisfy a requirement, leave the live App unchanged by reporting the mismatch; never expand the Manifest yourself.
 
@@ -70,4 +73,4 @@ All user-facing UI copy must be English.
 所有面向用户的界面文案必须使用中文。
 {% endif %}
 
-Inspect existing allowed artifacts, implement the approved request, validate `manifest.json` against the exact Runtime Contract, and finish only after the staging verifier can pass.
+Inspect existing allowed artifacts, implement the approved request, validate the Manifest V2 security fields against their mapped Runtime Contract values, and finish only after the staging verifier can pass.

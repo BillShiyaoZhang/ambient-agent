@@ -55,6 +55,8 @@ export default function TaskList({ ambient }) {
 
 ## 4. 生成与发布检查
 
+Runtime Contract 是发布协调器使用的审批信封，不是 `manifest.json` 的文件格式。Coding Agent 只能把其中的 `app_id`、schema ID 列表和规范化 capabilities 分别映射为 Manifest V2 的 `id`、`schema_refs` 和 `capabilities`；不得把 `contract_version`、`catalog_version`、`schemas`、`grants_digest` 或 `allowed_files` 写入 Manifest。生成提示必须同时给出完整的 Manifest V2 模板，修复提示也必须保持这一映射，避免把审批信封误复制为 App 产物。`intents` 必须是由唯一、非空字符串组成的数组，不能使用对象。
+
 发布前依次检查：
 
 1. 安全路径、允许文件、大小、UTF-8 和默认导出；
@@ -69,6 +71,7 @@ export default function TaskList({ ambient }) {
 ## 5. 调试
 
 - 编译/渲染错误显示在 Widget 区域并写入浏览器 console。
+- 生成失败时，聊天会显示 App ID、失败阶段、错误码和原因；直接回复 `/repair <app-id> [补充说明]` 可在保留草稿上继续修复。
 - `capability_denied` 先检查 Manifest grant 的 entity/operation/source/path/action scope。
 - 有 interaction 或 `needs_attention` 时到任务抽屉处理。
 - 静态检查运行 `node scripts/verify_widget_controller.mjs <controller.js>`。

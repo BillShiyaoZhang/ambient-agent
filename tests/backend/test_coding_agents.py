@@ -146,6 +146,16 @@ def test_codex_prompt_explains_the_supported_app_scoped_data_path():
     assert "Do not replace requested live behavior with fake/sample data" in prompt
     assert "Close dynamic HTM components with `<//>`" in prompt
     assert "ambient.mcp" in prompt
+    assert "approval envelope, not the `manifest.json` document" in prompt
+    for forbidden_manifest_field in (
+        "contract_version",
+        "catalog_version",
+        "app_id",
+        "schemas",
+        "grants_digest",
+        "allowed_files",
+    ):
+        assert forbidden_manifest_field in prompt
 
 
 @pytest.mark.asyncio
@@ -222,8 +232,11 @@ async def test_codex_runner_repairs_sequential_validation_failures_in_place(tmp_
     approved_contract = '{"app_id":"repair-widget","capabilities":[{"id":"graph.mutate"}]}'
     result = await run_codex_agent(
         "repair-widget",
-        "build it\n\n[APPROVED RUNTIME CONTRACT — COPY EXACTLY INTO MANIFEST V2]\n"
-        f"{approved_contract}\n\n[SYSTEM CAPABILITIES]\n...",
+        "build it\n\n[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]\n"
+        f"{approved_contract}\n\n[REQUIRED MANIFEST V2 TEMPLATE]\n"
+        '{"manifest_version":2,"id":"repair-widget","title":"Repair Widget","description":"","app_version":"0.1.0",'
+        '"intents":[],"schema_refs":[],"capabilities":[{"id":"graph.mutate"}]}'
+        "\n\n[SYSTEM CAPABILITIES]\n...",
         language="en",
         promote=False,
         runtime=runtime,
@@ -236,6 +249,9 @@ async def test_codex_runner_repairs_sequential_validation_failures_in_place(tmp_
     assert "data source id must use kebab-case" in repair_prompt
     assert "controller.js and/or manifest.json" in repair_prompt
     assert approved_contract in repair_prompt
+    assert "approval envelope fields" in repair_prompt
+    assert "REQUIRED MANIFEST V2 TEMPLATE" in repair_prompt
+    assert "`intents` must be an array of unique, non-empty strings; never objects" in repair_prompt
     second_repair_prompt = (result.staging_dir / "prompt-3.txt").read_text(encoding="utf-8")
     assert 'Unexpected token, expected "}"' in second_repair_prompt
 

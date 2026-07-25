@@ -518,7 +518,7 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
       className="ambient-widget-root w-full h-full overflow-auto"
     >
       {Component ? (
-        <ErrorBoundary>
+        <ErrorBoundary key={widget.js}>
           <Component ambient={ambientProps} />
         </ErrorBoundary>
       ) : (

@@ -34,6 +34,8 @@ step attempt、最新 state、checkpoint、Run 状态、interaction 和 reducer 
 
 Widget 在 promotion 前失败（包括 Coding Agent 内部校验修复耗尽、`budget_exhausted`、校验器不可用和进程异常）时，workflow 必须保留 `data.staged_app`，并把它标记为不可执行的 failed draft。以 `promote=False` 运行的 Coding Agent adapter 不拥有失败草稿的清理权：任何非取消异常都必须将受约束的 staging handle 与原始错误一起交还 reducer，并由 reducer 在同一个 step checkpoint 中持久化。failed draft 仍位于隐藏 staging 隔离目录，不进入 App 列表、Canvas 或 Widget runtime，也不能绕过校验直接提升。显式 retry 在 artifact 仍存在时复用它：Coding Agent 内部校验失败从同一 staging 原地修复，`verify` 从校验继续，`wait_override` 回到 `verify` 重新产生可信报告，已通过校验的 `promote` 从原子发布继续。只有 artifact 已缺失时才回到新的 `stage_code`，同时保留已批准的 plan/schema，并清除只针对旧 artifact 的校验报告与 override。
 
+failed draft 进入终态时，reducer 必须同时持久化并投影一条聊天诊断消息，至少包含 App ID、失败阶段、稳定错误码、可读错误原因，以及“草稿尚未发布”的明确说明。用户可在同一聊天中输入 `/repair <app-id> [补充说明]`，或使用明确指向刚才失败草稿的自然语言修复/重试请求；命令会创建新的 Run attempt，把补充说明加入 `code_feedback`，并复用原 staging checkpoint。该路径不得重新申请权限、创建第二份同 ID 草稿或把失败产物暴露给 App Center。
+
 failed draft 默认保留 7 天，可通过 `FAILED_STAGING_RETENTION_SECONDS` 调整。启动清理只删除超过保留期的 failed draft 或普通孤儿 staging；活跃 Run 引用的 staging 永不由 reaper 删除。取消 Run 或用户选择返工表示放弃当前 draft，可以通过受约束的 staging handle 删除。无论哪一种失败或清理路径，都不得删除或覆盖最后一个已发布 App。
 
 Widget 发布成功后，后端会把新 App 同步写入 workspace Canvas 的 `open_app_ids` 并设为 `active_app_id`，然后才发送实时 `widget` projection。这样浏览器断线或刷新不会依赖瞬时 WebSocket 事件来找回刚生成的 App。

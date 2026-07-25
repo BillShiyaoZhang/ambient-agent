@@ -470,6 +470,12 @@ async def test_widget_staging_does_not_touch_live_app_until_clean_verification(
         assert "RECENT APP RUNTIME DIAGNOSTICS" in instruction
         assert "data_source_path_not_allowed" in instruction
         assert "Add the exact API path" in instruction
+        assert "[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]" in instruction
+        assert "[REQUIRED MANIFEST V2 TEMPLATE]" in instruction
+        assert "COPY EXACTLY INTO MANIFEST V2" not in instruction
+        assert '"manifest_version": 2' in instruction
+        assert '"id": "durable-app"' in instruction
+        assert "`intents` must be an array of unique, non-empty strings; never objects" in instruction
         assert language == "en"
         assert promote is False
         staging_dir = apps_dir / f".{app_id}.staging-{uuid.uuid4().hex}"
@@ -586,9 +592,11 @@ async def test_terminal_widget_failure_retains_isolated_draft_and_live_app(tmp_p
             }
         },
     )
+    run = _create_run(store, state, content="update the weather app")
 
     failed = await workflow._failure(
         state,
+        run=run,
         code="budget_exhausted",
         message="Active time exhausted",
         retryable=False,
@@ -606,6 +614,15 @@ async def test_terminal_widget_failure_retains_isolated_draft_and_live_app(tmp_p
         "error_code": "budget_exhausted",
         "retryable": False,
     }
+    messages = WorkspaceStorage(str(tmp_path)).get_messages(state.session_id or "")
+    diagnostic = next(message for message in messages if message.run_id == run["id"])
+    assert "weather-app" in diagnostic.content
+    assert "verify" in diagnostic.content
+    assert "budget_exhausted" in diagnostic.content
+    assert "Active time exhausted" in diagnostic.content
+    assert "/repair weather-app" in diagnostic.content
+    assert [event.type for event in failed.events] == ["reply"]
+    assert failed.events[0].payload["message"]["content"] == diagnostic.content
 
 
 @pytest.mark.asyncio

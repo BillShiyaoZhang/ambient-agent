@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -1113,10 +1114,9 @@ class FastAPIACPClient(Client):
             accumulated_text = "".join(self.output_buffer)
 
             if self.on_update_callback:
-                if asyncio.iscoroutinefunction(self.on_update_callback):
-                    await self.on_update_callback(accumulated_text)
-                else:
-                    self.on_update_callback(accumulated_text)
+                callback_result = self.on_update_callback(accumulated_text)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
 
 
 async def run_opencode_agent_acp(

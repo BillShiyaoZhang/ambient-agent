@@ -10,8 +10,8 @@
 | `ambient.fullscreen()` / `ambient.minimize()` | 请求宿主切换当前 App 窗口状态 |
 | `ambient.theme.preference` / `effective` | 读取主题偏好和有效主题 |
 | `ambient.html` | 绑定 React createElement 的 HTM tag |
-| `ambient.react` | 受支持的 React hooks |
-| `ambient.components` | `Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table` |
+| `ambient.react` | `useState`、`useEffect`、`useMemo`、`useRef`、`useCallback`、`useContext`、`useReducer`；发布前验证会拒绝其他未注入 hook |
+| `ambient.components` | `Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table`；发布前验证会拒绝其他未注入组件 |
 
 这些接口不授予外部数据访问。Controller 不使用 `window`、DOM 查询、storage、import、`fetch`、原始 WebSocket、`eval` 或 `Function`。
 

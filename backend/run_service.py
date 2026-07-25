@@ -3017,7 +3017,13 @@ class RunCoordinator:
         self._wake.set()
         return self.store.get_run(run_id) or run
 
-    def retry(self, run_id: str) -> dict[str, Any]:
+    def retry(
+        self,
+        run_id: str,
+        *,
+        feedback: str | None = None,
+        input_data: Any | None = None,
+    ) -> dict[str, Any]:
         original = self.store.get_run(run_id)
         if original is None:
             raise KeyError(run_id)
@@ -3071,6 +3077,23 @@ class RunCoordinator:
                         "verification_override",
                     ):
                         normalized_retry_state.data.pop(key, None)
+                normalized_feedback = " ".join(str(feedback or "").strip().split())[:12_000]
+                if normalized_feedback:
+                    previous_feedback = str(normalized_retry_state.data.get("code_feedback") or "").strip()
+                    normalized_retry_state.data["code_feedback"] = (
+                        f"{previous_feedback}\n\n[USER REPAIR FEEDBACK]\n{normalized_feedback}".strip()
+                    )
+                    if staged_exists:
+                        normalized_retry_state.phase = "stage_code"
+                    for key in (
+                        "verification_report",
+                        "verification_options",
+                        "verification_passed",
+                        "verification_override",
+                    ):
+                        normalized_retry_state.data.pop(key, None)
+                if isinstance(input_data, dict) and input_data.get("user_message_id") is not None:
+                    normalized_retry_state.data["user_message_id"] = input_data["user_message_id"]
             if original["status"] == "cancelled":
                 preserved = {
                     key: normalized_retry_state.data[key]
@@ -3091,7 +3114,7 @@ class RunCoordinator:
             adapter_type=original["adapter_type"],
             runtime_id=original["runtime_id"],
             tool_name=original["tool_name"],
-            input_data=original["input"],
+            input_data=original["input"] if input_data is None else input_data,
             recovery=original["recovery"],
             parent_run_id=original["parent_run_id"],
             retry_of=run_id,
@@ -3103,6 +3126,80 @@ class RunCoordinator:
         )
         self._wake.set()
         return run
+
+    def retry_failed_widget_from_chat(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        input_data: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Resume the newest retained failed Widget draft addressed by a chat repair request."""
+
+        normalized_content = " ".join(str(content or "").strip().split())
+        if not normalized_content:
+            return None
+        candidates: list[tuple[dict[str, Any], str]] = []
+        for run in self.store.list_runs(status="failed", limit=500):
+            if run.get("source_type") != "chat" or run.get("source_id") != session_id:
+                continue
+            if not str(run.get("workflow_type") or "").startswith("widget"):
+                continue
+            state = run.get("state") if isinstance(run.get("state"), dict) else {}
+            data = state.get("data") if isinstance(state.get("data"), dict) else {}
+            status = data.get("staged_app_status") if isinstance(data.get("staged_app_status"), dict) else {}
+            staged = data.get("staged_app") if isinstance(data.get("staged_app"), dict) else {}
+            if status.get("state") != "failed_draft":
+                continue
+            app_id = str(staged.get("app_id") or "")
+            raw_path = staged.get("staging_dir")
+            if not app_id or not isinstance(raw_path, str) or not raw_path:
+                continue
+            staging_path = Path(raw_path)
+            try:
+                if not staging_path.is_dir() or staging_path.is_symlink():
+                    continue
+            except OSError:
+                continue
+            candidates.append((run, app_id))
+        if not candidates:
+            return None
+
+        lowered = normalized_content.casefold()
+        parts = normalized_content.split(maxsplit=2)
+        slash_command = parts[0].casefold() in {"/repair", "/fix"}
+        requested_app_id: str | None = None
+        feedback = normalized_content
+        if slash_command:
+            if len(parts) < 2:
+                return None
+            requested_app_id = parts[1]
+            feedback = parts[2] if len(parts) > 2 else ""
+        else:
+            repair_terms = ("修复", "继续修", "重试", "重新验证", "repair", "fix", "retry", "resume")
+            draft_terms = ("刚才", "上次", "之前", "失败", "草稿", "failed", "draft", "previous")
+            mentioned = next((app_id for _run, app_id in candidates if app_id.casefold() in lowered), None)
+            if not any(term in lowered for term in repair_terms) or not (
+                mentioned or any(term in lowered for term in draft_terms)
+            ):
+                return None
+            requested_app_id = mentioned
+
+        target = next(
+            (
+                item
+                for item in candidates
+                if requested_app_id is None or item[1].casefold() == requested_app_id.casefold()
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        return self.retry(
+            target[0]["id"],
+            feedback=feedback,
+            input_data=input_data,
+        )
 
     def resolve_interaction(
         self,

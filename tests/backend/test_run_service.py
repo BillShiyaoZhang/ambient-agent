@@ -625,6 +625,147 @@ def test_widget_retry_reuses_retained_failed_draft_from_verification(tmp_path):
     assert staging_dir.is_dir()
 
 
+def test_chat_repair_command_reuses_failed_widget_draft_and_adds_feedback(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    apps_dir = tmp_path / "apps"
+    staging_dir = apps_dir / f".weather-app.staging-{'f' * 32}"
+    staging_dir.mkdir(parents=True)
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="wait_override",
+        data={
+            "approved_plan": "Build the weather app",
+            "runtime_contract": {"app_id": "weather-app"},
+            "code_feedback": "Original verifier failure",
+            "staged_app": {
+                "output": "generated",
+                "app_id": "weather-app",
+                "staging_dir": str(staging_dir),
+                "live_dir": str(apps_dir / "weather-app"),
+            },
+            "staged_app_status": {
+                "state": "failed_draft",
+                "phase": "wait_override",
+                "error_code": "capability_contract_error",
+                "retryable": False,
+            },
+        },
+        last_error={
+            "code": "capability_contract_error",
+            "message": "Manifest mismatch",
+            "effect_state": "none",
+        },
+    )
+    store = RunStore(str(tmp_path))
+    original = create(
+        store,
+        owner_id="ambient-agent:session-1",
+        action_id="chat",
+        action_title="Agent task",
+        source_type="chat",
+        source_id="session-1",
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        input_data={"content": "build a weather app", "user_message_id": 1},
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    store.transition(
+        original["id"],
+        "failed",
+        error={"code": "capability_contract_error", "message": "Manifest mismatch", "effect_state": "none"},
+    )
+    coordinator = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace())
+
+    repaired = coordinator.retry_failed_widget_from_chat(
+        "session-1",
+        "/repair weather-app keep the existing layout and fix the manifest",
+        input_data={
+            "content": "/repair weather-app keep the existing layout and fix the manifest",
+            "sender": "user",
+            "user_message_id": 2,
+        },
+    )
+
+    assert repaired is not None
+    assert repaired["retry_of"] == original["id"]
+    assert repaired["input"]["user_message_id"] == 2
+    assert repaired["state"]["phase"] == "stage_code"
+    assert repaired["state"]["data"]["staged_app"]["staging_dir"] == str(staging_dir)
+    assert "Original verifier failure" in repaired["state"]["data"]["code_feedback"]
+    assert "keep the existing layout and fix the manifest" in repaired["state"]["data"]["code_feedback"]
+    assert "staged_app_status" not in repaired["state"]["data"]
+
+
+def test_chat_repair_detection_requires_a_failed_draft_reference(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    coordinator = RunCoordinator(RunStore(str(tmp_path)), Catalog(), SimpleNamespace(), SimpleNamespace())
+
+    assert coordinator.retry_failed_widget_from_chat("session-1", "今天天气如何？") is None
+    assert coordinator.retry_failed_widget_from_chat("session-1", "/repair missing-app") is None
+
+
+def test_chat_repair_natural_language_requires_an_unambiguous_failed_draft_reference(tmp_path):
+    class Catalog:
+        def get_action(self, *_args):
+            return None
+
+    apps_dir = tmp_path / "apps"
+    staging_dir = apps_dir / f".weather-app.staging-{'e' * 32}"
+    staging_dir.mkdir(parents=True)
+    state = AgentRunState(
+        workflow_type="widget_create",
+        workflow_version=2,
+        session_id="session-1",
+        phase="stage_code",
+        data={
+            "staged_app": {
+                "app_id": "weather-app",
+                "staging_dir": str(staging_dir),
+                "live_dir": str(apps_dir / "weather-app"),
+            },
+            "staged_app_status": {"state": "failed_draft"},
+        },
+    )
+    store = RunStore(str(tmp_path))
+    original = create(
+        store,
+        source_type="chat",
+        source_id="session-1",
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        recovery="restart_safe",
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    store.transition(
+        original["id"],
+        "failed",
+        error={"code": "generation_failed", "message": "broken", "effect_state": "none"},
+    )
+    coordinator = RunCoordinator(store, Catalog(), SimpleNamespace(), SimpleNamespace())
+
+    assert coordinator.retry_failed_widget_from_chat("session-1", "修复另一个应用的标题") is None
+    repaired = coordinator.retry_failed_widget_from_chat(
+        "session-1",
+        "继续修复刚才失败的 weather-app 草稿，保持现有布局",
+    )
+
+    assert repaired is not None
+    assert repaired["retry_of"] == original["id"]
+
+
 def test_widget_retry_regenerates_when_retained_draft_has_expired(tmp_path):
     class Catalog:
         def get_action(self, *_args):

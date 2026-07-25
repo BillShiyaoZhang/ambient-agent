@@ -63,4 +63,42 @@ describe("SandboxWidget Rendering & Containment", () => {
       expect(status.textContent).toBe("Clicked");
     });
   });
+
+  it("should clear a prior render crash when updated widget code arrives", async () => {
+    const spyConsole = vi.spyOn(console, "error").mockImplementation(() => {});
+    const crashingWidget: Widget = {
+      id: "repairable-widget",
+      title: "Repairable Widget",
+      manifest_revision: "2:0.1.0",
+      js: `
+        const { Badge } = ambient.components;
+        export default function App() {
+          return ambient.html\`<\${Badge} label="broken" />\`;
+        }
+      `,
+    };
+    const { rerender } = render(<SandboxWidget widget={crashingWidget} />);
+
+    await waitFor(() => expect(screen.getByText("Widget Crashed")).toBeDefined());
+
+    rerender(
+      <SandboxWidget
+        widget={{
+          ...crashingWidget,
+          js: `
+            const { Text } = ambient.components;
+            export default function App() {
+              return ambient.html\`<\${Text} text="系统正常" />\`;
+            }
+          `,
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("系统正常")).toBeDefined();
+      expect(screen.queryByText("Widget Crashed")).toBeNull();
+    });
+    spyConsole.mockRestore();
+  });
 });

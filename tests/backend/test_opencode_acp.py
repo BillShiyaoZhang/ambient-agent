@@ -244,6 +244,16 @@ def test_promotion_marker_recovers_exact_committed_artifact(tmp_path):
             "export default function App() { return window.document.body; }",
             "Forbidden host or network global: window",
         ),
+        (
+            "const { Badge } = ambient.components; "
+            "export default function App() { return ambient.html`<${Badge} />`; }",
+            "Unknown ambient.components primitive: Badge",
+        ),
+        (
+            "const { useLayoutEffect } = ambient.react; "
+            "export default function App() { useLayoutEffect(() => {}); return null; }",
+            "Unknown ambient.react hook: useLayoutEffect",
+        ),
     ],
 )
 def test_staging_verifier_rejects_invalid_or_host_capable_controller(tmp_path, source, message):
@@ -368,6 +378,24 @@ async def test_client_session_update_callbacks():
     await client.session_update(session_id="sess", update=tool_chunk)
     assert len(callback_outputs) == 2
     assert "write_text_file" in callback_outputs[1]
+
+
+@pytest.mark.asyncio
+async def test_client_session_update_awaits_async_callable_callback():
+    callback_outputs = []
+
+    class AsyncUpdateCallback:
+        async def __call__(self, text):
+            callback_outputs.append(text)
+
+    client = FastAPIACPClient(workspace_root=Path("."), on_update_callback=AsyncUpdateCallback())
+    msg_chunk = AgentMessageChunk(
+        session_update="agent_message_chunk", content=text_block("streamed"), message_id="msg-1"
+    )
+
+    await client.session_update(session_id="sess", update=msg_chunk)
+
+    assert callback_outputs == ["streamed"]
 
 
 @pytest.mark.asyncio

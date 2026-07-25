@@ -10,8 +10,8 @@
 | `ambient.fullscreen()` / `ambient.minimize()` | Ask the host to change the current App window state |
 | `ambient.theme.preference` / `effective` | Read theme preference and effective theme |
 | `ambient.html` | HTM tag bound to React createElement |
-| `ambient.react` | Supported React hooks |
-| `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table` |
+| `ambient.react` | `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, `useReducer`; pre-publication verification rejects any other non-injected hook |
+| `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table`; pre-publication verification rejects any other non-injected component |
 
 These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, storage, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
 

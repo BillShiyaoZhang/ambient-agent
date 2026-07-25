@@ -65,11 +65,61 @@ const forbiddenGlobals = new Set([
   "require",
   "process",
 ]);
+const ambientSdkMembers = new Map([
+  ["components", new Set(["Column", "Row", "Card", "Text", "Button", "TextField", "Checkbox", "List", "Table"])],
+  ["react", new Set(["useState", "useEffect", "useMemo", "useRef", "useCallback", "useContext", "useReducer"])],
+]);
 
 const securityPlugin = ({ types: t }) => ({
   visitor: {
     ImportDeclaration(path) {
       throw path.buildCodeFrameError("Static imports are not allowed in Widget controllers");
+    },
+    VariableDeclarator(path) {
+      const { id, init } = path.node;
+      if (
+        !t.isObjectPattern(id) ||
+        !t.isMemberExpression(init) ||
+        init.computed ||
+        !t.isIdentifier(init.object, { name: "ambient" }) ||
+        !t.isIdentifier(init.property)
+      ) return;
+      const namespace = init.property.name;
+      const allowed = ambientSdkMembers.get(namespace);
+      if (!allowed) return;
+      for (const property of id.properties) {
+        if (!t.isObjectProperty(property) || property.computed) {
+          throw path.buildCodeFrameError(`Dynamic ambient.${namespace} destructuring is not allowed`);
+        }
+        const name = t.isIdentifier(property.key)
+          ? property.key.name
+          : t.isStringLiteral(property.key)
+            ? property.key.value
+            : "";
+        if (!allowed.has(name)) {
+          const label = namespace === "components" ? "primitive" : "hook";
+          throw path.buildCodeFrameError(`Unknown ambient.${namespace} ${label}: ${name || "<computed>"}`);
+        }
+      }
+    },
+    MemberExpression(path) {
+      const object = path.node.object;
+      if (
+        !t.isMemberExpression(object) ||
+        object.computed ||
+        !t.isIdentifier(object.object, { name: "ambient" }) ||
+        !t.isIdentifier(object.property)
+      ) return;
+      const namespace = object.property.name;
+      const allowed = ambientSdkMembers.get(namespace);
+      if (!allowed) return;
+      const name = path.node.computed
+        ? t.isStringLiteral(path.node.property) ? path.node.property.value : ""
+        : t.isIdentifier(path.node.property) ? path.node.property.name : "";
+      if (!allowed.has(name)) {
+        const label = namespace === "components" ? "primitive" : "hook";
+        throw path.buildCodeFrameError(`Unknown ambient.${namespace} ${label}: ${name || "<computed>"}`);
+      }
     },
     CallExpression(path) {
       if (path.node.callee?.type === "Import") {

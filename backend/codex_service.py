@@ -268,7 +268,7 @@ def _codex_prompt(app_id: str, instruction: str, language: str) -> str:
 
 
 def _approved_runtime_contract_excerpt(instruction: str) -> str:
-    marker = "[APPROVED RUNTIME CONTRACT — COPY EXACTLY INTO MANIFEST V2]"
+    marker = "[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]"
     start = instruction.find(marker)
     if start < 0:
         return ""
@@ -343,7 +343,11 @@ async def run_codex_agent(
                     "mistake, not only the reported line. HTM component closing syntax is `<//>`; never emit "
                     "React-like `</${Component}>` or malformed `</${Component>`. Re-run your own inspection "
                     "before finishing. If capability use and Manifest grants disagree, make both match the approved "
-                    "Runtime Contract exactly; never add unapproved entities, operations, sources, paths, or actions.\n\n"
+                    "Runtime Contract exactly; never add unapproved entities, operations, sources, paths, or actions. "
+                    "The Runtime Contract is an approval envelope, not a Manifest document. Keep manifest.json in the "
+                    "exact `[REQUIRED MANIFEST V2 TEMPLATE]` shape and never copy approval envelope fields such as "
+                    "contract_version, catalog_version, app_id, schemas, grants_digest, or allowed_files into it. "
+                    "`intents` must be an array of unique, non-empty strings; never objects.\n\n"
                     f"[VALIDATION ERROR]\n{diagnostic}{contract_context}"
                 )
         if result is None:  # pragma: no cover - the bounded loop always executes
