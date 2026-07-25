@@ -2,10 +2,17 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Widget } from "./DashboardCanvas";
 import wsService from "../services/websocket";
+import type { ThemeSnapshot } from "../services/theme";
 
+export interface WidgetPresentationContext {
+  theme: ThemeSnapshot;
+  locale: string;
+  reduced_motion: boolean;
+}
 
 interface SandboxWidgetProps {
   widget: Widget;
+  presentationContext?: WidgetPresentationContext;
   onFullscreen?: (id: string) => void;
   onMinimize?: (id: string) => void;
 }
@@ -29,10 +36,28 @@ interface Viewport {
   device_scale_factor: number;
 }
 
+const DEFAULT_PRESENTATION_CONTEXT: WidgetPresentationContext = {
+  theme: { preference: "system", effective: "dark" },
+  locale: "en-US",
+  reduced_motion: false,
+};
 
-const runtimeWebSocketUrl = (appId: string) => {
+const runtimeWebSocketUrl = (
+  appId: string,
+  viewport: Viewport,
+  presentationContext: WidgetPresentationContext,
+) => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:8000/ws/widgets/${encodeURIComponent(appId)}/runtime`;
+  const params = new URLSearchParams({
+    width: String(viewport.width),
+    height: String(viewport.height),
+    device_scale_factor: String(viewport.device_scale_factor),
+    theme_preference: presentationContext.theme.preference,
+    theme_effective: presentationContext.theme.effective,
+    locale: presentationContext.locale,
+    reduced_motion: String(presentationContext.reduced_motion),
+  });
+  return `${protocol}//${window.location.hostname}:8000/ws/widgets/${encodeURIComponent(appId)}/runtime?${params}`;
 };
 
 const pointerButton = (button: number) => {
@@ -53,6 +78,7 @@ const keyboardModifiers = (event: React.KeyboardEvent) =>
 
 export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   widget,
+  presentationContext = DEFAULT_PRESENTATION_CONTEXT,
   onFullscreen,
   onMinimize,
 }) => {
@@ -60,6 +86,8 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
   const socketRef = useRef<WebSocket | null>(null);
   const hostCallbacksRef = useRef({ onFullscreen, onMinimize });
   hostCallbacksRef.current = { onFullscreen, onMinimize };
+  const presentationContextRef = useRef(presentationContext);
+  presentationContextRef.current = presentationContext;
   const viewportRef = useRef<Viewport>({
     width: 640,
     height: 480,
@@ -80,6 +108,13 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     send({ type: "viewport", ...viewportRef.current });
   }, [send]);
 
+  const sendPresentationContext = useCallback(() => {
+    send({
+      type: "presentation_context",
+      ...presentationContextRef.current,
+    });
+  }, [send]);
+
   useEffect(() => {
     setFrame(null);
     setFailure(null);
@@ -92,13 +127,20 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     const connect = () => {
       connectTimer = null;
       if (disposed) return;
-      socket = new WebSocket(runtimeWebSocketUrl(widget.id));
+      socket = new WebSocket(
+        runtimeWebSocketUrl(
+          widget.id,
+          viewportRef.current,
+          presentationContextRef.current,
+        ),
+      );
       socketRef.current = socket;
 
       socket.onopen = () => {
         setStatus("ready");
         setFailure(null);
         sendViewport();
+        sendPresentationContext();
         send({
           type: "visibility",
           visible: document.visibilityState !== "hidden",
@@ -188,10 +230,21 @@ export const SandboxWidget: React.FC<SandboxWidgetProps> = ({
     };
   }, [
     send,
+    sendPresentationContext,
     sendViewport,
     widget.grants_digest,
     widget.id,
     widget.manifest_revision,
+  ]);
+
+  useEffect(() => {
+    sendPresentationContext();
+  }, [
+    presentationContext.locale,
+    presentationContext.reduced_motion,
+    presentationContext.theme.effective,
+    presentationContext.theme.preference,
+    sendPresentationContext,
   ]);
 
   useEffect(() => {

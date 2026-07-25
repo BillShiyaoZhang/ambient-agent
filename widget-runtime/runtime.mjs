@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import * as Babel from "@babel/standalone";
 import { chromium } from "playwright-core";
 
+import { screencastDimensions } from "./frame_geometry.mjs";
+import {
+  normalizePresentationContext,
+  presentationMedia,
+} from "./presentation_context.mjs";
 import { SerialTaskQueue } from "./serial_task_queue.mjs";
 
 
@@ -176,6 +181,16 @@ async function installPageRuntime(page, session, transformedController) {
         --widget-control: #475569;
         --widget-input: rgba(15,23,42,.55);
       }
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --widget-text: rgba(15,23,42,.92);
+        --widget-muted: rgba(15,23,42,.6);
+        --widget-border: rgba(15,23,42,.12);
+        --widget-surface: rgba(255,255,255,.72);
+        --widget-surface-soft: rgba(15,23,42,.045);
+        --widget-control: #64748b;
+        --widget-input: rgba(255,255,255,.78);
+      }
       * { box-sizing: border-box; }
       html, body, #root { width: 100%; height: 100%; margin: 0; }
       body {
@@ -187,6 +202,14 @@ async function installPageRuntime(page, session, transformedController) {
       }
       button, input, textarea, select { font: inherit; }
       button { appearance: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          scroll-behavior: auto !important;
+          animation-duration: .01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: .01ms !important;
+        }
+      }
     </style>
   </head>
   <body><div id="root"></div></body>
@@ -235,7 +258,7 @@ async function installPageRuntime(page, session, transformedController) {
   });
 
   await page.evaluate(
-    ({ code, capabilityIds, theme }) => {
+    ({ code, capabilityIds, presentationContext }) => {
       const runtime = window.htmPreact;
       if (!runtime) throw new Error("The Widget renderer failed to initialize");
       const {
@@ -256,7 +279,51 @@ async function installPageRuntime(page, session, transformedController) {
       const root = document.getElementById("root");
       const allowed = new Set(capabilityIds);
       const subscriptions = new Map();
+      const presentationListeners = new Set();
+      const themeListeners = new Set();
       let subscriptionSequence = 0;
+      let currentPresentation = {
+        theme: {
+          preference: presentationContext.theme.preference,
+          effective: presentationContext.theme.effective,
+        },
+        locale: presentationContext.locale,
+        reducedMotion: Boolean(presentationContext.reduced_motion),
+      };
+
+      const themeSnapshot = () =>
+        Object.freeze({
+          preference: currentPresentation.theme.preference,
+          effective: currentPresentation.theme.effective,
+        });
+      const presentationSnapshot = () =>
+        Object.freeze({
+          theme: themeSnapshot(),
+          locale: currentPresentation.locale,
+          reducedMotion: currentPresentation.reducedMotion,
+        });
+      const applyPresentation = (next, notify = true) => {
+        currentPresentation = {
+          theme: {
+            preference: next.theme.preference,
+            effective: next.theme.effective,
+          },
+          locale: next.locale,
+          reducedMotion: Boolean(next.reduced_motion),
+        };
+        const documentRoot = document.documentElement;
+        documentRoot.dataset.theme = currentPresentation.theme.effective;
+        documentRoot.dataset.themePreference = currentPresentation.theme.preference;
+        documentRoot.lang = currentPresentation.locale;
+        documentRoot.style.colorScheme = currentPresentation.theme.effective;
+        if (!notify) return;
+        const nextTheme = themeSnapshot();
+        const nextPresentation = presentationSnapshot();
+        themeListeners.forEach((listener) => listener(nextTheme));
+        presentationListeners.forEach((listener) => listener(nextPresentation));
+      };
+      window.__ambientUpdatePresentation = (next) => applyPresentation(next);
+      applyPresentation(presentationContext, false);
 
       const mergeStyle = (base, custom) => {
         if (typeof custom === "string") {
@@ -517,6 +584,32 @@ async function installPageRuntime(page, session, transformedController) {
           ),
         );
 
+      const themeApi = Object.freeze({
+        get preference() {
+          return currentPresentation.theme.preference;
+        },
+        get effective() {
+          return currentPresentation.theme.effective;
+        },
+        getSnapshot: themeSnapshot,
+        subscribe(listener) {
+          if (typeof listener !== "function") {
+            throw new TypeError("ambient.theme.subscribe requires a listener");
+          }
+          themeListeners.add(listener);
+          return () => themeListeners.delete(listener);
+        },
+      });
+      const presentationApi = Object.freeze({
+        getSnapshot: presentationSnapshot,
+        subscribe(listener) {
+          if (typeof listener !== "function") {
+            throw new TypeError("ambient.presentation.subscribe requires a listener");
+          }
+          presentationListeners.add(listener);
+          return () => presentationListeners.delete(listener);
+        },
+      });
       const ambient = {
         html,
         react: Object.freeze({
@@ -542,10 +635,8 @@ async function installPageRuntime(page, session, transformedController) {
           Text,
           TextField,
         }),
-        theme: Object.freeze({
-          preference: theme.preference,
-          effective: theme.effective,
-        }),
+        theme: themeApi,
+        presentation: presentationApi,
         sendMessage: (text) =>
           window.__ambientHostEvent({ event: "send_message", text }),
         fullscreen: () => window.__ambientHostEvent({ event: "fullscreen" }),
@@ -582,7 +673,7 @@ async function installPageRuntime(page, session, transformedController) {
           graph.mutate = (actions) =>
             window.__ambientRpc({
               method: "graph.mutate",
-              params: { actions, invocation_id: crypto.randomUUID() },
+              params: { actions },
             });
         }
         ambient.graph = Object.freeze(graph);
@@ -639,7 +730,6 @@ async function installPageRuntime(page, session, transformedController) {
                 catalog_id: catalogId,
                 input: input ?? {},
                 action_id: actionId,
-                invocation_id: crypto.randomUUID(),
               },
             }),
         });
@@ -678,39 +768,84 @@ async function installPageRuntime(page, session, transformedController) {
     {
       code: transformedController,
       capabilityIds: session.capabilityIds,
-      theme: session.theme,
+      presentationContext: session.presentationContext,
     },
   );
 }
 
 
 async function startScreencast(session) {
-  session.cdp = await session.context.newCDPSession(session.page);
-  session.cdp.on("Page.screencastFrame", async (event) => {
-    try {
-      if (session.visible) {
+  if (!session.cdp) {
+    session.cdp = await session.context.newCDPSession(session.page);
+    session.cdp.on("Page.screencastFrame", async (event) => {
+      try {
+        if (!session.visible || session.captureInFlight || session.closed) return;
+        session.captureInFlight = true;
+        const dimensions = screencastDimensions(session.viewport);
+        const deviceScaleFactor = Math.max(
+          1,
+          Number(session.viewport.deviceScaleFactor) || 1,
+        );
+        const captureScale = Math.min(
+          dimensions.maxWidth / (session.viewport.width * deviceScaleFactor),
+          dimensions.maxHeight / (session.viewport.height * deviceScaleFactor),
+        );
+        const screenshot = await session.cdp.send("Page.captureScreenshot", {
+          format: "jpeg",
+          quality: 88,
+          fromSurface: true,
+          captureBeyondViewport: false,
+          optimizeForSpeed: true,
+          clip: {
+            x: 0,
+            y: 0,
+            width: session.viewport.width,
+            height: session.viewport.height,
+            scale: captureScale,
+          },
+        });
         send(
           session.socket,
           {
             type: "frame",
             session_id: session.id,
             format: "jpeg",
-            data: event.data,
-            width: session.viewport.width,
-            height: session.viewport.height,
+            data: screenshot.data,
+            width: dimensions.maxWidth,
+            height: dimensions.maxHeight,
           },
           { droppable: true },
         );
+      } catch (error) {
+        if (!session.closed) {
+          send(
+            session.socket,
+            runtimeError(
+              "frame_capture_failed",
+              error?.message ?? error,
+              "operator",
+            ),
+          );
+        }
+      } finally {
+        session.captureInFlight = false;
+        await session.cdp
+          .send("Page.screencastFrameAck", { sessionId: event.sessionId })
+          .catch(() => {});
       }
-    } finally {
-      await session.cdp
-        .send("Page.screencastFrameAck", { sessionId: event.sessionId })
-        .catch(() => {});
-    }
+    });
+  }
+  await session.cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: session.viewport.width,
+    height: session.viewport.height,
+    deviceScaleFactor: session.viewport.deviceScaleFactor,
+    mobile: false,
+    screenWidth: session.viewport.width,
+    screenHeight: session.viewport.height,
   });
   await session.cdp.send("Page.startScreencast", {
     format: "jpeg",
-    quality: 72,
+    quality: 35,
     maxWidth: session.viewport.width,
     maxHeight: session.viewport.height,
     everyNthFrame: 1,
@@ -733,10 +868,15 @@ async function openSession(socket, message) {
     height: Math.trunc(message.viewport.height),
     deviceScaleFactor: Number(message.viewport.device_scale_factor ?? 1),
   };
+  const presentationContext = normalizePresentationContext(
+    message.presentation_context
+      ?? (message.theme ? { theme: message.theme } : undefined),
+  );
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height },
     deviceScaleFactor: viewport.deviceScaleFactor,
-    locale: "en-US",
+    locale: presentationContext.locale,
+    ...presentationMedia(presentationContext),
     javaScriptEnabled: true,
     serviceWorkers: "block",
     acceptDownloads: false,
@@ -758,10 +898,7 @@ async function openSession(socket, message) {
     capabilityIds: Array.isArray(message.capability_ids)
       ? message.capability_ids.filter((item) => typeof item === "string")
       : [],
-    theme:
-      typeof message.theme === "object" && message.theme !== null
-        ? message.theme
-        : { preference: "system", effective: "dark" },
+    presentationContext,
     socket,
     context,
     page,
@@ -771,6 +908,7 @@ async function openSession(socket, message) {
     rpcSequence: 0,
     visible: true,
     screencastActive: false,
+    captureInFlight: false,
     closed: false,
   };
   sessions.set(session.id, session);
@@ -855,12 +993,17 @@ async function dispatchInput(session, event) {
       await session.cdp.send("Input.insertText", { text: event.text });
       break;
     case "viewport":
+      if (session.screencastActive) {
+        await session.cdp.send("Page.stopScreencast").catch(() => {});
+        session.screencastActive = false;
+      }
       session.viewport.width = event.width;
       session.viewport.height = event.height;
       await session.page.setViewportSize({
         width: event.width,
         height: event.height,
       });
+      if (session.visible) await startScreencast(session);
       break;
     case "visibility":
       session.visible = Boolean(event.visible);
@@ -874,6 +1017,15 @@ async function dispatchInput(session, event) {
     case "focus":
       if (event.focused) await session.page.bringToFront();
       break;
+    case "presentation_context": {
+      const nextPresentation = normalizePresentationContext(event);
+      session.presentationContext = nextPresentation;
+      await session.page.emulateMedia(presentationMedia(nextPresentation));
+      await session.page.evaluate((next) => {
+        window.__ambientUpdatePresentation?.(next);
+      }, nextPresentation);
+      break;
+    }
     default:
       throw new Error("Unsupported Widget Runtime input event");
   }

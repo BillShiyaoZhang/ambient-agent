@@ -64,6 +64,7 @@ Popovers 支持 Escape、外部点击和焦点返回。审批对话框是 blocki
 
 - 主题偏好为 `system`、`light` 或 `dark`；默认 `system` 并跟随操作系统实时变化。
 - 宿主和标准 `ambient.components` 使用有效主题；自定义 Widget 的硬编码颜色不会自动改写。
+- Widget 通过同一 Runtime session 接收 `{ theme, locale, reducedMotion }` 展示上下文；主题或语言变化不重建 Chromium BrowserContext。
 - 控件具有 accessible name、可见焦点和至少 40 px 点击区域；移动端至少 44 px。
 - reduced-motion 会关闭 spring/transform 动画；透明材质在不支持 backdrop filter 时有不透明 fallback。
 - 普通文本以 WCAG AA 对比度为目标，焦点状态不只依赖颜色表达。

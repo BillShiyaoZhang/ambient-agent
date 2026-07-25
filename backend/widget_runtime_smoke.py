@@ -148,10 +148,10 @@ class WidgetRuntimeSmokeTester:
                     return []
                 return {"status": "validated"}
             if method == "capabilities.invoke":
-                invocation_id = str(params.get("invocation_id") or "")
-                if not invocation_id or len(invocation_id) > 200:
+                runtime_request_id = str(params.get("_runtime_request_id") or "")
+                if not runtime_request_id or len(runtime_request_id) > 200:
                     raise ValueError(
-                        "capabilities.invoke requires a bounded invocation_id"
+                        "capabilities.invoke requires a bounded Runtime request ID"
                     )
                 authorizer.authorize_invocation(
                     binding.app_id,

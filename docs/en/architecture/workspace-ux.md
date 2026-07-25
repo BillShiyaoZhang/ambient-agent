@@ -64,6 +64,7 @@ Popovers support Escape, outside press, and focus return. Approval dialogs are b
 
 - Theme preference is `system`, `light`, or `dark`. `system` is the default and follows live OS changes.
 - The host and standard `ambient.components` follow the effective theme. Hard-coded custom Widget colors are not rewritten.
+- Widgets receive `{ theme, locale, reducedMotion }` presentation context over the same Runtime session; theme or language changes do not recreate the Chromium BrowserContext.
 - Controls have accessible names, visible focus, and at least 40 px hit targets; mobile uses at least 44 px.
 - Reduced motion disables spring/transform animations. Translucent materials have an opaque fallback without backdrop-filter support.
 - Normal text targets WCAG AA contrast, and focus is never represented by color alone.

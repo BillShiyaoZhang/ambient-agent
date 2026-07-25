@@ -8,12 +8,29 @@
 | --- | --- |
 | `ambient.sendMessage(text)` | 向当前聊天提交用户消息 |
 | `ambient.fullscreen()` / `ambient.minimize()` | 请求宿主切换当前 App 窗口状态 |
-| `ambient.theme.preference` / `effective` | 读取主题偏好和有效主题 |
+| `ambient.theme.preference` / `effective` | 兼容访问器；始终读取当前主题偏好和有效主题 |
+| `ambient.theme.getSnapshot()` / `subscribe(listener)` | 读取主题快照并订阅同 session 内的主题变化 |
+| `ambient.presentation.getSnapshot()` / `subscribe(listener)` | 读取并订阅 `{ theme, locale, reducedMotion }` 展示上下文 |
 | `ambient.html` | 绑定 React createElement 的 HTM tag |
 | `ambient.react` | `useState`、`useEffect`、`useMemo`、`useRef`、`useCallback`、`useContext`、`useReducer`；发布前验证会拒绝其他未注入 hook |
 | `ambient.components` | `Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table`；发布前验证会拒绝其他未注入组件 |
 
 这些接口不授予外部数据访问。Controller 不使用 `window`、DOM 查询、storage、import、`fetch`、原始 WebSocket、`eval` 或 `Function`。
+
+展示上下文会在不重启 Widget 的情况下更新。需要响应主题、语言或减少动画偏好的 Controller 应订阅它，而不是只在模块加载时读取一次：
+
+```javascript
+const [presentation, setPresentation] = useState(
+  ambient.presentation.getSnapshot()
+);
+
+useEffect(
+  () => ambient.presentation.subscribe(setPresentation),
+  []
+);
+```
+
+内置组件使用的 `--widget-*` CSS variables、页面 `color-scheme` 和 prefers-reduced-motion media emulation 由 Runtime 自动同步。动态语言以 `presentation.locale` 为准。
 
 ## 2. Graph Grants
 

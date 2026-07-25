@@ -20,6 +20,7 @@ Use the complete object under `[REQUIRED MANIFEST V2 TEMPLATE]` as the file shap
 # Widget runtime
 
 - Obtain hooks from `ambient.react` and UI primitives from `ambient.components`. The only available components are `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`. The only available hooks are `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`. Never invent or assume another primitive or hook.
+- The host provides live presentation state without a capability grant. Read `{ theme, locale, reducedMotion }` with `ambient.presentation.getSnapshot()` and subscribe to changes with `ambient.presentation.subscribe(listener)`. `ambient.theme.preference`, `ambient.theme.effective`, `ambient.theme.getSnapshot()`, and `ambient.theme.subscribe(listener)` are available when only theme is needed. Do not use `window`, `document`, or `navigator` to infer these values.
 - Render with the `ambient.html` tagged template. Close dynamic HTM components with `<//>` or use a self-closing tag.
 - Never import modules. Never use `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `window`, `document`, `navigator`, storage globals, `eval`, `Function`, Node APIs, environment variables, shell commands, or host filesystem APIs.
 - The host injects only capability namespaces granted by Manifest V2. A namespace or method not in the approved Runtime Contract does not exist.

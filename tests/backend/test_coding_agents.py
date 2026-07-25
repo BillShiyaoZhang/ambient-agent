@@ -133,6 +133,8 @@ def test_codex_prompt_explains_the_supported_app_scoped_data_path():
     assert "Do not replace requested live behavior with fake/sample data" in prompt
     assert "Close dynamic HTM components with `<//>`" in prompt
     assert "ambient.mcp" in prompt
+    assert "ambient.presentation.getSnapshot()" in prompt
+    assert "ambient.presentation.subscribe" in prompt
     assert "approval envelope, not the `manifest.json` document" in prompt
     for forbidden_manifest_field in (
         "contract_version",

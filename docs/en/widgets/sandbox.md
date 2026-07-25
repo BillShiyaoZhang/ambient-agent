@@ -47,7 +47,7 @@ runtime_session_id -> {
 }
 ```
 
-The Backend then sends `start` over the Unix socket with Controller source, digest, viewport, and theme. The Runtime cannot read an App by path; source enters only as a message and remains in memory/tmpfs.
+The Backend then sends `start` over the Unix socket with Controller source, digest, viewport, and a validated `presentation_context`. The Runtime cannot read an App by path; source enters only as a message and remains in memory/tmpfs.
 
 A Controller RPC contains only a `request_id`, method, and parameters. Any `app_id`, revision, grants digest, or artifact digest in the payload is ignored. `WidgetRuntimeGateway` invokes `CapabilityAuthorizer` solely with its server-side session binding. A Manifest edit or revocation, artifact-digest change, Frontend disconnect, or Runtime restart closes the old session; a new connection reloads current authorization facts.
 
@@ -68,7 +68,26 @@ The Runtime captures frames with `Page.startScreencast` and acknowledges process
 }
 ```
 
-The Frontend renders only the newest frame; a slow client cannot create an unbounded queue. Mouse, touch, wheel, key, text, focus, and viewport-resize events are normalized, sent to the Backend, and translated to CDP `Input.*` by the Runtime. Input messages cannot carry a capability identity. The Runtime WebSocket is recreated only when the App identity, revision, or grants digest changes; parent renders and callback-reference changes must not interrupt an opening or established connection. Infrastructure disconnects reconnect automatically with bounded exponential backoff and do not require a page refresh.
+The Frontend renders only the newest frame; a slow client cannot create an unbounded queue. Mouse, touch, wheel, key, text, focus, and viewport-resize events are normalized, sent to the Backend, and translated to CDP `Input.*` by the Runtime. Input messages cannot carry a capability identity. The initial Runtime WebSocket connection must carry the Widget's actual logical viewport and device-pixel ratio. A low-cost screencast event acts as the visual-change signal, while each delivered frame is captured at the corresponding physical-pixel resolution with `Page.captureScreenshot`. Screencasting restarts after viewport resize so a default low-resolution frame is never stretched. The Runtime WebSocket is recreated only when the App identity, revision, or grants digest changes; parent renders and callback-reference changes must not interrupt an opening or established connection. Infrastructure disconnects reconnect automatically with bounded exponential backoff and do not require a page refresh.
+
+### Presentation context
+
+Theme, language, and reduced-motion preference form a presentation-only context. They grant no data access and remain separate from Manifest grants, Graph scopes, and Runtime session identity:
+
+```json
+{
+  "theme": {
+    "preference": "system",
+    "effective": "light"
+  },
+  "locale": "zh-CN",
+  "reduced_motion": false
+}
+```
+
+The Frontend supplies the initial context as WebSocket query parameters so Chromium uses the correct `colorScheme`, locale, and reduced-motion media emulation before the Controller's first render. The Backend normalizes the theme enums, BCP 47 locale, and boolean before creating the Runtime session; the Runtime never trusts raw Frontend payloads.
+
+When the theme, language, or system reduced-motion preference changes, the Frontend sends a complete `presentation_context` input over the existing WebSocket session. Such changes must not recreate the BrowserContext or Runtime WebSocket. The Runtime updates `documentElement.lang`, `data-theme`, `color-scheme`, theme CSS variables, and media emulation, then notifies `ambient.presentation` and `ambient.theme` subscribers. The compatibility properties `ambient.theme.preference` and `ambient.theme.effective` read the current values rather than an initial frozen snapshot. For dynamic locale changes, Controllers use `ambient.presentation` and `documentElement.lang`; `navigator.language` is guaranteed to match only the initial locale of the BrowserContext.
 
 Default budgets:
 
@@ -103,6 +122,8 @@ The Runtime neither reads the Manifest nor decides grants. The Backend reauthori
 - `capabilities.invoke` enters catalog/action/input/output and Run-interaction policy.
 
 The Backend owns subscriptions. Closing a session unregisters all Graph listeners. The Runtime only holds a session-local subscription ID and cannot reuse it for another App.
+
+Idempotency identity for Graph mutations and installed-capability invocations is derived from the Runtime Supervisor's `request_id` plus the Backend-owned session binding. The Controller/Page does not generate or submit invocation identity and cannot depend on secure-context-only APIs such as `crypto.randomUUID()`.
 
 ## 5. Controller compatibility and publication verification
 

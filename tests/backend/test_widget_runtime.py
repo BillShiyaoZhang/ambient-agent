@@ -54,7 +54,11 @@ async def test_open_session_transfers_source_by_value_and_binds_artifact_identit
     binding = await gateway.open_session(
         "notes-app",
         {"width": 640, "height": 480, "device_scale_factor": 1},
-        theme={"preference": "system", "effective": "dark"},
+        presentation_context={
+            "theme": {"preference": "system", "effective": "light"},
+            "locale": "zh-CN",
+            "reduced_motion": True,
+        },
     )
 
     assert binding.app_id == "notes-app"
@@ -75,7 +79,11 @@ async def test_open_session_transfers_source_by_value_and_binds_artifact_identit
             "capability_ids": ["file.read"],
             "controller_source": "export default function App() { return null; }",
             "viewport": {"width": 640, "height": 480, "device_scale_factor": 1.0},
-            "theme": {"preference": "system", "effective": "dark"},
+            "presentation_context": {
+                "theme": {"preference": "system", "effective": "light"},
+                "locale": "zh-CN",
+                "reduced_motion": True,
+            },
         }
     ]
 
@@ -109,6 +117,7 @@ async def test_runtime_rpc_uses_server_binding_and_ignores_forged_identity() -> 
                 "path": "notes/today.md",
                 "app_id": "other-app",
                 "manifest_revision": "forged",
+                "_runtime_request_id": "forged",
             },
         },
     )
@@ -119,7 +128,10 @@ async def test_runtime_rpc_uses_server_binding_and_ignores_forged_identity() -> 
     assert called_binding.app_id == "notes-app"
     assert called_binding.manifest_revision == "2:1.0.0"
     assert method == "files.read"
-    assert params == {"path": "notes/today.md"}
+    assert params == {
+        "path": "notes/today.md",
+        "_runtime_request_id": "rpc-1",
+    }
     assert connection.sent[-1] == {
         "type": "rpc_response",
         "session_id": binding.session_id,
@@ -194,6 +206,67 @@ async def test_forward_input_allowlists_fields_and_never_relays_identity() -> No
             "buttons": 1,
             "click_count": 1,
         },
+    }
+
+    await gateway.forward_input(
+        binding.session_id,
+        {
+            "type": "presentation_context",
+            "theme": {"preference": "light", "effective": "light"},
+            "locale": "zh-CN",
+            "reduced_motion": True,
+            "app_id": "other-app",
+            "grants_digest": "forged",
+        },
+    )
+
+    assert connection.sent[-1] == {
+        "type": "input",
+        "session_id": binding.session_id,
+        "event": {
+            "type": "presentation_context",
+            "theme": {"preference": "light", "effective": "light"},
+            "locale": "zh-CN",
+            "reduced_motion": True,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_presentation_context_is_normalized_at_every_frontend_boundary() -> None:
+    connection = FakeRuntimeConnection()
+    gateway = WidgetRuntimeGateway(app_manager=FakeAppManager(), connector=lambda: connection)
+
+    binding = await gateway.open_session(
+        "notes-app",
+        {"width": 320, "height": 240},
+        presentation_context={
+            "theme": {"preference": "unsupported", "effective": "invalid"},
+            "locale": "../../etc/passwd",
+            "reduced_motion": "yes",
+        },
+    )
+
+    assert connection.sent[0]["presentation_context"] == {
+        "theme": {"preference": "system", "effective": "dark"},
+        "locale": "en-US",
+        "reduced_motion": False,
+    }
+
+    await gateway.forward_input(
+        binding.session_id,
+        {
+            "type": "presentation_context",
+            "theme": {"preference": "dark", "effective": "dark"},
+            "locale": "fr-FR",
+            "reduced_motion": False,
+        },
+    )
+    assert connection.sent[-1]["event"] == {
+        "type": "presentation_context",
+        "theme": {"preference": "dark", "effective": "dark"},
+        "locale": "fr-FR",
+        "reduced_motion": False,
     }
 
 

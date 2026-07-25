@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import wsService from "./services/websocket";
 import type { Message } from "./components/ChatPanel";
 import type { Widget } from "./components/DashboardCanvas";
@@ -97,12 +97,33 @@ function App() {
   const themeControllerRef = useRef<ReturnType<typeof createThemeController> | null>(null);
   if (!themeControllerRef.current) themeControllerRef.current = createThemeController();
   const [theme, setTheme] = useState<ThemeSnapshot>(() => themeControllerRef.current!.snapshot());
+  const [reducedMotion, setReducedMotion] = useState(
+    () => typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
 
   useEffect(() => {
     const controller = themeControllerRef.current!;
     const unsubscribe = controller.subscribe(setTheme);
     return () => { unsubscribe(); controller.destroy(); };
   }, []);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = (event: MediaQueryListEvent) => setReducedMotion(event.matches);
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, []);
+
+  const widgetPresentationContext = useMemo(
+    () => ({
+      theme,
+      locale: language === "zh" ? "zh-CN" : "en-US",
+      reduced_motion: reducedMotion,
+    }),
+    [language, reducedMotion, theme],
+  );
 
   const handleChatOpenChange = (open: boolean) => {
     chatOpenRef.current = open;
@@ -844,6 +865,7 @@ function App() {
               <ErrorBoundary key={`${widget.id}:${widget.manifest_revision ?? widget.grants_digest ?? "runtime"}`}>
                 <SandboxWidget
                   widget={widget}
+                  presentationContext={widgetPresentationContext}
                   onFullscreen={(id) => setAppWindowMode(id, "maximized")}
                   onMinimize={(id) => setAppWindowMode(id, "floating")}
                 />

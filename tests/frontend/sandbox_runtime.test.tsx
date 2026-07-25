@@ -92,12 +92,29 @@ describe("SandboxWidget remote runtime player", () => {
   });
 
   it("opens an app-scoped runtime stream without sending Controller source or grants", () => {
-    render(<SandboxWidget widget={widget} />);
+    render(
+      <SandboxWidget
+        widget={widget}
+        presentationContext={{
+          theme: { preference: "system", effective: "light" },
+          locale: "zh-CN",
+          reduced_motion: true,
+        }}
+      />,
+    );
     act(() => vi.runOnlyPendingTimers());
 
     expect(MockWebSocket.instances).toHaveLength(1);
     const socket = MockWebSocket.instances[0];
-    expect(new URL(socket.url).pathname).toBe("/ws/widgets/notes-app/runtime");
+    const runtimeUrl = new URL(socket.url);
+    expect(runtimeUrl.pathname).toBe("/ws/widgets/notes-app/runtime");
+    expect(runtimeUrl.searchParams.get("width")).toBe("640");
+    expect(runtimeUrl.searchParams.get("height")).toBe("480");
+    expect(runtimeUrl.searchParams.get("device_scale_factor")).toBe("1");
+    expect(runtimeUrl.searchParams.get("theme_preference")).toBe("system");
+    expect(runtimeUrl.searchParams.get("theme_effective")).toBe("light");
+    expect(runtimeUrl.searchParams.get("locale")).toBe("zh-CN");
+    expect(runtimeUrl.searchParams.get("reduced_motion")).toBe("true");
 
     act(() => socket.open());
 
@@ -108,9 +125,51 @@ describe("SandboxWidget remote runtime player", () => {
       height: 480,
       device_scale_factor: 1,
     });
+    expect(messages).toContainEqual({
+      type: "presentation_context",
+      theme: { preference: "system", effective: "light" },
+      locale: "zh-CN",
+      reduced_motion: true,
+    });
     expect(socket.sent.join("\n")).not.toContain(widget.js);
     expect(socket.sent.join("\n")).not.toContain("file.read");
     expect(socket.sent.join("\n")).not.toContain("grants_digest");
+  });
+
+  it("updates presentation context in the same runtime session", () => {
+    const { rerender } = render(
+      <SandboxWidget
+        widget={widget}
+        presentationContext={{
+          theme: { preference: "system", effective: "dark" },
+          locale: "en-US",
+          reduced_motion: false,
+        }}
+      />,
+    );
+    act(() => vi.runOnlyPendingTimers());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    socket.sent = [];
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        presentationContext={{
+          theme: { preference: "light", effective: "light" },
+          locale: "zh-CN",
+          reduced_motion: true,
+        }}
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
+      type: "presentation_context",
+      theme: { preference: "light", effective: "light" },
+      locale: "zh-CN",
+      reduced_motion: true,
+    });
   });
 
   it("renders only runtime frames and surfaces structured runtime errors", () => {

@@ -8,12 +8,29 @@
 | --- | --- |
 | `ambient.sendMessage(text)` | Submit a user message to the current chat |
 | `ambient.fullscreen()` / `ambient.minimize()` | Ask the host to change the current App window state |
-| `ambient.theme.preference` / `effective` | Read theme preference and effective theme |
+| `ambient.theme.preference` / `effective` | Compatibility accessors that always read the current preference and effective theme |
+| `ambient.theme.getSnapshot()` / `subscribe(listener)` | Read a theme snapshot and subscribe to in-session theme changes |
+| `ambient.presentation.getSnapshot()` / `subscribe(listener)` | Read and subscribe to the `{ theme, locale, reducedMotion }` presentation context |
 | `ambient.html` | HTM tag bound to React createElement |
 | `ambient.react` | `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, `useReducer`; pre-publication verification rejects any other non-injected hook |
 | `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table`; pre-publication verification rejects any other non-injected component |
 
 These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, storage, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
+
+Presentation context updates without restarting the Widget. A Controller that reacts to theme, language, or reduced-motion changes subscribes instead of reading only once during module load:
+
+```javascript
+const [presentation, setPresentation] = useState(
+  ambient.presentation.getSnapshot()
+);
+
+useEffect(
+  () => ambient.presentation.subscribe(setPresentation),
+  []
+);
+```
+
+The Runtime automatically synchronizes the `--widget-*` CSS variables used by built-in components, page `color-scheme`, and prefers-reduced-motion media emulation. Use `presentation.locale` for dynamic language changes.
 
 ## 2. Graph Grants
 

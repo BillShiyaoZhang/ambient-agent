@@ -1302,13 +1302,15 @@ async def _handle_widget_runtime_rpc(
             manifest_revision=binding.manifest_revision,
             grants_digest=binding.grants_digest,
         )
-        invocation_id = str(params.get("invocation_id") or hashlib.sha256(
-            json.dumps(actions, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest())
+        runtime_request_id = str(params.get("_runtime_request_id") or "")
+        if not runtime_request_id or len(runtime_request_id) > 200:
+            raise ValueError("graph.mutate requires a bounded Runtime request ID")
         completed = await _run_approved_graph_mutation(
             actions,
             session_id=f"widget-runtime:{binding.session_id}",
-            idempotency_key=f"widget:{binding.app_id}:{invocation_id[:200]}",
+            idempotency_key=(
+                f"widget:{binding.app_id}:{binding.session_id}:{runtime_request_id}"
+            ),
             title=f"{binding.app_id} Graph mutation",
         )
         if completed["status"] != "succeeded":
@@ -1379,11 +1381,16 @@ async def _handle_widget_runtime_rpc(
     if method == "capabilities.invoke":
         catalog_id = str(params.get("catalog_id") or "")
         action_id = str(params.get("action_id") or "")
-        invocation_id = str(params.get("invocation_id") or "")
+        runtime_request_id = str(params.get("_runtime_request_id") or "")
         input_data = params.get("input")
-        if not catalog_id or not action_id or not invocation_id or len(invocation_id) > 200:
+        if (
+            not catalog_id
+            or not action_id
+            or not runtime_request_id
+            or len(runtime_request_id) > 200
+        ):
             raise ValueError(
-                "capabilities.invoke requires catalog_id, action_id, and a bounded invocation_id"
+                "capabilities.invoke requires catalog_id, action_id, and a bounded Runtime request ID"
             )
         capability_authorizer.authorize_invocation(
             binding.app_id,
@@ -1399,7 +1406,8 @@ async def _handle_widget_runtime_rpc(
             source_type="widget",
             source_id=binding.app_id,
             idempotency_key=(
-                f"widget:{binding.app_id}:{catalog_id}:{action_id}:{invocation_id}"
+                f"widget:{binding.app_id}:{binding.session_id}:"
+                f"{catalog_id}:{action_id}:{runtime_request_id}"
             ),
             correlation={"widget_runtime_session": binding.session_id},
         )
@@ -1421,6 +1429,10 @@ async def websocket_widget_runtime(
     width: int = 640,
     height: int = 480,
     device_scale_factor: float = 1.0,
+    theme_preference: str = "system",
+    theme_effective: str = "dark",
+    locale: str = "en-US",
+    reduced_motion: bool = False,
 ):
     if not await _accept_websocket_safely(websocket):
         return
@@ -1435,6 +1447,14 @@ async def websocket_widget_runtime(
                 "width": width,
                 "height": height,
                 "device_scale_factor": device_scale_factor,
+            },
+            presentation_context={
+                "theme": {
+                    "preference": theme_preference,
+                    "effective": theme_effective,
+                },
+                "locale": locale,
+                "reduced_motion": reduced_motion,
             },
         )
 

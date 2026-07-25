@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -28,8 +29,10 @@ _IDENTITY_FIELDS = frozenset(
         "artifact_digest",
         "controller_source",
         "session_id",
+        "_runtime_request_id",
     }
 )
+_LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 class RuntimeConnection(Protocol):
@@ -187,13 +190,33 @@ class WidgetRuntimeGateway:
         return {"width": width, "height": height, "device_scale_factor": scale}
 
     @staticmethod
-    def _normalize_theme(theme: dict[str, Any] | None) -> dict[str, str]:
+    def _normalize_theme(theme: Any) -> dict[str, str]:
         theme = theme if isinstance(theme, dict) else {}
         preference = theme.get("preference")
         effective = theme.get("effective")
         return {
             "preference": preference if preference in {"light", "dark", "system"} else "system",
             "effective": effective if effective in {"light", "dark"} else "dark",
+        }
+
+    @classmethod
+    def _normalize_presentation_context(cls, context: Any) -> dict[str, Any]:
+        context = context if isinstance(context, dict) else {}
+        locale = context.get("locale")
+        if (
+            not isinstance(locale, str)
+            or len(locale) > 35
+            or _LOCALE_PATTERN.fullmatch(locale) is None
+        ):
+            locale = "en-US"
+        return {
+            "theme": cls._normalize_theme(context.get("theme")),
+            "locale": locale,
+            "reduced_motion": (
+                context.get("reduced_motion")
+                if isinstance(context.get("reduced_motion"), bool)
+                else False
+            ),
         }
 
     async def _new_connection(self) -> RuntimeConnection:
@@ -207,7 +230,7 @@ class WidgetRuntimeGateway:
         app_id: str,
         viewport: dict[str, Any],
         *,
-        theme: dict[str, Any] | None = None,
+        presentation_context: dict[str, Any] | None = None,
     ) -> WidgetRuntimeBinding:
         normalized_viewport = self._normalize_viewport(viewport)
         app = self.app_manager.get_app_files(app_id)
@@ -259,7 +282,9 @@ class WidgetRuntimeGateway:
                     "capability_ids": capability_ids,
                     "controller_source": source,
                     "viewport": normalized_viewport,
-                    "theme": self._normalize_theme(theme),
+                    "presentation_context": self._normalize_presentation_context(
+                        presentation_context
+                    ),
                 }
             )
         except Exception:
@@ -346,6 +371,11 @@ class WidgetRuntimeGateway:
             return {"type": "visibility", "visible": bool(message.get("visible"))}
         if message_type == "focus":
             return {"type": "focus", "focused": bool(message.get("focused"))}
+        if message_type == "presentation_context":
+            return {
+                "type": "presentation_context",
+                **self._normalize_presentation_context(message),
+            }
         raise ValueError("Unsupported Widget Runtime input message")
 
     async def forward_input(self, session_id: str, message: dict[str, Any]) -> None:
@@ -380,7 +410,10 @@ class WidgetRuntimeGateway:
         if message_type == "rpc_request":
             request_id = self._require_string(message.get("request_id"), "RPC request ID")
             method = self._require_string(message.get("method"), "RPC method")
-            params = self._sanitize_rpc_params(message.get("params", {}))
+            params = {
+                **self._sanitize_rpc_params(message.get("params", {})),
+                "_runtime_request_id": request_id,
+            }
             if self._rpc_handler is None:
                 error = {
                     "code": "runtime_rpc_unavailable",

@@ -47,7 +47,7 @@ runtime_session_id -> {
 }
 ```
 
-随后 Backend 通过 Unix socket 发送 `start`，包含 Controller 源码、digest、viewport 和主题。Runtime 不能通过文件路径读取 App；源码只以消息传入并保存在 tmpfs/内存中。
+随后 Backend 通过 Unix socket 发送 `start`，包含 Controller 源码、digest、viewport 和经过校验的 `presentation_context`。Runtime 不能通过文件路径读取 App；源码只以消息传入并保存在 tmpfs/内存中。
 
 Controller 发出的 RPC 只包含 `request_id`、方法和参数。`app_id`、revision、grants digest 或 artifact digest 即使出现在 payload 中也必须忽略；`WidgetRuntimeGateway` 只使用 server-side session binding 调用 `CapabilityAuthorizer`。Manifest 修改、撤权、artifact digest 改变、Frontend 断线或 Runtime 重启都会关闭旧 session，下一次连接重新加载授权事实。
 
@@ -68,7 +68,26 @@ Runtime 使用 `Page.startScreencast` 获取画面，并在每帧处理后发送
 }
 ```
 
-Frontend 只渲染最新帧；慢客户端不能形成无界队列。鼠标、触摸、滚轮、按键、文本输入、焦点与 viewport resize 被归一化后发送到 Backend，再由 Runtime 转换为 CDP `Input.*`。输入消息不允许携带 capability 身份。Runtime WebSocket 只在 App 身份、revision 或 grants digest 改变时重建；父组件 render 或事件回调引用变化不能中断正在建立或已建立的连接。基础设施断连使用有上限的指数退避自动重连，不要求用户刷新页面。
+Frontend 只渲染最新帧；慢客户端不能形成无界队列。鼠标、触摸、滚轮、按键、文本输入、焦点与 viewport resize 被归一化后发送到 Backend，再由 Runtime 转换为 CDP `Input.*`。输入消息不允许携带 capability 身份。Runtime WebSocket 首次连接必须携带 Widget 的实际逻辑 viewport 和 device-pixel ratio；低成本 screencast 事件作为画面变化信号，交付帧再由 `Page.captureScreenshot` 按对应物理像素抓取。viewport resize 后重启 screencast，避免把默认低分辨率帧拉伸。Runtime WebSocket 只在 App 身份、revision 或 grants digest 改变时重建；父组件 render 或事件回调引用变化不能中断正在建立或已建立的连接。基础设施断连使用有上限的指数退避自动重连，不要求用户刷新页面。
+
+### 展示上下文
+
+主题、语言和减少动画偏好属于不授予数据权限的展示上下文，与 Manifest grants、Graph scope 和 Runtime session identity 分开：
+
+```json
+{
+  "theme": {
+    "preference": "system",
+    "effective": "light"
+  },
+  "locale": "zh-CN",
+  "reduced_motion": false
+}
+```
+
+Frontend 在 WebSocket 建立时通过 query 参数提供初始上下文，使 Chromium 在 Controller 首次渲染前使用正确的 `colorScheme`、locale 和 reduced-motion media emulation。Backend 必须将主题枚举、BCP 47 locale 和布尔值归一化后再创建 Runtime session，Runtime 不信任原始 Frontend payload。
+
+主题、语言或系统减少动画偏好改变时，Frontend 在同一个 WebSocket session 中发送完整的 `presentation_context` 输入；这类变化不得重建 BrowserContext 或 Runtime WebSocket。Runtime 更新 `documentElement.lang`、`data-theme`、`color-scheme`、主题 CSS variables 和 media emulation，然后通知 `ambient.presentation` / `ambient.theme` 订阅者。`ambient.theme.preference` 和 `ambient.theme.effective` 保持为读取当前值的兼容访问器，而不是只反映首次连接的静态快照。动态 locale 以 `ambient.presentation` 和 `documentElement.lang` 为准；BrowserContext 的 `navigator.language` 只保证与初始 locale 一致。
 
 默认预算：
 
@@ -103,6 +122,8 @@ Runtime 不能自行读取 Manifest 或判断 grant。Backend 每次操作都以
 - `capabilities.invoke` 进入 catalog/action/input/output 与 Run interaction policy。
 
 订阅由 Backend 所有。session 关闭时 Gateway 注销全部 Graph listeners；Runtime 只持有 session-local subscription ID，不能把它复用于其他 App。
+
+Graph mutation 和 installed-capability invocation 的幂等身份由 Runtime Supervisor 的 `request_id` 与 Backend 保存的 session binding 共同产生。Controller/Page 不生成或提交 invocation identity，也不能依赖安全上下文专属的 `crypto.randomUUID()`。
 
 ## 5. Controller 兼容与发布验证
 
