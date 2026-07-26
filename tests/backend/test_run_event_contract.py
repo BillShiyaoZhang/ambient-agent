@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.run_events import (
+    ActivityUpdatedEvent,
     CORE_RUN_EVENT_MODELS,
     InteractionResolvedEvent,
     RunCreatedEvent,
@@ -62,8 +63,36 @@ def test_core_event_registry_has_unique_discriminators():
         "step_committed",
         "interaction_requested",
         "interaction_resolved",
+        "activity_updated",
+        "tool_started",
+        "tool_succeeded",
+        "tool_failed",
+        "tool_cancelled",
+        "artifact_ready",
     ]
     assert len(event_types) == len(set(event_types))
+
+
+def test_structured_activity_contract_rejects_unknown_status():
+    base = _golden_tape()["events"][0]
+    event = {
+        **base,
+        "type": "activity_updated",
+        "payload": {
+            "activity_id": "verification:contract",
+            "activity_type": "verification",
+            "status": "completed",
+            "summary": "Verification passed",
+            "metadata": {"finding_count": 0},
+        },
+    }
+    parsed = parse_run_event(event)
+    assert isinstance(parsed, ActivityUpdatedEvent)
+    assert parsed.payload.activity_type == "verification"
+
+    event["payload"] = {**event["payload"], "status": "unknown"}
+    with pytest.raises(ValidationError):
+        parse_run_event(event)
 
 
 def test_generated_typescript_is_current():

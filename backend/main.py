@@ -292,6 +292,38 @@ def _active_chat_session_ids() -> set[str]:
     }
 
 
+def _chat_artifact_refs(session_id: str) -> list[dict[str, Any]]:
+    """Carry prior published Apps through Run state instead of code-role chat messages."""
+
+    refs: dict[str, dict[str, Any]] = {}
+    prior_runs = run_store.list_runs(
+        status="succeeded",
+        source_type="chat",
+        source_id=session_id,
+        limit=100,
+    )
+    for prior in prior_runs:
+        state = prior.get("state") if isinstance(prior.get("state"), dict) else {}
+        candidates = [
+            *(state.get("artifact_refs") if isinstance(state.get("artifact_refs"), list) else []),
+            *(prior.get("artifacts") if isinstance(prior.get("artifacts"), list) else []),
+        ]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            artifact_id = str(candidate.get("id") or "")
+            artifact_type = str(candidate.get("type") or "")
+            if not artifact_id or artifact_type not in {"app", "widget"} or artifact_id in refs:
+                continue
+            normalized = {"type": "app", "id": artifact_id}
+            if candidate.get("sha256"):
+                normalized["sha256"] = str(candidate["sha256"])
+            refs[artifact_id] = normalized
+            if len(refs) >= 32:
+                return list(refs.values())
+    return list(refs.values())
+
+
 async def _project_agent_run_status(run: dict[str, Any]) -> None:
     if run.get("adapter_type") != "internal_agent" or run.get("source_type") != "chat":
         return
@@ -808,8 +840,30 @@ async def create_run(data: RunCreate):
 
 
 @app.get("/api/runs")
-async def list_runs(status: str | None = None, owner_id: str | None = None, limit: int = 100, offset: int = 0):
-    return run_store.list_runs(status=status, owner_id=owner_id, limit=limit, offset=offset)
+async def list_runs(
+    status: str | None = None,
+    owner_id: str | None = None,
+    source_type: str | None = None,
+    source_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    include_details: bool = False,
+):
+    runs = run_store.list_runs(
+        status=status,
+        owner_id=owner_id,
+        source_type=source_type,
+        source_id=source_id,
+        limit=limit,
+        offset=offset,
+    )
+    if not include_details:
+        return runs
+    return [
+        detailed
+        for run in runs
+        if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
+    ]
 
 
 @app.get("/api/runs/{run_id}")
@@ -1878,6 +1932,7 @@ async def websocket_chat(
             session_id=session_id,
             phase="route",
             model_snapshot=model_snapshot,
+            artifact_refs=_chat_artifact_refs(session_id),
             data={
                 "workspace_dir": session.workspace_dir,
                 "user_message_id": user_msg.id,

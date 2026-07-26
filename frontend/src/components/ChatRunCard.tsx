@@ -16,13 +16,24 @@ import type {
   ChatRunCard as ChatRunCardModel,
   LiveStreamState,
   RunActivity,
+  RunInteractionState,
 } from "../lib/chatProjection";
+
+export type RunInteractionAction =
+  | "approve"
+  | "deny"
+  | "rework_code"
+  | "rework_schema"
+  | "rework_plan";
 
 interface ChatRunCardProps {
   run: ChatRunCardModel;
   language: "zh" | "en";
   onCancel?: (runId: string) => void;
   liveStreams?: LiveStreamState[];
+  interactions?: RunInteractionState[];
+  onResolveInteraction?: (interaction: RunInteractionState, action: RunInteractionAction) => void;
+  onInspectInteraction?: (interaction: RunInteractionState) => void;
 }
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "waiting_user", "cancel_requested"]);
@@ -86,6 +97,76 @@ function activitySummary(activity: RunActivity, isZh: boolean): string {
   return parts.join(" · ");
 }
 
+function humanizeTool(value: string): string {
+  return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function structuredActivityTitle(activity: RunActivity, isZh: boolean): string {
+  const kind = activity.kind ?? "phase";
+  if (kind === "phase") return phaseLabel(activity.phase, isZh);
+  if (activity.kind === "tool") {
+    const tool = humanizeTool(activity.title || "tool");
+    if (activity.status === "running") return isZh ? `正在运行 ${tool}` : `Running ${tool}`;
+    if (activity.status === "failed") return isZh ? `${tool} 未完成` : `${tool} failed`;
+    return isZh ? `${tool} 已完成` : `${tool} completed`;
+  }
+  const labels: Record<NonNullable<RunActivity["kind"]>, [string, string]> = {
+    phase: ["处理阶段", "Phase"],
+    plan: ["开发计划已生成", "Development plan prepared"],
+    schema: ["数据与能力方案已生成", "Data and capability proposal prepared"],
+    code: activity.status === "running"
+      ? ["正在生成应用", "Generating the app"]
+      : ["应用草稿已生成", "Staged app generated"],
+    tool: ["工具执行", "Tool execution"],
+    verification: activity.status === "running"
+      ? ["正在独立验证", "Running independent verification"]
+      : activity.status === "failed"
+        ? ["验证发现需要调整", "Verification found required changes"]
+        : ["独立验证已通过", "Independent verification passed"],
+    repair: activity.status === "failed"
+      ? ["自动修复已停止", "Automatic repair stopped"]
+      : ["自动修复已完成", "Automatic repair completed"],
+    artifact: activity.status === "running"
+      ? ["正在发布 App", "Publishing app"]
+      : ["App 已发布", "App published"],
+    approval: activity.status === "waiting"
+      ? ["等待你的确认", "Waiting for your decision"]
+      : ["确认已处理", "Decision recorded"],
+  };
+  return labels[kind][isZh ? 0 : 1];
+}
+
+function interactionSummary(interaction: RunInteractionState, isZh: boolean): {
+  title: string;
+  detail: string;
+} {
+  if (interaction.kind === "plan_approval") {
+    return {
+      title: isZh ? "确认开发计划" : "Review development plan",
+      detail: String(interaction.payload.plan || "").slice(0, 360),
+    };
+  }
+  if (interaction.kind === "schema_approval") {
+    const proposal = interaction.payload.proposal;
+    const record = typeof proposal === "object" && proposal !== null && !Array.isArray(proposal)
+      ? proposal as Record<string, unknown>
+      : {};
+    const reused = Array.isArray(record.reused_schemas) ? record.reused_schemas.length : 0;
+    const created = Array.isArray(record.new_schemas) ? record.new_schemas.length : 0;
+    const capabilities = Array.isArray(record.capabilities) ? record.capabilities.length : 0;
+    return {
+      title: isZh ? "确认数据与能力方案" : "Review data and capability proposal",
+      detail: isZh
+        ? `复用 ${reused} 个 Schema · 新增 ${created} 个 · ${capabilities} 项能力`
+        : `${reused} reused schemas · ${created} new · ${capabilities} capabilities`,
+    };
+  }
+  return {
+    title: isZh ? "选择验证修复方式" : "Choose a verification repair path",
+    detail: String(interaction.payload.report || "").replace(/^#+\s*/gm, "").slice(0, 360),
+  };
+}
+
 function liveStreamText(stream: LiveStreamState, isZh: boolean): string {
   if (stream.kind !== "tool_progress") return stream.text.slice(-1_200);
   const tool = stream.tool || stream.text;
@@ -100,7 +181,15 @@ function liveStreamText(stream: LiveStreamState, isZh: boolean): string {
   return pair[isZh ? 0 : 1];
 }
 
-export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCancel, liveStreams = [] }) => {
+export const ChatRunCard: React.FC<ChatRunCardProps> = ({
+  run,
+  language,
+  onCancel,
+  liveStreams = [],
+  interactions = [],
+  onResolveInteraction,
+  onInspectInteraction,
+}) => {
   const isZh = language === "zh";
   const [expanded, setExpanded] = useState(() => ACTIVE_STATUSES.has(run.status));
   const active = ACTIVE_STATUSES.has(run.status);
@@ -110,6 +199,7 @@ export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCance
   const currentPhaseIndex = PHASES.indexOf(currentPhase as typeof PHASES[number]);
   const widgetRun = run.workflowType?.startsWith("widget") || currentPhaseIndex >= 0;
   const latestLive = liveStreams.at(-1);
+  const debugEvents = run.debugEvents ?? [];
 
   useEffect(() => {
     if (run.status === "needs_attention" || run.status === "failed") setExpanded(true);
@@ -158,19 +248,57 @@ export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCance
             return <li key={activity.id} className={`is-${activity.status}`}>
               <span className="chat-run-activity-marker" />
               <div>
-                <strong>{phaseLabel(activity.phase, isZh)}</strong>
+                <strong>{structuredActivityTitle(activity, isZh)}</strong>
                 {localizedDetail(activity.detail, isZh) ? <p>{localizedDetail(activity.detail, isZh)}</p> : null}
                 {aggregate ? <small>{aggregate}</small> : null}
               </div>
             </li>;
           })}
         </ol> : <p className="chat-run-summary">{run.summary || (isZh ? "正在准备…" : "Preparing…")}</p>}
+        {interactions.map((interaction) => {
+          const summary = interactionSummary(interaction, isZh);
+          const pending = interaction.status === "pending";
+          const allowedActions = Array.isArray(interaction.payload.allowed_actions)
+            ? interaction.payload.allowed_actions.map(String)
+            : ["rework_code", "rework_schema", "rework_plan"];
+          return <section className={`chat-run-interaction is-${interaction.status}`} key={interaction.id}>
+            <header>
+              <strong>{summary.title}</strong>
+              <span>{pending ? (isZh ? "需要操作" : "Action needed") : (isZh ? "已处理" : "Resolved")}</span>
+            </header>
+            {summary.detail ? <p>{summary.detail}</p> : null}
+            {pending ? <div>
+              {pending && interaction.kind === "plan_approval" && onResolveInteraction ? <>
+                <button type="button" onClick={() => onResolveInteraction(interaction, "deny")}>{isZh ? "取消" : "Cancel"}</button>
+                <button type="button" onClick={() => onInspectInteraction?.(interaction)}>{isZh ? "查看 / 调整" : "Review / edit"}</button>
+                <button type="button" className="is-primary" onClick={() => onResolveInteraction(interaction, "approve")}>{isZh ? "批准计划" : "Approve plan"}</button>
+              </> : null}
+              {pending && interaction.kind === "schema_approval" && onResolveInteraction ? <>
+                <button type="button" onClick={() => onResolveInteraction(interaction, "deny")}>{isZh ? "取消" : "Cancel"}</button>
+                <button type="button" onClick={() => onInspectInteraction?.(interaction)}>{isZh ? "查看 / 编辑" : "Review / edit"}</button>
+                <button type="button" className="is-primary" onClick={() => onResolveInteraction(interaction, "approve")}>{isZh ? "批准并编码" : "Approve"}</button>
+              </> : null}
+              {pending && interaction.kind === "verification_approval" && onResolveInteraction ? <>
+                {allowedActions.includes("rework_plan") ? <button type="button" onClick={() => onResolveInteraction(interaction, "rework_plan")}>{isZh ? "重做方案" : "Rework plan"}</button> : null}
+                {allowedActions.includes("rework_schema") ? <button type="button" onClick={() => onResolveInteraction(interaction, "rework_schema")}>{isZh ? "调整数据" : "Rework data"}</button> : null}
+                {allowedActions.includes("rework_code") ? <button type="button" className="is-primary" onClick={() => onResolveInteraction(interaction, "rework_code")}>{isZh ? "修复代码" : "Repair code"}</button> : null}
+                <button type="button" onClick={() => onInspectInteraction?.(interaction)}>{isZh ? "查看详情" : "Details"}</button>
+              </> : null}
+            </div> : null}
+          </section>;
+        })}
         {latestLive ? <div className={`chat-run-live is-${latestLive.kind}`}>
           <span aria-hidden="true" />
           <p>{liveStreamText(latestLive, isZh)}<i aria-hidden="true" /></p>
           {latestLive.hasGap ? <small>{isZh ? "部分实时片段已跳过，完成后将以持久结果校准。" : "Some live fragments were skipped; durable completion will reconcile the result."}</small> : null}
         </div> : null}
         {run.error ? <p className="chat-run-error">{run.error}</p> : null}
+        {debugEvents.length > 0 ? <details className="chat-run-debug">
+          <summary>{isZh ? `调试详情 · ${debugEvents.length}` : `Debug details · ${debugEvents.length}`}</summary>
+          <pre>{debugEvents.map((event) => (
+            `[${event.sequence}] ${event.type}${event.stepId ? ` · ${event.stepId}` : ""}\n${event.payload}`
+          )).join("\n\n")}</pre>
+        </details> : null}
         <footer className="chat-run-footer">
           <span>
             {run.attempt > 1 ? (isZh ? `第 ${run.attempt} 次尝试` : `Attempt ${run.attempt}`) : null}

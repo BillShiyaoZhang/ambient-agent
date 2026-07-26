@@ -1,6 +1,6 @@
 # Chat 与 Run 信息体验设计
 
-> 状态：Phase A–B 已实现；Phase C–D 待后续迭代。本文记录信息架构、事件契约、当前实现与后续顺序。
+> 状态：Phase A–D 已实现。本文记录信息架构、事件契约与当前实现。
 
 ## 1. 目标与原则
 
@@ -22,7 +22,7 @@ GitHub Copilot Agent 也把 session overview、live session log、工具/验证�
 当前实现有四个具体限制：
 
 - `Message` 只有 `sender/content/timestamp`，不能表达阶段、activity、artifact、approval 或 error。
-- ACP 的 `agent_message_chunk` 和 tool update 被拼成累计字符串，再以 `id=-1` 的普通 `reply` 投影；前端只能替换一条 pending 消息。
+- 旧实现曾把 ACP 的 `agent_message_chunk` 和 tool update 拼成累计字符串，再以带负数 sentinel ID 的普通 `reply` 投影；前端只能替换一条 pending 消息。
 - durable reducer 的 `_emit()` 先写 step event buffer，直到 step commit 后才投影。Coding Agent 即使逐 chunk 回调，用户也会在阶段结束时一次性收到一大段内容，并非真正流式。
 - `/ws/runs` 已有 sequence、epoch、replay 和去重能力，但聊天只消费少数业务 payload，没有把 `step_started`、`progress` 和 `step_committed` 组合成用户可读的任务状态。
 
@@ -163,7 +163,7 @@ type ConversationItem =
 
 同一 `run_id` 在一级列表中最多只有一张 Run 卡。`step_id + activity_id` 负责二级 activity 去重；`event_id` 和 run stream cursor 继续负责 durable replay 去重。
 
-当前 `mergeIncomingMessage()` 可保留为兼容层，但新事件不得继续依赖 `id=-1` 表达所有 pending 状态。
+`mergeIncomingMessage()` 现在只接收带正整数持久 ID 的用户消息和最终回答；进行中状态完全由 Run projection 表达。
 
 ## 7. 流式渲染与滚动
 
@@ -200,7 +200,7 @@ Approval 应是结构化卡片：
 ### Phase A：projection model
 
 - 新增 `ConversationProjection` 与 `RunCard`，先消费现有 durable events。
-- 将阶段提示和 `id=-1` 累计日志收进 activity timeline。
+- 将阶段提示和旧累计日志收进 activity timeline。
 - 将桌面聊天浮层默认尺寸调整为约 432 × 600 px，并增加受视口约束的缩放与尺寸持久化。
 - 保持现有 reply/widget/approval API 兼容。
 
@@ -223,11 +223,45 @@ Approval 应是结构化卡片：
 - 将高风险 approval 继续交给 blocking dialog，普通选择内联。
 - 增加 debug 模式，按需显示原始 bounded event JSON。
 
+已实现说明：
+
+- Run v1 协议新增 `activity_updated` 与 `artifact_ready`，并将已有 `tool_started`、`tool_succeeded`、`tool_failed`、`tool_cancelled` 纳入正式类型注册表；旧 `/ws/chat` 投影顺序保持不变。
+- `activity_updated` 通过稳定 `activity_id` 原位更新，覆盖 plan、schema、code、verification、repair、artifact 与 approval；工具按 `phase + tool` 聚合，不逐条挤占主聊天。
+- plan、schema 和 verification interaction 在 Run 卡中显示摘要和常用操作；只有用户主动选择“查看 / 编辑”时才打开完整对话框。OpenCode、Backend/MCP 等敏感权限仍使用 blocking dialog。
+- resolved/cancelled interaction 保留为只读记录。刷新后可从 Run snapshot 的 durable interaction 恢复，不依赖内存弹窗状态。
+- 活动会话通过 `include_details=true` 获取 events/interactions 详细 snapshot，并以 `event_id` 去重；即使任务中心先消费了全局 Run cursor，聊天稍后打开也能恢复完整过程且不会重复工具计数。
+- 每张 Run 卡最多保留最近 24 个 debug event；单个 payload 限制为 2.4 KB，并按 authorization、credential、password、secret、token、API key 等字段名脱敏。
+
+结构化 activity 示例：
+
+```json
+{
+  "type": "activity_updated",
+  "activity_id": "verification:contract",
+  "activity_type": "verification",
+  "status": "failed",
+  "summary": "Verification found required changes",
+  "detail": "Unknown property: temperature",
+  "metadata": {
+    "finding_count": 1,
+    "clean": false
+  }
+}
+```
+
 ### Phase D：收敛旧协议
 
 - 停止用普通 `reply` 承载阶段进度。
-- 删除 `id=-1` 单 pending 消息约定。
+- 删除负数 sentinel ID 的单 pending 消息约定。
 - 将聊天历史持久化限定为用户消息、最终回答和必要的 interaction 摘要。
+
+已实现说明：
+
+- workflow 的 durable `_emit()` 只接受带 `type` 的结构化对象；自由文本 callback 只进入有界 live activity，不写 Run event 或聊天消息，从源头阻止旧 pending reply 回流。
+- plan、Schema、Coding Agent、verification 和等待确认的阶段文案不再投影成聊天气泡；对应事实由 `activity_updated`、tool event 和 interaction event 承载。
+- Widget 成功后的最终回答改为简洁交付摘要。完整 Coding Agent 输出、校验报告和修复证据保留在 Run state、activity 与 debug 中，不再挤占主聊天。
+- 新发布的 App 不再写入 `role=code` 的伪聊天消息；后续 Run 从同一会话的成功 Run artifact/state 恢复最多 32 个 App 引用。
+- 前端仅合并带正整数持久 ID 的 `ack/reply`，旧负数或无持久 ID 的消息不会进入聊天历史。
 
 ## 10. 已确认的产品选择与验收标准
 

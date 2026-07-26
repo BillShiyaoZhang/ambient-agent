@@ -237,12 +237,12 @@ async def test_scripted_converse_runs_through_coordinator_and_evaluates_persiste
             "agent_routed",
             "step_committed",
             "step_started",
-            "agent_progress",
             "reply",
             "step_committed",
             "status_changed",
         ],
     )
+    assert "agent_progress" not in production_event_types
 
     adapter = RunStoreTraceAdapter(store)
     trace = adapter.trace(submitted["id"])
@@ -274,7 +274,7 @@ async def test_scripted_converse_runs_through_coordinator_and_evaluates_persiste
             and stages == ["route", "converse"]
             and _contains_subsequence(
                 run_events,
-                ["agent_routed", "step_committed", "agent_progress", "reply", "step_committed"],
+                ["agent_routed", "step_committed", "reply", "step_committed"],
             )
         )
 

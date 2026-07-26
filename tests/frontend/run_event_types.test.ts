@@ -37,6 +37,12 @@ describe("generated Run event contract", () => {
       "step_committed",
       "interaction_requested",
       "interaction_resolved",
+      "activity_updated",
+      "tool_started",
+      "tool_succeeded",
+      "tool_failed",
+      "tool_cancelled",
+      "artifact_ready",
     ]);
   });
 

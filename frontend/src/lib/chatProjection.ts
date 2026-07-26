@@ -4,12 +4,23 @@ import type { RunLiveEvent, RunLiveEventKind } from "../services/runLive";
 export interface RunActivity {
   id: string;
   phase: string;
+  kind?: "phase" | "plan" | "schema" | "code" | "tool" | "verification" | "repair" | "artifact" | "approval";
   status: "running" | "completed" | "failed" | "waiting";
+  title?: string;
   detail?: string;
+  metadata?: Record<string, unknown>;
   updates: number;
   toolCalls: number;
   startedAt: string;
   updatedAt: string;
+}
+
+export interface RunDebugEvent {
+  type: string;
+  sequence: number;
+  stepId?: string;
+  createdAt: string;
+  payload: string;
 }
 
 export interface ChatRunCard {
@@ -27,6 +38,17 @@ export interface ChatRunCard {
   repairCount: number;
   artifactCount: number;
   activities: RunActivity[];
+  debugEvents?: RunDebugEvent[];
+}
+
+export interface RunInteractionState {
+  id: string;
+  runId: string;
+  kind: string;
+  status: "pending" | "resolved" | "cancelled";
+  payload: Record<string, unknown>;
+  createdAt: string;
+  resolvedAt?: string;
 }
 
 export interface LiveStreamState {
@@ -47,6 +69,8 @@ export interface ConversationProjection {
   runs: Record<string, ChatRunCard>;
   liveStreams: Record<string, LiveStreamState>;
   liveStepWatermarks: Record<string, number>;
+  interactions: Record<string, RunInteractionState>;
+  seenEventIds: Record<string, true>;
 }
 
 export const EMPTY_CONVERSATION_PROJECTION: ConversationProjection = {
@@ -54,6 +78,8 @@ export const EMPTY_CONVERSATION_PROJECTION: ConversationProjection = {
   runs: {},
   liveStreams: {},
   liveStepWatermarks: {},
+  interactions: {},
+  seenEventIds: {},
 };
 
 const TERMINAL_STATUSES = new Set<RunStatus>(["succeeded", "failed", "cancelled", "needs_attention"]);
@@ -88,6 +114,22 @@ const asString = (value: unknown): string => typeof value === "string" ? value :
 const asNumber = (value: unknown): number => (
   typeof value === "number" && Number.isFinite(value) ? value : 0
 );
+
+const SENSITIVE_DEBUG_KEY = /(?:authorization|credential|password|secret|token|api[_-]?key)/i;
+
+function boundedDebugPayload(value: unknown): string {
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(value, (key, item) => (
+      SENSITIVE_DEBUG_KEY.test(key) ? "[REDACTED]" : item
+    ), 2);
+  } catch {
+    serialized = String(value);
+  }
+  return serialized.length > 2_400
+    ? `${serialized.slice(0, 2_400)}\n…[truncated]`
+    : serialized;
+}
 
 function normalizedStatus(value: unknown, fallback: RunStatus = "queued"): RunStatus {
   return [
@@ -136,6 +178,7 @@ function defaultCard(runId: string, createdAt: string): ChatRunCard {
     repairCount: 0,
     artifactCount: 0,
     activities: [],
+    debugEvents: [],
   };
 }
 
@@ -160,11 +203,12 @@ function upsertActivity(
   now: string,
   patch: Partial<RunActivity> = {},
 ): ChatRunCard {
-  const activityId = `phase:${phase}`;
+  const activityId = patch.id ?? `phase:${phase}`;
   const index = card.activities.findIndex((activity) => activity.id === activityId);
   const existing = index >= 0 ? card.activities[index] : {
     id: activityId,
     phase,
+    kind: "phase" as const,
     status: "running" as const,
     updates: 0,
     toolCalls: 0,
@@ -184,29 +228,96 @@ function upsertActivity(
   return { ...card, activities };
 }
 
+function appendDebugEvent(card: ChatRunCard, event: RunEvent): ChatRunCard {
+  const debugEvent: RunDebugEvent = {
+    type: event.type,
+    sequence: event.sequence,
+    stepId: event.step_id || undefined,
+    createdAt: event.created_at,
+    payload: boundedDebugPayload(event.payload),
+  };
+  const currentDebugEvents = card.debugEvents ?? [];
+  const existingIndex = currentDebugEvents.findIndex((item) => (
+    item.sequence === debugEvent.sequence && item.type === debugEvent.type
+  ));
+  const debugEvents = existingIndex >= 0
+    ? currentDebugEvents.map((item, index) => index === existingIndex ? debugEvent : item)
+    : [...currentDebugEvents, debugEvent].slice(-24);
+  return { ...card, debugEvents };
+}
+
 function payloadType(payload: Record<string, unknown> | null): string {
   return asString(payload?.type);
 }
 
 function projectBusinessPayload(card: ChatRunCard, payload: Record<string, unknown>, now: string): ChatRunCard {
   const type = payloadType(payload);
-  if (type === "reply") {
-    const message = asRecord(payload.message);
-    if (message?.id === -1) {
-      const content = asString(message.content);
-      const detail = trimDetail(content);
-      const toolCalls = (content.match(/(?:Calling tool|调用工具)/g) ?? []).length;
-      let next = upsertActivity(card, card.phase, now);
-      const activity = next.activities.find((item) => item.id === `phase:${card.phase}`);
-      next = upsertActivity(next, card.phase, now, {
-        detail: detail || activity?.detail,
-        status: "running",
-        updates: (activity?.updates ?? 0) + 1,
-        toolCalls: Math.max(activity?.toolCalls ?? 0, toolCalls),
-      });
-      return next;
-    }
-    return card;
+  if (type === "activity_updated") {
+    const activityId = asString(payload.activity_id);
+    const activityType = asString(payload.activity_type);
+    const status = asString(payload.status);
+    if (
+      !activityId
+      || !["plan", "schema", "code", "tool", "verification", "repair", "artifact", "approval"].includes(activityType)
+      || !["running", "completed", "failed", "waiting"].includes(status)
+    ) return card;
+    return upsertActivity(card, card.phase, now, {
+      id: activityId,
+      kind: activityType as RunActivity["kind"],
+      status: status as RunActivity["status"],
+      title: asString(payload.summary),
+      detail: trimDetail(payload.detail) || undefined,
+      metadata: asRecord(payload.metadata) ?? undefined,
+    });
+  }
+  if (["tool_started", "tool_succeeded", "tool_failed", "tool_cancelled"].includes(type)) {
+    const tool = asString(payload.tool) || "tool";
+    const activityId = `tool:${card.phase}:${tool}`;
+    const existing = card.activities.find((item) => item.id === activityId);
+    const durationMs = asNumber(payload.duration_ms);
+    const status: RunActivity["status"] = type === "tool_started"
+      ? "running"
+      : type === "tool_succeeded"
+        ? "completed"
+        : "failed";
+    const detail = type === "tool_failed"
+      ? asString(payload.error) || undefined
+      : durationMs > 0
+        ? `${Math.round(durationMs)} ms`
+        : undefined;
+    return upsertActivity(card, card.phase, now, {
+      id: activityId,
+      kind: "tool",
+      status,
+      title: tool,
+      detail,
+      metadata: {
+        effect: payload.effect,
+        duration_ms: durationMs || undefined,
+        output_bytes: asNumber(payload.output_bytes) || undefined,
+      },
+      toolCalls: (existing?.toolCalls ?? 0) + (type === "tool_started" ? 1 : 0),
+      updates: (existing?.updates ?? 0) + 1,
+    });
+  }
+  if (type === "artifact_ready") {
+    const artifactId = asString(payload.artifact_id);
+    return upsertActivity(
+      { ...card, artifactCount: Math.max(1, card.artifactCount) },
+      card.phase,
+      now,
+      {
+        id: `artifact:${artifactId || "ready"}`,
+        kind: "artifact",
+        status: "completed",
+        title: asString(payload.summary) || "Artifact ready",
+        detail: asString(payload.title) || artifactId || undefined,
+        metadata: {
+          artifact_type: payload.artifact_type,
+          artifact_id: artifactId,
+        },
+      },
+    );
   }
   if (type === "plan_approval_request") {
     return upsertActivity({ ...card, status: "waiting_user", phase: "wait_plan" }, "plan", now, {
@@ -238,10 +349,82 @@ function projectBusinessPayload(card: ChatRunCard, payload: Record<string, unkno
   return card;
 }
 
+const INLINE_INTERACTION_TYPES: Record<string, string> = {
+  plan_approval_request: "plan_approval",
+  schema_approval_request: "schema_approval",
+  verification_approval_request: "verification_approval",
+};
+
+function projectInteractionRequest(
+  projection: ConversationProjection,
+  event: RunEvent,
+  payload: Record<string, unknown> | null,
+): ConversationProjection {
+  if (!payload) return projection;
+  const payloadTypeValue = payloadType(payload);
+  const kind = INLINE_INTERACTION_TYPES[payloadTypeValue];
+  const interactionId = asString(payload.request_id);
+  if (!kind || !interactionId) return projection;
+  return {
+    ...projection,
+    interactions: {
+      ...projection.interactions,
+      [interactionId]: {
+        id: interactionId,
+        runId: event.run_id,
+        kind,
+        status: "pending",
+        payload,
+        createdAt: event.created_at,
+      },
+    },
+  };
+}
+
+function projectInteractionResolution(
+  projection: ConversationProjection,
+  interactionId: string,
+  status: string,
+  now: string,
+): ConversationProjection {
+  if (!interactionId) return projection;
+  const existing = projection.interactions[interactionId];
+  const normalized = status === "cancelled" ? "cancelled" : "resolved";
+  const interactions = existing
+    ? {
+        ...projection.interactions,
+        [interactionId]: {
+          ...existing,
+          status: normalized as RunInteractionState["status"],
+          resolvedAt: now,
+        },
+      }
+    : projection.interactions;
+  const runId = existing?.runId;
+  if (!runId || !projection.runs[runId]) return { ...projection, interactions };
+  const card = projection.runs[runId];
+  return {
+    ...projection,
+    interactions,
+    runs: {
+      ...projection.runs,
+      [runId]: {
+        ...card,
+        activities: card.activities.map((activity) => (
+          activity.metadata?.interaction_id === interactionId
+            ? { ...activity, status: normalized === "resolved" ? "completed" : "failed", updatedAt: now }
+            : activity
+        )),
+      },
+    },
+  };
+}
+
 export function projectRunEvent(
   projection: ConversationProjection,
   event: RunEvent,
 ): ConversationProjection {
+  if (projection.seenEventIds[event.event_id]) return projection;
   const payload = asRecord(event.payload);
   const now = event.created_at;
   let next = withCard(projection, event.run_id, now, (current) => {
@@ -251,6 +434,12 @@ export function projectRunEvent(
       attempt: event.attempt ?? current.attempt,
       modelTurns: Math.max(current.modelTurns, asNumber(event.model_usage?.model_turns)),
     };
+    if (
+      event.step_id
+      && ["activity_updated", "tool_started", "tool_succeeded", "tool_failed", "tool_cancelled", "artifact_ready"].includes(event.type)
+    ) {
+      card = { ...card, phase: event.step_id };
+    }
 
     if (event.type === "run_created") {
       return {
@@ -324,10 +513,38 @@ export function projectRunEvent(
 
     return payload ? projectBusinessPayload(card, payload, now) : card;
   });
+  next = withCard(next, event.run_id, now, (card) => appendDebugEvent(card, event));
+  next = projectInteractionRequest(next, event, payload);
+  if (event.type === "interaction_requested") {
+    const interactionId = asString(payload?.interaction_id);
+    if (interactionId && !next.interactions[interactionId]) {
+      next = {
+        ...next,
+        interactions: {
+          ...next.interactions,
+          [interactionId]: {
+            id: interactionId,
+            runId: event.run_id,
+            kind: asString(payload?.type) || "interaction",
+            status: "pending",
+            payload: payload ?? {},
+            createdAt: now,
+          },
+        },
+      };
+    }
+  } else if (event.type === "interaction_resolved") {
+    next = projectInteractionResolution(
+      next,
+      asString(payload?.interaction_id),
+      asString(payload?.status),
+      now,
+    );
+  }
   const replyMessage = asRecord(payload?.message);
   const positiveReply = payloadType(payload) === "reply"
     && replyMessage !== null
-    && asNumber(replyMessage.id) >= 0;
+    && asNumber(replyMessage.id) > 0;
   if (event.type === "step_committed") {
     const phase = asString(payload?.step_key) || event.step_id;
     next = clearLiveStreams(next, (stream) => (
@@ -355,16 +572,23 @@ export function projectRunEvent(
       asNumber(event.attempt),
     );
   }
-  return next;
+  return {
+    ...next,
+    seenEventIds: {
+      ...next.seenEventIds,
+      [event.event_id]: true,
+    },
+  };
 }
 
 export function projectRunSnapshot(
   projection: ConversationProjection,
   run: AmbientRun,
 ): ConversationProjection {
+  const replayed = (run.events ?? []).reduce(projectRunEvent, projection);
   const checkpoint = asRecord(run.checkpoint);
   const lastStep = asString(checkpoint?.last_step);
-  const next = withCard(projection, run.id, run.created_at, (current) => {
+  const next = withCard(replayed, run.id, run.created_at, (current) => {
     const input = asRecord(run.input);
     const content = trimDetail(input?.content);
     const error = run.error?.message ?? "";
@@ -402,9 +626,32 @@ export function projectRunSnapshot(
   const reconciled = lastStep
     ? markLiveStepCompleted(next, run.id, lastStep, checkpointAttempt)
     : next;
+  let withInteractions = reconciled;
+  for (const interaction of run.interactions ?? []) {
+    const interactionPayload = asRecord(interaction.payload) ?? {};
+    withInteractions = {
+      ...withInteractions,
+      interactions: {
+        ...withInteractions.interactions,
+        [interaction.id]: {
+          id: interaction.id,
+          runId: run.id,
+          kind: interaction.type,
+          status: interaction.status === "pending"
+            ? "pending"
+            : interaction.status === "cancelled"
+              ? "cancelled"
+              : "resolved",
+          payload: interactionPayload,
+          createdAt: interaction.created_at,
+          resolvedAt: interaction.resolved_at ?? undefined,
+        },
+      },
+    };
+  }
   return ["queued", "running"].includes(run.status)
-    ? reconciled
-    : clearLiveStreams(reconciled, (stream) => stream.runId === run.id);
+    ? withInteractions
+    : clearLiveStreams(withInteractions, (stream) => stream.runId === run.id);
 }
 
 export function projectLiveRunEvent(
@@ -477,6 +724,15 @@ export function liveStreamsForRun(
   return Object.values(streams)
     .filter((stream) => stream.runId === runId)
     .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+}
+
+export function interactionsForRun(
+  interactions: Record<string, RunInteractionState>,
+  runId: string,
+): RunInteractionState[] {
+  return Object.values(interactions)
+    .filter((interaction) => interaction.runId === runId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 export function orderedRunCards(projection: ConversationProjection): ChatRunCard[] {

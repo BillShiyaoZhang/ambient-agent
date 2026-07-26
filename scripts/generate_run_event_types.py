@@ -53,6 +53,12 @@ export type StepStartedEvent = RunEventEnvelope<"step_started", {{ step_key: str
 export type StepCommittedEvent = RunEventEnvelope<"step_committed", {{ step_key: string; attempt: number; lease_epoch: number; run_version: number; outcome: Record<string, unknown>; [key: string]: unknown }}>;
 export type InteractionRequestedEvent = RunEventEnvelope<"interaction_requested", {{ interaction_id: string; type: string; [key: string]: unknown }}>;
 export type InteractionResolvedEvent = RunEventEnvelope<"interaction_resolved", {{ interaction_id: string; run_version: number; status: string; [key: string]: unknown }}>;
+export type ActivityUpdatedEvent = RunEventEnvelope<"activity_updated", {{ activity_id: string; activity_type: "plan" | "schema" | "code" | "tool" | "verification" | "repair" | "artifact" | "approval"; status: "running" | "completed" | "failed" | "waiting"; summary: string; detail?: string | null; metadata?: Record<string, unknown>; [key: string]: unknown }}>;
+export type ToolStartedEvent = RunEventEnvelope<"tool_started", {{ tool: string; [key: string]: unknown }}>;
+export type ToolSucceededEvent = RunEventEnvelope<"tool_succeeded", {{ tool: string; [key: string]: unknown }}>;
+export type ToolFailedEvent = RunEventEnvelope<"tool_failed", {{ tool: string; [key: string]: unknown }}>;
+export type ToolCancelledEvent = RunEventEnvelope<"tool_cancelled", {{ tool: string; [key: string]: unknown }}>;
+export type ArtifactReadyEvent = RunEventEnvelope<"artifact_ready", {{ artifact_type: string; artifact_id: string; title?: string | null; summary: string; [key: string]: unknown }}>;
 
 export type KnownRunEvent =
   | RunCreatedEvent
@@ -60,7 +66,13 @@ export type KnownRunEvent =
   | StepStartedEvent
   | StepCommittedEvent
   | InteractionRequestedEvent
-  | InteractionResolvedEvent;
+  | InteractionResolvedEvent
+  | ActivityUpdatedEvent
+  | ToolStartedEvent
+  | ToolSucceededEvent
+  | ToolFailedEvent
+  | ToolCancelledEvent
+  | ArtifactReadyEvent;
 
 export type UnknownRunEvent = RunEventEnvelope<string, unknown>;
 export type RunEvent = KnownRunEvent | UnknownRunEvent;

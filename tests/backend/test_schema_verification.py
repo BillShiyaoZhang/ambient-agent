@@ -139,20 +139,11 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch, 
         assert status_running["type"] == "session_status_update"
         assert status_running["status"] == "running"
 
-        # PHASE 1: Plan Generation thinking
-        plan_thinking = websocket.receive_json()
-        assert plan_thinking["type"] == "reply"
-        assert "正在为您制定开发计划" in plan_thinking["message"]["content"]
-
         # Expect Plan Approval Request modal
         plan_req = websocket.receive_json()
         assert plan_req["type"] == "plan_approval_request"
         assert plan_req["plan"] == "Plan: Build stopwatch"
         plan_request_id = plan_req["request_id"]
-
-        # Expect Plan Waiting message
-        waiting_plan = websocket.receive_json()
-        assert "等待开发计划 Plan 确认中" in waiting_plan["message"]["content"]
 
         # Approve Plan
         websocket.send_json(
@@ -165,19 +156,10 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch, 
             }
         )
 
-        # PHASE 2: Schema Alignment thinking
-        schema_thinking = websocket.receive_json()
-        assert schema_thinking["type"] == "reply"
-        assert "正在对齐数据库 Schema" in schema_thinking["message"]["content"]
-
         # Expect Schema Approval Request modal
         schema_req = websocket.receive_json()
         assert schema_req["type"] == "schema_approval_request"
         schema_request_id = schema_req["request_id"]
-
-        # Expect Schema Waiting message
-        waiting_schema = websocket.receive_json()
-        assert "等待数据库 Schema 确认中" in waiting_schema["message"]["content"]
 
         # Approve Schema
         websocket.send_json(
@@ -190,23 +172,8 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch, 
             }
         )
 
-        # Expect ACP OpenCode start update
-        opencode_start = websocket.receive_json()
-        assert "正在启动 OpenCode 开发者智能体" in opencode_start["message"]["content"]
-
-        # Expect Verification start update
-        verify_start = websocket.receive_json()
-        assert "正在校验代码与 Database Schema" in verify_start["message"]["content"]
-
-        # Expect final Verification report message
-        verify_report = websocket.receive_json()
-        assert any(
-            x in verify_report["message"]["content"]
-            for x in ["Database Schema Verification Report", "数据库 Schema 校验报告"]
-        )
-        assert "✅ Schema Verification PASSED" in verify_report["message"]["content"]
-
-        # Promotion emits both a durable App artifact and the final reply. Their
+        # Process output stays on the Run stream. The legacy socket receives
+        # only the final answer and App delivery. Their
         # projection order is not part of the public WebSocket contract.
         tail = []
         for _ in range(4):
@@ -218,9 +185,10 @@ def test_websocket_plan_then_schema_then_verify_flow(test_session, monkeypatch, 
         else:  # pragma: no cover - keeps a hung/malformed projection failure explicit
             pytest.fail("workflow did not reach idle after promotion")
 
-        final_log = next(event for event in tail if event.get("type") == "reply")
-        assert any(x in final_log["message"]["content"] for x in ["OpenCode Execution Log", "OpenCode 执行日志"])
-        assert "✅ Schema Verification PASSED" in final_log["message"]["content"]
+        final_answer = next(event for event in tail if event.get("type") == "reply")
+        assert "已生成、验证并发布" in final_answer["message"]["content"]
+        assert "Execution Log" not in final_answer["message"]["content"]
+        assert "Schema Verification" not in final_answer["message"]["content"]
 
         # Expect widget delivery message
         widget_msg = next(event for event in tail if event.get("type") == "widget")

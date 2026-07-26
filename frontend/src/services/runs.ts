@@ -16,7 +16,7 @@ export interface RunInteraction {
   type: string;
   prompt: string;
   payload: Record<string, unknown>;
-  status: "pending" | "resolved";
+  status: "pending" | "resolved" | "cancelled";
   response?: unknown;
   created_at: string;
   resolved_at?: string | null;
@@ -473,11 +473,21 @@ export class RunService {
     return () => this.listeners.delete(listener);
   }
 
-  async list(params: { status?: string; owner_id?: string; limit?: number } = {}): Promise<AmbientRun[]> {
+  async list(params: {
+    status?: string;
+    owner_id?: string;
+    source_type?: string;
+    source_id?: string;
+    limit?: number;
+    include_details?: boolean;
+  } = {}): Promise<AmbientRun[]> {
     const query = new URLSearchParams();
     if (params.status) query.set("status", params.status);
     if (params.owner_id) query.set("owner_id", params.owner_id);
+    if (params.source_type) query.set("source_type", params.source_type);
+    if (params.source_id) query.set("source_id", params.source_id);
     if (params.limit) query.set("limit", String(params.limit));
+    if (params.include_details) query.set("include_details", "true");
     const response = await fetch(`${API_BASE}/api/runs?${query}`);
     if (!response.ok) throw new Error(`Unable to list runs: HTTP ${response.status}`);
     const payload = await response.json();

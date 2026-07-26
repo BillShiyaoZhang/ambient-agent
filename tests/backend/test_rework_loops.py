@@ -164,15 +164,11 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
         # Expect running status update
         assert websocket.receive_json()["type"] == "session_status_update"
 
-        # Plan thinking & plan request 1
-        assert "正在为您制定开发计划" in websocket.receive_json()["message"]["content"]
+        # Plan request 1; progress is projected through the canonical Run stream.
         plan_req = websocket.receive_json()
         assert plan_req["type"] == "plan_approval_request"
         assert plan_req["plan"] == "Plan Version 1"
         plan_request_id = plan_req["request_id"]
-
-        # Expect waiting message
-        assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 1
         websocket.send_json(
@@ -185,14 +181,10 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
             }
         )
 
-        # Schema alignment thinking & request 1
-        assert "正在对齐数据库 Schema" in websocket.receive_json()["message"]["content"]
+        # Schema request 1
         schema_req = websocket.receive_json()
         assert schema_req["type"] == "schema_approval_request"
         schema_request_id = schema_req["request_id"]
-
-        # Expect waiting message
-        assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Send rework_plan response back to request Plan Rework!
         websocket.send_json(
@@ -206,15 +198,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
         )
 
         # Rework resumes directly from the durable plan checkpoint.
-        assert "正在为您制定开发计划" in websocket.receive_json()["message"]["content"]
         plan_req_2 = websocket.receive_json()
         assert plan_req_2["type"] == "plan_approval_request"
         assert plan_req_2["plan"] == "Plan Version 2"
         assert "Please rework plan to be simpler" in plan_inputs[1]["instruction"]
         assert '"reused_schemas"' in plan_inputs[1]["schemas_context"]
         plan_request_id_2 = plan_req_2["request_id"]
-
-        assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 2
         websocket.send_json(
@@ -227,13 +216,10 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
             }
         )
 
-        # Schema alignment thinking & request 2
-        assert "正在对齐数据库 Schema" in websocket.receive_json()["message"]["content"]
+        # Schema request 2
         schema_req_2 = websocket.receive_json()
         assert schema_req_2["type"] == "schema_approval_request"
         schema_request_id_2 = schema_req_2["request_id"]
-
-        assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Approve Schema 2
         websocket.send_json(
@@ -246,27 +232,11 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
             }
         )
 
-        # OpenCode starts execution
-        stage_event = websocket.receive_json()
-        assert stage_event["type"] == "reply", stage_event
-        assert "正在启动 OpenCode 开发者智能体" in stage_event["message"]["content"]
-
-        # Verification starts execution
-        assert "正在校验代码与 Database Schema" in websocket.receive_json()["message"]["content"]
-
-        # Expect Verification Report showing discrepancies (fails verification 1)
-        verify_report_msg = websocket.receive_json()
-        assert "Database Schema Verification Report" in verify_report_msg["message"]["content"]
-        assert "WARNING" in verify_report_msg["message"]["content"]
-
         # Expect Verification Approval request payload
         verify_req = websocket.receive_json()
         assert verify_req["type"] == "verification_approval_request"
         verify_request_id = verify_req["request_id"]
         assert "WARNING" in verify_req["report"]
-
-        # Expect waiting message
-        assert "等待校验处理决定" in websocket.receive_json()["message"]["content"]
 
         # Send Rework Code response to request Auto-Fix!
         websocket.send_json(
@@ -278,21 +248,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
             }
         )
 
-        # Code rework resumes directly from the durable staging phase.
-        assert "正在启动 OpenCode 开发者智能体" in websocket.receive_json()["message"]["content"]
-
-        # Verification starts execution again (run 2)
-        assert "正在校验代码与 Database Schema" in websocket.receive_json()["message"]["content"]
-
-        # Expect Verification Report showing PASS
-        verify_report_msg_2 = websocket.receive_json()
-        assert "✅ Schema Verification PASSED" in verify_report_msg_2["message"]["content"]
-
-        # Expect final reply and execution logs
+        # Process details remain in Run activity/debug; chat gets one concise answer.
         reply_msg = websocket.receive_json()
         assert reply_msg["type"] == "reply"
-        assert "OpenCode ran 2 times" in reply_msg["message"]["content"]
-        assert "✅ Schema Verification PASSED" in reply_msg["message"]["content"]
+        assert "已生成、验证并发布" in reply_msg["message"]["content"]
+        assert "OpenCode ran" not in reply_msg["message"]["content"]
+        assert "Schema Verification" not in reply_msg["message"]["content"]
 
         # Expect widget delivery message
         widget_msg = websocket.receive_json()

@@ -44,11 +44,9 @@ def test_websocket_chat_flow(test_session, monkeypatch):
             assert ack["type"] == "ack"
             assert ack["message"]["content"] == "Hello Agent"
             assert websocket.receive_json()["status"] == "running"
-            thinking = websocket.receive_json()
-            if thinking["type"] == "session_title_updated":
-                thinking = websocket.receive_json()
-            assert thinking["type"] == "reply"
             reply = websocket.receive_json()
+            if reply["type"] == "session_title_updated":
+                reply = websocket.receive_json()
             assert reply["type"] == "reply"
             assert "Hello Agent" in reply["message"]["content"]
             assert websocket.receive_json()["status"] == "idle"
@@ -120,11 +118,9 @@ def test_websocket_converse_rejects_unverified_inline_widget(test_session, monke
             websocket.send_json({"sender": "user", "content": "Give me weather details"})
             assert websocket.receive_json()["type"] == "ack"
             assert websocket.receive_json()["status"] == "running"
-            thinking = websocket.receive_json()
-            if thinking["type"] == "session_title_updated":
-                thinking = websocket.receive_json()
-            assert thinking["type"] == "reply"
             error = websocket.receive_json()
+            if error["type"] == "session_title_updated":
+                error = websocket.receive_json()
             assert error["type"] == "error"
             assert error["code"] == "unverified_inline_artifact"
             assert websocket.receive_json()["status"] == "idle"

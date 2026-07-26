@@ -82,6 +82,32 @@ class InteractionResolvedPayload(BaseModel):
     status: str = Field(min_length=1)
 
 
+class ActivityUpdatedPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    activity_id: str = Field(min_length=1)
+    activity_type: Literal["plan", "schema", "code", "tool", "verification", "repair", "artifact", "approval"]
+    status: Literal["running", "completed", "failed", "waiting"]
+    summary: str = Field(min_length=1, max_length=2_000)
+    detail: str | None = Field(default=None, max_length=12_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolEventPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    tool: str = Field(min_length=1)
+
+
+class ArtifactReadyPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    artifact_type: str = Field(min_length=1)
+    artifact_id: str = Field(min_length=1)
+    title: str | None = None
+    summary: str = Field(min_length=1, max_length=2_000)
+
+
 class RunCreatedEvent(RunEventEnvelope):
     type: Literal["run_created"] = "run_created"
     payload: RunCreatedPayload
@@ -112,6 +138,36 @@ class InteractionResolvedEvent(RunEventEnvelope):
     payload: InteractionResolvedPayload
 
 
+class ActivityUpdatedEvent(RunEventEnvelope):
+    type: Literal["activity_updated"] = "activity_updated"
+    payload: ActivityUpdatedPayload
+
+
+class ToolStartedEvent(RunEventEnvelope):
+    type: Literal["tool_started"] = "tool_started"
+    payload: ToolEventPayload
+
+
+class ToolSucceededEvent(RunEventEnvelope):
+    type: Literal["tool_succeeded"] = "tool_succeeded"
+    payload: ToolEventPayload
+
+
+class ToolFailedEvent(RunEventEnvelope):
+    type: Literal["tool_failed"] = "tool_failed"
+    payload: ToolEventPayload
+
+
+class ToolCancelledEvent(RunEventEnvelope):
+    type: Literal["tool_cancelled"] = "tool_cancelled"
+    payload: ToolEventPayload
+
+
+class ArtifactReadyEvent(RunEventEnvelope):
+    type: Literal["artifact_ready"] = "artifact_ready"
+    payload: ArtifactReadyPayload
+
+
 class UnknownRunEvent(RunEventEnvelope):
     """Forward-compatible carrier for unknown types and future versions."""
 
@@ -123,6 +179,12 @@ CORE_RUN_EVENT_MODELS = (
     StepCommittedEvent,
     InteractionRequestedEvent,
     InteractionResolvedEvent,
+    ActivityUpdatedEvent,
+    ToolStartedEvent,
+    ToolSucceededEvent,
+    ToolFailedEvent,
+    ToolCancelledEvent,
+    ArtifactReadyEvent,
 )
 _MODEL_BY_TYPE = {model.model_fields["type"].default: model for model in CORE_RUN_EVENT_MODELS}
 

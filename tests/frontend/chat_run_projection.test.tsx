@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   chatConnect: vi.fn(),
   chatDisconnect: vi.fn(),
+  chatSend: vi.fn(),
   runListeners: new Set<(event: Record<string, unknown>) => void>(),
   liveListeners: new Set<(event: Record<string, unknown>) => void>(),
   liveResetListeners: new Set<() => void>(),
@@ -15,7 +16,7 @@ vi.mock("../../frontend/src/services/websocket", () => ({
     connect: harness.chatConnect,
     disconnect: harness.chatDisconnect,
     isConnected: vi.fn(() => true),
-    sendMessage: vi.fn(),
+    sendMessage: harness.chatSend,
     registerPersistentMessage: vi.fn(),
     unregisterPersistentMessage: vi.fn(),
   },
@@ -190,7 +191,7 @@ describe("canonical RunEvent chat projection", () => {
     expect(createCalls).toBe(1);
   });
 
-  it("groups ephemeral streaming replies into a Run card", async () => {
+  it("projects structured progress into a Run card without a chat message", async () => {
     render(<App />);
     await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
@@ -202,20 +203,30 @@ describe("canonical RunEvent chat projection", () => {
           attempt: 1,
           lease_epoch: 1,
         }));
-        listener(canonicalProgress("session-one", 2, "agent_update", {
-          type: "reply",
-          message: { id: -1, sender: "agent", content: "正在准备组件文件" },
+        listener(canonicalProgress("session-one", 2, "activity_updated", {
+          type: "activity_updated",
+          activity_id: "code:generation",
+          activity_type: "code",
+          status: "running",
+          summary: "Generating staged App",
+          detail: "正在准备组件文件",
+          metadata: {},
         }));
-        listener(canonicalProgress("session-one", 3, "agent_update", {
-          type: "reply",
-          message: { id: -1, sender: "agent", content: "正在写入组件文件" },
+        listener(canonicalProgress("session-one", 3, "activity_updated", {
+          type: "activity_updated",
+          activity_id: "code:generation",
+          activity_type: "code",
+          status: "running",
+          summary: "Generating staged App",
+          detail: "正在写入组件文件",
+          metadata: {},
         }));
       });
     });
 
     expect(await screen.findByText("生成中 · 生成应用")).toBeDefined();
     expect(screen.getAllByText("正在写入组件文件")).toHaveLength(1);
-    expect(screen.getByText("2 条进度已归并")).toBeDefined();
+    expect(screen.queryByText("正在准备组件文件")).toBeNull();
   });
 
   it("shows batched live deltas before commit and removes them at the durable boundary", async () => {
@@ -282,5 +293,53 @@ describe("canonical RunEvent chat projection", () => {
       harness.liveResetListeners.forEach((listener) => listener());
     });
     await waitFor(() => expect(screen.queryByText("断线前文本")).toBeNull());
+  });
+
+  it("keeps ordinary plan approval inline and sends the selected action", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "plan_approval_request", {
+          type: "plan_approval_request",
+          request_id: "interaction-plan",
+          app_id: "weather-app",
+          plan: "生成天气概览与逐小时预报。",
+        }),
+      ));
+    });
+
+    expect(await screen.findByText("确认开发计划")).toBeDefined();
+    expect(screen.queryByText("App 开发计划确认")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "批准计划" }));
+    expect(harness.chatSend).toHaveBeenCalledWith({
+      type: "plan_approval_response",
+      request_id: "interaction-plan",
+      approved: true,
+      plan: "生成天气概览与逐小时预报。",
+      feedback: "",
+    });
+  });
+
+  it("keeps sensitive tool permission requests in a blocking dialog", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "permission_request", {
+          type: "permission_request",
+          request_id: "permission-one",
+          tool_call: "terminal",
+          details: "npm publish",
+        }),
+      ));
+    });
+
+    expect(await screen.findByText("OpenCode 授权请求")).toBeDefined();
+    expect(screen.getByText("npm publish")).toBeDefined();
+    expect(screen.getByRole("button", { name: "允许 (Allow)" })).toBeDefined();
   });
 });

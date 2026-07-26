@@ -205,7 +205,7 @@ def _workflow(
 
 
 @pytest.mark.asyncio
-async def test_live_snapshot_updates_are_diffed_without_entering_durable_store(
+async def test_live_activity_snapshots_are_diffed_without_entering_durable_store(
     tmp_path: Path,
 ) -> None:
     store = RunStore(str(tmp_path))
@@ -221,21 +221,19 @@ async def test_live_snapshot_updates_are_diffed_without_entering_durable_store(
     buffer_token = workflow._event_buffer.set([])
     live_token = workflow._live_stream_state.set({})
     try:
-        await workflow._emit(
+        await workflow._emit_activity_progress(
             run,
-            {
-                "type": "reply",
-                "message": {"id": -1, "sender": "agent", "content": "正在编"},
-            },
-            live_mode="snapshot",
+            activity_id="code:generation",
+            summary="Generating staged App",
+            detail="正在编",
+            mode="snapshot",
         )
-        await workflow._emit(
+        await workflow._emit_activity_progress(
             run,
-            {
-                "type": "reply",
-                "message": {"id": -1, "sender": "agent", "content": "正在编写"},
-            },
-            live_mode="snapshot",
+            activity_id="code:generation",
+            summary="Generating staged App",
+            detail="正在编写",
+            mode="snapshot",
         )
         buffered = list(workflow._event_buffer.get() or [])
     finally:
@@ -246,10 +244,72 @@ async def test_live_snapshot_updates_are_diffed_without_entering_durable_store(
     assert [event["replace"] for event in emitted] == [True, False]
     assert [event["chunk_sequence"] for event in emitted] == [1, 2]
     assert {event["stream_id"] for event in emitted} == {
-        "run-live:stage_code:2:activity"
+        "run-live:stage_code:2:activity:code:generation"
     }
-    assert len(buffered) == 2
+    assert buffered == []
     assert store.events_after(0) == []
+
+
+@pytest.mark.asyncio
+async def test_durable_emit_rejects_unstructured_progress(tmp_path: Path) -> None:
+    workflow = _workflow(tmp_path, RunStore(str(tmp_path)), GraphDatabase(str(tmp_path)))
+    buffer_token = workflow._event_buffer.set([])
+    try:
+        with pytest.raises(durable_workflow_module.WorkflowError, match="structured payload"):
+            await workflow._emit(  # type: ignore[arg-type]
+                {"id": "run-legacy", "source_id": "session-1"},
+                "legacy progress",
+            )
+    finally:
+        workflow._event_buffer.reset(buffer_token)
+
+
+@pytest.mark.asyncio
+async def test_structured_activity_is_durable_and_immediately_projected_live(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    live_emitted: list[dict[str, Any]] = []
+    workflow = _workflow(tmp_path, store, graph_db, live_emitted=live_emitted)
+    run = {
+        "id": "run-activity",
+        "source_id": "session-1",
+        "step_key": "verify",
+        "step_attempt": 1,
+    }
+    buffer_token = workflow._event_buffer.set([])
+    live_token = workflow._live_stream_state.set({})
+    try:
+        await workflow._emit_activity(
+            run,
+            activity_id="verification:contract",
+            activity_type="verification",
+            status="running",
+            summary="Verifying staged App",
+            metadata={"finding_count": 0},
+        )
+        buffered = list(workflow._event_buffer.get() or [])
+    finally:
+        workflow._live_stream_state.reset(live_token)
+        workflow._event_buffer.reset(buffer_token)
+
+    assert len(buffered) == 1
+    assert buffered[0].type == "activity_updated"
+    assert buffered[0].payload["activity_id"] == "verification:contract"
+    assert live_emitted[0] == {
+        "schema_version": 1,
+        "run_id": "run-activity",
+        "session_id": "session-1",
+        "step_id": "verify",
+        "attempt": 1,
+        "stream_id": "run-activity:verify:1:activity:verification:contract",
+        "chunk_sequence": 1,
+        "kind": "activity_delta",
+        "delta": "Verifying staged App",
+        "replace": True,
+        "created_at": live_emitted[0]["created_at"],
+    }
 
 
 async def _execute_fenced_step(
@@ -1351,6 +1411,16 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
     assert len([event for event in events if event["type"] == "interaction_resolved"]) == 2
     terminal_status = [event for event in events if event["type"] == "status_changed"][-1]
     assert terminal_status["payload"]["to"] == "succeeded"
+    assert not [event for event in events if event["type"] == "agent_update"]
+    final_replies = [event for event in events if event["type"] == "reply"]
+    assert len(final_replies) == 1
+    assert final_replies[0]["payload"]["message"]["id"] > 0
+    assert "generated, verified, and published" in final_replies[0]["payload"]["message"]["content"]
+    assert "Execution Log" not in final_replies[0]["payload"]["message"]["content"]
+    persisted_messages = WorkspaceStorage(str(tmp_path)).get_messages("widget-e2e-session")
+    assert [(message.role, message.run_id) for message in persisted_messages] == [
+        ("agent", submitted["id"]),
+    ]
 
 
 @pytest.mark.asyncio

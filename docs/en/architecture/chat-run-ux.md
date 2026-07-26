@@ -1,6 +1,6 @@
 # Chat and Run Information Experience
 
-> Status: Phases A–B implemented; Phases C–D remain for later iterations. This document records the information architecture, event contracts, current implementation, and rollout order.
+> Status: Phases A–D are implemented. This document records the information architecture, event contracts, and current implementation.
 
 ## 1. Goals and principles
 
@@ -22,7 +22,7 @@ GitHub Copilot Agent similarly separates session overview, live session logs, to
 The current implementation has four concrete limits:
 
 - `Message` only has `sender/content/timestamp`; it cannot represent phases, activities, artifacts, approvals, or errors.
-- ACP `agent_message_chunk` and tool updates are concatenated into one string and projected as an ordinary `reply` with `id=-1`; the frontend can only replace one pending message.
+- The old implementation concatenated ACP `agent_message_chunk` and tool updates into one string, then projected it as an ordinary `reply` with a negative sentinel ID; the frontend could replace only one pending message.
 - Durable reducer `_emit()` first writes the step event buffer and projects only after step commit. Even when the Coding Agent calls back per chunk, users receive a burst at phase completion rather than true streaming.
 - `/ws/runs` already supports sequence, epoch, replay, and deduplication, but chat consumes only selected business payloads instead of projecting `step_started`, `progress`, and `step_committed` into readable task state.
 
@@ -164,7 +164,7 @@ type ConversationItem =
 
 A `run_id` appears at most once as a top-level Run card. `step_id + activity_id` deduplicates secondary activities; `event_id` and the Run stream cursor continue to deduplicate durable replay.
 
-`mergeIncomingMessage()` can remain as a compatibility adapter, but new events must not use `id=-1` as the universal pending state.
+`mergeIncomingMessage()` now accepts only user messages and final answers with positive persisted integer IDs. In-progress state is represented entirely by the Run projection.
 
 ## 7. Streaming rendering and scrolling
 
@@ -201,7 +201,7 @@ Show the latest finding by default and keep prior findings in the expanded timel
 ### Phase A: projection model
 
 - Add `ConversationProjection` and `RunCard`, initially consuming existing durable events.
-- Move phase notices and accumulated `id=-1` logs into the activity timeline.
+- Move phase notices and old accumulated logs into the activity timeline.
 - Change the desktop chat overlay default to about 432 × 600 px and add viewport-constrained resizing with persisted dimensions.
 - Preserve current reply/widget/approval API compatibility.
 
@@ -224,11 +224,45 @@ Implemented behavior:
 - Keep high-risk approval in blocking dialogs while moving ordinary choices inline.
 - Add a debug mode for bounded raw event JSON.
 
+Implemented behavior:
+
+- Run protocol v1 now registers `activity_updated` and `artifact_ready`, plus the existing `tool_started`, `tool_succeeded`, `tool_failed`, and `tool_cancelled` events. The legacy `/ws/chat` projection order is unchanged.
+- `activity_updated` updates a stable `activity_id` in place for plan, schema, code, verification, repair, artifact, and approval work. Tools aggregate by `phase + tool` instead of occupying one top-level row per call.
+- Plan, schema, and verification interactions show summaries and common actions inside the Run card. The full dialog opens only when the user explicitly chooses review/edit. Sensitive OpenCode and Backend/MCP permissions remain blocking dialogs.
+- Resolved and cancelled interactions remain as read-only records. Refresh restores them from the durable Run snapshot instead of relying on in-memory dialog state.
+- The active conversation requests a detailed events/interactions snapshot with `include_details=true` and deduplicates by `event_id`. Even if Task Center advanced the global Run cursor first, opening chat later restores the full process without double-counting tools.
+- Each Run card retains at most 24 debug events. Each payload is capped at 2.4 KB and fields named like authorization, credential, password, secret, token, or API key are redacted.
+
+Structured activity example:
+
+```json
+{
+  "type": "activity_updated",
+  "activity_id": "verification:contract",
+  "activity_type": "verification",
+  "status": "failed",
+  "summary": "Verification found required changes",
+  "detail": "Unknown property: temperature",
+  "metadata": {
+    "finding_count": 1,
+    "clean": false
+  }
+}
+```
+
 ### Phase D: retire the old protocol
 
 - Stop carrying phase progress through ordinary `reply`.
-- Remove the `id=-1` single-pending-message convention.
+- Remove the negative-sentinel single-pending-message convention.
 - Persist only user messages, final answers, and necessary interaction summaries in chat history.
+
+Implemented behavior:
+
+- The workflow durable `_emit()` accepts only structured objects with a `type`. Free-form callback text goes only to bounded live activity and is never written as a Run event or chat message.
+- Plan, Schema, Coding Agent, verification, and waiting notices no longer become chat bubbles. Their facts are carried by `activity_updated`, tool events, and interaction events.
+- A successful Widget now produces a concise delivery answer. Full Coding Agent output, verification reports, and repair evidence remain available in Run state, activity, and debug instead of occupying the main conversation.
+- Publishing an App no longer writes a synthetic `role=code` chat message. Later Runs recover up to 32 App references from successful Runs in the same conversation.
+- The frontend merges only `ack/reply` messages with positive persisted integer IDs, so old negative or non-persisted messages cannot enter chat history.
 
 ## 10. Confirmed product choices and acceptance criteria
 

@@ -927,7 +927,14 @@ class RunStore:
             return run
 
     def list_runs(
-        self, *, status: str | None = None, owner_id: str | None = None, limit: int = 100, offset: int = 0
+        self,
+        *,
+        status: str | None = None,
+        owner_id: str | None = None,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         where: list[str] = []
         params: list[Any] = []
@@ -938,6 +945,12 @@ class RunStore:
         if owner_id:
             where.append("owner_id=?")
             params.append(owner_id)
+        if source_type:
+            where.append("source_type=?")
+            params.append(source_type)
+        if source_id:
+            where.append("source_id=?")
+            params.append(source_id)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         params.extend([max(1, min(limit, 500)), max(0, offset)])
         with self._connect() as connection:

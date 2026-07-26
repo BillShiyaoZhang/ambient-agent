@@ -59,6 +59,41 @@ class ApiCoordinator:
         return self.store.get_run(interaction["run_id"])
 
 
+def test_chat_artifact_refs_are_recovered_from_successful_runs(monkeypatch):
+    class ArtifactStore:
+        def list_runs(self, **filters):
+            assert filters == {
+                "status": "succeeded",
+                "source_type": "chat",
+                "source_id": "session-one",
+                "limit": 100,
+            }
+            return [
+                {
+                    "state": {
+                        "artifact_refs": [
+                            {"type": "app", "id": "weather", "sha256": "new-hash"},
+                        ],
+                    },
+                    "artifacts": [{"type": "app", "id": "weather"}],
+                },
+                {
+                    "state": {"artifact_refs": []},
+                    "artifacts": [
+                        {"type": "widget", "id": "tasks"},
+                        {"type": "file", "id": "ignored"},
+                    ],
+                },
+            ]
+
+    monkeypatch.setattr(main_module, "run_store", ArtifactStore())
+
+    assert main_module._chat_artifact_refs("session-one") == [
+        {"type": "app", "id": "weather", "sha256": "new-hash"},
+        {"type": "app", "id": "tasks"},
+    ]
+
+
 def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
     store = RunStore(str(tmp_path))
     coordinator = ApiCoordinator(store)
@@ -79,6 +114,11 @@ def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
         assert created.status_code == 202
         run_id = created.json()["id"]
         assert client.get(f"/api/runs/{run_id}").json()["input"] == {"subject": "Hello"}
+        assert "events" not in client.get("/api/runs?limit=10").json()[0]
+        detailed = client.get("/api/runs?limit=10&include_details=true").json()[0]
+        assert detailed["id"] == run_id
+        assert detailed["events"][0]["type"] == "run_created"
+        assert detailed["interactions"] == []
 
         with client.websocket_connect("/ws/runs?after_sequence=0") as websocket:
             ready = websocket.receive_json()

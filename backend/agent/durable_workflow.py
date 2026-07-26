@@ -306,23 +306,24 @@ class DurableAgentWorkflow:
         payload_type = str(payload.get("type") or "")
         kind = ""
         delta = ""
+        snapshot = ""
         stream_suffix = "activity"
         tool: str | None = None
         tool_status: str | None = None
 
-        if payload_type == "reply":
-            message = payload.get("message")
-            if not isinstance(message, dict) or message.get("id") != -1:
-                return
-            delta = str(message.get("content") or "")
-            kind = "assistant_message_delta" if phase == "converse" else "activity_delta"
-        elif payload_type.startswith("tool_"):
+        if payload_type.startswith("tool_"):
             kind = "tool_progress"
             tool = str(payload.get("tool") or "tool")
             tool_status = payload_type.removeprefix("tool_")
             stream_suffix = f"tool:{tool}"
             delta = tool
             mode = "replace"
+        elif payload_type == "activity_updated":
+            activity_id = str(payload.get("activity_id") or "activity")
+            kind = "activity_delta"
+            stream_suffix = f"activity:{activity_id}"
+            delta = str(payload.get("detail") or payload.get("summary") or "")
+            snapshot = delta
         else:
             return
 
@@ -338,7 +339,7 @@ class DurableAgentWorkflow:
                 replace = False
             else:
                 replace = True
-            stream["snapshot"] = str(payload.get("message", {}).get("content") or "")
+            stream["snapshot"] = snapshot
         if not delta:
             return
         stream["sequence"] = int(stream.get("sequence") or 0) + 1
@@ -368,31 +369,27 @@ class DurableAgentWorkflow:
     async def _emit(
         self,
         run: dict[str, Any],
-        payload: Any,
+        payload: dict[str, Any],
         *,
         project_to_chat: bool = True,
-        live_mode: str = "delta",
     ) -> None:
-        if isinstance(payload, dict):
-            wire_payload = payload
-            event_type = str(payload.get("type") or "agent_update")
-        else:
-            wire_payload = {
-                "type": "reply",
-                "message": {
-                    "id": -1,
-                    "sender": "agent",
-                    "role": "agent",
-                    "content": str(payload),
-                    "timestamp": datetime.now(UTC).isoformat(),
-                },
-            }
-            event_type = "agent_update"
+        if not isinstance(payload, dict):
+            raise WorkflowError(
+                "Durable Run events must use a structured payload",
+                code="unstructured_run_event",
+            )
+        if not str(payload.get("type") or ""):
+            raise WorkflowError(
+                "Durable Run event payload is missing its type",
+                code="invalid_run_event",
+            )
+        wire_payload = payload
+        event_type = str(payload["type"])
         buffer = self._event_buffer.get()
         if buffer is None:
             raise WorkflowError("Reducer event emitted outside a step transaction", code="event_outside_step")
         if project_to_chat:
-            await self._emit_live(run, wire_payload, mode=live_mode)
+            await self._emit_live(run, wire_payload, mode="delta")
         buffer.append(
             PendingRunEvent(
                 type=event_type,
@@ -400,6 +397,98 @@ class DurableAgentWorkflow:
                 project_to_chat=project_to_chat,
             )
         )
+
+    async def _emit_activity_progress(
+        self,
+        run: dict[str, Any],
+        *,
+        activity_id: str,
+        summary: str,
+        detail: str,
+        mode: str = "replace",
+    ) -> None:
+        """Project ephemeral progress without adding it to Run or chat history."""
+
+        normalized_detail = str(detail or "")[-12_000:]
+        if not normalized_detail:
+            return
+        await self._emit_live(
+            run,
+            {
+                "type": "activity_updated",
+                "activity_id": activity_id[:200],
+                "status": "running",
+                "summary": " ".join(summary.strip().split())[:2_000] or "Working",
+                "detail": normalized_detail,
+            },
+            mode=mode,
+        )
+
+    async def _emit_callback_update(
+        self,
+        run: dict[str, Any],
+        payload: Any,
+        *,
+        activity_id: str,
+        summary: str,
+        mode: str = "replace",
+    ) -> None:
+        """Keep typed tool events durable and route free-form updates to live progress."""
+
+        if isinstance(payload, dict):
+            payload_type = str(payload.get("type") or "")
+            if payload_type in {
+                "tool_started",
+                "tool_succeeded",
+                "tool_failed",
+                "tool_cancelled",
+                "permission_request",
+                "backend_permission_request",
+            }:
+                await self._emit(run, payload)
+                return
+            detail = str(
+                payload.get("message")
+                or payload.get("detail")
+                or payload.get("summary")
+                or payload_type
+                or ""
+            )
+        else:
+            detail = str(payload)
+        await self._emit_activity_progress(
+            run,
+            activity_id=activity_id,
+            summary=summary,
+            detail=detail,
+            mode=mode,
+        )
+
+    async def _emit_activity(
+        self,
+        run: dict[str, Any],
+        *,
+        activity_id: str,
+        activity_type: str,
+        status: str,
+        summary: str,
+        detail: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "type": "activity_updated",
+            "activity_id": activity_id[:200],
+            "activity_type": activity_type,
+            "status": status,
+            "summary": " ".join(summary.strip().split())[:2_000] or activity_type,
+            "metadata": metadata or {},
+        }
+        if detail:
+            payload["detail"] = detail[:12_000]
+        # Structured activity belongs to the canonical Run stream. Keep the
+        # legacy /ws/chat projection stable while still sending its live hint.
+        await self._emit_live(run, payload, mode="replace")
+        await self._emit(run, payload, project_to_chat=False)
 
     async def dispatch_committed_events(self, run: dict[str, Any], outcome: StepOutcomeValue) -> None:
         """Best-effort compatibility projection after the SQLite commit."""
@@ -550,24 +639,15 @@ class DurableAgentWorkflow:
         )
         wire_payload = {**payload, "request_id": interaction_id, "run_id": run["id"]}
         state.pending_interaction_id = interaction_id
+        await self._emit_activity(
+            run,
+            activity_id=f"approval:{interaction_id}",
+            activity_type="approval",
+            status="waiting",
+            summary=prompt,
+            metadata={"interaction_id": interaction_id, "interaction_type": kind},
+        )
         await self._emit(run, wire_payload)
-        language = str(state.data.get("language") or "zh")
-        waiting_text = {
-            "plan_approval": (
-                "⏳ 等待开发计划 Plan 确认中...",
-                "⏳ Waiting for development plan approval...",
-            ),
-            "schema_approval": (
-                "⏳ 等待数据库 Schema 确认中...",
-                "⏳ Waiting for database schema approval...",
-            ),
-            "verification_approval": (
-                "⏳ 等待校验处理决定...",
-                "⏳ Waiting for a verification decision...",
-            ),
-        }.get(kind)
-        if waiting_text:
-            await self._emit(run, waiting_text[0] if language == "zh" else waiting_text[1])
         return Wait(
             interaction_id=interaction_id,
             interaction_type=kind,
@@ -899,7 +979,12 @@ class DurableAgentWorkflow:
         )
 
         async def on_update(payload: Any) -> None:
-            await self._emit(run, payload)
+            await self._emit_callback_update(
+                run,
+                payload,
+                activity_id="converse:response",
+                summary="Preparing response",
+            )
 
         message, widget = await orchestrator._handle_converse(
             plan=intent,
@@ -1149,11 +1234,13 @@ class DurableAgentWorkflow:
                 budget=self._model_budget(state),
             )
             state.data["plan_candidate"] = candidate
-        await self._emit(
+        await self._emit_activity(
             run,
-            "🔍 正在为您制定开发计划 Plan..."
-            if state.data.get("language") == "zh"
-            else "🔍 Formulating development plan...",
+            activity_id="plan:proposal",
+            activity_type="plan",
+            status="completed",
+            summary="Development plan prepared",
+            metadata={"app_id": intent.app_id},
         )
         state.phase = "wait_plan"
         return await self._wait(
@@ -1226,9 +1313,18 @@ class DurableAgentWorkflow:
             state.data.pop("pre_extend_schema_props", None)
             self.graph_db.effective_schemas(proposal)
             state.data["schema_candidate"] = proposal
-        await self._emit(
+        await self._emit_activity(
             run,
-            "🔍 正在对齐数据库 Schema..." if state.data.get("language") == "zh" else "🔍 Aligning database schemas...",
+            activity_id="schema:proposal",
+            activity_type="schema",
+            status="completed",
+            summary="Schema and capability proposal prepared",
+            metadata={
+                "app_id": intent.app_id,
+                "reused_schema_count": len(proposal.get("reused_schemas") or []),
+                "new_schema_count": len(proposal.get("new_schemas") or []),
+                "capability_count": len(proposal.get("capabilities") or []),
+            },
         )
         state.phase = "wait_schema"
         return await self._wait(
@@ -1440,15 +1536,23 @@ class DurableAgentWorkflow:
         language = str(state.data.get("language") or "zh")
         coding_agent = str(state.model_snapshot.get("coding_agent") or "opencode")
         coding_agent_name = spec_for(coding_agent).name
-        await self._emit(
+        await self._emit_activity(
             run,
-            f"🛠️ 正在启动 {coding_agent_name} 开发者智能体并生成隔离 staging App..."
-            if language == "zh"
-            else f"🛠️ Starting the {coding_agent_name} agent in an isolated staging App...",
+            activity_id="code:generation",
+            activity_type="code",
+            status="running",
+            summary=f"{coding_agent_name} is generating the staged App",
+            metadata={"agent": coding_agent, "app_id": intent.app_id},
         )
 
         async def on_coding_agent_update(payload: Any) -> None:
-            await self._emit(run, payload, live_mode="snapshot")
+            await self._emit_callback_update(
+                run,
+                payload,
+                activity_id="code:generation",
+                summary=f"{coding_agent_name} is generating the staged App",
+                mode="snapshot",
+            )
 
         kwargs: dict[str, Any] = {"language": language, "on_update": on_coding_agent_update}
         try:
@@ -1495,6 +1599,23 @@ class DurableAgentWorkflow:
                 "reason": exc.repair_reason,
                 "finding": exc.finding,
             }
+            finding = exc.finding if isinstance(exc.finding, dict) else {}
+            await self._emit_activity(
+                run,
+                activity_id="repair:auto",
+                activity_type="repair",
+                status="failed",
+                summary="Automatic repair stopped",
+                detail=str(finding.get("message") or exc)[:12_000],
+                metadata={
+                    "action": exc.repair_action,
+                    "reason": exc.repair_reason,
+                    "code": finding.get("code"),
+                    "stage": finding.get("stage"),
+                    "attempt": finding.get("attempt"),
+                    "artifact_hash": finding.get("artifact_hash"),
+                },
+            )
             raise WorkflowError(str(exc), code=exc.error_code) from exc
         if isinstance(generated, CodingAgentStagedResult):
             self._record_staged_app(state, generated, coding_agent)
@@ -1503,6 +1624,31 @@ class DurableAgentWorkflow:
             state.data.pop("repair_decision", None)
         else:
             raise WorkflowError("Coding agent did not return a staged artifact", code="staged_artifact_missing")
+        if generated.repair_attempts > 0:
+            latest_finding = generated.repair_findings[-1] if generated.repair_findings else {}
+            await self._emit_activity(
+                run,
+                activity_id="repair:auto",
+                activity_type="repair",
+                status="completed",
+                summary=f"Automatic repair completed after {generated.repair_attempts} attempt(s)",
+                detail=str(latest_finding.get("message") or "")[:12_000] or None,
+                metadata={
+                    "repair_count": generated.repair_attempts,
+                    "code": latest_finding.get("code"),
+                    "stage": latest_finding.get("stage"),
+                    "attempt": latest_finding.get("attempt"),
+                    "artifact_hash": latest_finding.get("artifact_hash"),
+                },
+            )
+        await self._emit_activity(
+            run,
+            activity_id="code:generation",
+            activity_type="code",
+            status="completed",
+            summary="Staged App generated",
+            metadata={"agent": coding_agent, "app_id": intent.app_id},
+        )
         return Continue(next_phase="verify", summary="Staged App generated")
 
     @staticmethod
@@ -1591,11 +1737,12 @@ class DurableAgentWorkflow:
         if not staged:
             raise WorkflowError("Verification has no staged artifact", code="staged_artifact_missing")
 
-        await self._emit(
+        await self._emit_activity(
             run,
-            "🔍 正在校验代码与 Database Schema..."
-            if state.data.get("language") == "zh"
-            else "🔍 Verifying staged code and Database Schema...",
+            activity_id="verification:contract",
+            activity_type="verification",
+            status="running",
+            summary="Verifying staged code and Database Schema",
         )
         contract = state.data.get("runtime_contract")
         if not isinstance(contract, dict):
@@ -1613,7 +1760,18 @@ class DurableAgentWorkflow:
         report = diff.to_markdown()
         state.data["verification_report"] = report
         state.data["verification_options"] = diff.to_per_field_payload()
-        await self._emit(run, f"### 🔍 Database Schema Verification Report\n\n{report}")
+        await self._emit_activity(
+            run,
+            activity_id="verification:contract",
+            activity_type="verification",
+            status="completed" if diff.is_clean else "failed",
+            summary="Staged App verification passed" if diff.is_clean else "Verification found required changes",
+            detail=report,
+            metadata={
+                "finding_count": len(state.data["verification_options"]),
+                "clean": diff.is_clean,
+            },
+        )
         if diff.is_clean:
             state.data["verification_passed"] = True
             return Continue(next_phase="promote", summary="Staged App verified")
@@ -1765,6 +1923,14 @@ class DurableAgentWorkflow:
 
     async def _publish_widget(self, run: dict[str, Any], state: AgentRunState, intent: IntentPlan) -> StepOutcomeValue:
         staged = state.data.get("staged_app") or {}
+        await self._emit_activity(
+            run,
+            activity_id="artifact:publish",
+            activity_type="artifact",
+            status="running",
+            summary="Publishing verified App",
+            metadata={"app_id": intent.app_id},
+        )
         schema_effect_key = f"agent-run:{run['id']}:schema_promote"
         schema_change: dict[str, Any] | None = None
         staged_result = self._staged_result(staged)
@@ -1829,32 +1995,36 @@ class DurableAgentWorkflow:
         ]
         canvas["active_app_id"] = published_app_id
         storage.save_canvas_config(canvas)
-        report = str(state.data.get("verification_report") or "Verification report unavailable")
-        output = str(staged.get("output") or "")
-        coding_agent = str(staged.get("coding_agent") or state.model_snapshot.get("coding_agent") or "opencode")
-        coding_agent_name = spec_for(coding_agent).name
-        content = f"{coding_agent_name} Execution Log:\n\n```\n{output}\n```\n\n### 🔍 Database Schema Verification Report\n\n{report}"
-
-        code_message = ChatMessage(
-            session_id=state.session_id,
-            role="code",
-            sender="agent",
-            content=json.dumps(
-                {
-                    "artifact": "app",
-                    "app_id": widget.get("id"),
-                    "manifest_revision": widget.get("manifest_revision"),
-                    "grants_digest": widget.get("grants_digest"),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-            run_id=f"{run['id']}:artifact",
+        app_title = str(widget.get("title") or widget.get("id") or intent.app_id or "App")
+        content = (
+            f"✅ App“{app_title}”已生成、验证并发布。"
+            if state.data.get("language") == "zh"
+            else f'✅ App "{app_title}" was generated, verified, and published.'
         )
-        if self._message_for_run(storage, state.session_id or "", code_message.run_id) is None:
-            storage.add(code_message)
-            storage.commit()
         artifacts = [{"type": "app", "id": widget.get("id")}]
+        await self._emit_activity(
+            run,
+            activity_id="artifact:publish",
+            activity_type="artifact",
+            status="completed",
+            summary="Verified App published",
+            metadata={
+                "artifact_type": "app",
+                "artifact_id": widget.get("id"),
+                "manifest_revision": widget.get("manifest_revision"),
+            },
+        )
+        await self._emit(
+            run,
+            {
+                "type": "artifact_ready",
+                "artifact_type": "app",
+                "artifact_id": str(widget.get("id") or ""),
+                "title": str(widget.get("title") or widget.get("id") or ""),
+                "summary": "Verified App is ready",
+            },
+            project_to_chat=False,
+        )
         result = {"message": content, "app_id": widget.get("id")}
         if state.data.get("return_to_multi"):
             await self._emit(run, {"type": "widget", "widget": widget})

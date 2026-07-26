@@ -5,9 +5,11 @@ import type { Session } from "./SessionSidebar";
 import type { LLMProvider, ModelSelection } from "../services/llm";
 import type { AgentModelConfig, CodingAgentDefinition } from "../services/codingAgents";
 import {
+  interactionsForRun,
   liveStreamsForRun,
   type ChatRunCard as ChatRunCardModel,
   type LiveStreamState,
+  type RunInteractionState,
 } from "../lib/chatProjection";
 import {
   CHAT_SIZE_PRESETS,
@@ -18,7 +20,7 @@ import {
   type ChatSize,
   type ChatSizePreset,
 } from "../lib/chatLayout";
-import { ChatRunCard } from "./ChatRunCard";
+import { ChatRunCard, type RunInteractionAction } from "./ChatRunCard";
 import { ModelPicker } from "./LLMSettings";
 import { SystemIconButton, SystemPopover } from "./system/SystemUI";
 import "./Workspace.css";
@@ -29,6 +31,7 @@ interface AgentChatOverlayProps {
   messages: Message[];
   runCards?: ChatRunCardModel[];
   liveStreams?: Record<string, LiveStreamState>;
+  interactions?: Record<string, RunInteractionState>;
   sessions: Session[];
   activeSessionId: string | null;
   runningSessions: string[];
@@ -40,6 +43,8 @@ interface AgentChatOverlayProps {
   onCreateSession: () => void;
   onDeleteSession: (id: string) => void;
   onCancelRun?: (runId: string) => void;
+  onResolveRunInteraction?: (interaction: RunInteractionState, action: RunInteractionAction) => void;
+  onInspectRunInteraction?: (interaction: RunInteractionState) => void;
   providers?: LLMProvider[];
   modelSelection?: ModelSelection | null;
   onModelChange?: (selection: ModelSelection) => void;
@@ -58,8 +63,8 @@ function timeValue(value: string | undefined, fallback: number): number {
 }
 
 export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
-  open, unreadCount, messages, runCards = [], liveStreams = {}, sessions, activeSessionId, runningSessions, isConnected, language,
-  onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession, onCancelRun,
+  open, unreadCount, messages, runCards = [], liveStreams = {}, interactions = {}, sessions, activeSessionId, runningSessions, isConnected, language,
+  onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession, onCancelRun, onResolveRunInteraction, onInspectRunInteraction,
   providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel,
 }) => {
   const isZh = language === "zh";
@@ -102,6 +107,9 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
   const liveStreamsByRun = useMemo(() => Object.fromEntries(
     runCards.map((run) => [run.id, liveStreamsForRun(liveStreams, run.id)])
   ), [liveStreams, runCards]);
+  const interactionsByRun = useMemo(() => Object.fromEntries(
+    runCards.map((run) => [run.id, interactionsForRun(interactions, run.id)])
+  ), [interactions, runCards]);
   const streamRevision = `${visibleMessages.length}:${runCards.map((run) => `${run.id}:${run.updatedAt}:${run.status}`).join("|")}:${Object.values(liveStreams).map((stream) => `${stream.streamId}:${stream.lastSequence}`).join("|")}`;
 
   const scrollToLatest = (behavior: ScrollBehavior = "smooth") => {
@@ -250,7 +258,16 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
           {conversationItems.length === 0 ? <div className="agent-chat-empty"><span><MessageCircle size={22} /></span><strong>{isZh ? "需要我做什么？" : "What can I help with?"}</strong><p>{isZh ? "我可以创建 App、整理信息，或协助你操作当前工作区。" : "I can create apps, organize information, or help with your workspace."}</p></div> : conversationItems.map((item) => (
             item.kind === "message"
               ? <div key={item.key} className={`agent-message ${item.message.sender === "user" ? "is-user" : "is-agent"}`}><div>{item.message.content}</div><span>{item.message.sender === "user" ? (isZh ? "你" : "You") : "Ambient"}</span></div>
-              : <ChatRunCard key={item.key} run={item.run} language={language} onCancel={onCancelRun} liveStreams={liveStreamsByRun[item.run.id]} />
+              : <ChatRunCard
+                  key={item.key}
+                  run={item.run}
+                  language={language}
+                  onCancel={onCancelRun}
+                  liveStreams={liveStreamsByRun[item.run.id]}
+                  interactions={interactionsByRun[item.run.id]}
+                  onResolveInteraction={onResolveRunInteraction}
+                  onInspectInteraction={onInspectRunInteraction}
+                />
           ))}
           <div ref={endRef} />
         </div>

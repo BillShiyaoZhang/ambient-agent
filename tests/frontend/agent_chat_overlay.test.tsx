@@ -151,4 +151,50 @@ describe("AgentChatOverlay", () => {
     />);
     expect(container.querySelector(".chat-run-phase-rail")).toBeNull();
   });
+
+  it("renders ordinary approval as an inline Run interaction", () => {
+    const onResolveRunInteraction = vi.fn();
+    const onInspectRunInteraction = vi.fn();
+    const interaction = {
+      id: "interaction-one",
+      runId: "run-one",
+      kind: "plan_approval",
+      status: "pending" as const,
+      payload: {
+        type: "plan_approval_request",
+        request_id: "interaction-one",
+        app_id: "weather-app",
+        plan: "Build a weather dashboard with hourly conditions.",
+      },
+      createdAt: "2026-07-26T00:00:01Z",
+    };
+    render(<AgentChatOverlay
+      {...commonProps}
+      messages={[]}
+      runCards={[{
+        id: "run-one",
+        status: "waiting_user",
+        phase: "wait_plan",
+        workflowType: "widget_create",
+        attempt: 1,
+        summary: "Approve development plan",
+        createdAt: "2026-07-26T00:00:00Z",
+        updatedAt: "2026-07-26T00:00:01Z",
+        modelTurns: 1,
+        repairCount: 0,
+        artifactCount: 0,
+        activities: [],
+      }]}
+      interactions={{ "interaction-one": interaction }}
+      onResolveRunInteraction={onResolveRunInteraction}
+      onInspectRunInteraction={onInspectRunInteraction}
+    />);
+
+    expect(screen.getByText("Review development plan")).toBeDefined();
+    expect(screen.getByText(/Build a weather dashboard/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Approve plan" }));
+    expect(onResolveRunInteraction).toHaveBeenCalledWith(interaction, "approve");
+    fireEvent.click(screen.getByRole("button", { name: "Review / edit" }));
+    expect(onInspectRunInteraction).toHaveBeenCalledWith(interaction);
+  });
 });

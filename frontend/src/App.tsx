@@ -11,6 +11,7 @@ import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
 import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
+import type { RunInteractionAction } from "./components/ChatRunCard";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { LLMSettingsDialog } from "./components/LLMSettings";
 import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
@@ -26,6 +27,7 @@ import {
   projectRunEvent,
   projectRunSnapshot,
   type ConversationProjection,
+  type RunInteractionState,
 } from "./lib/chatProjection";
 import { RunLiveEventBatcher, runLiveService } from "./services/runLive";
 import {
@@ -330,6 +332,57 @@ function App() {
     setPendingPlanRequest(null);
   };
 
+  const handleResolveRunInteraction = (
+    interaction: RunInteractionState,
+    action: RunInteractionAction,
+  ) => {
+    const payload = interaction.payload;
+    if (interaction.kind === "plan_approval") {
+      wsService.sendMessage({
+        type: "plan_approval_response",
+        request_id: interaction.id,
+        approved: action === "approve",
+        plan: String(payload.plan || ""),
+        feedback: "",
+      });
+      return;
+    }
+    if (interaction.kind === "schema_approval") {
+      wsService.sendMessage({
+        type: "schema_approval_response",
+        request_id: interaction.id,
+        approved: action === "approve",
+        proposal: payload.proposal,
+        feedback: "",
+      });
+      return;
+    }
+    if (
+      interaction.kind === "verification_approval"
+      && ["rework_code", "rework_schema", "rework_plan"].includes(action)
+    ) {
+      wsService.sendMessage({
+        type: "verification_approval_response",
+        request_id: interaction.id,
+        approved: action,
+        feedback: "",
+        approved_options: [],
+      });
+    }
+  };
+
+  const handleInspectRunInteraction = (interaction: RunInteractionState) => {
+    if (interaction.status !== "pending") return;
+    const payload = interaction.payload;
+    if (interaction.kind === "plan_approval") {
+      setPendingPlanRequest(payload as unknown as PlanApprovalRequest);
+    } else if (interaction.kind === "schema_approval") {
+      setPendingSchemaRequest(payload as unknown as SchemaApprovalRequest);
+    } else if (interaction.kind === "verification_approval") {
+      setPendingVerificationRequest(payload as unknown as VerificationApprovalRequest);
+    }
+  };
+
   // Helper functions for editing Reused Schema extensions
   const handleAddExtendedProperty = (schemaIndex: number) => {
     if (!editedProposal) return;
@@ -562,7 +615,12 @@ function App() {
     };
 
     loadSessionHistory();
-    void runService.list({ limit: 100 }).then((runs) => {
+    void runService.list({
+      source_type: "chat",
+      source_id: activeSessionId,
+      limit: 100,
+      include_details: true,
+    }).then((runs) => {
       if (disposed) return;
       const sessionRuns = runs
         .filter((run) => run.source_type === "chat" && run.source_id === activeSessionId)
@@ -574,7 +632,7 @@ function App() {
 
     const handleProjection = (data: any) => {
       if (data.type === "ack" || data.type === "reply") {
-        if (data.message?.id === -1) return;
+        if (!Number.isSafeInteger(data.message?.id) || data.message.id < 1) return;
         if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
           setUnreadCount((count) => count + 1);
         }
@@ -632,12 +690,6 @@ function App() {
         setPendingPermission(data);
       } else if (data.type === "backend_permission_request") {
         setPendingBackendPermission(data);
-      } else if (data.type === "schema_approval_request") {
-        setPendingSchemaRequest(data);
-      } else if (data.type === "plan_approval_request") {
-        setPendingPlanRequest(data);
-      } else if (data.type === "verification_approval_request") {
-        setPendingVerificationRequest(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
       } else if (data.type === "session_title_updated") {
@@ -686,9 +738,6 @@ function App() {
       "reply",
       "widget",
       "permission_request",
-      "schema_approval_request",
-      "plan_approval_request",
-      "verification_approval_request",
       "mutation_preview",
       "mutation_committed",
     ]);
@@ -947,6 +996,7 @@ function App() {
         messages={messages}
         runCards={orderedRunCards(chatProjection)}
         liveStreams={chatProjection.liveStreams}
+        interactions={chatProjection.interactions}
         sessions={sessions}
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
@@ -958,6 +1008,8 @@ function App() {
         onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
         onCancelRun={handleCancelRun}
+        onResolveRunInteraction={handleResolveRunInteraction}
+        onInspectRunInteraction={handleInspectRunInteraction}
         providers={llmProviders}
         modelSelection={sessions.find((session) => session.id === activeSessionId)?.model_selection ?? llmSettings.default_model}
         onModelChange={handleSessionModelChange}
