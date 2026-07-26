@@ -1824,8 +1824,10 @@ class DurableAgentWorkflow:
             )
         if action == "rework_code":
             state.data["code_feedback"] = str(response.get("feedback") or state.data.get("verification_report") or "")
-            discard_coding_agent_staging(self._staged_result(staged))
-            state.data.pop("staged_app", None)
+            # Keep the validated draft as the Coding Agent's editing base.
+            # Discarding it turns a one-line verifier fix into a full
+            # regeneration, loses useful context, and can exhaust the active
+            # workflow budget before verification runs again.
             for key in (
                 "verification_report",
                 "verification_options",

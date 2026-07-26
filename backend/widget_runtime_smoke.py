@@ -165,12 +165,34 @@ class WidgetRuntimeSmokeTester:
 
         return handle
 
+    async def _preflight_dependencies(self, manifest: AppManifest) -> None:
+        """Separate host dependency failures from generated Controller failures."""
+
+        graph_query = next(
+            (capability for capability in manifest.capabilities if capability.id == "graph.query"),
+            None,
+        )
+        if graph_query is None:
+            return
+        entities = graph_query.scope.get("entities")
+        query = {"type": entities[0]} if isinstance(entities, list) and entities else {}
+        try:
+            await asyncio.to_thread(execute_graph_query, query, self.graph_db)
+        except Exception as exc:
+            raise WidgetRuntimeSmokeError(
+                f"Widget Runtime Graph dependency could not run: {exc!s}",
+                code="widget_runtime_unavailable",
+                runtime_code=type(exc).__name__,
+                classification="operator",
+            ) from exc
+
     async def verify(self, result: CodingAgentStagedResult) -> dict[str, Any]:
         staging_dir = Path(result.staging_dir)
         manifest = AppManifest.read(
             staging_dir / "manifest.json",
             expected_app_id=result.app_id,
         )
+        await self._preflight_dependencies(manifest)
         source = (staging_dir / "controller.js").read_text(encoding="utf-8")
         app = {
             **manifest.to_dict(),

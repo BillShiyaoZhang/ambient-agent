@@ -523,6 +523,31 @@ class GraphDatabase:
                 }
         return None
 
+    def list_nodes(self, node_type: str | None = None) -> list[dict[str, Any]]:
+        """Return context records through the adapter contract.
+
+        Query consumers must not reach into the SQLite connection directly:
+        the deployed graph backend can be Neo4j.
+        """
+
+        sql = "SELECT id, type, properties FROM graph_nodes"
+        params: tuple[str, ...] = ()
+        if node_type is not None:
+            sql += " WHERE type = ?"
+            params = (node_type,)
+        sql += " ORDER BY created_at DESC, id ASC"
+        with self.get_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "type": row["type"],
+                    "ontology_entity_id": row["type"],
+                    "properties": json.loads(row["properties"] or "{}"),
+                }
+                for row in rows
+            ]
+
     def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
         node = self.get_node(node_id)
         if not node:

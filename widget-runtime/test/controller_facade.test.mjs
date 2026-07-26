@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createStorageApi } from "../controller_facade.mjs";
+import {
+  createStorageApi,
+  readTextFieldValue,
+} from "../controller_facade.mjs";
 
 
 test("ambient.storage exposes the complete local storage contract", async () => {
@@ -26,4 +29,15 @@ test("ambient.storage exposes the complete local storage contract", async () => 
     { operation: "list" },
   ]);
   assert.equal(Object.isFrozen(storage), true);
+});
+
+
+test("TextField callbacks receive the current string value", () => {
+  assert.equal(readTextFieldValue("Shanghai"), "Shanghai");
+  assert.equal(
+    readTextFieldValue({ currentTarget: { value: "北京" } }),
+    "北京",
+  );
+  assert.equal(readTextFieldValue({ currentTarget: { value: 0 } }), "0");
+  assert.equal(readTextFieldValue({}), "");
 });

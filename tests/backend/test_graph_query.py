@@ -53,6 +53,57 @@ def test_execute_graph_query(tmp_path):
     assert rel["target"]["properties"]["title"] == "Meeting 1"
 
 
+def test_execute_graph_query_uses_the_adapter_contract() -> None:
+    class NonSqliteGraph:
+        nodes = {
+            "t1": {"id": "t1", "type": "Task", "properties": {"status": "pending"}},
+            "e1": {"id": "e1", "type": "Event", "properties": {"title": "Meeting"}},
+        }
+
+        def list_nodes(self, node_type=None):
+            return [node for node in self.nodes.values() if node_type is None or node["type"] == node_type]
+
+        def get_edges(self, node_id):
+            return [
+                {
+                    "from_id": "t1",
+                    "to_id": "e1",
+                    "type": "ASSOCIATED_WITH",
+                    "properties": {"source": "adapter"},
+                }
+            ]
+
+        def get_node(self, node_id):
+            return self.nodes.get(node_id)
+
+        def get_conn(self):
+            raise AssertionError("query engine must not open a SQLite connection")
+
+    result = execute_graph_query(
+        {
+            "type": "Task",
+            "properties": {"status": "pending"},
+            "include": [{"relation": "ASSOCIATED_WITH", "target_type": "Event"}],
+        },
+        NonSqliteGraph(),
+    )
+
+    assert result == [
+        {
+            "id": "t1",
+            "type": "Task",
+            "properties": {"status": "pending"},
+            "relations": [
+                {
+                    "edge_type": "ASSOCIATED_WITH",
+                    "properties": {"source": "adapter"},
+                    "target": {"id": "e1", "type": "Event", "properties": {"title": "Meeting"}},
+                }
+            ],
+        }
+    ]
+
+
 def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     workspace_dir = str(tmp_path / "workspace")
     monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)

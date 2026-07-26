@@ -145,6 +145,31 @@ def test_graph_database_factory_selects_neo4j_for_deployment(tmp_path, monkeypat
     assert create_graph_database(str(tmp_path / "workspace")) is sentinel
 
 
+def test_neo4j_bootstrap_preserves_approved_core_schema_extensions():
+    from backend.neo4j_graph_db import Neo4jGraphDatabase
+
+    entities = {
+        item["id"]: item
+        for item in Neo4jGraphDatabase._bootstrap_entities(
+            {
+                "Place": {
+                    "name": "integer",
+                    "coordinates": "string",
+                    "is_default": "boolean",
+                }
+            }
+        )
+    }
+
+    assert entities["Place"]["properties"] == {
+        "name": "string",
+        "address": "string",
+        "url": "string",
+        "coordinates": "string",
+        "is_default": "boolean",
+    }
+
+
 def test_ontology_growth_survives_restart_and_cannot_change_existing_property_type(tmp_path):
     workspace = str(tmp_path / "workspace")
     db = GraphDatabase(workspace)

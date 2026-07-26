@@ -16,6 +16,8 @@
 | `ambient.react` | `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, `useReducer`; pre-publication verification rejects any other non-injected hook |
 | `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table`; pre-publication verification rejects any other non-injected component |
 
+`TextField` delivers the current string value to `onChange(value)` and `onEnter(value)`; `Checkbox` delivers a boolean to `onChange(checked)`. Component callbacks do not expose DOM event objects.
+
 These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, Cookies, browser storage globals, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
 
 Presentation context updates without restarting the Widget. A Controller that reacts to theme, language, or reduced-motion changes subscribes instead of reading only once during module load:

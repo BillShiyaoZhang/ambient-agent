@@ -63,6 +63,22 @@ def staged_result(tmp_path: Path) -> CodingAgentStagedResult:
     )
 
 
+def grant_graph_query(result: CodingAgentStagedResult) -> None:
+    AppManifest.from_dict(
+        {
+            "manifest_version": 2,
+            "id": result.app_id,
+            "title": "Notes",
+            "description": "",
+            "app_version": "0.1.0",
+            "intents": [],
+            "schema_refs": ["Place"],
+            "capabilities": [{"id": "graph.query", "scope": {"entities": ["Place"]}}],
+        },
+        expected_app_id=result.app_id,
+    ).write_atomic(result.staging_dir / "manifest.json")
+
+
 @pytest.mark.asyncio
 async def test_smoke_tester_requires_a_real_first_frame(tmp_path: Path) -> None:
     connection = FakeRuntimeConnection(
@@ -91,6 +107,76 @@ async def test_smoke_tester_requires_a_real_first_frame(tmp_path: Path) -> None:
     assert connection.sent[0]["app_id"] == "notes-app"
     assert connection.sent[-1]["type"] == "close"
     assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_smoke_graph_rpc_uses_non_sqlite_adapter_contract(tmp_path: Path) -> None:
+    class NonSqliteGraph:
+        def list_nodes(self, node_type=None):
+            return []
+
+        def get_node(self, node_id):
+            return None
+
+        def get_edges(self, node_id):
+            return []
+
+        def get_conn(self):
+            raise AssertionError("runtime smoke must not open a SQLite connection")
+
+    connection = FakeRuntimeConnection(
+        [
+            {"type": "ready"},
+            {
+                "type": "rpc_request",
+                "request_id": "rpc-1",
+                "method": "graph.subscribe",
+                "params": {"query": {"type": "Place"}},
+            },
+            {
+                "type": "frame",
+                "format": "jpeg",
+                "data": "ZmFrZQ==",
+                "width": 640,
+                "height": 480,
+            },
+        ]
+    )
+    result = staged_result(tmp_path)
+    grant_graph_query(result)
+    tester = WidgetRuntimeSmokeTester(
+        graph_db=NonSqliteGraph(),
+        connector=lambda: connection,
+        timeout_seconds=1,
+    )
+
+    verified = await tester.verify(result)
+
+    assert verified["status"] == "rendered"
+    assert any(message.get("request_id") == "rpc-1" and message.get("result") == [] for message in connection.sent)
+
+
+@pytest.mark.asyncio
+async def test_smoke_graph_dependency_failure_is_an_operator_error(tmp_path: Path) -> None:
+    class BrokenGraph:
+        def list_nodes(self, node_type=None):
+            raise RuntimeError("graph backend unavailable")
+
+    result = staged_result(tmp_path)
+    grant_graph_query(result)
+    tester = WidgetRuntimeSmokeTester(
+        graph_db=BrokenGraph(),
+        connector=lambda: pytest.fail("runtime must not start when its Graph dependency is unavailable"),
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(WidgetRuntimeSmokeError) as caught:
+        await tester.verify(result)
+
+    assert caught.value.code == "widget_runtime_unavailable"
+    assert caught.value.classification == "operator"
+    finding = finding_from_exception(caught.value, attempt=1, artifact_revision="hash")
+    assert finding.repairability == "operator"
 
 
 @pytest.mark.asyncio

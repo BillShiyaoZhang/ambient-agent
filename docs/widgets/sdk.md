@@ -16,6 +16,8 @@
 | `ambient.react` | `useState`、`useEffect`、`useMemo`、`useRef`、`useCallback`、`useContext`、`useReducer`；发布前验证会拒绝其他未注入 hook |
 | `ambient.components` | `Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table`；发布前验证会拒绝其他未注入组件 |
 
+`TextField` 的 `onChange(value)` 与 `onEnter(value)` 接收当前字符串值；`Checkbox` 的 `onChange(checked)` 接收布尔值。组件回调不会暴露 DOM 事件对象。
+
 这些接口不授予外部数据访问。Controller 不使用 `window`、DOM 查询、Cookie、浏览器 storage globals、import、`fetch`、原始 WebSocket、`eval` 或 `Function`。
 
 展示上下文会在不重启 Widget 的情况下更新。需要响应主题、语言或减少动画偏好的 Controller 应订阅它，而不是只在模块加载时读取一次：

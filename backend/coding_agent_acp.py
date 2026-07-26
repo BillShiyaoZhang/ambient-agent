@@ -885,15 +885,52 @@ _OPENCODE_NPM_BY_PRESET = {
     "bedrock": "@ai-sdk/amazon-bedrock",
 }
 
+_OPENCODE_WIDGET_PERMISSION_POLICY: dict[str, Any] = {
+    # OpenCode 1.17.x reports its permission requests over ACP as kind
+    # "other", so the generic ACP client cannot safely authorize them from
+    # the protocol kind alone. Keep the native tools inside the staging jail
+    # and resolve the known-safe operations before they become ACP prompts.
+    "*": "deny",
+    "read": {
+        "*": "deny",
+        "*controller.js": "allow",
+        "*manifest.json": "allow",
+        "*README.md": "allow",
+    },
+    "edit": {
+        "*": "deny",
+        "*controller.js": "allow",
+        "*manifest.json": "allow",
+        "*README.md": "allow",
+    },
+    "glob": {"*": "allow"},
+    "list": {"*": "allow"},
+    "todowrite": "allow",
+    "doom_loop": "allow",
+    "external_directory": "deny",
+}
+
 
 def _opencode_runtime_env() -> dict[str, str]:
     """Build a process-local OpenCode override from the active run snapshot."""
     from backend.llm_runtime import coding_selection
     from backend.llm_service import get_default_llm_store
 
+    try:
+        inline_config = json.loads(os.getenv("OPENCODE_CONFIG_CONTENT", "{}"))
+        if not isinstance(inline_config, dict):
+            inline_config = {}
+    except json.JSONDecodeError:
+        inline_config = {}
+    # App generation is deliberately narrower than a normal interactive
+    # OpenCode session. Never inherit a broader or ask-based host policy:
+    # ask-based requests arrive as ACP kind "other" in OpenCode 1.17.x and
+    # broader permissions would bypass the artifact-only client policy.
+    inline_config["permission"] = _OPENCODE_WIDGET_PERMISSION_POLICY
+
     selection = coding_selection()
     if selection is None:
-        return {}
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps(inline_config, ensure_ascii=False)}
     resolved = get_default_llm_store().resolve(selection)
     provider_key = f"ambient-{resolved.provider_id}"
     npm = _OPENCODE_NPM_BY_PRESET.get(resolved.preset, "@ai-sdk/openai-compatible")
@@ -918,12 +955,6 @@ def _opencode_runtime_env() -> dict[str, str]:
     if resolved.connection.get("timeout") is not None:
         options["timeout"] = float(resolved.connection["timeout"]) * 1000
 
-    try:
-        inline_config = json.loads(os.getenv("OPENCODE_CONFIG_CONTENT", "{}"))
-        if not isinstance(inline_config, dict):
-            inline_config = {}
-    except json.JSONDecodeError:
-        inline_config = {}
     providers = inline_config.get("provider")
     if not isinstance(providers, dict):
         providers = {}

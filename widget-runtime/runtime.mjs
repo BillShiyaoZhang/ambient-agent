@@ -483,9 +483,12 @@ async function installPageRuntime(page, session, transformedController) {
             type: "text",
             placeholder,
             value: value ?? "",
-            onInput: onChange,
+            onInput: (event) =>
+              onChange?.(String(event?.currentTarget?.value ?? "")),
             onKeyDown: (event) => {
-              if (event.key === "Enter") onEnter?.(event.currentTarget.value);
+              if (event.key === "Enter") {
+                onEnter?.(String(event?.currentTarget?.value ?? ""));
+              }
             },
             style: {
               padding: "8px 12px",

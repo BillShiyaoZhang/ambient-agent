@@ -3,7 +3,7 @@ import json
 from backend.llm_config import LLMConfigStore, ModelSelection
 from backend.llm_runtime import use_model_selections
 from backend.llm_service import set_default_llm_store
-from backend.coding_agent_acp import _opencode_runtime_env
+from backend.coding_agent_acp import _OPENCODE_WIDGET_PERMISSION_POLICY, _opencode_runtime_env
 
 
 def test_opencode_runtime_config_uses_run_model_snapshot_and_private_credentials(tmp_path, monkeypatch):
@@ -27,7 +27,13 @@ def test_opencode_runtime_config_uses_run_model_snapshot_and_private_credentials
 
     config = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
     assert config["model"] == "ambient-company-endpoint/coder-model"
-    assert config["permission"] == {"edit": "ask"}
+    assert config["permission"] == _OPENCODE_WIDGET_PERMISSION_POLICY
+    assert config["permission"]["edit"] == {
+        "*": "deny",
+        "*controller.js": "allow",
+        "*manifest.json": "allow",
+        "*README.md": "allow",
+    }
     assert config["provider"]["ambient-company-endpoint"] == {
         "npm": "@ai-sdk/openai-compatible",
         "name": "Company Endpoint",
@@ -38,3 +44,16 @@ def test_opencode_runtime_config_uses_run_model_snapshot_and_private_credentials
         },
         "models": {"coder-model": {"name": "coder-model"}},
     }
+
+
+def test_opencode_runtime_config_enforces_widget_permissions_without_model_selection(monkeypatch):
+    monkeypatch.setenv(
+        "OPENCODE_CONFIG_CONTENT",
+        '{"permission":"allow","share":"auto"}',
+    )
+
+    environment = _opencode_runtime_env()
+
+    config = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
+    assert config["permission"] == _OPENCODE_WIDGET_PERMISSION_POLICY
+    assert config["share"] == "auto"

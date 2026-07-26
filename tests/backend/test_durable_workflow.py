@@ -1163,6 +1163,25 @@ async def test_schema_verification_findings_cannot_be_bypassed_into_promotion(
     ]
     assert "cannot be bypassed" in interaction["payload"]["validation_errors"][0]
 
+    store.resolve_interaction(
+        rejected.interaction_id,
+        {"approved": "rework_code", "feedback": "Inline the approved property object"},
+        expected_run_version=waiting_again["version"],
+    )
+
+    rework, _queued, reworked_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-verify-rework",
+    )
+
+    assert isinstance(rework, Continue)
+    assert rework.next_phase == "stage_code"
+    assert reworked_state.data["staged_app"]["staging_dir"] == str(staging_dir)
+    assert reworked_state.data["code_feedback"] == "Inline the approved property object"
+    assert staging_dir.is_dir()
+
 
 @pytest.mark.asyncio
 async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verified_promotion(

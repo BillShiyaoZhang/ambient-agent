@@ -47,6 +47,11 @@ function mergeStyle(base, custom) {
   };
 }
 
+export function readTextFieldValue(eventOrValue) {
+  if (typeof eventOrValue === "string") return eventOrValue;
+  return String(eventOrValue?.currentTarget?.value ?? "");
+}
+
 
 function createComponents(h) {
   const Column = ({
@@ -208,10 +213,10 @@ function createComponents(h) {
         type: "text",
         placeholder,
         value: value ?? "",
-        onInput: onChange,
+        onInput: (event) => onChange?.(readTextFieldValue(event)),
         onKeyDown: (event) => {
           if (event.key === "Enter") {
-            onEnter?.(event.currentTarget.value);
+            onEnter?.(readTextFieldValue(event));
           }
         },
         style: {

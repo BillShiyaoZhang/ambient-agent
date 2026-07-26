@@ -873,6 +873,7 @@ def test_failed_draft_references_expire_independently_from_active_staging(tmp_pa
 
 def test_agent_state_and_step_outcomes_are_strictly_serializable():
     defaults = RunBudget()
+    assert defaults.max_wall_seconds == 600.0
     assert defaults.max_tokens == 64_000
     assert defaults.max_cost_usd == 5.0
     state = AgentRunState(

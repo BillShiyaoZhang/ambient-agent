@@ -76,6 +76,25 @@ class Neo4jGraphDatabase(GraphDatabase):
         with self.driver.session(database=self.database) as session:
             return session.execute_write(callback, *args)
 
+    @staticmethod
+    def _bootstrap_entities(
+        existing_properties: dict[str, dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Merge core definitions without erasing approved ontology growth."""
+
+        entities: list[dict[str, Any]] = []
+        for definition in PREBUILT_ONTOLOGY:
+            entity = definition.as_schema()
+            # Existing keys outside the core definition are approved
+            # extensions and must survive a backend restart. Core definitions
+            # remain authoritative for their own property types.
+            entity["properties"] = {
+                **existing_properties.get(entity["id"], {}),
+                **entity["properties"],
+            }
+            entities.append(entity)
+        return entities
+
     def load(self) -> None:
         constraints = (
             "CREATE CONSTRAINT ambient_ontology_id IF NOT EXISTS FOR (n:Ontology) REQUIRE n.id IS UNIQUE",
@@ -86,8 +105,6 @@ class Neo4jGraphDatabase(GraphDatabase):
             "CREATE CONSTRAINT ambient_migration_id IF NOT EXISTS FOR (n:GraphMigration) REQUIRE n.id IS UNIQUE",
         )
         now = datetime.now(UTC).isoformat()
-        entities = [entity.as_schema() for entity in PREBUILT_ONTOLOGY]
-
         for statement in constraints:
             self._write(lambda tx, query: tx.run(query).consume(), statement)
 
@@ -102,6 +119,17 @@ class Neo4jGraphDatabase(GraphDatabase):
                 version=ONTOLOGY_VERSION,
                 now=now,
             ).consume()
+            existing_properties = {
+                str(record["id"]): json.loads(record["properties_json"] or "{}")
+                for record in tx.run(
+                    """
+                    MATCH (e:OntologyEntity {ontology_id: $ontology_id})
+                    RETURN e.id AS id, e.properties_json AS properties_json
+                    """,
+                    ontology_id=ONTOLOGY_ID,
+                )
+            }
+            entities = self._bootstrap_entities(existing_properties)
             tx.run(
                 """
                 MATCH (o:Ontology {id: $ontology_id})
@@ -402,6 +430,33 @@ class Neo4jGraphDatabase(GraphDatabase):
             node.pop("namespace", None)
             node.pop("created_at", None)
         return node
+
+    def list_nodes(self, node_type: str | None = None) -> list[dict[str, Any]]:
+        """Return context records without falling back to the SQLite adapter."""
+
+        def fetch(tx: Any) -> list[dict[str, Any]]:
+            records = tx.run(
+                """
+                MATCH (n:ContextRecord)-[:INSTANCE_OF]->
+                      (e:OntologyEntity {ontology_id: $ontology_id})
+                WHERE $node_type IS NULL OR e.id = $node_type
+                RETURN n.id AS id, e.id AS type, n.properties_json AS properties_json
+                ORDER BY n.created_at DESC, n.id ASC
+                """,
+                ontology_id=ONTOLOGY_ID,
+                node_type=node_type,
+            )
+            return [
+                {
+                    "id": record["id"],
+                    "type": record["type"],
+                    "ontology_entity_id": record["type"],
+                    "properties": json.loads(record["properties_json"] or "{}"),
+                }
+                for record in records
+            ]
+
+        return self._read(fetch)
 
     def routing_snapshot(self, recent_per_type: int = 5) -> dict[str, Any]:
         """Return the same bounded Router context contract as the SQLite adapter."""

@@ -56,7 +56,11 @@ class RunBudget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_model_turns: int = Field(default=8, ge=1)
-    max_wall_seconds: float = Field(default=300.0, gt=0)
+    # A full Widget run can include routing, two model-backed proposals,
+    # two approval resumptions, an ACP coding turn, and a verifier-driven
+    # repair turn. The coding-agent timeout alone is 600 seconds, so a shorter
+    # durable-run window can abort a healthy generation before verification.
+    max_wall_seconds: float = Field(default=600.0, gt=0)
     max_tokens: int | None = Field(default=64_000, ge=1)
     max_cost_usd: float | None = Field(default=5.0, ge=0)
     model_turns: int = Field(default=0, ge=0)
