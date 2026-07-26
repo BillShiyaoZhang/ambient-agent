@@ -6,6 +6,8 @@ const harness = vi.hoisted(() => ({
   chatConnect: vi.fn(),
   chatDisconnect: vi.fn(),
   runListeners: new Set<(event: Record<string, unknown>) => void>(),
+  liveListeners: new Set<(event: Record<string, unknown>) => void>(),
+  liveResetListeners: new Set<() => void>(),
 }));
 
 vi.mock("../../frontend/src/services/websocket", () => ({
@@ -34,6 +36,27 @@ vi.mock("../../frontend/src/services/runs", () => ({
     stopRuntime: vi.fn(),
   },
 }));
+
+vi.mock("../../frontend/src/services/runLive", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../frontend/src/services/runLive")>();
+  return {
+    ...actual,
+    runLiveService: {
+      subscribe: vi.fn((
+        _sessionId: string,
+        listener: (event: Record<string, unknown>) => void,
+        onReset: () => void,
+      ) => {
+        harness.liveListeners.add(listener);
+        harness.liveResetListeners.add(onReset);
+        return () => {
+          harness.liveListeners.delete(listener);
+          harness.liveResetListeners.delete(onReset);
+        };
+      }),
+    },
+  };
+});
 
 import App from "../../frontend/src/App";
 
@@ -93,6 +116,8 @@ describe("canonical RunEvent chat projection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     harness.runListeners.clear();
+    harness.liveListeners.clear();
+    harness.liveResetListeners.clear();
     localStorage.clear();
     sessionStorage.clear();
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
@@ -191,5 +216,71 @@ describe("canonical RunEvent chat projection", () => {
     expect(await screen.findByText("生成中 · 生成应用")).toBeDefined();
     expect(screen.getAllByText("正在写入组件文件")).toHaveLength(1);
     expect(screen.getByText("2 条进度已归并")).toBeDefined();
+  });
+
+  it("shows batched live deltas before commit and removes them at the durable boundary", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      harness.liveListeners.forEach((listener) => {
+        listener({
+          schema_version: 1,
+          run_id: "run-progress",
+          session_id: "session-one",
+          step_id: "stage_code",
+          attempt: 1,
+          stream_id: "run-progress:stage_code:1:activity",
+          chunk_sequence: 1,
+          kind: "activity_delta",
+          delta: "正在实时生成",
+          replace: true,
+          created_at: "2026-07-19T00:00:01Z",
+        });
+      });
+    });
+
+    expect(await screen.findByText("正在实时生成")).toBeDefined();
+
+    act(() => {
+      harness.runListeners.forEach((listener) => {
+        listener(canonicalProgress("session-one", 2, "step_committed", {
+          step_key: "stage_code",
+          attempt: 1,
+          outcome: { kind: "continue", summary: "代码阶段已完成" },
+        }));
+      });
+    });
+
+    await waitFor(() => expect(screen.queryByText("正在实时生成")).toBeNull());
+  });
+
+  it("clears uncommitted live text when the connection is reset", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      harness.liveListeners.forEach((listener) => listener({
+        schema_version: 1,
+        run_id: "run-progress",
+        session_id: "session-one",
+        step_id: "stage_code",
+        attempt: 1,
+        stream_id: "run-progress:stage_code:1:activity",
+        chunk_sequence: 1,
+        kind: "activity_delta",
+        delta: "断线前文本",
+        replace: true,
+        created_at: "2026-07-19T00:00:01Z",
+      }));
+    });
+    expect(await screen.findByText("断线前文本")).toBeDefined();
+
+    act(() => {
+      harness.liveResetListeners.forEach((listener) => listener());
+    });
+    await waitFor(() => expect(screen.queryByText("断线前文本")).toBeNull());
   });
 });

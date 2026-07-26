@@ -64,6 +64,7 @@ from backend.coding_agent_acp import (
     recover_interrupted_coding_agent_promotions,
 )
 from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
+from backend.run_live import RunLiveBroker
 from backend.session_title import is_placeholder_title, sanitize_title
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 from backend.widget_runtime import (
@@ -190,6 +191,7 @@ from backend.backend_manager import BackendManager
 
 backend_manager = BackendManager()
 run_store = RunStore(WORKSPACE_DIR)
+run_live_broker = RunLiveBroker()
 run_coordinator = RunCoordinator(run_store, app_store, app_manager, backend_manager)
 
 
@@ -240,6 +242,7 @@ durable_agent_workflow = DurableAgentWorkflow(
     llm_config_store=lambda: llm_config_store,
     coding_agent_runner=_run_coding_agent_staged,
     event_sink=send_legacy_run_projection,
+    live_event_sink=run_live_broker.publish,
     app_diagnostic_loader=app_data_source_gateway.recent_diagnostics,
     capability_catalog_factory=_system_capability_catalog,
 )
@@ -926,6 +929,27 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_e
             await asyncio.sleep(0.5)
     except (WebSocketDisconnect, RuntimeError):
         return
+
+
+@app.websocket("/ws/run-live")
+async def websocket_run_live(websocket: WebSocket, session_id: str):
+    """Session-scoped, non-replayable progress lane for active Runs."""
+
+    if not await _accept_websocket_safely(websocket):
+        return
+    queue = run_live_broker.subscribe(session_id)
+    try:
+        await websocket.send_json({"type": "run_live_ready", "session_id": session_id})
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                await websocket.send_json({"type": "run_live_event", "event": event})
+            except TimeoutError:
+                await websocket.send_json({"type": "run_live_heartbeat", "session_id": session_id})
+    except (WebSocketDisconnect, RuntimeError):
+        return
+    finally:
+        run_live_broker.unsubscribe(session_id, queue)
 
 
 @app.get("/api/app-store")

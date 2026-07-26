@@ -1601,7 +1601,8 @@ async def run_coding_agent_acp(
                                 if language == "zh"
                                 else f"\n🔧 Independent validation found a repairable issue; repairing the staging App in the same {agent_name} ACP session."
                             )
-                            callback_result = on_update(update)
+                            client.output_buffer.append(update)
+                            callback_result = on_update("".join(client.output_buffer))
                             if inspect.isawaitable(callback_result):
                                 await callback_result
                         prompt_text = build_repair_prompt(finding, instruction=instruction)

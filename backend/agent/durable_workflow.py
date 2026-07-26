@@ -57,6 +57,7 @@ from backend.workspace_storage import WorkspaceStorage
 logger = logging.getLogger("agent.durable_workflow")
 
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
+LiveEventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 CodingAgentRunner = Callable[..., Awaitable[Any]]
 
 
@@ -98,6 +99,7 @@ class DurableAgentWorkflow:
         llm_config_store: LLMConfigStore | Callable[[], LLMConfigStore],
         coding_agent_runner: CodingAgentRunner,
         event_sink: EventSink | None = None,
+        live_event_sink: LiveEventSink | None = None,
         app_diagnostic_loader: Callable[[str], list[dict[str, Any]]] | None = None,
         capability_catalog_factory: Callable[[], SystemCapabilityCatalog] | None = None,
     ) -> None:
@@ -108,19 +110,26 @@ class DurableAgentWorkflow:
         self.llm_config_store = llm_config_store
         self.coding_agent_runner = coding_agent_runner
         self.event_sink = event_sink
+        self.live_event_sink = live_event_sink
         self.app_diagnostic_loader = app_diagnostic_loader
         self.capability_catalog_factory = capability_catalog_factory or SystemCapabilityCatalog.build
         self._event_buffer: ContextVar[list[PendingRunEvent] | None] = ContextVar(
             "durable_agent_event_buffer",
             default=None,
         )
+        self._live_stream_state: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+            "durable_agent_live_stream_state",
+            default=None,
+        )
 
     async def __call__(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         token = self._event_buffer.set([])
+        live_token = self._live_stream_state.set({})
         try:
             outcome = await self._reduce_once(run, state)
             events = list(self._event_buffer.get() or [])
         finally:
+            self._live_stream_state.reset(live_token)
             self._event_buffer.reset(token)
         outcome.events.extend(events)
         return outcome
@@ -280,7 +289,90 @@ class DurableAgentWorkflow:
             artifact_hashes=artifact_hashes,
         )
 
-    async def _emit(self, run: dict[str, Any], payload: Any, *, project_to_chat: bool = True) -> None:
+    async def _emit_live(
+        self,
+        run: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        mode: str,
+    ) -> None:
+        session_id = str(run.get("source_id") or "")
+        streams = self._live_stream_state.get()
+        if self.live_event_sink is None or streams is None or not session_id:
+            return
+
+        phase = str(run.get("step_key") or payload.get("step_id") or "route")
+        attempt = max(1, int(run.get("step_attempt") or payload.get("attempt") or 1))
+        payload_type = str(payload.get("type") or "")
+        kind = ""
+        delta = ""
+        stream_suffix = "activity"
+        tool: str | None = None
+        tool_status: str | None = None
+
+        if payload_type == "reply":
+            message = payload.get("message")
+            if not isinstance(message, dict) or message.get("id") != -1:
+                return
+            delta = str(message.get("content") or "")
+            kind = "assistant_message_delta" if phase == "converse" else "activity_delta"
+        elif payload_type.startswith("tool_"):
+            kind = "tool_progress"
+            tool = str(payload.get("tool") or "tool")
+            tool_status = payload_type.removeprefix("tool_")
+            stream_suffix = f"tool:{tool}"
+            delta = tool
+            mode = "replace"
+        else:
+            return
+
+        if not delta:
+            return
+        stream_id = f"{run['id']}:{phase}:{attempt}:{stream_suffix}"
+        stream = streams.setdefault(stream_id, {"sequence": 0, "snapshot": ""})
+        replace = mode == "replace"
+        if mode == "snapshot":
+            previous = str(stream.get("snapshot") or "")
+            if previous and delta.startswith(previous):
+                delta = delta[len(previous) :]
+                replace = False
+            else:
+                replace = True
+            stream["snapshot"] = str(payload.get("message", {}).get("content") or "")
+        if not delta:
+            return
+        stream["sequence"] = int(stream.get("sequence") or 0) + 1
+        event = {
+            "schema_version": 1,
+            "run_id": str(run["id"]),
+            "session_id": session_id,
+            "step_id": phase,
+            "attempt": attempt,
+            "stream_id": stream_id,
+            "chunk_sequence": stream["sequence"],
+            "kind": kind,
+            "delta": delta[-12_000:],
+            "replace": replace,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        if tool is not None:
+            event["tool"] = tool
+            event["tool_status"] = tool_status
+        try:
+            result = self.live_event_sink(session_id, event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Live Run event projection failed", exc_info=True)
+
+    async def _emit(
+        self,
+        run: dict[str, Any],
+        payload: Any,
+        *,
+        project_to_chat: bool = True,
+        live_mode: str = "delta",
+    ) -> None:
         if isinstance(payload, dict):
             wire_payload = payload
             event_type = str(payload.get("type") or "agent_update")
@@ -299,6 +391,8 @@ class DurableAgentWorkflow:
         buffer = self._event_buffer.get()
         if buffer is None:
             raise WorkflowError("Reducer event emitted outside a step transaction", code="event_outside_step")
+        if project_to_chat:
+            await self._emit_live(run, wire_payload, mode=live_mode)
         buffer.append(
             PendingRunEvent(
                 type=event_type,
@@ -1353,7 +1447,10 @@ class DurableAgentWorkflow:
             else f"🛠️ Starting the {coding_agent_name} agent in an isolated staging App...",
         )
 
-        kwargs: dict[str, Any] = {"language": language, "on_update": lambda payload: self._emit(run, payload)}
+        async def on_coding_agent_update(payload: Any) -> None:
+            await self._emit(run, payload, live_mode="snapshot")
+
+        kwargs: dict[str, Any] = {"language": language, "on_update": on_coding_agent_update}
         try:
             runner_parameters = inspect.signature(self.coding_agent_runner).parameters
             supports_promote = "promote" in runner_parameters

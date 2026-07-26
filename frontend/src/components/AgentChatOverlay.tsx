@@ -4,7 +4,11 @@ import type { Message } from "./ChatPanel";
 import type { Session } from "./SessionSidebar";
 import type { LLMProvider, ModelSelection } from "../services/llm";
 import type { AgentModelConfig, CodingAgentDefinition } from "../services/codingAgents";
-import type { ChatRunCard as ChatRunCardModel } from "../lib/chatProjection";
+import {
+  liveStreamsForRun,
+  type ChatRunCard as ChatRunCardModel,
+  type LiveStreamState,
+} from "../lib/chatProjection";
 import {
   CHAT_SIZE_PRESETS,
   clampChatSize,
@@ -24,6 +28,7 @@ interface AgentChatOverlayProps {
   unreadCount: number;
   messages: Message[];
   runCards?: ChatRunCardModel[];
+  liveStreams?: Record<string, LiveStreamState>;
   sessions: Session[];
   activeSessionId: string | null;
   runningSessions: string[];
@@ -53,7 +58,7 @@ function timeValue(value: string | undefined, fallback: number): number {
 }
 
 export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
-  open, unreadCount, messages, runCards = [], sessions, activeSessionId, runningSessions, isConnected, language,
+  open, unreadCount, messages, runCards = [], liveStreams = {}, sessions, activeSessionId, runningSessions, isConnected, language,
   onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession, onCancelRun,
   providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel,
 }) => {
@@ -94,7 +99,10 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
       left.sortTime - right.sortTime || left.ordinal - right.ordinal
     ));
   }, [runCards, visibleMessages]);
-  const streamRevision = `${visibleMessages.length}:${runCards.map((run) => `${run.id}:${run.updatedAt}:${run.status}`).join("|")}`;
+  const liveStreamsByRun = useMemo(() => Object.fromEntries(
+    runCards.map((run) => [run.id, liveStreamsForRun(liveStreams, run.id)])
+  ), [liveStreams, runCards]);
+  const streamRevision = `${visibleMessages.length}:${runCards.map((run) => `${run.id}:${run.updatedAt}:${run.status}`).join("|")}:${Object.values(liveStreams).map((stream) => `${stream.streamId}:${stream.lastSequence}`).join("|")}`;
 
   const scrollToLatest = (behavior: ScrollBehavior = "smooth") => {
     autoFollowRef.current = true;
@@ -242,7 +250,7 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
           {conversationItems.length === 0 ? <div className="agent-chat-empty"><span><MessageCircle size={22} /></span><strong>{isZh ? "需要我做什么？" : "What can I help with?"}</strong><p>{isZh ? "我可以创建 App、整理信息，或协助你操作当前工作区。" : "I can create apps, organize information, or help with your workspace."}</p></div> : conversationItems.map((item) => (
             item.kind === "message"
               ? <div key={item.key} className={`agent-message ${item.message.sender === "user" ? "is-user" : "is-agent"}`}><div>{item.message.content}</div><span>{item.message.sender === "user" ? (isZh ? "你" : "You") : "Ambient"}</span></div>
-              : <ChatRunCard key={item.key} run={item.run} language={language} onCancel={onCancelRun} />
+              : <ChatRunCard key={item.key} run={item.run} language={language} onCancel={onCancelRun} liveStreams={liveStreamsByRun[item.run.id]} />
           ))}
           <div ref={endRef} />
         </div>

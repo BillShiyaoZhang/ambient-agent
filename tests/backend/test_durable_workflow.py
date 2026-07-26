@@ -177,6 +177,7 @@ def _workflow(
     app_manager: FakeAppManager | None = None,
     coding_agent_runner: Any = None,
     emitted: list[dict[str, Any]] | None = None,
+    live_emitted: list[dict[str, Any]] | None = None,
     app_diagnostic_loader: Any = None,
 ) -> DurableAgentWorkflow:
     async def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
@@ -186,6 +187,10 @@ def _workflow(
         if emitted is not None:
             emitted.append(payload)
 
+    def live_event_sink(_session_id: str, payload: dict[str, Any]) -> None:
+        if live_emitted is not None:
+            live_emitted.append(payload)
+
     return DurableAgentWorkflow(
         workspace_dir=str(tmp_path),
         run_store=store,
@@ -194,8 +199,57 @@ def _workflow(
         llm_config_store=FakeLLMConfigStore(),
         coding_agent_runner=coding_agent_runner or fail_if_called,
         event_sink=event_sink,
+        live_event_sink=live_event_sink,
         app_diagnostic_loader=app_diagnostic_loader,
     )
+
+
+@pytest.mark.asyncio
+async def test_live_snapshot_updates_are_diffed_without_entering_durable_store(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    emitted: list[dict[str, Any]] = []
+    workflow = _workflow(tmp_path, store, graph_db, live_emitted=emitted)
+    run = {
+        "id": "run-live",
+        "source_id": "session-1",
+        "step_key": "stage_code",
+        "step_attempt": 2,
+    }
+    buffer_token = workflow._event_buffer.set([])
+    live_token = workflow._live_stream_state.set({})
+    try:
+        await workflow._emit(
+            run,
+            {
+                "type": "reply",
+                "message": {"id": -1, "sender": "agent", "content": "正在编"},
+            },
+            live_mode="snapshot",
+        )
+        await workflow._emit(
+            run,
+            {
+                "type": "reply",
+                "message": {"id": -1, "sender": "agent", "content": "正在编写"},
+            },
+            live_mode="snapshot",
+        )
+        buffered = list(workflow._event_buffer.get() or [])
+    finally:
+        workflow._live_stream_state.reset(live_token)
+        workflow._event_buffer.reset(buffer_token)
+
+    assert [event["delta"] for event in emitted] == ["正在编", "写"]
+    assert [event["replace"] for event in emitted] == [True, False]
+    assert [event["chunk_sequence"] for event in emitted] == [1, 2]
+    assert {event["stream_id"] for event in emitted} == {
+        "run-live:stage_code:2:activity"
+    }
+    assert len(buffered) == 2
+    assert store.events_after(0) == []
 
 
 async def _execute_fenced_step(

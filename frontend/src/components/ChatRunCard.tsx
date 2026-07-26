@@ -12,12 +12,17 @@ import {
   Square,
   Wrench,
 } from "lucide-react";
-import type { ChatRunCard as ChatRunCardModel, RunActivity } from "../lib/chatProjection";
+import type {
+  ChatRunCard as ChatRunCardModel,
+  LiveStreamState,
+  RunActivity,
+} from "../lib/chatProjection";
 
 interface ChatRunCardProps {
   run: ChatRunCardModel;
   language: "zh" | "en";
   onCancel?: (runId: string) => void;
+  liveStreams?: LiveStreamState[];
 }
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "waiting_user", "cancel_requested"]);
@@ -81,7 +86,21 @@ function activitySummary(activity: RunActivity, isZh: boolean): string {
   return parts.join(" · ");
 }
 
-export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCancel }) => {
+function liveStreamText(stream: LiveStreamState, isZh: boolean): string {
+  if (stream.kind !== "tool_progress") return stream.text.slice(-1_200);
+  const tool = stream.tool || stream.text;
+  const labels: Record<string, [string, string]> = {
+    started: [`正在运行 ${tool}`, `Running ${tool}`],
+    succeeded: [`${tool} 已完成`, `${tool} completed`],
+    completed: [`${tool} 已完成`, `${tool} completed`],
+    failed: [`${tool} 未完成`, `${tool} failed`],
+    cancelled: [`${tool} 已停止`, `${tool} stopped`],
+  };
+  const pair = labels[stream.toolStatus ?? "started"] ?? [`正在运行 ${tool}`, `Running ${tool}`];
+  return pair[isZh ? 0 : 1];
+}
+
+export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCancel, liveStreams = [] }) => {
   const isZh = language === "zh";
   const [expanded, setExpanded] = useState(() => ACTIVE_STATUSES.has(run.status));
   const active = ACTIVE_STATUSES.has(run.status);
@@ -90,6 +109,7 @@ export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCance
   const currentPhase = canonicalPhase(run.phase);
   const currentPhaseIndex = PHASES.indexOf(currentPhase as typeof PHASES[number]);
   const widgetRun = run.workflowType?.startsWith("widget") || currentPhaseIndex >= 0;
+  const latestLive = liveStreams.at(-1);
 
   useEffect(() => {
     if (run.status === "needs_attention" || run.status === "failed") setExpanded(true);
@@ -145,6 +165,11 @@ export const ChatRunCard: React.FC<ChatRunCardProps> = ({ run, language, onCance
             </li>;
           })}
         </ol> : <p className="chat-run-summary">{run.summary || (isZh ? "正在准备…" : "Preparing…")}</p>}
+        {latestLive ? <div className={`chat-run-live is-${latestLive.kind}`}>
+          <span aria-hidden="true" />
+          <p>{liveStreamText(latestLive, isZh)}<i aria-hidden="true" /></p>
+          {latestLive.hasGap ? <small>{isZh ? "部分实时片段已跳过，完成后将以持久结果校准。" : "Some live fragments were skipped; durable completion will reconcile the result."}</small> : null}
+        </div> : null}
         {run.error ? <p className="chat-run-error">{run.error}</p> : null}
         <footer className="chat-run-footer">
           <span>

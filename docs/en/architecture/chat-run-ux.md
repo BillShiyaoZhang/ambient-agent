@@ -1,6 +1,6 @@
 # Chat and Run Information Experience
 
-> Status: Phase A implemented; Phases B–D remain for later iterations. This document records the information architecture, event contracts, current implementation, and rollout order.
+> Status: Phases A–B implemented; Phases C–D remain for later iterations. This document records the information architecture, event contracts, current implementation, and rollout order.
 
 ## 1. Goals and principles
 
@@ -115,16 +115,20 @@ Live events are not chat history and may be discarded. They provide in-progress 
 - `tool_progress`;
 - `run_heartbeat`.
 
-Suggested envelope:
+Current v1 envelope (carried by `run_live_event.event` on `/ws/run-live?session_id=...`):
 
 ```json
 {
-  "type": "assistant_message_delta",
+  "schema_version": 1,
   "run_id": "run-id",
+  "session_id": "session-id",
   "step_id": "stage_code",
-  "stream_id": "run-id:stage_code:message-1",
+  "attempt": 1,
+  "stream_id": "run-id:stage_code:1:activity",
   "chunk_sequence": 17,
+  "kind": "activity_delta",
   "delta": "Inspecting controller.js",
+  "replace": false,
   "created_at": "2026-07-26T06:00:00Z"
 }
 ```
@@ -147,6 +151,7 @@ interface ConversationProjection {
   items: ConversationItem[];
   runs: Record<string, RunCardState>;
   liveStreams: Record<string, LiveStreamState>;
+  liveStepWatermarks: Record<string, number>;
   interactions: Record<string, InteractionCardState>;
 }
 
@@ -205,6 +210,13 @@ Show the latest finding by default and keep prior findings in the expanded timel
 - Add a separate live WebSocket projection for ACP callbacks that bypasses the reducer commit buffer.
 - Add `stream_id/chunk_sequence`, throttling, coalescing, and completed replacement.
 - Test disconnect, replay, duplicate, out-of-order, and session-switch behavior.
+
+Implemented behavior:
+
+- The backend projects `assistant_message_delta`, `activity_delta`, and `tool_progress` through session-scoped bounded in-memory queues. Slow clients drop only their oldest ephemeral events and never block the workflow.
+- ACP cumulative snapshots are converted to deltas at the workflow boundary. A reset snapshot uses `replace=true` instead of duplicating prior text.
+- The frontend coalesces events every 50 ms, deduplicates by `stream_id + chunk_sequence`, and ignores out-of-order fragments. Sequence gaps are surfaced as a reminder that durable events will reconcile the final state.
+- Durable `step_committed`, final replies, waiting states, and terminal states clear the matching live buffer. Disconnects and session switches discard incomplete buffers before `/ws/runs` restores factual state.
 
 ### Phase C: structured activities and interactions
 

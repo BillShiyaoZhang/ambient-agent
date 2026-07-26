@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import _accept_websocket_safely, app, app_manager, get_db
+from backend.main import _accept_websocket_safely, app, app_manager, get_db, run_live_broker
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -64,6 +64,35 @@ async def test_aborted_or_duplicate_websocket_handshake_is_ignored_without_asgi_
             )
 
     assert await _accept_websocket_safely(StaleHandshake()) is False
+
+
+def test_websocket_run_live_projects_only_the_subscribed_session():
+    session_id = f"run-live-{uuid4().hex}"
+    event = {
+        "schema_version": 1,
+        "run_id": "run-one",
+        "session_id": session_id,
+        "step_id": "stage_code",
+        "attempt": 1,
+        "stream_id": "run-one:stage_code:1:activity",
+        "chunk_sequence": 1,
+        "kind": "activity_delta",
+        "delta": "hello",
+        "replace": True,
+        "created_at": "2026-07-26T00:00:00Z",
+    }
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws/run-live?session_id={session_id}") as websocket:
+            assert websocket.receive_json() == {
+                "type": "run_live_ready",
+                "session_id": session_id,
+            }
+            run_live_broker.publish("another-session", {**event, "session_id": "another-session"})
+            run_live_broker.publish(session_id, event)
+            assert websocket.receive_json() == {"type": "run_live_event", "event": event}
+
+    assert run_live_broker.subscriber_count(session_id) == 0
 
 
 def test_websocket_converse_rejects_unverified_inline_widget(test_session, monkeypatch):

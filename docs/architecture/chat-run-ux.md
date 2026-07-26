@@ -1,6 +1,6 @@
 # Chat 与 Run 信息体验设计
 
-> 状态：Phase A 已实现；Phase B–D 待后续迭代。本文记录信息架构、事件契约、当前实现与后续顺序。
+> 状态：Phase A–B 已实现；Phase C–D 待后续迭代。本文记录信息架构、事件契约、当前实现与后续顺序。
 
 ## 1. 目标与原则
 
@@ -114,16 +114,20 @@ Live event 不进入聊天历史，允许丢弃，用于正在进行的视觉反
 - `tool_progress`；
 - `run_heartbeat`。
 
-建议 envelope：
+当前 v1 envelope（由 `/ws/run-live?session_id=...` 的 `run_live_event.event` 承载）：
 
 ```json
 {
-  "type": "assistant_message_delta",
+  "schema_version": 1,
   "run_id": "run-id",
+  "session_id": "session-id",
   "step_id": "stage_code",
-  "stream_id": "run-id:stage_code:message-1",
+  "attempt": 1,
+  "stream_id": "run-id:stage_code:1:activity",
   "chunk_sequence": 17,
+  "kind": "activity_delta",
   "delta": "正在检查 controller.js",
+  "replace": false,
   "created_at": "2026-07-26T06:00:00Z"
 }
 ```
@@ -146,6 +150,7 @@ interface ConversationProjection {
   items: ConversationItem[];
   runs: Record<string, RunCardState>;
   liveStreams: Record<string, LiveStreamState>;
+  liveStepWatermarks: Record<string, number>;
   interactions: Record<string, InteractionCardState>;
 }
 
@@ -204,6 +209,13 @@ Approval 应是结构化卡片：
 - 为 ACP callback 增加独立 live WebSocket 投影，不经过 reducer commit buffer。
 - 增加 `stream_id/chunk_sequence`、限流、合并和 completed replacement。
 - 覆盖断线、重放、重复、乱序和 session 切换测试。
+
+已实现说明：
+
+- 后端使用 session-scoped、内存有界队列投影 `assistant_message_delta`、`activity_delta` 和 `tool_progress`；慢客户端只丢最旧的临时事件，不会阻塞 workflow。
+- ACP 累计 snapshot 在 workflow 边界转成 delta；完全重置的 snapshot 使用 `replace=true`，不会重复拼接。
+- 前端每 50 ms 批量归并事件，以 `stream_id + chunk_sequence` 去重并忽略乱序；发现序号缺口时提示最终以 durable event 校准。
+- durable `step_committed`、最终 reply、等待/终态会清理对应 live buffer；断线和 session 切换会丢弃未完成 buffer，再由 `/ws/runs` 恢复事实状态。
 
 ### Phase C：结构化 activity 与 interaction
 

@@ -1,4 +1,5 @@
 import type { AmbientRun, RunEvent, RunStatus } from "../services/runs";
+import type { RunLiveEvent, RunLiveEventKind } from "../services/runLive";
 
 export interface RunActivity {
   id: string;
@@ -28,17 +29,53 @@ export interface ChatRunCard {
   activities: RunActivity[];
 }
 
+export interface LiveStreamState {
+  streamId: string;
+  runId: string;
+  stepId: string;
+  kind: RunLiveEventKind;
+  text: string;
+  lastSequence: number;
+  hasGap: boolean;
+  updatedAt: string;
+  tool?: string;
+  toolStatus?: string;
+}
+
 export interface ConversationProjection {
   order: string[];
   runs: Record<string, ChatRunCard>;
+  liveStreams: Record<string, LiveStreamState>;
+  liveStepWatermarks: Record<string, number>;
 }
 
 export const EMPTY_CONVERSATION_PROJECTION: ConversationProjection = {
   order: [],
   runs: {},
+  liveStreams: {},
+  liveStepWatermarks: {},
 };
 
 const TERMINAL_STATUSES = new Set<RunStatus>(["succeeded", "failed", "cancelled", "needs_attention"]);
+const liveStepKey = (runId: string, stepId: string): string => `${runId}:${stepId}`;
+
+function markLiveStepCompleted(
+  projection: ConversationProjection,
+  runId: string,
+  stepId: string,
+  attempt: number,
+): ConversationProjection {
+  if (!stepId || attempt < 1) return projection;
+  const key = liveStepKey(runId, stepId);
+  if ((projection.liveStepWatermarks[key] ?? 0) >= attempt) return projection;
+  return {
+    ...projection,
+    liveStepWatermarks: {
+      ...projection.liveStepWatermarks,
+      [key]: attempt,
+    },
+  };
+}
 
 const asRecord = (value: unknown): Record<string, unknown> | null => (
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -111,6 +148,7 @@ function withCard(
   const existing = projection.runs[runId] ?? defaultCard(runId, createdAt);
   const next = updater(existing);
   return {
+    ...projection,
     order: projection.order.includes(runId) ? projection.order : [...projection.order, runId],
     runs: { ...projection.runs, [runId]: next },
   };
@@ -206,7 +244,7 @@ export function projectRunEvent(
 ): ConversationProjection {
   const payload = asRecord(event.payload);
   const now = event.created_at;
-  return withCard(projection, event.run_id, now, (current) => {
+  let next = withCard(projection, event.run_id, now, (current) => {
     let card = {
       ...current,
       updatedAt: now,
@@ -286,13 +324,47 @@ export function projectRunEvent(
 
     return payload ? projectBusinessPayload(card, payload, now) : card;
   });
+  const replyMessage = asRecord(payload?.message);
+  const positiveReply = payloadType(payload) === "reply"
+    && replyMessage !== null
+    && asNumber(replyMessage.id) >= 0;
+  if (event.type === "step_committed") {
+    const phase = asString(payload?.step_key) || event.step_id;
+    next = clearLiveStreams(next, (stream) => (
+      stream.runId === event.run_id && (!phase || stream.stepId === phase)
+    ));
+    next = markLiveStepCompleted(
+      next,
+      event.run_id,
+      phase || "",
+      asNumber(event.attempt) || asNumber(payload?.attempt),
+    );
+  } else if (
+    event.type === "interaction_requested"
+    || (event.type === "status_changed" && ["waiting_user", "cancelled", "failed", "needs_attention", "succeeded"].includes(asString(payload?.to)))
+  ) {
+    next = clearLiveStreams(next, (stream) => stream.runId === event.run_id);
+  } else if (positiveReply) {
+    next = clearLiveStreams(next, (stream) => (
+      stream.runId === event.run_id && stream.kind === "assistant_message_delta"
+    ));
+    next = markLiveStepCompleted(
+      next,
+      event.run_id,
+      event.step_id || "",
+      asNumber(event.attempt),
+    );
+  }
+  return next;
 }
 
 export function projectRunSnapshot(
   projection: ConversationProjection,
   run: AmbientRun,
 ): ConversationProjection {
-  return withCard(projection, run.id, run.created_at, (current) => {
+  const checkpoint = asRecord(run.checkpoint);
+  const lastStep = asString(checkpoint?.last_step);
+  const next = withCard(projection, run.id, run.created_at, (current) => {
     const input = asRecord(run.input);
     const content = trimDetail(input?.content);
     const error = run.error?.message ?? "";
@@ -309,11 +381,9 @@ export function projectRunSnapshot(
       artifactCount: run.artifacts?.length ?? current.artifactCount,
     };
     const state = asRecord(run.state);
-    const checkpoint = asRecord(run.checkpoint);
     const data = asRecord(state?.data);
     const budget = asRecord(state?.budget);
     const statePhase = asString(state?.phase);
-    const lastStep = asString(checkpoint?.last_step);
     const phase = statePhase && statePhase !== "done"
       ? statePhase
       : lastStep || (run.status === "succeeded" && run.workflow_type?.startsWith("widget") ? "promote" : current.phase);
@@ -328,6 +398,85 @@ export function projectRunSnapshot(
       detail: trimDetail(run.summary || error) || undefined,
     });
   });
+  const checkpointAttempt = asNumber(checkpoint?.attempt);
+  const reconciled = lastStep
+    ? markLiveStepCompleted(next, run.id, lastStep, checkpointAttempt)
+    : next;
+  return ["queued", "running"].includes(run.status)
+    ? reconciled
+    : clearLiveStreams(reconciled, (stream) => stream.runId === run.id);
+}
+
+export function projectLiveRunEvent(
+  projection: ConversationProjection,
+  event: RunLiveEvent,
+): ConversationProjection {
+  const currentStream = projection.liveStreams[event.stream_id];
+  if (currentStream && event.chunk_sequence <= currentStream.lastSequence) return projection;
+  if (
+    event.attempt <= (projection.liveStepWatermarks[liveStepKey(event.run_id, event.step_id)] ?? 0)
+  ) return projection;
+  const currentRun = projection.runs[event.run_id];
+  if (
+    currentRun
+    && ["waiting_user", "cancel_requested", "needs_attention", "succeeded", "failed", "cancelled"].includes(currentRun.status)
+  ) return projection;
+
+  const next = withCard(projection, event.run_id, event.created_at, (card) => {
+    const status = card.status === "queued" ? "running" : card.status;
+    return { ...card, status, phase: event.step_id || card.phase, updatedAt: event.created_at };
+  });
+  const previousText = currentStream?.text ?? "";
+  const text = (event.replace ? event.delta : previousText + event.delta).slice(-12_000);
+  return {
+    ...next,
+    liveStreams: {
+      ...next.liveStreams,
+      [event.stream_id]: {
+        streamId: event.stream_id,
+        runId: event.run_id,
+        stepId: event.step_id,
+        kind: event.kind,
+        text,
+        lastSequence: event.chunk_sequence,
+        hasGap: currentStream?.hasGap === true
+          || (currentStream === undefined
+            ? event.chunk_sequence > 1
+            : event.chunk_sequence > currentStream.lastSequence + 1),
+        updatedAt: event.created_at,
+        tool: event.tool,
+        toolStatus: event.tool_status,
+      },
+    },
+  };
+}
+
+export function projectLiveRunEvents(
+  projection: ConversationProjection,
+  events: RunLiveEvent[],
+): ConversationProjection {
+  return events.reduce(projectLiveRunEvent, projection);
+}
+
+export function clearLiveStreams(
+  projection: ConversationProjection,
+  predicate: (stream: LiveStreamState) => boolean = () => true,
+): ConversationProjection {
+  const liveStreams = Object.fromEntries(
+    Object.entries(projection.liveStreams).filter(([, stream]) => !predicate(stream))
+  );
+  return Object.keys(liveStreams).length === Object.keys(projection.liveStreams).length
+    ? projection
+    : { ...projection, liveStreams };
+}
+
+export function liveStreamsForRun(
+  streams: Record<string, LiveStreamState>,
+  runId: string,
+): LiveStreamState[] {
+  return Object.values(streams)
+    .filter((stream) => stream.runId === runId)
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
 }
 
 export function orderedRunCards(projection: ConversationProjection): ChatRunCard[] {

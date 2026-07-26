@@ -19,12 +19,15 @@ import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/wi
 import { mergeIncomingMessage } from "./lib/messages";
 import {
   EMPTY_CONVERSATION_PROJECTION,
+  clearLiveStreams,
   markRunCancelling,
   orderedRunCards,
+  projectLiveRunEvents,
   projectRunEvent,
   projectRunSnapshot,
   type ConversationProjection,
 } from "./lib/chatProjection";
+import { RunLiveEventBatcher, runLiveService } from "./services/runLive";
 import {
   createCustomOntologyEntity,
   parseEquivalentOntologyIris,
@@ -689,8 +692,20 @@ function App() {
       "mutation_preview",
       "mutation_committed",
     ]);
+    const liveBatcher = new RunLiveEventBatcher((events) => {
+      setChatProjection((current) => projectLiveRunEvents(current, events));
+    });
+    const unsubscribeLiveEvents = runLiveService.subscribe(
+      activeSessionId,
+      (event) => liveBatcher.push(event),
+      () => {
+        liveBatcher.clear();
+        setChatProjection((current) => clearLiveStreams(current));
+      },
+    );
     const unsubscribeRunEvents = runService.subscribe((event) => {
       if (event.session_id !== activeSessionId) return;
+      liveBatcher.flushNow();
       setChatProjection((current) => projectRunEvent(current, event));
       const payload = event.payload;
       if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
@@ -702,6 +717,8 @@ function App() {
 
     return () => {
       disposed = true;
+      liveBatcher.clear();
+      unsubscribeLiveEvents();
       unsubscribeRunEvents();
       wsService.disconnect();
     };
@@ -929,6 +946,7 @@ function App() {
         unreadCount={unreadCount}
         messages={messages}
         runCards={orderedRunCards(chatProjection)}
+        liveStreams={chatProjection.liveStreams}
         sessions={sessions}
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
