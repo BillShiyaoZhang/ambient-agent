@@ -29,7 +29,7 @@ Provider Connection 与凭据集中管理，但模型绑定按消费者隔离：
 ## 方式二：Dev Container
 
 1. 用 VS Code 打开仓库并执行 **Dev Containers: Reopen in Container**。
-2. Dev Containers 会用 `.devcontainer/docker-compose.yml` 同时启动开发工作区和 Neo4j sidecar；`postCreateCommand` 会运行 `uv sync`，并安装 `frontend/` 与 `docs/` 的 npm 依赖。Python 虚拟环境位于容器专用的 `python_env` volume，不与宿主机项目目录中的 `.venv` 混用，避免 macOS/Linux 解释器互相覆盖。
+2. Dev Containers 会用 `.devcontainer/docker-compose.yml` 同时启动开发工作区、Neo4j sidecar、服务端 Widget Runtime 和浏览器 Widget Frame；`postCreateCommand` 会运行 `uv sync`，并安装 `frontend/` 与 `docs/` 的 npm 依赖。Python 虚拟环境位于容器专用的 `python_env` volume，不与宿主机项目目录中的 `.venv` 混用，避免 macOS/Linux 解释器互相覆盖。
 3. 在开发容器终端中分别启动后端和前端：
 
 ```bash
@@ -43,7 +43,7 @@ npm run dev
 
 开发工作区已经设置 `GRAPH_DATABASE_BACKEND=neo4j`，并通过容器网络地址 `bolt://neo4j:7687` 连接 sidecar。Neo4j 的开发凭据是 `neo4j` / `ambient-agent-dev`，数据保存在独立的 Compose volume 中；这些凭据只适合本机开发。
 
-Dev Container 已声明转发工作区端口 8000、5173、5174，以及 Neo4j Browser/Bolt 端口 7474、7687。Browser 位于 `http://localhost:7474`；如果 IDE 未自动转发，请在 Ports 面板手动添加。关闭 Dev Container 会停止这组 Compose 服务，但不会删除 Neo4j 数据卷。
+Dev Container 已声明转发工作区端口 8000、5173、5174、浏览器 Widget Frame 端口 8001，以及 Neo4j Browser/Bolt 端口 7474、7687。Widget Frame 必须能从浏览器通过 `http://localhost:8001` 访问；否则生成阶段的服务端 Runtime smoke test 仍可成功，但打开 Widget 时会报 `runtime_handshake_timeout`。Neo4j Browser 位于 `http://localhost:7474`；如果 IDE 未自动转发，请在 Ports 面板手动添加。关闭 Dev Container 会停止这组 Compose 服务，但不会删除 Neo4j 数据卷。
 
 ## 方式三：本机开发
 

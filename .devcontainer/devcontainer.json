@@ -2,7 +2,7 @@
   "name": "Ambient Agent Developer Environment",
   "dockerComposeFile": "docker-compose.yml",
   "service": "workspace",
-  "runServices": ["workspace", "neo4j", "widget-runtime"],
+  "runServices": ["workspace", "neo4j", "widget-runtime", "widget-frame"],
   "workspaceFolder": "/workspaces/ambient-agent",
   "shutdownAction": "stopCompose",
   "customizations": {
@@ -35,7 +35,7 @@
       ]
     }
   },
-  "forwardPorts": [8000, 5173, 5174, "neo4j:7474", "neo4j:7687"],
+  "forwardPorts": [8000, 5173, 5174, "widget-frame:8001", "neo4j:7474", "neo4j:7687"],
   "portsAttributes": {
     "8000": {
       "label": "Ambient Agent API"
@@ -45,6 +45,10 @@
     },
     "5174": {
       "label": "Ambient Agent Docs"
+    },
+    "widget-frame:8001": {
+      "label": "Widget Frame",
+      "onAutoForward": "silent"
     },
     "neo4j:7474": {
       "label": "Neo4j Browser"

@@ -29,6 +29,8 @@ services:
         condition: service_healthy
       widget-runtime:
         condition: service_healthy
+      widget-frame:
+        condition: service_healthy
 
   widget-runtime:
     build:
@@ -66,6 +68,35 @@ services:
       timeout: 1s
       retries: 15
       start_period: 5s
+    restart: unless-stopped
+
+  widget-frame:
+    build:
+      context: ..
+      dockerfile: widget-runtime/frame.Dockerfile
+    init: true
+    user: "node"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      WIDGET_FRAME_HOST: 0.0.0.0
+      WIDGET_FRAME_PORT: 8001
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch("http://127.0.0.1:8001/health").then(function(response){process.exit(response.ok?0:1)}).catch(function(){process.exit(1)})
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 2s
     restart: unless-stopped
 
   neo4j:

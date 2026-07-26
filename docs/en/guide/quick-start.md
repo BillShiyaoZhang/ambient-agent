@@ -29,7 +29,7 @@ The chat composer shows the `Ambient` primary model used for request understandi
 ## Option 2: Dev Container
 
 1. Open the repository in VS Code and run **Dev Containers: Reopen in Container**.
-2. Dev Containers starts both the development workspace and a Neo4j sidecar from `.devcontainer/docker-compose.yml`; the `postCreateCommand` runs `uv sync` and installs npm dependencies for `frontend/` and `docs/`. The Python environment lives in a container-only `python_env` volume instead of the bind-mounted project `.venv`, preventing macOS and Linux interpreters from overwriting one another.
+2. Dev Containers starts the development workspace, Neo4j sidecar, server-side Widget Runtime, and browser Widget Frame from `.devcontainer/docker-compose.yml`; the `postCreateCommand` runs `uv sync` and installs npm dependencies for `frontend/` and `docs/`. The Python environment lives in a container-only `python_env` volume instead of the bind-mounted project `.venv`, preventing macOS and Linux interpreters from overwriting one another.
 3. Start the backend and frontend separately in development-container terminals:
 
 ```bash
@@ -43,7 +43,7 @@ npm run dev
 
 The workspace already sets `GRAPH_DATABASE_BACKEND=neo4j` and reaches the sidecar at the container-network address `bolt://neo4j:7687`. Neo4j uses the development-only credentials `neo4j` / `ambient-agent-dev` and persists data in a dedicated Compose volume.
 
-The Dev Container forwards workspace ports 8000, 5173, and 5174 plus Neo4j Browser/Bolt ports 7474 and 7687. The Browser is available at `http://localhost:7474`; add a port in the Ports panel if the IDE does not forward it automatically. Closing the Dev Container stops this Compose stack without deleting the Neo4j data volume.
+The Dev Container forwards workspace ports 8000, 5173, and 5174, the browser Widget Frame on port 8001, and Neo4j Browser/Bolt ports 7474 and 7687. The Widget Frame must be browser-reachable at `http://localhost:8001`; otherwise the server-side Runtime smoke test can still pass during generation while opening the Widget fails with `runtime_handshake_timeout`. Neo4j Browser is available at `http://localhost:7474`; add a port in the Ports panel if the IDE does not forward it automatically. Closing the Dev Container stops this Compose stack without deleting the Neo4j data volume.
 
 ## Option 3: Local Development
 
