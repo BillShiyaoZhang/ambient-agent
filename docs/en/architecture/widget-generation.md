@@ -125,7 +125,7 @@ Verification order is fixed:
 5. Isolated-Chromium smoke test through the production `WidgetRuntimeGateway`.
 6. Recompute artifact, contract, and grants digests before promotion.
 
-All automatic repairs run with bounds in the same staging directory and Run. Findings enter the repair prompt and receive a signature. If the same signature repeats, strategy escalates: local repair first, full-file same-class scan second, and contract/design-unsatisfied classification third. The workflow returns to joint design instead of generating forever or requiring repeated `/repair` input.
+Automatic repairs run in the same staging directory and Run. Every finding enters the repair prompt and receives an exact signature, and the independent verifier runs again immediately after the edit. The loop keeps handling new findings as long as the finding changes and the artifact was modified; there is no fixed turn count. It stops and retains the failed draft when the same signature repeats consecutively or the artifact hash is unchanged instead of requiring repeated `/repair` input. Finding history is stored with the staging checkpoint and still participates in repetition detection after a cross-Run retry.
 
 Capability, security-boundary, and unknown-entity failures cannot be bypassed. Only presentation-level warnings that cannot make Graph writes invalid may be explicitly accepted.
 
@@ -145,7 +145,7 @@ The policy is deterministic:
 3. `subset_only` findings are automatic only when approved acceptance coverage remains intact; otherwise they return to design;
 4. `design_change`, `expansion`, or `unknown` findings never go to the Coding Agent and require reapproval;
 5. verifier/runtime infrastructure failures are `operator` findings and are not hidden by code generation;
-6. each adapter gets at most three automatic repair turns; the loop stops immediately when the same signature repeats twice, the artifact hash does not change, or the budget is exhausted, retaining a failed draft.
+6. distinct new findings are not truncated by a fixed repair count; the loop stops immediately when the same exact signature repeats twice, the artifact hash does not change, a turn times out, or another safety budget is exhausted, retaining a failed draft.
 
 ### 7.1 ACP compatibility policy
 
@@ -168,7 +168,7 @@ Staging smoke tests and published Widgets use the same isolated Runtime protocol
 | `operator` | Runtime unavailable, Chromium crash, protocol mismatch, host resource exhaustion | Restart/back off and retain the draft; request operator attention after persistent failure without modifying App code |
 | `abuse_or_budget` | infinite loop, message flood, resource-quota exhaustion | Terminate the session immediately; auto-repair only when a bounded code fix is identifiable without relaxing the quota |
 
-Same-session automatic repair is limited to `code_only + contract_impact=none` and still observes the three-turn budget, repeated-signature, unchanged-artifact-hash, and total-time limits. Before Runtime diagnostics enter a model, they are stripped of non-source secrets, host paths, and other-session data, with hard bounds on console, stack, DOM snapshot, and frame sizes. A runtime failure in a published App may create a new staging repair Run while preserving the current live revision; that staging cannot replace live until it passes the full verifier and smoke test.
+Same-session automatic repair is limited to `code_only + contract_impact=none` and observes exact repeated-signature, unchanged-artifact-hash, per-turn timeout, and resource-budget guards; distinct new findings have no fixed three-turn ceiling. Before Runtime diagnostics enter a model, they are stripped of non-source secrets, host paths, and other-session data, with hard bounds on console, stack, DOM snapshot, and frame sizes. A runtime failure in a published App may create a new staging repair Run while preserving the current live revision; that staging cannot replace live until it passes the full verifier and smoke test.
 
 ## 8. Durable state
 

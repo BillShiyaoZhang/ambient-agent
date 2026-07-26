@@ -8,6 +8,7 @@
   - [Widget 生成信息契约](/architecture/widget-generation.md)
   - [Widget 能力安全架构](/architecture/capability-security.md)
   - [工作区交互](/architecture/workspace-ux.md)
+  - [Chat 与 Run 信息体验](/architecture/chat-run-ux.md)
   - [Widget 与应用中心](/architecture/apps.md)
   - [持久 Run 与 Runtime](/architecture/runs.md)
   - [图数据库](/architecture/graph-db.md)

@@ -25,7 +25,7 @@ _DESIGN_CODES = {
     "design_change_required",
     "schema_extension_required",
 }
-_NORMALIZE_DIAGNOSTIC_PATTERN = re.compile(r"\b(?:0x)?[0-9a-f]{8,}\b|\b\d+\b", re.IGNORECASE)
+_NORMALIZE_DIAGNOSTIC_WHITESPACE = re.compile(r"\s+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +52,35 @@ class RepairFinding:
 class RepairDirective:
     action: RepairAction
     reason: str
+
+
+def repair_finding_from_dict(value: object) -> RepairFinding:
+    """Restore one persisted verifier finding without weakening its types."""
+
+    if not isinstance(value, dict):
+        raise ValueError("Persisted repair finding must be an object")
+    locations = value.get("locations", ())
+    if not isinstance(locations, (list, tuple)) or not all(isinstance(item, str) for item in locations):
+        raise ValueError("Persisted repair finding locations must be strings")
+    repairability = str(value.get("repairability") or "")
+    if repairability not in {"deterministic", "code_only", "design_change", "operator"}:
+        raise ValueError("Persisted repair finding has invalid repairability")
+    contract_impact = str(value.get("contract_impact") or "")
+    if contract_impact not in {"none", "subset_only", "expansion", "unknown"}:
+        raise ValueError("Persisted repair finding has invalid contract impact")
+    return RepairFinding(
+        code=str(value.get("code") or ""),
+        stage=str(value.get("stage") or ""),
+        message=str(value.get("message") or "")[:12_000],
+        signature=str(value.get("signature") or ""),
+        attempt=max(1, int(value.get("attempt") or 1)),
+        repairability=repairability,  # type: ignore[arg-type]
+        contract_impact=contract_impact,  # type: ignore[arg-type]
+        artifact_hash=str(value.get("artifact_hash") or ""),
+        expected=str(value.get("expected") or ""),
+        observed=str(value.get("observed") or ""),
+        locations=tuple(locations),
+    )
 
 
 def artifact_hash(staging_dir: Path) -> str:
@@ -100,7 +129,11 @@ def finding_from_exception(
     else:
         repairability = "operator"
         contract_impact = "unknown"
-    normalized = _NORMALIZE_DIAGNOSTIC_PATTERN.sub("#", f"{stage}|{code}|{message}")
+    # Preserve line/column numbers and source excerpts: "exactly the same"
+    # means the verifier returned the same finding, not merely the same broad
+    # error class at a different source location. Whitespace-only transport
+    # differences are safe to ignore.
+    normalized = _NORMALIZE_DIAGNOSTIC_WHITESPACE.sub(" ", f"{stage}|{code}|{message}").strip()
     signature = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
     return RepairFinding(
         code=code,
@@ -118,7 +151,7 @@ def decide_widget_repair(
     finding: RepairFinding,
     history: Sequence[RepairFinding],
     *,
-    max_repairs: int = 3,
+    max_repairs: int | None = None,
 ) -> RepairDirective:
     """Make the authority decision independently of any model session."""
 
@@ -126,14 +159,14 @@ def decide_widget_repair(
         return RepairDirective("operator", "The failure is outside the generated artifact or has unknown effects.")
     if finding.repairability == "design_change" or finding.contract_impact == "expansion":
         return RepairDirective("design", "Repair would change the approved design or expand authority.")
-    if len(history) >= max_repairs:
-        return RepairDirective("human", "The automatic repair budget is exhausted.")
     if history:
         previous = history[-1]
         if previous.signature == finding.signature:
             return RepairDirective("human", "The same verifier finding repeated after an automatic repair.")
         if previous.artifact_hash == finding.artifact_hash:
             return RepairDirective("human", "The coding agent did not change the contract-bearing artifact.")
+    if max_repairs is not None and len(history) >= max_repairs:
+        return RepairDirective("human", "The automatic repair budget is exhausted.")
     return RepairDirective("repair", "The finding is local to code and preserves the approved Runtime Contract.")
 
 

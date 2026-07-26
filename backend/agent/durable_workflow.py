@@ -636,23 +636,42 @@ class DurableAgentWorkflow:
                 app_id = str(state.intent.get("app_id") or "")
             app_id = app_id or "unknown-app"
             reason = " ".join(str(message).strip().split())[:2_000] or "Unknown generation failure"
+            repair_decision = (
+                state.data.get("repair_decision")
+                if isinstance(state.data.get("repair_decision"), dict)
+                else {}
+            )
+            automatic_repair_stalled = repair_decision.get("action") == "human"
             if state.data.get("language") == "zh":
+                repair_guidance = (
+                    "自动修复已停止：同一校验错误连续出现，或修复没有改变受校验文件。"
+                    f"失败草稿已安全保留；如有新的修复思路，可回复 `/repair {app_id} <具体说明>`。"
+                    if automatic_repair_stalled
+                    else f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；"
+                    "也可以在命令后补充具体要求。"
+                )
                 content = (
                     f"Widget “{app_id}” 生成失败，尚未发布到应用中心。\n"
                     f"失败阶段：{state.phase}\n"
                     f"错误码：{code}\n"
                     f"原因：{reason}\n"
-                    f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；"
-                    "也可以在命令后补充具体要求。"
+                    f"{repair_guidance}"
                 )
             else:
+                repair_guidance = (
+                    "Automatic repair stopped because the same verifier finding repeated or the validated "
+                    f"files did not change. The failed draft was retained; reply with `/repair {app_id} "
+                    "<specific guidance>` only if you have a new repair direction."
+                    if automatic_repair_stalled
+                    else f"The failed draft was retained safely. Reply with `/repair {app_id}` to continue, "
+                    "optionally followed by additional instructions."
+                )
                 content = (
                     f'Widget "{app_id}" failed and was not published to App Center.\n'
                     f"Failed phase: {state.phase}\n"
                     f"Error code: {code}\n"
                     f"Cause: {reason}\n"
-                    f"The failed draft was retained safely. Reply with `/repair {app_id}` to continue, "
-                    "optionally followed by additional instructions."
+                    f"{repair_guidance}"
                 )
             try:
                 diagnostic, created = self._save_agent_message(run, state, content)
@@ -1376,6 +1395,7 @@ class DurableAgentWorkflow:
             self._record_staged_app(state, exc.staged_result, coding_agent, validation_error=str(exc))
             state.data["repair_decision"] = {
                 "action": exc.repair_action,
+                "reason": exc.repair_reason,
                 "finding": exc.finding,
             }
             raise WorkflowError(str(exc), code=exc.error_code) from exc

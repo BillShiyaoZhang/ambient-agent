@@ -8,6 +8,7 @@
   - [Widget Generation Information Contract](/en/architecture/widget-generation.md)
   - [Widget Capability Security](/en/architecture/capability-security.md)
   - [Workspace UX](/en/architecture/workspace-ux.md)
+  - [Chat and Run Information Experience](/en/architecture/chat-run-ux.md)
   - [Widgets and App Center](/en/architecture/apps.md)
   - [Durable Runs and Runtimes](/en/architecture/runs.md)
   - [Graph Database](/en/architecture/graph-db.md)

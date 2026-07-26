@@ -653,6 +653,50 @@ async def test_terminal_widget_failure_retains_isolated_draft_and_live_app(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_repeated_automatic_repair_failure_is_reported_as_stalled(tmp_path: Path) -> None:
+    apps_dir = tmp_path / "apps"
+    staging_dir = apps_dir / f".weather-app.staging-{'c' * 32}"
+    staging_dir.mkdir(parents=True)
+    (staging_dir / "controller.js").write_text("// invalid draft", encoding="utf-8")
+    store = RunStore(str(tmp_path))
+    workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)))
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="build it"),
+        data={
+            "language": "zh",
+            "staged_app": {
+                "output": "generated",
+                "app_id": "weather-app",
+                "staging_dir": str(staging_dir),
+                "live_dir": str(apps_dir / "weather-app"),
+            },
+            "repair_decision": {
+                "action": "human",
+                "reason": "The same verifier finding repeated after an automatic repair.",
+            },
+        },
+    )
+    run = _create_run(store, state, content="build it")
+
+    failed = await workflow._failure(
+        state,
+        run=run,
+        code="widget_verification_failed",
+        message="Unexpected token (980:3)",
+        retryable=False,
+        effect_state="none",
+    )
+
+    diagnostic = WorkspaceStorage(str(tmp_path)).get_messages(state.session_id or "")[-1]
+    assert "自动修复已停止" in diagnostic.content
+    assert "同一校验错误连续出现" in diagnostic.content
+    assert "/repair weather-app <具体说明>" in diagnostic.content
+    assert failed.events[0].payload["message"]["content"] == diagnostic.content
+
+
+@pytest.mark.asyncio
 async def test_stage_code_failure_checkpoints_adapter_draft_and_retry_repairs_it_in_place(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

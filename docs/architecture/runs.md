@@ -30,9 +30,9 @@ step attempt、最新 state、checkpoint、Run 状态、interaction 和 reducer 
 
 默认总预算为 8 个模型 turn、300 秒 active wall time、64,000 token 和 5 美元；usage 在每次模型响应后累计进 checkpoint，任何一项超额都以 `budget_exhausted` 失败。上下文只按稳定顺序装入近期消息；窗口外消息形成确定性 extractive summary，摘要正文与 `sha256:` 引用一起持久化。LLM audit 同时记录 prompt、tool schema 和被读取 artifact 的 hash。
 
-显式 retry 会创建新的 Run attempt，并从原 checkpoint 继续。新 attempt 重置 active wall-time 计数，避免基础设施故障耗尽的时间预算让恢复立即再次失败；模型 turn、token 与 cost 计数继续累计，以维持整项任务的推理与费用上限。
+显式 retry 会创建新的 Run attempt，并从原 checkpoint 继续。新 attempt 重置 active wall-time，并在保留累计 model turn、token 与 cost usage 的同时增加一个新的同尺寸预算窗口；这样审计仍能看到整条 retry 链的累计用量，旧 attempt 已耗尽的上限也不会让恢复立即失败。
 
-Widget 在 promotion 前失败（包括 Coding Agent 内部校验修复耗尽、`budget_exhausted`、校验器不可用和进程异常）时，workflow 必须保留 `data.staged_app`，并把它标记为不可执行的 failed draft。以 `promote=False` 运行的 Coding Agent adapter 不拥有失败草稿的清理权：任何非取消异常都必须将受约束的 staging handle 与原始错误一起交还 reducer，并由 reducer 在同一个 step checkpoint 中持久化。failed draft 仍位于隐藏 staging 隔离目录，不进入 App 列表、Canvas 或 Widget runtime，也不能绕过校验直接提升。显式 retry 在 artifact 仍存在时复用它：Coding Agent 内部校验失败从同一 staging 原地修复，`verify` 从校验继续，`wait_override` 回到 `verify` 重新产生可信报告，已通过校验的 `promote` 从原子发布继续。只有 artifact 已缺失时才回到新的 `stage_code`，同时保留已批准的 plan/schema，并清除只针对旧 artifact 的校验报告与 override。
+Widget 在 promotion 前失败（包括 Coding Agent 校验修复熔断、`budget_exhausted`、校验器不可用和进程异常）时，workflow 必须保留 `data.staged_app`，并把它标记为不可执行的 failed draft。以 `promote=False` 运行的 Coding Agent adapter 不拥有失败草稿的清理权：任何非取消异常都必须将受约束的 staging handle 与原始错误一起交还 reducer，并由 reducer 在同一个 step checkpoint 中持久化。failed draft 仍位于隐藏 staging 隔离目录，不进入 App 列表、Canvas 或 Widget runtime，也不能绕过校验直接提升。显式 retry 在 artifact 仍存在时复用它：Coding Agent 内部校验失败从同一 staging 原地修复并恢复历史 finding，`verify` 从校验继续，`wait_override` 回到 `verify` 重新产生可信报告，已通过校验的 `promote` 从原子发布继续。只有 artifact 已缺失时才回到新的 `stage_code`，同时保留已批准的 plan/schema，并清除只针对旧 artifact 的校验报告与 override。
 
 failed draft 进入终态时，reducer 必须同时持久化并投影一条聊天诊断消息，至少包含 App ID、失败阶段、稳定错误码、可读错误原因，以及“草稿尚未发布”的明确说明。用户可在同一聊天中输入 `/repair <app-id> [补充说明]`，或使用明确指向刚才失败草稿的自然语言修复/重试请求；命令会创建新的 Run attempt，把补充说明加入 `code_feedback`，并复用原 staging checkpoint。该路径不得重新申请权限、创建第二份同 ID 草稿或把失败产物暴露给 App Center。
 

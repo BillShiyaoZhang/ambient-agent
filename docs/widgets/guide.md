@@ -66,7 +66,7 @@ Runtime Contract 是发布协调器使用的审批信封，不是 `manifest.json
 5. Graph 使用与有效 schema 一致；
 6. artifact hash、grants digest、Run version 和 effect/idempotency 记录。
 
-全部通过后才将 staging 原子提升。失败、取消或拒绝不会覆盖现有 App。校验错误若被确定性策略判定为只需改代码且不改变批准 contract，Coding Agent 会在同一 staging 中自动进行最多三轮修复；OpenCode 优先复用仍存活的 ACP session。基础设施错误、需要扩权/改 schema 的错误，以及重复 finding 不会被盲目交给 Coding Agent。promotion 前仍未解决的内部校验失败、超时或系统错误会连同草稿一起保留在不可执行的隐藏 staging 中；用户重试会在该目录原地修复或继续校验，而不是先删除再生成。若错误来自 Controller 与 Manifest grant 不一致，修复 turn 会再次获得已批准 Runtime Contract，只能修正现有 `controller.js`/`manifest.json` 使其匹配，不能申请或扩大权限。只有显式取消、返工或超过草稿保留期后才会清理该 staging。
+全部通过后才将 staging 原子提升。失败、取消或拒绝不会覆盖现有 App。校验错误若被确定性策略判定为只需改代码且不改变批准 contract，Coding Agent 会在同一 staging 和 ACP session 中持续“修复 → 独立校验”，不再受固定三轮上限约束。完全相同的 finding 连续出现或受校验 artifact hash 没有变化时立即熔断；基础设施错误、需要扩权/改 schema 的错误也不会被盲目交给 Coding Agent。finding 历史会随 failed draft 持久化，因此新的 Run attempt 不能从零开始重复同一失败。promotion 前仍未解决的内部校验失败、超时或系统错误会连同草稿一起保留在不可执行的隐藏 staging 中；用户重试会在该目录原地修复或继续校验，而不是先删除再生成。若错误来自 Controller 与 Manifest grant 不一致，修复 turn 会再次获得已批准 Runtime Contract，只能修正现有 `controller.js`/`manifest.json` 使其匹配，不能申请或扩大权限。只有显式取消、返工或超过草稿保留期后才会清理该 staging。
 
 ## 5. 调试
 

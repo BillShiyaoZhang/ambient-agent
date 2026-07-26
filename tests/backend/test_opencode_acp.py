@@ -50,6 +50,7 @@ from backend.coding_agent_acp import (
     validate_opencode_promotion,
     validate_opencode_staging,
 )
+from backend.coding_agent_repair import finding_from_exception
 
 
 def _write_manifest(
@@ -1074,6 +1075,121 @@ async def test_acp_repairs_contract_validation_failure_in_the_same_session(monke
     assert "runtime_contract_mismatch" in repair_prompt
     assert "never add or broaden capabilities" in repair_prompt
     assert "APPROVED RUNTIME CONTRACT" in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_acp_keeps_repairing_distinct_findings_past_three_turns(monkeypatch, tmp_path):
+    mock_conn = AsyncMock()
+    mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-many-repairs"))
+    prompts = 0
+
+    async def generate_controller(*args, **kwargs):
+        nonlocal prompts
+        prompts += 1
+        staging_dir = Path(mock_conn.new_session.call_args.kwargs["cwd"])
+        (staging_dir / "controller.js").write_text(
+            f"export default function App() {{ return null; }}\n// revision {prompts}",
+            encoding="utf-8",
+        )
+        _write_manifest(staging_dir, "weather-card")
+        return PromptResponse(stop_reason="end_turn")
+
+    mock_conn.prompt = AsyncMock(side_effect=generate_controller)
+
+    @contextlib.asynccontextmanager
+    async def mock_spawn(to_client, command, *args, **kwargs):
+        to_client.on_connect(mock_conn)
+        yield mock_conn, MagicMock(returncode=0)
+
+    validations = 0
+
+    def validate_contract(_result):
+        nonlocal validations
+        validations += 1
+        if validations <= 4:
+            raise OpenCodeArtifactError(
+                f"Distinct verifier issue {validations}",
+                code="runtime_contract_mismatch",
+                stage="runtime_contract",
+            )
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+
+    result = await run_opencode_agent_acp(
+        app_id="weather-card",
+        instruction="build",
+        promote=False,
+        artifact_validator=validate_contract,
+    )
+
+    assert isinstance(result, OpenCodeStagedResult)
+    assert result.repair_attempts == 4
+    assert len(result.repair_findings) == 4
+    assert validations == 5
+    assert mock_conn.prompt.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_acp_restores_findings_and_stops_same_error_across_run_retries(monkeypatch, tmp_path):
+    staging_dir = tmp_path / ".weather-card.staging-00000000000000000000000000000000"
+    staging_dir.mkdir()
+    (staging_dir / "controller.js").write_text(
+        "export default function App() { return null; }",
+        encoding="utf-8",
+    )
+    _write_manifest(staging_dir, "weather-card")
+    verifier_error = OpenCodeArtifactError(
+        "Unexpected token (980:3)",
+        code="widget_verification_failed",
+        stage="static_verify",
+    )
+    previous = finding_from_exception(verifier_error, attempt=1, artifact_revision="previous-revision")
+    retained = OpenCodeStagedResult(
+        output="previous run",
+        app_id="weather-card",
+        staging_dir=staging_dir,
+        live_dir=tmp_path / "weather-card",
+        repair_attempts=1,
+        repair_findings=(previous.to_dict(),),
+        artifact_hash="previous-revision",
+    )
+    mock_conn = AsyncMock()
+    mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-resumed-repair"))
+    mock_conn.prompt = AsyncMock(return_value=PromptResponse(stop_reason="end_turn"))
+
+    @contextlib.asynccontextmanager
+    async def mock_spawn(to_client, command, *args, **kwargs):
+        to_client.on_connect(mock_conn)
+        yield mock_conn, MagicMock(returncode=0)
+
+    def validate_contract(_result):
+        raise OpenCodeArtifactError(
+            "Unexpected token (980:3)",
+            code="widget_verification_failed",
+            stage="static_verify",
+        )
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+
+    with pytest.raises(CodingAgentDraftError) as captured:
+        await run_opencode_agent_acp(
+            app_id="weather-card",
+            instruction="repair the retained draft",
+            promote=False,
+            staged_result=retained,
+            artifact_validator=validate_contract,
+        )
+
+    assert mock_conn.prompt.await_count == 1
+    assert captured.value.repair_action == "human"
+    assert "same verifier finding" in captured.value.repair_reason
+    assert captured.value.staged_result.repair_attempts == 1
+    assert len(captured.value.staged_result.repair_findings) == 2
+    assert captured.value.staged_result.repair_findings[-1]["attempt"] == 2
 
 
 @pytest.mark.asyncio

@@ -412,7 +412,7 @@ def test_confirmed_committed_effect_cannot_be_retried(tmp_path):
         coordinator.retry(run["id"])
 
 
-def test_agent_retry_gets_a_fresh_active_time_window_and_keeps_usage_counters(tmp_path):
+def test_agent_retry_gets_fresh_time_and_model_allowances_while_keeping_usage_counters(tmp_path):
     class Catalog:
         def get_action(self, *_args):
             return None
@@ -450,6 +450,14 @@ def test_agent_retry_gets_a_fresh_active_time_window_and_keeps_usage_counters(tm
     assert retried["state"]["budget"]["model_turns"] == 5
     assert retried["state"]["budget"]["tokens_used"] == 7_033
     assert retried["state"]["budget"]["cost_usd"] == 0.75
+    assert retried["state"]["budget"]["max_model_turns"] == 13
+    assert retried["state"]["budget"]["max_tokens"] == 71_033
+    assert retried["state"]["budget"]["max_cost_usd"] == 5.75
+    assert retried["state"]["data"]["retry_budget_window"] == {
+        "model_turns": 8,
+        "tokens": 64_000,
+        "cost_usd": 5.0,
+    }
 
 
 def test_widget_retry_without_retained_staging_restarts_code_generation(tmp_path):

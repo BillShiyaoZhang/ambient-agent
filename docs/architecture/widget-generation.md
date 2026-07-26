@@ -125,7 +125,7 @@ Grant operation 与 SDK action 必须分别表达。例如 `graph.mutate.operati
 5. 通过生产 `WidgetRuntimeGateway` 的隔离 Chromium smoke test。
 6. promotion 前重新计算 artifact、contract 与 grants digest。
 
-所有自动修复在同一 staging、同一 Run 中有界执行。finding 必须进入 repair prompt，并记录 signature；同一 signature 连续出现时升级策略：第一次局部修复，第二次要求全文件同类扫描，第三次判定 contract/design 不可满足并返回联合设计，而不是无限生成或要求用户反复输入 `/repair`。
+所有自动修复在同一 staging、同一 Run 中执行。finding 必须进入 repair prompt，并记录精确 signature；修复后立即重新运行独立 verifier。只要 finding 发生变化且 artifact 确实被修改，循环就继续处理新的错误，不设置固定轮数；同一 signature 连续出现或 artifact hash 不变时立即熔断并保留 failed draft，而不是要求用户反复输入 `/repair`。finding 历史随 staging checkpoint 持久化，跨 Run retry 仍参与连续重复判断。
 
 Capability、安全边界和未知实体错误不可 bypass。只有不影响 Graph 写入合法性的展示级警告可以由用户显式接受。
 
@@ -145,7 +145,7 @@ Verifier/adapter 统一输出 `RepairFinding`：
 3. `subset_only` 只有在不损害批准验收目标时才自动修复，否则返回设计；
 4. `design_change`、`expansion` 或 `unknown` 不发送给 Coding Agent，必须重新审批；
 5. verifier/runtime 基础设施错误进入 `operator`，不会用代码生成掩盖；
-6. 每个 adapter 最多自动修复三轮；同一 signature 连续两次、产物 hash 不变或预算耗尽时立即停止并保留 failed draft。
+6. 不用固定修复轮数截断不同的新错误；同一精确 signature 连续两次、产物 hash 不变、单 turn 超时或其他安全预算耗尽时立即停止并保留 failed draft。
 
 ### 7.1 ACP 兼容策略
 
@@ -168,7 +168,7 @@ staging smoke test 和已发布 Widget 使用同一隔离 Runtime 协议。`runt
 | `operator` | Runtime 不可达、Chromium 崩溃、协议版本不匹配、宿主资源耗尽 | 重启/退避并保留草稿；持续失败后提示运维，不修改 App 代码 |
 | `abuse_or_budget` | 无限循环、消息洪泛、资源配额超限 | 立即终止 session；只有能定位为有限代码修复且不降低配额时才自动修复 |
 
-同 session 自动修复只用于 `code_only + contract_impact=none`，且继续遵守三轮预算、重复 signature、artifact hash 不变与总时限规则。Runtime 日志在进入模型前必须去除源码外的秘密、宿主路径和其他 session 数据，并限制 console、stack、DOM snapshot 与 frame 的大小。已发布 App 运行时出错时，系统可以创建保留当前 live 版本的新 staging repair Run；修复通过完整 verifier + smoke test 前不得覆盖 live App。
+同 session 自动修复只用于 `code_only + contract_impact=none`，并遵守精确重复 signature、artifact hash 不变、单 turn timeout 与资源预算规则；不同的新 finding 不受固定三轮上限限制。Runtime 日志在进入模型前必须去除源码外的秘密、宿主路径和其他 session 数据，并限制 console、stack、DOM snapshot 与 frame 的大小。已发布 App 运行时出错时，系统可以创建保留当前 live 版本的新 staging repair Run；修复通过完整 verifier + smoke test 前不得覆盖 live App。
 
 ## 8. Durable state
 

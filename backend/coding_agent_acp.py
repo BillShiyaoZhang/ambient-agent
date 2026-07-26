@@ -46,6 +46,7 @@ from backend.coding_agent_repair import (
     build_repair_prompt,
     decide_widget_repair,
     finding_from_exception,
+    repair_finding_from_dict,
 )
 
 logger = logging.getLogger("coding_agent_acp")
@@ -54,7 +55,6 @@ _DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT = 256 * 1024
 _MAX_TERMINAL_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
 _MAX_CONTROLLER_BYTES = 2 * 1024 * 1024
 _PROCESS_TERMINATION_GRACE_SECONDS = 2.0
-_MAX_AUTOMATIC_REPAIRS = 3
 _MAX_PENDING_FILE_CHANGES = 128
 _MAX_FILE_CHANGES_PER_TOOL_CALL = 16
 _MAX_ACP_PATH_LENGTH = 4096
@@ -171,12 +171,14 @@ class CodingAgentDraftError(CodingAgentACPError):
         staged_result: CodingAgentStagedResult,
         error_code: str,
         repair_action: str = "operator",
+        repair_reason: str = "",
         finding: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.staged_result = staged_result
         self.error_code = error_code
         self.repair_action = repair_action
+        self.repair_reason = repair_reason
         self.finding = finding
 
 
@@ -1481,6 +1483,13 @@ async def run_coding_agent_acp(
     retain_staging = False
     repair_findings: list[RepairFinding] = []
     repair_attempts = 0
+    if staged_result is not None:
+        repair_attempts = max(0, staged_result.repair_attempts)
+        for persisted_finding in staged_result.repair_findings:
+            try:
+                repair_findings.append(repair_finding_from_dict(persisted_finding))
+            except (TypeError, ValueError):
+                logger.warning("Ignoring malformed persisted repair finding for App %s", app_id)
     last_directive = RepairDirective("operator", "The Coding Agent failed before artifact repair was authorized.")
     last_finding: RepairFinding | None = None
 
@@ -1517,13 +1526,7 @@ async def run_coding_agent_acp(
                     language=language,
                 )
 
-                decide_repair = repair_decider or (
-                    lambda finding, history: decide_widget_repair(
-                        finding,
-                        history,
-                        max_repairs=_MAX_AUTOMATIC_REPAIRS,
-                    )
-                )
+                decide_repair = repair_decider or decide_widget_repair
                 while True:
                     try:
                         prompt_response = await asyncio.wait_for(
@@ -1570,14 +1573,16 @@ async def run_coding_agent_acp(
                         break
                     except Exception as exc:
                         revision = artifact_hash(staging_dir)
+                        previous_finding_attempt = max(
+                            (item.attempt for item in repair_findings),
+                            default=repair_attempts,
+                        )
                         finding = finding_from_exception(
                             exc,
-                            attempt=repair_attempts + 1,
+                            attempt=previous_finding_attempt + 1,
                             artifact_revision=revision,
                         )
                         directive = decide_repair(finding, tuple(repair_findings))
-                        if directive.action == "repair" and repair_attempts >= _MAX_AUTOMATIC_REPAIRS:
-                            directive = RepairDirective("human", "The adapter repair budget is exhausted.")
                         repair_findings.append(finding)
                         last_finding = finding
                         last_directive = directive
@@ -1635,6 +1640,7 @@ async def run_coding_agent_acp(
                 ),
                 error_code=str(getattr(exc, "code", type(exc).__name__)),
                 repair_action=last_directive.action,
+                repair_reason=last_directive.reason,
                 finding=last_finding.to_dict() if last_finding is not None else None,
             ) from exc
         raise

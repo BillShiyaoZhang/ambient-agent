@@ -3014,6 +3014,34 @@ class RunCoordinator:
         self._wake.set()
         return self.store.get_run(run_id) or run
 
+    @staticmethod
+    def _renew_agent_retry_budget(state: AgentRunState) -> None:
+        """Give a new Run attempt a fresh allowance while retaining cumulative usage."""
+
+        stored_window = state.data.get("retry_budget_window")
+        if not isinstance(stored_window, dict):
+            stored_window = {
+                "model_turns": state.budget.max_model_turns,
+                "tokens": state.budget.max_tokens,
+                "cost_usd": state.budget.max_cost_usd,
+            }
+            state.data["retry_budget_window"] = stored_window
+
+        turn_window = max(1, int(stored_window.get("model_turns") or state.budget.max_model_turns))
+        state.budget.max_model_turns = state.budget.model_turns + turn_window
+
+        token_window = stored_window.get("tokens")
+        if token_window is None:
+            state.budget.max_tokens = None
+        else:
+            state.budget.max_tokens = state.budget.tokens_used + max(1, int(token_window))
+
+        cost_window = stored_window.get("cost_usd")
+        if cost_window is None:
+            state.budget.max_cost_usd = None
+        else:
+            state.budget.max_cost_usd = state.budget.cost_usd + max(0.0, float(cost_window))
+
     def retry(
         self,
         run_id: str,
@@ -3040,6 +3068,7 @@ class RunCoordinator:
             normalized_retry_state.last_error = None
             normalized_retry_state.data.pop("phase_retries", None)
             normalized_retry_state.data["active_seconds"] = 0.0
+            self._renew_agent_retry_budget(normalized_retry_state)
             if normalized_retry_state.workflow_type.startswith("widget"):
                 staged = normalized_retry_state.data.get("staged_app")
                 raw_staging_path = staged.get("staging_dir") if isinstance(staged, dict) else None
