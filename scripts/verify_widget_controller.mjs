@@ -75,6 +75,7 @@ const ambientSdkMembers = new Map([
   ["components", new Set(["Column", "Row", "Card", "Text", "Button", "TextField", "Checkbox", "List", "Table"])],
   ["react", new Set(["useState", "useEffect", "useMemo", "useRef", "useCallback", "useContext", "useReducer"])],
   ["storage", new Set(["get", "set", "delete", "clear", "list"])],
+  ["lifecycle", new Set(["onBeforeSuspend"])],
 ]);
 const ambientMemberLabel = (namespace) =>
   namespace === "components" ? "primitive" : namespace === "react" ? "hook" : "method";

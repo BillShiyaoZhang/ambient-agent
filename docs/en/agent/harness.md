@@ -33,6 +33,23 @@ Responsibilities:
 - `AgentOrchestrator`: retained routing, Converse, and formatting domain helpers; it no longer owns `/ws/chat` execution lifecycle.
 - `ToolGateway`, the MCP client, and Coding Agent ACP: enforcement boundaries for local model tools, external JSON-RPC, and code generation respectively. OpenCode's native ACP server and the Codex ACP bridge use exactly the same Ambient session, permission, staging, verification, and repair state machine.
 
+As the composition root, `backend/main.py` creates exactly one Graph adapter per
+active application lifespan and
+injects that same instance into `DurableAgentWorkflow` and every
+`AgentOrchestrator`. Router context, read-only query, mutation, and schema phases
+must not call `create_graph_database()` inside a request or reducer step; doing
+so in a Neo4j deployment would create a new Driver and connection pool per
+message and repeat ontology initialization. The composition root also owns the
+adapter lifetime: application shutdown explicitly calls `close()` after Runs,
+Coding Agents, and MCP tasks stop, while the SQLite adapter provides the same
+no-op close contract. The composition root must still attempt every remaining
+cleanup in order when startup, the application context, or an earlier shutdown
+step fails; one exception must not leak later child processes or the Graph
+Driver. Tests and embedded hosts can enter the ASGI lifespan more than once in
+the same process; the composition root must not reuse a Neo4j Driver closed by
+the prior shutdown, and instead creates and reinjects a fresh adapter on the
+next startup.
+
 ## 2. Reducer protocol
 
 ```mermaid

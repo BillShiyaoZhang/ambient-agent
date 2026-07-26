@@ -183,13 +183,14 @@ The backend image must include both Node.js and the `@babel/standalone` version 
 
 ```mermaid
 flowchart LR
-    Player[User-browser frame player] <-->|frame / input| Gateway[FastAPI WidgetRuntimeGateway]
-    Gateway <-->|NDJSON / Unix socket| Supervisor[Zero-network widget-runtime]
-    Supervisor --> Chromium[Pinned Chromium browser process]
-    Chromium --> A[App A BrowserContext]
-    Chromium --> B[App B BrowserContext]
+    Host[Trusted React host] -->|fixed frame assets| Frame[opaque-origin iframe]
+    Host <-->|nonce + MessageChannel| Frame
+    Host <-->|ticket + client-runtime WebSocket| Gateway[FastAPI client runtime]
     Gateway -->|server-side session identity| Authorizer[CapabilityAuthorizer]
     Authorizer --> Adapters[Graph / HTTP / Files / Capability adapters]
+    Gateway <-.->|pixel rollback only: Unix socket| Supervisor[Zero-network widget-runtime]
+    Supervisor -.-> Chromium["On-demand shared Chromium; closes after 60s idle"]
+    Chromium -.-> Contexts[At most 4 rollback BrowserContexts]
 ```
 
 ```mermaid
@@ -202,7 +203,19 @@ classDiagram
     }
 ```
 
-`WidgetRuntimeGateway` is the only bridge among the browser connection, Unix socket, and capability adapters. It reloads the persistent Manifest and binds `session_id -> app_id/revision/grants_digest/artifact_digest` in memory; all Controller-supplied identity fields are ignored. The Runtime has no workspace mount and uses `network_mode: none`, so a Controller can reach external authority only through Gateway RPC. Each App gets an independent BrowserContext, while the default shared Chromium keeps startup and memory cost practical on personal laptops.
+On the default path, the ticket-authenticated client-runtime Gateway binds
+`session_id -> app_id/revision/grants_digest/artifact_digest` in memory; all
+Controller-supplied identity fields are ignored. The Controller executes only
+inside the opaque-origin frame and sends RPC through the MessageChannel to the
+trusted host and Backend authorizer. At steady state the Workspace retains at
+most the Active and Warm Widgets, plus one temporary Suspending Widget during a
+transition.
+
+`WidgetRuntimeGateway`, the Unix socket, shared Chromium, and independent
+BrowserContexts belong only to the explicit pixel rollback path. The Runtime
+has no workspace mount and uses `network_mode: none`; Chromium starts on
+demand, closes 60 seconds after the last session, and allows at most four
+Contexts by default.
 
 ## 6. Event and recovery boundaries
 
@@ -218,6 +231,7 @@ classDiagram
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
         +apply_schema_proposal_atomic(proposal)
+        +close()
     }
     class Neo4jGraphDatabase {
         +from_env(workspace_dir)
@@ -236,7 +250,7 @@ classDiagram
     Neo4jGraphDatabase --> OntologyEntity
 ```
 
-`create_graph_database()` is the runtime factory: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. Both adapters enforce the same `ambient-context` ontology contract; unknown entities, abstract entities, and unknown properties cannot be written as records.
+`create_graph_database()` is a runtime factory called only by the composition root: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. The same created adapter is injected into Workflows, Agent routing, and tools; requests and reducer steps must not create a second Driver. Both adapters enforce the same `ambient-context` ontology contract and are explicitly `close()`d by the composition root during shutdown; unknown entities, abstract entities, and unknown properties cannot be written as records.
 
 ## 8. Coding Agent Runtime and model ownership
 

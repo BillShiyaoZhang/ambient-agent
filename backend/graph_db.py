@@ -31,6 +31,14 @@ class GraphDatabase:
         os.makedirs(self.workspace_dir, exist_ok=True)
         self.load()
 
+    def close(self) -> None:
+        """Close the adapter.
+
+        SQLite connections are scoped to individual operations, so there is no
+        retained driver to release.  Keeping an idempotent lifecycle method
+        lets the composition root treat SQLite and Neo4j adapters uniformly.
+        """
+
     @contextmanager
     def get_conn(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)

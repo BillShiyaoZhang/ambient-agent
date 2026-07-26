@@ -243,9 +243,7 @@ async def test_live_activity_snapshots_are_diffed_without_entering_durable_store
     assert [event["delta"] for event in emitted] == ["正在编", "写"]
     assert [event["replace"] for event in emitted] == [True, False]
     assert [event["chunk_sequence"] for event in emitted] == [1, 2]
-    assert {event["stream_id"] for event in emitted} == {
-        "run-live:stage_code:2:activity:code:generation"
-    }
+    assert {event["stream_id"] for event in emitted} == {"run-live:stage_code:2:activity:code:generation"}
     assert buffered == []
     assert store.events_after(0) == []
 
@@ -355,6 +353,7 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     converse_calls = 0
 
     async def scripted_route(_self: AgentOrchestrator, content: str, session_id: str, language: str) -> IntentPlan:
+        assert _self.graph_db is graph_db
         assert (content, session_id, language) == ("say hello", "session-1", "zh")
         return IntentPlan(kind=IntentKind.CONVERSE, confidence=1.0, rationale="scripted tape")
 

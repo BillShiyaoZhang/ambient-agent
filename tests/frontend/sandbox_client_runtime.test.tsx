@@ -54,8 +54,17 @@ class MockPort {
   sent: unknown[] = [];
   started = false;
   closed = false;
+  failMessageType: string | null = null;
 
   postMessage(payload: unknown) {
+    if (
+      this.failMessageType
+      && typeof payload === "object"
+      && payload !== null
+      && (payload as { type?: string }).type === this.failMessageType
+    ) {
+      throw new Error(`Mock port rejected ${this.failMessageType}`);
+    }
     this.sent.push(payload);
   }
 
@@ -153,6 +162,34 @@ describe("SandboxWidget isolated client runtime", () => {
     return { frame, socket, channel };
   };
 
+  const startReadySession = async (
+    props: Omit<React.ComponentProps<typeof SandboxWidget>, "widget"> = {},
+  ) => {
+    const rendered = render(<SandboxWidget widget={widget} {...props} />);
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    const frame = screen.getByTitle("Notes");
+    vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {});
+    const socket = ClientRuntimeSocket.instances[0];
+    act(() => {
+      socket.open();
+      fireEvent.load(frame);
+    });
+    const channel = MockMessageChannel.instances[0];
+    act(() => {
+      socket.emit({
+        type: "bootstrap",
+        protocol_version: 1,
+        controller_source: widget.js,
+        capability_ids: ["graph.query"],
+      });
+      channel.port1.emit({ type: "port_ready", nonce: "host-nonce" });
+      channel.port1.emit({ type: "ready" });
+    });
+    return { ...rendered, frame, socket, channel };
+  };
+
   it("uses a one-time ticket, strict iframe attributes, and ticket WebSocket protocols", async () => {
     const { frame, socket, channel } = await startSession();
 
@@ -230,6 +267,34 @@ describe("SandboxWidget isolated client runtime", () => {
       },
     });
     expect(globalThis.__controllerExecutedInHost).toBeUndefined();
+  });
+
+  it("promotes the host window when the fixed frame reports trusted focus", async () => {
+    const onActivate = vi.fn();
+    render(<SandboxWidget widget={widget} onActivate={onActivate} />);
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    const frame = screen.getByTitle("Notes");
+    vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {});
+    const socket = ClientRuntimeSocket.instances[0];
+    act(() => {
+      socket.open();
+      fireEvent.load(frame);
+    });
+    const channel = MockMessageChannel.instances[0];
+    act(() => {
+      socket.emit({
+        type: "bootstrap",
+        protocol_version: 1,
+        controller_source: widget.js,
+        capability_ids: ["graph.query"],
+      });
+      channel.port1.emit({ type: "port_ready", nonce: "host-nonce" });
+      channel.port1.emit({ type: "host_event", event: "focus" });
+    });
+
+    expect(onActivate).toHaveBeenCalledTimes(1);
   });
 
   it("relays bounded RPC and server events only through the transferred port", async () => {
@@ -376,6 +441,216 @@ describe("SandboxWidget isolated client runtime", () => {
         reduced_motion: true,
       },
     });
+  });
+
+  it("waits for the matching frame acknowledgement and uses the latest completion callback", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: vi.fn()
+        .mockReturnValueOnce("host-nonce")
+        .mockReturnValueOnce("suspend-request-1"),
+    });
+    const firstCompletion = vi.fn();
+    const latestCompletion = vi.fn();
+    const { channel, rerender } = await startReadySession({
+      onSuspendReady: firstCompletion,
+    });
+    const port = channel.port1;
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={firstCompletion}
+      />,
+    );
+    const request = lastPortMessage(port, "before_suspend");
+    expect(request).toEqual({
+      type: "before_suspend",
+      request_id: "suspend-request-1",
+    });
+    expect(request?.request_id.length).toBeLessThanOrEqual(200);
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={latestCompletion}
+      />,
+    );
+    expect(ClientRuntimeSocket.instances).toHaveLength(1);
+    expect(port.sent.filter(
+      (message) => (message as { type?: string }).type === "before_suspend",
+    )).toHaveLength(1);
+
+    act(() => {
+      port.emit({ type: "suspend_ready", request_id: "wrong-request" });
+    });
+    expect(firstCompletion).not.toHaveBeenCalled();
+    expect(latestCompletion).not.toHaveBeenCalled();
+
+    act(() => {
+      port.emit({
+        type: "suspend_ready",
+        request_id: request?.request_id,
+      });
+      port.emit({
+        type: "suspend_ready",
+        request_id: request?.request_id,
+      });
+    });
+    expect(firstCompletion).not.toHaveBeenCalled();
+    expect(latestCompletion).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(latestCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds suspend flushing at one second and ignores a cancelled request", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: vi.fn()
+        .mockReturnValueOnce("host-nonce")
+        .mockReturnValueOnce("suspend-request-1")
+        .mockReturnValueOnce("suspend-request-2")
+        .mockReturnValueOnce("suspend-request-3"),
+    });
+    const onSuspendReady = vi.fn();
+    const { channel, rerender } = await startReadySession({ onSuspendReady });
+    const port = channel.port1;
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={onSuspendReady}
+      />,
+    );
+    const cancelledRequest = lastPortMessage(port, "before_suspend");
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested={false}
+        onSuspendReady={onSuspendReady}
+      />,
+    );
+    act(() => {
+      port.emit({
+        type: "suspend_ready",
+        request_id: cancelledRequest?.request_id,
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(onSuspendReady).not.toHaveBeenCalled();
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={onSuspendReady}
+      />,
+    );
+    const timedRequest = lastPortMessage(port, "before_suspend");
+    expect(timedRequest?.request_id).not.toBe(cancelledRequest?.request_id);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(onSuspendReady).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(onSuspendReady).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      port.emit({
+        type: "suspend_ready",
+        request_id: timedRequest?.request_id,
+      });
+    });
+    expect(onSuspendReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes immediately without a ready port or when port delivery fails", async () => {
+    const notReadyCompletion = vi.fn();
+    const notReady = render(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={notReadyCompletion}
+      />,
+    );
+    expect(notReadyCompletion).toHaveBeenCalledTimes(1);
+    notReady.unmount();
+
+    const failedDeliveryCompletion = vi.fn();
+    const {
+      channel,
+      rerender,
+    } = await startReadySession({ onSuspendReady: failedDeliveryCompletion });
+    channel.port1.failMessageType = "before_suspend";
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={failedDeliveryCompletion}
+      />,
+    );
+    expect(failedDeliveryCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a pending suspend timeout during session cleanup", async () => {
+    const onSuspendReady = vi.fn();
+    const { rerender, unmount } = await startReadySession({ onSuspendReady });
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={onSuspendReady}
+      />,
+    );
+
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(onSuspendReady).not.toHaveBeenCalled();
+  });
+
+  it("does not let a replaced session acknowledge its successor", async () => {
+    const onSuspendReady = vi.fn();
+    const { channel, rerender } = await startReadySession({ onSuspendReady });
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={onSuspendReady}
+      />,
+    );
+    const oldPort = channel.port1;
+    const oldRequest = lastPortMessage(oldPort, "before_suspend");
+
+    rerender(
+      <SandboxWidget
+        widget={{ ...widget, id: "tasks/app", title: "Tasks" }}
+        suspendRequested
+        onSuspendReady={onSuspendReady}
+      />,
+    );
+    expect(onSuspendReady).toHaveBeenCalledTimes(1);
+    expect(oldPort.closed).toBe(true);
+
+    act(() => {
+      oldPort.emit({
+        type: "suspend_ready",
+        request_id: oldRequest?.request_id,
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(onSuspendReady).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces session errors and closes the socket and port on unmount", async () => {

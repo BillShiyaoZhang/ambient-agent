@@ -21,7 +21,7 @@ workspace/apps/<app-id>/
 - 状态与副作用使用 `ambient.react` hooks。
 - 只使用 Runtime Contract 中列出的 SDK；Graph、Network、Files 或 installed capabilities 需要对应 grant。
 - Capability/source/catalog/action ID 使用字符串字面量，不能在运行时拼接。
-- 卸载时清理订阅和 timer；禁止直接浏览器事件、DOM、Cookie、浏览器 storage globals、网络和动态代码 API。本地非秘密状态只使用 `ambient.storage`。
+- 卸载时清理订阅和 timer；禁止直接浏览器事件、DOM、Cookie、浏览器 storage globals、网络和动态代码 API。本地非秘密状态只使用 `ambient.storage`。用户草稿、表单值和编辑内容必须在初始化时 hydrate，并在有意义的修改后写穿到持久层，不能只留在 React hook 内存中，因为工作区挂起 Runtime 时会卸载 Controller。若使用有界 debounce，必须通过 `ambient.lifecycle.onBeforeSuspend(handler)` 注册异步刷盘函数，在其中把 ref 保存的最新值写入 `ambient.storage` 并等待完成；effect cleanup 必须注销该 handler。
 
 ```javascript
 export default function TaskList({ ambient }) {

@@ -29,9 +29,30 @@ iframe 同时使用：
 - `allow=""`、`referrerPolicy="no-referrer"`；
 - 响应 CSP：`sandbox allow-scripts`、`default-src 'none'`、`connect-src 'none'`，并禁止 worker、子 frame、object、media、font、manifest、form 和 base URL；
 - Permissions Policy 禁止相机、麦克风、定位、剪贴板、USB、串口、支付、凭据等浏览器能力；
-- `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`。
+- Frame HTML、health、错误响应使用 `Cache-Control: no-store`；固定的同服务
+  JS/CSS 资产使用强 SHA-256 ETag 和可验证缓存；所有响应都使用
+  `X-Content-Type-Options: nosniff`。
 
 CSP 允许固定的同服务脚本和 Babel 所需的 `'unsafe-eval'`。由于 CSP sandbox 使文档成为 opaque origin，固定 ES modules 带无凭据 `Access-Control-Allow-Origin: *`；该响应不包含 App 数据，Controller 的 `fetch`/WebSocket 仍被 `connect-src 'none'` 阻断。
+
+Frame Server 只服务固定 allowlist 中的路径。它启动时读取每个 JS/CSS
+资产、计算强 ETag，并把 Frame HTML 中的资产引用改写为带内容摘要的
+`?v=` URL。摘要匹配的版本 URL 使用
+`Cache-Control: public, max-age=31536000, immutable`；无版本或摘要不匹配的
+兼容 URL 使用 `public, max-age=0, must-revalidate`。两者在同一浏览器网络
+缓存分区内收到匹配的 `If-None-Match` 时都返回无响应体的 `304`。
+
+每次重建 `sandbox="allow-scripts"` 的 iframe 都会得到新的 opaque origin；
+浏览器可能为它分配新的网络缓存分区，因此实现不能承诺 suspend/resume
+一定复用前一个 iframe 的 HTTP cache。为限制不可避免的重复传输，Frame
+Server 在启动时为固定 JS/CSS 预计算 Brotli 和 gzip 表示，根据
+`Accept-Encoding` 选择 `br`、`gzip` 或 identity，并发送
+`Vary: Accept-Encoding`；每个编码表示有自己的强 ETag。当前固定版本的
+Babel 从 2,458,024 字节 identity 降至 444,563 字节（约 434 KiB）
+Brotli 或 562,162 字节（约 549 KiB）gzip。
+Frame HTML 本身和任何 App/动态内容绝不进入共享长期缓存。`HEAD`、`304`
+与 `200` 保持相同的 CSP、Permissions Policy、Referrer Policy、CORS 和
+nosniff 安全头。
 
 ## 2. Ticket、会话与身份
 
@@ -55,9 +76,8 @@ Controller RPC 只允许 `{ request_id, method, params }`。Frontend 与 Backend
 
 ```text
 Backend -> trusted host WS: bootstrap(controller_source, capability_ids)
-Host -> frame port:          init(nonce, controller_source, capabilities, presentation)
-Frame -> host port:          rpc_request / storage_request / host_event
-Host -> frame port:          rpc_response / storage_response / subscription_event
+Host -> frame port:          init / before_suspend / presentation / responses
+Frame -> host port:          rpc_request / storage_request / host_event / suspend_ready
 ```
 
 宿主不会用 `eval`、`Function`、Babel 或 React 渲染 Controller。Babel 转译、module wrapper 和 Preact 渲染全部发生在隔离 frame。端口、WebSocket 或组件卸载时会关闭 session、拒绝 pending request 并注销 Graph subscriptions；服务端并发发送由单一锁串行化。
@@ -85,6 +105,32 @@ await ambient.storage.clear();
 - 数据只存在当前浏览器 profile，清理站点数据、隐私模式结束或浏览器配额回收都可能删除它；
 - 不用于凭据、API key、access token、跨设备同步或用户数据的唯一副本。
 
+### 4.1 挂起前刷盘
+
+会被 Workspace 挂起、卸载并在下次激活时重建的 Controller，可以注册一个
+异步刷盘处理器：
+
+```javascript
+const unsubscribe = ambient.lifecycle.onBeforeSuspend(async () => {
+  await ambient.storage.set("draft", latestDraft);
+});
+```
+
+任意时刻至多保留一个处理器；后一次注册替换前一次注册。每个
+`unsubscribe` 只会移除它自己创建且仍为当前值的注册，因此旧注册返回的
+清理函数不会误删更新的处理器。宿主只在认证端口进入 `ready` 阶段后发送
+非空、有界 `request_id` 的 `before_suspend`，Frame 同一时刻至多执行一次
+处理器，并在 Promise 完成后回复 `suspend_ready`。重复的已完成请求复用
+最近一条有界结果；并发的新请求直接失败，不会启动第二次刷盘，也不会被当成
+capability RPC。
+
+处理器抛错时 Frame 回复无 stack 的有界错误，Frame 与宿主会话继续有效；
+宿主仍会在自己的有界等待期限后释放 iframe，所以该 hook 是卸载前的
+best-effort 刷盘机会，不是无限期阻止挂起的锁。用户草稿、表单与编辑状态应
+持续写入 `ambient.storage`；若使用 debounce，处理器必须等待仍未完成的写入。
+Pixel 回滚链路不提供这个 API。Frame 或端口已经 dispose 后不会发送迟到的
+`suspend_ready`。
+
 ## 5. 展示上下文与宿主事件
 
 主题、语言和减少动画偏好通过同一个 port 发送，不需要重建 iframe 或 WebSocket。Runtime 更新 `documentElement`、CSS variables，并通知 `ambient.presentation` / `ambient.theme` subscribers。
@@ -109,5 +155,13 @@ Controller 可请求 `fullscreen`、`minimize` 和 `sendMessage`。宿主只处�
 构建 Frontend 时设置 `VITE_WIDGET_UI_TRANSPORT=pixels` 可恢复原 `PixelSandboxWidget`、`/ws/widgets/{app_id}/runtime` 和零网络 `widget-runtime` Chromium 容器。Compose 暂时同时保留两个 runtime 服务。
 
 该模式用于紧急兼容回滚，不是默认路径。它继续承担视频带宽、输入转发和较高资源占用，并且不提供新的宿主 IndexedDB `ambient.storage`；依赖本地存储的新 Widget 不应在 pixel 模式运行。一个发布周期后，在部署指标与兼容性验证完成时可删除旧链路。
+
+为避免默认 iframe 路径仍为空闲 Chromium 付费，`widget-runtime` 先监听 Unix socket，但启动时不创建浏览器。第一个 pixel 会话或生成阶段 smoke test 的 `start` 消息会按需启动唯一的 Chromium；并发首开共享同一次启动，不会各自创建浏览器。最后一个会话关闭后，Runtime 等待 `WIDGET_RUNTIME_IDLE_TIMEOUT_MS`（默认 60 秒）再关闭 Chromium；等待期间的新会话会取消回收。计划内的空闲关闭只释放浏览器，不退出 socket supervisor，后续会话可以再次按需启动。
+
+浏览器生命周期保持严格的单实例资源上界：任意时刻最多存在一个正在运行或正在关闭的 Chromium。若空闲计时器已经进入异步 `close()`，此时到达的新 `start` 必须先等待该关闭完成，不能并行启动第二个浏览器。关闭成功，或关闭报错但浏览器已确认断开后，所有等待者才可以共享下一次按需启动；若 `close()` 报错且浏览器仍连接，Runtime 必须立即进入 fatal 状态，拒绝后续 `start`，并交给容器重启恢复，不能在仍存活的 Chromium 旁启动第二个实例。
+
+Chromium 非计划断连也必须同步把浏览器生命周期标记为 fatal，因而从断连事件发生起就拒绝新的 `start`；不能在 supervisor 延迟退出的窗口内重启 Chromium。生产 fatal 回调仍向所有现有会话发送运行时错误、关闭会话，并以非零状态退出，让 Docker 的自动重启策略恢复整个 Runtime。`restart: unless-stopped` 不限制重试次数，且仅 `unhealthy` 不会重启仍在运行的进程。supervisor 的显式 shutdown 属于计划内关闭，不触发该重启路径。
+
+pixel 模式默认最多同时保留 4 个 BrowserContext（可通过 `WIDGET_RUNTIME_MAX_CONTEXTS` 下调；只有同步扩大并压测容器 PID 与内存预算后才应上调），以便在容器的 192 PID 上限内留出 Chromium 主进程、renderer 和 Runtime 的余量。达到上限时新会话失败，现有会话不受影响；关闭或断开会话必须释放其 BrowserContext。未建立任何会话时也不会加载 Babel standalone，首次 Controller 转译才动态加载并复用它。
 
 完整 API 见 [ambient SDK](/widgets/sdk.md)，授权语义见 [Widget 能力安全架构](/architecture/capability-security.md)，生成流程见 [Widget 生成信息契约](/architecture/widget-generation.md)。

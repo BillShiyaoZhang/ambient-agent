@@ -58,6 +58,7 @@ test(
         const iframe = document.createElement("iframe");
         iframe.src = url;
         document.body.append(iframe);
+        window.__widgetFocused = false;
         await new Promise((resolve, reject) => {
           iframe.addEventListener("load", resolve, { once: true });
           iframe.addEventListener("error", reject, { once: true });
@@ -130,7 +131,11 @@ test(
               return;
             }
             if (message.type === "host_event") {
-              hostEvents.push(message.text);
+              if (message.event === "focus") {
+                window.__widgetFocused = true;
+              } else {
+                hostEvents.push(message.text);
+              }
             } else if (message.type === "ready") {
               runtimeReady = true;
             } else if (message.type === "runtime_error") {
@@ -169,6 +174,15 @@ test(
     assert.ok(result.hostEvents.includes("storage:null"));
     assert.ok(result.hostEvents.includes("style:13px"));
     assert.equal(result.hostEvents.includes("external-network-allowed"), false);
+    const widgetFrame = page.frames().find((frame) => frame.url() === frameUrl);
+    assert.ok(widgetFrame, "expected the isolated Widget frame");
+    await widgetFrame.getByText("Native controller").click();
+    await page.waitForFunction(() => window.__widgetFocused === true);
+    await page.evaluate(() => {
+      window.__widgetFocused = false;
+    });
+    await page.keyboard.press("A");
+    await page.waitForFunction(() => window.__widgetFocused === true);
     assert.deepEqual(pageErrors, []);
   },
 );

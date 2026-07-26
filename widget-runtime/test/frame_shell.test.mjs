@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { MessageChannel } from "node:worker_threads";
+import { MessageChannel, receiveMessageOnPort } from "node:worker_threads";
 import { test } from "node:test";
 
 import {
@@ -72,6 +72,11 @@ function initMessage(overrides = {}) {
 }
 
 
+function turn() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+
 test("accepts one parent port, echoes the nonce, then removes global message access", async () => {
   const target = new FakeWindow();
   const initialized = [];
@@ -113,6 +118,40 @@ test("accepts one parent port, echoes the nonce, then removes global message acc
   channel.port2.close();
   secondChannel.port1.close();
   secondChannel.port2.close();
+});
+
+
+test("reports only trusted iframe pointer, keyboard, and wheel activation over the authenticated port", async (context) => {
+  const target = new FakeWindow();
+  const shell = installFrameShell(target, {
+    initializeController: async () => ({ dispose() {} }),
+  });
+  const channel = new MessageChannel();
+  context.after(() => {
+    shell.dispose();
+    channel.port1.close();
+    channel.port2.close();
+  });
+  const offered = nextMessage(channel.port2);
+  target.dispatch("message", portOffer(target, channel.port1));
+  await offered;
+
+  for (const eventType of ["pointerdown", "keydown", "wheel"]) {
+    assert.equal(target.listenerCount(eventType), 1);
+    target.dispatch(eventType, { isTrusted: false });
+    assert.equal(receiveMessageOnPort(channel.port2), undefined);
+    const activation = nextMessage(channel.port2);
+    target.dispatch(eventType, { isTrusted: true });
+    assert.deepEqual(await activation, {
+      type: "host_event",
+      event: "focus",
+    });
+  }
+
+  shell.dispose();
+  for (const eventType of ["pointerdown", "keydown", "wheel"]) {
+    assert.equal(target.listenerCount(eventType), 0);
+  }
 });
 
 
@@ -314,4 +353,248 @@ test("reports controller initialization errors without exposing a stack", async 
   assert.equal("stack" in message.error, false);
   shell.dispose();
   channel.port2.close();
+});
+
+
+test("runs one bounded pre-suspend flush and replays its completed result", async (context) => {
+  const target = new FakeWindow();
+  let flushCalls = 0;
+  let finishFlush;
+  let markFlushStarted;
+  const flushStarted = new Promise((resolve) => {
+    markFlushStarted = resolve;
+  });
+  const shell = installFrameShell(target, {
+    initializeController: async () => ({
+      beforeSuspend() {
+        flushCalls += 1;
+        markFlushStarted();
+        return new Promise((resolve) => {
+          finishFlush = resolve;
+        });
+      },
+      dispose() {},
+    }),
+  });
+  const channel = new MessageChannel();
+  context.after(() => {
+    shell.dispose();
+    channel.port1.close();
+    channel.port2.close();
+  });
+  const offered = nextMessage(channel.port2);
+  target.dispatch("message", portOffer(target, channel.port1));
+  await offered;
+  const ready = nextMessage(channel.port2);
+  channel.port2.postMessage(initMessage());
+  await ready;
+
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "suspend-1",
+  });
+  await flushStarted;
+  assert.equal(flushCalls, 1);
+
+  const concurrentReply = nextMessage(channel.port2);
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "suspend-1",
+  });
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "suspend-2",
+  });
+  const concurrent = await concurrentReply;
+  assert.equal(concurrent.type, "suspend_ready");
+  assert.equal(concurrent.request_id, "suspend-2");
+  assert.equal(concurrent.ok, false);
+  assert.match(concurrent.error.message, /already in progress/);
+  assert.equal(flushCalls, 1);
+
+  const completedReply = nextMessage(channel.port2);
+  finishFlush();
+  assert.deepEqual(await completedReply, {
+    type: "suspend_ready",
+    request_id: "suspend-1",
+    ok: true,
+  });
+
+  const replayedReply = nextMessage(channel.port2);
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "suspend-1",
+  });
+  assert.deepEqual(await replayedReply, {
+    type: "suspend_ready",
+    request_id: "suspend-1",
+    ok: true,
+  });
+  assert.equal(flushCalls, 1);
+});
+
+
+test("bounds pre-suspend errors and keeps the frame usable", async (context) => {
+  const target = new FakeWindow();
+  let shouldFail = true;
+  const shell = installFrameShell(target, {
+    initializeController: async () => ({
+      async beforeSuspend() {
+        if (shouldFail) {
+          shouldFail = false;
+          throw new Error("x".repeat(10_000));
+        }
+      },
+      dispose() {},
+    }),
+  });
+  const channel = new MessageChannel();
+  context.after(() => {
+    shell.dispose();
+    channel.port1.close();
+    channel.port2.close();
+  });
+  const offered = nextMessage(channel.port2);
+  target.dispatch("message", portOffer(target, channel.port1));
+  await offered;
+  const ready = nextMessage(channel.port2);
+  channel.port2.postMessage(initMessage());
+  await ready;
+
+  const failedReply = nextMessage(channel.port2);
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "failing-flush",
+  });
+  const failure = await failedReply;
+  assert.equal(failure.type, "suspend_ready");
+  assert.equal(failure.request_id, "failing-flush");
+  assert.equal(failure.ok, false);
+  assert.equal(failure.error.message.length, 4096);
+  assert.equal("stack" in failure.error, false);
+
+  const successfulReply = nextMessage(channel.port2);
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "next-flush",
+  });
+  assert.deepEqual(await successfulReply, {
+    type: "suspend_ready",
+    request_id: "next-flush",
+    ok: true,
+  });
+});
+
+
+test("ignores invalid suspend ids and never settles capability RPC with suspend control", async (context) => {
+  const target = new FakeWindow();
+  let transport;
+  let flushCalls = 0;
+  const shell = installFrameShell(target, {
+    initializeController: async (_message, nextTransport) => {
+      transport = nextTransport;
+      return {
+        async beforeSuspend() {
+          flushCalls += 1;
+        },
+        dispose() {},
+      };
+    },
+  });
+  const channel = new MessageChannel();
+  context.after(() => {
+    shell.dispose();
+    channel.port1.close();
+    channel.port2.close();
+  });
+  const offered = nextMessage(channel.port2);
+  target.dispatch("message", portOffer(target, channel.port1));
+  await offered;
+  const ready = nextMessage(channel.port2);
+  channel.port2.postMessage(initMessage());
+  await ready;
+
+  for (const requestId of ["", "x".repeat(201), 1, null]) {
+    channel.port2.postMessage({
+      type: "before_suspend",
+      request_id: requestId,
+    });
+  }
+  await turn();
+  assert.equal(flushCalls, 0);
+  assert.equal(receiveMessageOnPort(channel.port2), undefined);
+
+  const rpcRequestMessage = nextMessage(channel.port2);
+  let rpcSettled = false;
+  const rpcResult = transport
+    .rpc("graph.mutate", { actions: [] })
+    .then((value) => {
+      rpcSettled = true;
+      return value;
+    });
+  const rpcRequest = await rpcRequestMessage;
+  assert.equal(rpcRequest.request_id, "rpc-1");
+
+  const suspendReply = nextMessage(channel.port2);
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "rpc-1",
+  });
+  assert.deepEqual(await suspendReply, {
+    type: "suspend_ready",
+    request_id: "rpc-1",
+    ok: true,
+  });
+  assert.equal(rpcSettled, false);
+
+  channel.port2.postMessage({
+    type: "rpc_response",
+    request_id: "rpc-1",
+    result: { status: "ok" },
+  });
+  assert.deepEqual(await rpcResult, { status: "ok" });
+  assert.equal(flushCalls, 1);
+});
+
+
+test("does not send a late suspend reply after disposal", async (context) => {
+  const target = new FakeWindow();
+  let finishFlush;
+  let markFlushStarted;
+  const flushStarted = new Promise((resolve) => {
+    markFlushStarted = resolve;
+  });
+  const shell = installFrameShell(target, {
+    initializeController: async () => ({
+      beforeSuspend() {
+        markFlushStarted();
+        return new Promise((resolve) => {
+          finishFlush = resolve;
+        });
+      },
+      dispose() {},
+    }),
+  });
+  const channel = new MessageChannel();
+  context.after(() => {
+    shell.dispose();
+    channel.port1.close();
+    channel.port2.close();
+  });
+  const offered = nextMessage(channel.port2);
+  target.dispatch("message", portOffer(target, channel.port1));
+  await offered;
+  const ready = nextMessage(channel.port2);
+  channel.port2.postMessage(initMessage());
+  await ready;
+
+  channel.port2.postMessage({
+    type: "before_suspend",
+    request_id: "disposed-flush",
+  });
+  await flushStarted;
+  shell.dispose();
+  finishFlush();
+  await turn();
+  assert.equal(receiveMessageOnPort(channel.port2), undefined);
 });

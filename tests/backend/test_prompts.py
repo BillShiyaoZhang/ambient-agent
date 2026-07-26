@@ -38,3 +38,7 @@ def test_opencode_system_prompt_inclusion():
     assert "weather-app" in prompt
     assert "/some/path" in prompt
     assert "make weather blue" in prompt
+    assert "must survive Runtime suspension" in prompt
+    assert "Never keep user-authored drafts only in React hook state" in prompt
+    assert "ambient.lifecycle.onBeforeSuspend(handler)" in prompt
+    assert "awaits its `ambient.storage.set(...)`" in prompt

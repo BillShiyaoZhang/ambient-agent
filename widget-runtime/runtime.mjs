@@ -3,7 +3,6 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import * as Babel from "@babel/standalone";
 import { chromium } from "playwright-core";
 
 import { screencastDimensions } from "./frame_geometry.mjs";
@@ -20,14 +19,23 @@ const SOCKET_PATH =
   "/run/ambient-widget-runtime/runtime.sock";
 const CHROMIUM_PATH =
   process.env.CHROMIUM_EXECUTABLE_PATH ?? "/usr/bin/chromium";
+export const DEFAULT_MAX_CONTEXTS = 4;
+export const DEFAULT_BROWSER_IDLE_TIMEOUT_MS = 60_000;
 const MAX_CONTEXTS = boundedInteger(
   process.env.WIDGET_RUNTIME_MAX_CONTEXTS,
-  16,
+  DEFAULT_MAX_CONTEXTS,
   1,
   64,
 );
+const BROWSER_IDLE_TIMEOUT_MS = boundedInteger(
+  process.env.WIDGET_RUNTIME_IDLE_TIMEOUT_MS,
+  DEFAULT_BROWSER_IDLE_TIMEOUT_MS,
+  0,
+  60 * 60 * 1000,
+);
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
-const CURRENT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
+const RUNTIME_MODULE_PATH = fileURLToPath(import.meta.url);
+const CURRENT_DIRECTORY = path.dirname(RUNTIME_MODULE_PATH);
 const HTM_PREACT_PATH = path.join(
   CURRENT_DIRECTORY,
   "node_modules",
@@ -37,8 +45,9 @@ const HTM_PREACT_PATH = path.join(
 );
 
 const sessions = new Map();
-let browser;
+const openingSessionIds = new Set();
 let shuttingDown = false;
+let server;
 
 
 function boundedInteger(value, fallback, minimum, maximum) {
@@ -46,6 +55,243 @@ function boundedInteger(value, fallback, minimum, maximum) {
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(minimum, Math.min(maximum, parsed));
 }
+
+
+export class BrowserLifecycle {
+  constructor({
+    launchBrowser,
+    idleTimeoutMs = DEFAULT_BROWSER_IDLE_TIMEOUT_MS,
+    onFatal = () => {},
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
+  }) {
+    if (typeof launchBrowser !== "function") {
+      throw new TypeError("BrowserLifecycle requires launchBrowser");
+    }
+    this.launchBrowser = launchBrowser;
+    this.idleTimeoutMs = idleTimeoutMs;
+    this.onFatal = onFatal;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.browser = null;
+    this.launchPromise = null;
+    this.closingPromise = null;
+    this.idleTimer = null;
+    this.activeLeases = 0;
+    this.intentionalClosures = new WeakSet();
+    this.shuttingDown = false;
+    this.fatalError = null;
+  }
+
+  assertOperational() {
+    if (this.shuttingDown) {
+      throw new Error("Widget Runtime is shutting down");
+    }
+    if (this.fatalError) {
+      throw this.fatalError;
+    }
+  }
+
+  enterFatal(code, message, cause) {
+    if (this.shuttingDown || this.fatalError) return;
+    const error = new Error(
+      `${message}; Widget Runtime restart is required`,
+      { cause },
+    );
+    error.code = code;
+    this.fatalError = error;
+    this.cancelIdleClose();
+    void Promise.resolve()
+      .then(() => this.onFatal(error))
+      .catch(() => {});
+  }
+
+  async acquire() {
+    this.assertOperational();
+    this.cancelIdleClose();
+    this.activeLeases += 1;
+    try {
+      const browser = await this.ensureBrowser();
+      this.assertOperational();
+      let released = false;
+      return {
+        browser,
+        release: () => {
+          if (released) return;
+          released = true;
+          this.activeLeases = Math.max(0, this.activeLeases - 1);
+          if (this.activeLeases === 0) this.scheduleIdleClose();
+        },
+      };
+    } catch (error) {
+      this.activeLeases = Math.max(0, this.activeLeases - 1);
+      if (this.activeLeases === 0) this.scheduleIdleClose();
+      throw error;
+    }
+  }
+
+  async ensureBrowser() {
+    const closingPromise = this.closingPromise;
+    if (closingPromise) await closingPromise;
+    this.assertOperational();
+    if (this.browser) {
+      if (
+        typeof this.browser.isConnected !== "function"
+        || this.browser.isConnected()
+      ) {
+        return this.browser;
+      }
+      const disconnectedBrowser = this.browser;
+      this.browser = null;
+      this.enterFatal(
+        "chromium_disconnected",
+        "The managed Chromium process exited unexpectedly",
+        disconnectedBrowser,
+      );
+      this.assertOperational();
+    }
+    if (!this.launchPromise) {
+      const launchPromise = this.launchOnce();
+      this.launchPromise = launchPromise;
+      void launchPromise.finally(() => {
+        if (this.launchPromise === launchPromise) {
+          this.launchPromise = null;
+        }
+      }).catch(() => {});
+    }
+    return this.launchPromise;
+  }
+
+  async launchOnce() {
+    const browser = await this.launchBrowser();
+    this.browser = browser;
+    browser.on("disconnected", () => {
+      this.handleDisconnect(browser);
+    });
+    if (this.shuttingDown) {
+      await this.closeIntentionally(browser);
+      throw new Error("Widget Runtime is shutting down");
+    }
+    this.assertOperational();
+    return browser;
+  }
+
+  handleDisconnect(browser) {
+    if (this.intentionalClosures.has(browser)) return;
+    if (this.browser !== browser) return;
+    this.browser = null;
+    if (this.shuttingDown) return;
+    this.enterFatal(
+      "chromium_disconnected",
+      "The managed Chromium process exited unexpectedly",
+      browser,
+    );
+  }
+
+  cancelIdleClose() {
+    if (!this.idleTimer) return;
+    this.clearTimer(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  scheduleIdleClose() {
+    if (
+      this.shuttingDown
+      || this.fatalError
+      || this.idleTimer
+      || !this.browser
+    ) {
+      return;
+    }
+    this.idleTimer = this.setTimer(() => {
+      this.idleTimer = null;
+      return this.closeIfIdle();
+    }, this.idleTimeoutMs);
+  }
+
+  async closeIfIdle() {
+    if (this.shuttingDown || this.activeLeases !== 0 || !this.browser) return;
+    await this.closeIntentionally(this.browser);
+  }
+
+  async closeIntentionally(browser) {
+    if (!browser) {
+      await this.closingPromise;
+      return;
+    }
+    if (this.closingPromise) {
+      await this.closingPromise;
+      return;
+    }
+    if (this.browser === browser) this.browser = null;
+    this.intentionalClosures.add(browser);
+    let resolveClosing;
+    const closingPromise = new Promise((resolve) => {
+      resolveClosing = resolve;
+    });
+    this.closingPromise = closingPromise;
+    try {
+      await browser.close();
+    } catch (error) {
+      const stillConnected =
+        typeof browser.isConnected !== "function"
+        || browser.isConnected();
+      if (stillConnected && !this.shuttingDown) {
+        if (!this.browser) this.browser = browser;
+        this.enterFatal(
+          "chromium_close_failed",
+          "The managed Chromium process failed to close",
+          error,
+        );
+      }
+    } finally {
+      resolveClosing();
+      if (this.closingPromise === closingPromise) {
+        this.closingPromise = null;
+      }
+    }
+  }
+
+  async shutdown() {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    this.cancelIdleClose();
+    await this.launchPromise?.catch(() => {});
+    await this.closeIntentionally(this.browser);
+  }
+}
+
+
+export function createControllerTransformer({
+  loadBabel = () => import("@babel/standalone"),
+} = {}) {
+  let babelPromise;
+  return async (source) => {
+    if (!babelPromise) {
+      babelPromise = Promise.resolve().then(loadBabel);
+      void babelPromise.catch(() => {
+        babelPromise = undefined;
+      });
+    }
+    const namespace = await babelPromise;
+    const babel =
+      typeof namespace?.transform === "function"
+        ? namespace
+        : namespace?.default;
+    if (typeof babel?.transform !== "function") {
+      throw new Error("Babel standalone does not expose transform()");
+    }
+    return babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+      plugins: ["transform-modules-commonjs"],
+      filename: "controller.js",
+      sourceMaps: "inline",
+    }).code;
+  };
+}
+
+
+const transformController = createControllerTransformer();
 
 
 function serialize(message) {
@@ -96,33 +342,38 @@ function browserArguments() {
 }
 
 
-async function launchBrowser() {
-  browser = await chromium.launch({
+async function launchManagedBrowser() {
+  return chromium.launch({
     executablePath: CHROMIUM_PATH,
     headless: true,
     chromiumSandbox: true,
     args: browserArguments(),
   });
-  browser.on("disconnected", () => {
+}
+
+
+const browserLifecycle = new BrowserLifecycle({
+  idleTimeoutMs: BROWSER_IDLE_TIMEOUT_MS,
+  launchBrowser: launchManagedBrowser,
+  onFatal: (error) => {
     if (shuttingDown) return;
-    for (const session of sessions.values()) {
+    for (const session of [...sessions.values()]) {
       send(
         session.socket,
         runtimeError(
-          "chromium_disconnected",
-          "The managed Chromium process exited",
+          error.code ?? "chromium_fatal",
+          error.message,
           "operator",
         ),
       );
       void closeSession(session);
     }
-    // The supervisor intentionally owns one pinned browser process. Once it is
-    // gone, retaining a live socket server would make every later session fail
-    // against a dead browser. Exit so Docker's bounded restart policy can
-    // restore the complete runtime.
+    // An unexpected Chromium exit may have left renderer state inconsistent.
+    // Exit so Docker's bounded restart policy can restore the complete runtime.
+    // Intentional idle and shutdown closes are suppressed by BrowserLifecycle.
     setTimeout(() => process.exit(1), 250);
-  });
-}
+  },
+});
 
 
 function validateStart(message) {
@@ -150,16 +401,6 @@ function validateStart(message) {
   ) {
     throw new Error("Widget Runtime start.viewport is invalid");
   }
-}
-
-
-function transformController(source) {
-  return Babel.transform(source, {
-    presets: [["react", { runtime: "classic" }]],
-    plugins: ["transform-modules-commonjs"],
-    filename: "controller.js",
-    sourceMaps: "inline",
-  }).code;
 }
 
 
@@ -857,104 +1098,134 @@ async function startScreencast(session) {
 }
 
 
+function openingCancelled(socket) {
+  return shuttingDown || socket.runtimeClosed || socket.destroyed;
+}
+
+
 async function openSession(socket, message) {
+  if (openingCancelled(socket)) return;
   validateStart(message);
-  if (socket.runtimeClosed || socket.destroyed) return;
-  if (sessions.size >= MAX_CONTEXTS) {
+  if (socket.sessionId) {
+    throw new Error("Widget Runtime socket already owns a session");
+  }
+  if (sessions.size + openingSessionIds.size >= MAX_CONTEXTS) {
     throw new Error("Widget Runtime context limit reached");
   }
-  if (sessions.has(message.session_id)) {
+  if (
+    sessions.has(message.session_id)
+    || openingSessionIds.has(message.session_id)
+  ) {
     throw new Error("Widget Runtime session already exists");
   }
-  const viewport = {
-    width: Math.trunc(message.viewport.width),
-    height: Math.trunc(message.viewport.height),
-    deviceScaleFactor: Number(message.viewport.device_scale_factor ?? 1),
-  };
-  const presentationContext = normalizePresentationContext(
-    message.presentation_context
-      ?? (message.theme ? { theme: message.theme } : undefined),
-  );
-  const context = await browser.newContext({
-    viewport: { width: viewport.width, height: viewport.height },
-    deviceScaleFactor: viewport.deviceScaleFactor,
-    locale: presentationContext.locale,
-    ...presentationMedia(presentationContext),
-    javaScriptEnabled: true,
-    serviceWorkers: "block",
-    acceptDownloads: false,
-  });
-  if (socket.runtimeClosed || socket.destroyed) {
-    await context.close().catch(() => {});
-    return;
-  }
-  await context.route("**/*", (route) => route.abort("blockedbyclient"));
-  const page = await context.newPage();
-  if (socket.runtimeClosed || socket.destroyed) {
-    await context.close().catch(() => {});
-    return;
-  }
-  const session = {
-    id: message.session_id,
-    appId: message.app_id,
-    artifactDigest: message.artifact_digest,
-    capabilityIds: Array.isArray(message.capability_ids)
-      ? message.capability_ids.filter((item) => typeof item === "string")
-      : [],
-    presentationContext,
-    socket,
-    context,
-    page,
-    cdp: null,
-    viewport,
-    pendingRpc: new Map(),
-    rpcSequence: 0,
-    visible: true,
-    screencastActive: false,
-    captureInFlight: false,
-    closed: false,
-  };
-  sessions.set(session.id, session);
-  socket.sessionId = session.id;
-  page.on("pageerror", (error) => {
-    send(
-      socket,
-      runtimeError(
-        "controller_runtime_error",
-        error?.message ?? error,
-        "code_only",
-      ),
-    );
-  });
-  page.on("crash", () => {
-    send(
-      socket,
-      runtimeError("chromium_page_crashed", "The Widget page crashed", "operator"),
-    );
-  });
+  openingSessionIds.add(message.session_id);
+  let browserLease;
+  let context;
   try {
-    const transformed = transformController(message.controller_source);
-    await installPageRuntime(page, session, transformed);
-    if (socket.runtimeClosed || socket.destroyed) {
-      await closeSession(session);
-      return;
-    }
-    await startScreencast(session);
-    if (socket.runtimeClosed || socket.destroyed) {
-      await closeSession(session);
-      return;
-    }
-    send(socket, { type: "ready", session_id: session.id });
-  } catch (error) {
-    send(
-      socket,
-      runtimeError(
-        "controller_load_failed",
-        error?.message ?? error,
-        "code_only",
-      ),
+    const viewport = {
+      width: Math.trunc(message.viewport.width),
+      height: Math.trunc(message.viewport.height),
+      deviceScaleFactor: Number(message.viewport.device_scale_factor ?? 1),
+    };
+    const presentationContext = normalizePresentationContext(
+      message.presentation_context
+        ?? (message.theme ? { theme: message.theme } : undefined),
     );
-    await closeSession(session);
+    if (openingCancelled(socket)) return;
+    browserLease = await browserLifecycle.acquire();
+    if (openingCancelled(socket)) return;
+    context = await browserLease.browser.newContext({
+      viewport: { width: viewport.width, height: viewport.height },
+      deviceScaleFactor: viewport.deviceScaleFactor,
+      locale: presentationContext.locale,
+      ...presentationMedia(presentationContext),
+      javaScriptEnabled: true,
+      serviceWorkers: "block",
+      acceptDownloads: false,
+    });
+    if (openingCancelled(socket)) return;
+    await context.route("**/*", (route) => route.abort("blockedbyclient"));
+    if (openingCancelled(socket)) return;
+    const page = await context.newPage();
+    if (openingCancelled(socket)) return;
+    const session = {
+      id: message.session_id,
+      appId: message.app_id,
+      artifactDigest: message.artifact_digest,
+      capabilityIds: Array.isArray(message.capability_ids)
+        ? message.capability_ids.filter((item) => typeof item === "string")
+        : [],
+      presentationContext,
+      socket,
+      context,
+      browserLease,
+      page,
+      cdp: null,
+      viewport,
+      pendingRpc: new Map(),
+      rpcSequence: 0,
+      visible: true,
+      screencastActive: false,
+      captureInFlight: false,
+      closed: false,
+    };
+    sessions.set(session.id, session);
+    openingSessionIds.delete(session.id);
+    socket.sessionId = session.id;
+    context = undefined;
+    browserLease = undefined;
+    page.on("pageerror", (error) => {
+      send(
+        socket,
+        runtimeError(
+          "controller_runtime_error",
+          error?.message ?? error,
+          "code_only",
+        ),
+      );
+    });
+    page.on("crash", () => {
+      send(
+        socket,
+        runtimeError(
+          "chromium_page_crashed",
+          "The Widget page crashed",
+          "operator",
+        ),
+      );
+    });
+    try {
+      const transformed = await transformController(message.controller_source);
+      if (openingCancelled(socket)) {
+        await closeSession(session);
+        return;
+      }
+      await installPageRuntime(page, session, transformed);
+      if (openingCancelled(socket)) {
+        await closeSession(session);
+        return;
+      }
+      await startScreencast(session);
+      if (openingCancelled(socket)) {
+        await closeSession(session);
+        return;
+      }
+      send(socket, { type: "ready", session_id: session.id });
+    } catch (error) {
+      send(
+        socket,
+        runtimeError(
+          "controller_load_failed",
+          error?.message ?? error,
+          "code_only",
+        ),
+      );
+      await closeSession(session);
+    }
+  } finally {
+    if (context) await context.close().catch(() => {});
+    openingSessionIds.delete(message.session_id);
+    browserLease?.release();
   }
 }
 
@@ -1088,7 +1359,6 @@ async function handleSessionMessage(socket, message) {
 async function closeSession(session) {
   if (!session || session.closed) return;
   session.closed = true;
-  sessions.delete(session.id);
   for (const pending of session.pendingRpc.values()) {
     pending.reject(new Error("Widget Runtime session closed"));
   }
@@ -1096,9 +1366,14 @@ async function closeSession(session) {
   if (session.screencastActive && session.cdp) {
     await session.cdp.send("Page.stopScreencast").catch(() => {});
   }
-  await session.context.close().catch(() => {});
-  if (session.socket.sessionId === session.id) {
-    session.socket.sessionId = undefined;
+  try {
+    await session.context.close().catch(() => {});
+  } finally {
+    sessions.delete(session.id);
+    session.browserLease.release();
+    if (session.socket.sessionId === session.id) {
+      session.socket.sessionId = undefined;
+    }
   }
 }
 
@@ -1193,16 +1468,21 @@ function createSocketServer() {
 }
 
 
-await launchBrowser();
-const server = createSocketServer();
+export function startRuntime() {
+  if (server) return server;
+  server = createSocketServer();
+  return server;
+}
 
-async function shutdown() {
+
+export async function shutdown() {
+  if (shuttingDown) return;
   shuttingDown = true;
-  server.close();
+  server?.close();
   for (const session of [...sessions.values()]) {
     await closeSession(session);
   }
-  await browser?.close().catch(() => {});
+  await browserLifecycle.shutdown();
   try {
     fs.unlinkSync(SOCKET_PATH);
   } catch (error) {
@@ -1210,5 +1490,12 @@ async function shutdown() {
   }
 }
 
-process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
-process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
+
+const isMainModule =
+  typeof process.argv[1] === "string"
+  && path.resolve(process.argv[1]) === RUNTIME_MODULE_PATH;
+if (isMainModule) {
+  startRuntime();
+  process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+  process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
+}

@@ -68,7 +68,7 @@ Worker 领取 Run 时递增 `lease_epoch`。所有 durable step commit 都必须
 - `restart_safe` 的过期 `running` Run 回到 `queued`；
 - 不能确认外部副作用的 manual Run 进入 `needs_attention`；
 - MCP tool、HTTP Agent 等远端 effect 不接受 manifest 单方面的 `restart_safe` 声明；只有只读调用或具备可强制幂等/对账协议的 adapter 才能自动恢复；
-- graceful shutdown 会同步释放本 worker 的 lease，并遵循同一恢复策略；它不会执行取消补偿或修改 live effect，只有已经持久化为 `cancel_requested` 的命令才允许补偿；
+- graceful shutdown 会取消 scheduler、heartbeat 与 active worker，并等待每个 worker 的取消清理真正结束后，才同步释放本 worker 的 lease 并关闭下游 Graph 等共享资源；它不会执行取消补偿或修改 live effect，只有已经持久化为 `cancel_requested` 的命令才允许补偿；
 - `waiting_user` 不占 worker slot，但 interaction 和 Run 都保留在数据库中。
 
 queued / waiting Widget Run 被取消时，先在 state/checkpoint 中持久化 cleanup tombstone 并进入不可 claim 状态；transaction 提交后才通过受约束的 staging 路径幂等删除 artifact，随后以第二个 transaction 清除 tombstone 并终结。重启会恢复任一清理窗口；无法确认清理成功则进入 `needs_attention`，且不能绕过 tombstone 直接 reconciliation。`needs_attention` 不能再被 cancel 命令直接改写为 `cancelled`。操作者必须调用持久化 reconciliation 命令，明确选择 `confirmed_not_committed`、`compensated` 或 `confirmed_committed`；前两者允许之后显式 retry，确认已提交的副作用会保持 retry blocked，避免重复动作。
@@ -130,4 +130,15 @@ App-scoped Graph mutation 与 rollback 都提交 `graph_mutation` v2 Run：Widge
 - `GET /api/runtimes`、`POST /api/runtimes/{id}/stop`；
 - `/ws/runs?after_sequence=N`。
 
-默认并发为全局 4、每 owner 1，分别由 `RUNNER_MAX_CONCURRENCY` 与 `RUNNER_MAX_PER_APP` 配置。Session lane 是另一层约束，不由 owner limit 替代。
+`GET /api/runs` 默认保持完整 Run 行的兼容响应（但不含 event/step/
+interaction 详情）；`include_details=true` 会进一步返回这些详情。任务中心使用互斥的
+`summary_only=true`，数据库只读取列表需要的身份、状态、进度、摘要和时间字段，
+不读取或解析 input/result/state/checkpoint 等大 JSON。`summary_only` 与
+`include_details` 同时出现会返回 422。列表按 `created_at` 的专用索引倒序读取，
+并由前端把 Run event burst 合并为一次摘要刷新；Runtime 列表只在对应页签打开时读取。
+
+代码在未提供环境变量时回退为全局 4、每 owner 1，分别由
+`RUNNER_MAX_CONCURRENCY` 与 `RUNNER_MAX_PER_APP` 配置。面向 8GB 主机的
+`.env.example` 与生产 Docker Compose 会显式把全局并发设为 1；提高该值前必须同步
+验证 Backend 内存和 Coding Agent 子进程预算。Session lane 是另一层约束，不由
+owner limit 替代。

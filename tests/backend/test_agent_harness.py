@@ -3,10 +3,50 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.agent.harness import AgentOrchestrator
+from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.agent.router import IntentRouter
 from backend.agent.tools import ToolRegistry
 from backend.models import ChatSession
 from backend.workspace_storage import WorkspaceStorage
+
+
+@pytest.mark.asyncio
+async def test_agent_orchestrator_reuses_injected_graph_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    db_session = MagicMock(spec=WorkspaceStorage)
+    db_session.get_messages.return_value = []
+    app_manager = MagicMock()
+    app_manager.list_apps.return_value = []
+    graph_db = MagicMock()
+    graph_db.routing_snapshot.return_value = {
+        "type_counts": {"Task": 2},
+        "recent_nodes_by_type": {},
+        "schema_manifest": [],
+        "node_count": 2,
+        "edge_count": 0,
+    }
+    route = AsyncMock(
+        return_value=IntentPlan(
+            kind=IntentKind.CONVERSE,
+            rationale="injected graph adapter",
+            instruction="hello",
+        )
+    )
+    graph_factory = MagicMock(side_effect=AssertionError("request path must not create a Graph adapter"))
+    monkeypatch.setattr("backend.agent.harness.IntentRouter.route", route)
+    monkeypatch.setattr("backend.graph_db.create_graph_database", graph_factory)
+
+    orchestrator = AgentOrchestrator(
+        db_session=db_session,
+        app_manager=app_manager,
+        graph_db=graph_db,
+    )
+    plan = await orchestrator._classify_intent("hello", session_id="session-1", language="en")
+
+    assert plan.kind == IntentKind.CONVERSE
+    graph_factory.assert_not_called()
+    graph_db.routing_snapshot.assert_called_once_with(5)
+    router_context = route.await_args.args[1]
+    assert router_context.graph_snapshot.type_counts == {"Task": 2}
 
 
 @pytest.mark.asyncio
@@ -207,7 +247,13 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     app_manager = MagicMock()
     app_manager.list_apps.return_value = []
 
-    orchestrator = AgentOrchestrator(db_session=db_session, app_manager=app_manager)
+    graph_db = MagicMock()
+    graph_db.routing_snapshot.return_value = {}
+    orchestrator = AgentOrchestrator(
+        db_session=db_session,
+        app_manager=app_manager,
+        graph_db=graph_db,
+    )
 
     on_update = AsyncMock()
 

@@ -13,6 +13,10 @@ export interface WidgetPresentationContext {
 export interface SandboxWidgetProps {
   widget: Widget;
   presentationContext?: WidgetPresentationContext;
+  runtimeVisible?: boolean;
+  suspendRequested?: boolean;
+  onActivate?: () => void;
+  onSuspendReady?: () => void;
   onFullscreen?: (id: string) => void;
   onMinimize?: (id: string) => void;
 }
@@ -79,15 +83,32 @@ const keyboardModifiers = (event: React.KeyboardEvent) =>
 export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
   widget,
   presentationContext = DEFAULT_PRESENTATION_CONTEXT,
+  runtimeVisible = true,
+  suspendRequested = false,
+  onActivate,
+  onSuspendReady,
   onFullscreen,
   onMinimize,
 }) => {
   const playerRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const hostCallbacksRef = useRef({ onFullscreen, onMinimize });
-  hostCallbacksRef.current = { onFullscreen, onMinimize };
+  const hostCallbacksRef = useRef({
+    onActivate,
+    onSuspendReady,
+    onFullscreen,
+    onMinimize,
+  });
+  hostCallbacksRef.current = {
+    onActivate,
+    onSuspendReady,
+    onFullscreen,
+    onMinimize,
+  };
+  const suspensionHandledRef = useRef(false);
   const presentationContextRef = useRef(presentationContext);
   presentationContextRef.current = presentationContext;
+  const runtimeVisibleRef = useRef(runtimeVisible);
+  runtimeVisibleRef.current = runtimeVisible;
   const viewportRef = useRef<Viewport>({
     width: 640,
     height: 480,
@@ -115,6 +136,17 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
     });
   }, [send]);
 
+  const sendRuntimeVisibility = useCallback(() => {
+    send({
+      type: "visibility",
+      visible: runtimeVisibleRef.current && document.visibilityState !== "hidden",
+    });
+  }, [send]);
+
+  const activateBeforeInput = useCallback(() => {
+    hostCallbacksRef.current.onActivate?.();
+  }, []);
+
   useEffect(() => {
     setFrame(null);
     setFailure(null);
@@ -141,10 +173,7 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
         setFailure(null);
         sendViewport();
         sendPresentationContext();
-        send({
-          type: "visibility",
-          visible: document.visibilityState !== "hidden",
-        });
+        sendRuntimeVisibility();
       };
       socket.onmessage = (event) => {
         let message: Record<string, any>;
@@ -231,6 +260,7 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
   }, [
     send,
     sendPresentationContext,
+    sendRuntimeVisibility,
     sendViewport,
     widget.grants_digest,
     widget.id,
@@ -281,15 +311,24 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
   }, [sendViewport]);
 
   useEffect(() => {
-    const handleVisibility = () => {
-      send({
-        type: "visibility",
-        visible: document.visibilityState !== "hidden",
-      });
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [send]);
+    sendRuntimeVisibility();
+  }, [runtimeVisible, sendRuntimeVisibility]);
+
+  useEffect(() => {
+    if (!suspendRequested) {
+      suspensionHandledRef.current = false;
+      return;
+    }
+    if (suspensionHandledRef.current) return;
+    suspensionHandledRef.current = true;
+    send({ type: "visibility", visible: false });
+    hostCallbacksRef.current.onSuspendReady?.();
+  }, [send, suspendRequested]);
+
+  useEffect(() => {
+    document.addEventListener("visibilitychange", sendRuntimeVisibility);
+    return () => document.removeEventListener("visibilitychange", sendRuntimeVisibility);
+  }, [sendRuntimeVisibility]);
 
   const point = (clientX: number, clientY: number) => {
     const bounds = playerRef.current?.getBoundingClientRect();
@@ -324,13 +363,19 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
       aria-label={widget.title}
       tabIndex={0}
       onPointerDown={(event) => {
+        activateBeforeInput();
         event.currentTarget.focus();
         event.currentTarget.setPointerCapture?.(event.pointerId);
         sendPointer(event, "mousePressed");
       }}
-      onPointerUp={(event) => sendPointer(event, "mouseReleased")}
-      onPointerMove={(event) => sendPointer(event, "mouseMoved")}
+      onPointerUp={(event) => {
+        sendPointer(event, "mouseReleased");
+      }}
+      onPointerMove={(event) => {
+        sendPointer(event, "mouseMoved");
+      }}
       onWheel={(event) => {
+        activateBeforeInput();
         const coordinates = point(event.clientX, event.clientY);
         send({
           type: "wheel",
@@ -340,6 +385,7 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
         });
       }}
       onKeyDown={(event) => {
+        activateBeforeInput();
         send({
           type: "key",
           event: "keyDown",

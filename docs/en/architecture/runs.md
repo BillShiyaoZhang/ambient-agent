@@ -68,7 +68,12 @@ Claiming a Run increments `lease_epoch`. Every durable step commit must match bo
 - expired `restart_safe` work returns to `queued`;
 - manual work with an uncertain external effect enters `needs_attention`;
 - remote effects such as MCP tools and HTTP Agents cannot opt into `restart_safe` by manifest assertion alone; only read-only calls or adapters with enforceable idempotency/reconciliation protocols are auto-recoverable;
-- graceful shutdown synchronously releases this worker's leases using the same policy; it does not run cancellation compensation or change live effects, because only a durably recorded `cancel_requested` command may compensate;
+- graceful shutdown cancels the scheduler, heartbeat, and active workers, waits
+  for every worker's cancellation cleanup to finish, and only then releases
+  this worker's leases and closes downstream shared resources such as the
+  Graph adapter; it does not run cancellation compensation or change live
+  effects, because only a durably recorded `cancel_requested` command may
+  compensate;
 - `waiting_user` consumes no worker slot, while the interaction and Run remain durable.
 
 Cancelling a queued or waiting Widget Run first persists a cleanup tombstone in state/checkpoint and makes the Run unclaimable. Only after that transaction commits does it idempotently delete the artifact through the constrained staging path, then clear the tombstone and finish in a second transaction. Startup recovers either crash window; an unconfirmed cleanup enters `needs_attention` and cannot bypass the tombstone through reconciliation. `needs_attention` cannot be rewritten to `cancelled` by another cancel command. An operator must issue a durable reconciliation command with `confirmed_not_committed`, `compensated`, or `confirmed_committed`. The first two make a later explicit retry safe; a confirmed committed effect remains retry-blocked to prevent duplication.
@@ -130,4 +135,20 @@ Compatible public entry points remain:
 - `GET /api/runtimes` and `POST /api/runtimes/{id}/stop`;
 - `/ws/runs?after_sequence=N`.
 
-The defaults are four concurrent Runs globally and one per owner, configured with `RUNNER_MAX_CONCURRENCY` and `RUNNER_MAX_PER_APP`. Session lanes are an additional constraint, not a replacement for owner limits.
+By default, `GET /api/runs` preserves the compatible full Run-row response
+(without event/step/interaction details); `include_details=true` adds those
+details. The Task Center uses the mutually exclusive `summary_only=true` view,
+whose SQL reads only identity, status, progress, summary, and timestamp fields
+needed by the list. It does not read or decode large input/result/state/checkpoint
+JSON values. Supplying `summary_only` together with `include_details` returns
+422. A dedicated `created_at` index supports newest-first listing, the frontend
+coalesces Run-event bursts into one summary refresh, and Runtime snapshots are
+loaded only while their tab is open.
+
+When no environment variable is provided, the code falls back to four
+concurrent Runs globally and one per owner, configured with
+`RUNNER_MAX_CONCURRENCY` and `RUNNER_MAX_PER_APP`. The 8 GB-oriented
+`.env.example` and production Docker Compose explicitly set the global limit to
+one; increasing it requires revalidating the Backend memory budget and Coding
+Agent child-process load. Session lanes are an additional constraint, not a
+replacement for owner limits.

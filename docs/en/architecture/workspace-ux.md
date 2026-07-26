@@ -5,7 +5,7 @@ Ambient Agent uses an app-first desktop workspace. Chat is an auxiliary overlay 
 ## Workspace states
 
 - **Home**: when no app is open, App Center occupies the main surface.
-- **Maximized**: launching an app maximizes it inside the product viewport by default; other open apps remain mounted behind it.
+- **Maximized**: launching an app maximizes it inside the product viewport by default; other open apps remain workspace windows, while their runtimes follow the lifecycle below.
 - **Floating**: restoring a maximized app creates a movable, resizable window.
 - **Snapped**: dropping on the left or right edge uses half the stage, a corner uses one quarter, and the top edge maximizes.
 - **Mobile**: below 720 px, only the active app is visible; drag, resize, snap, and layout controls are hidden.
@@ -30,6 +30,61 @@ The desktop workspace reserves a 52 px system-chrome row above the app stage. A 
 - Pointer movement uses pointer capture and animation-frame updates. Persistence happens only when the gesture ends.
 - `open_app_ids` is also the window z-order. Focusing a window moves its id to the end.
 - Layout presets include focus, side by side, and adaptive grid.
+
+## Widget runtime lifecycle
+
+The number of open apps is independent from the number of resident Widget runtimes. The workspace derives four ephemeral states from `active_app_id` and the most-recently-used order in `open_app_ids`; these states are not persisted in Canvas:
+
+- **Active**: the focused app. Its iframe, WebSocket, or Pixel Runtime context stays mounted and interactive.
+- **Warm**: the one most recently used inactive app. At most one warm runtime is retained for a fast switch; no other inactive app keeps a runtime. A warm Pixel Widget must send `visibility=false` and stop its screencast even while the browser tab remains visible.
+- **Suspending**: after the former Warm app exceeds the resident budget, at most one outgoing Runtime remains mounted. The fixed Frame receives `before_suspend` over its authenticated MessagePort and invokes the Controller's `ambient.lifecycle.onBeforeSuspend` handler, where a Widget can await its last `ambient.storage` write. The host unmounts after the acknowledgement or a one-second timeout, with a 1.25-second workspace fallback. Steady state therefore has at most two resident Runtimes and the bounded flush window at most three. Rapid successive switches replace the older outgoing request with the latest one rather than accumulating Runtimes without bound. The legacy Pixel rollback path has no storage protocol; it stops visibility and releases immediately.
+- **Suspended**: every other open app. The workspace retains window position, mode, and z-order, but unmounts Widget content so its iframe, WebSocket, and Pixel Runtime context are destroyed. The content area shows a clickable resume placeholder. Selecting it or the app switcher restores that app as Active, moves the former Active to Warm, and suspends the former Warm when the budget is exceeded.
+
+Input events inside a warm iframe do not bubble across its browsing context, so
+the fixed Frame must report trusted `pointerdown`, `keydown`, and `wheel` user
+activations to the host over the authenticated MessagePort. Only events marked
+`isTrusted` by the browser may produce this internal notification; neither
+Controller-synthesized events nor the public `hostEvent` API can forge it. The
+host immediately promotes that window to Active, updates MRU, and persists the
+Canvas. A user's first mouse, keyboard, or wheel interaction with a warm app
+therefore cannot remain misclassified as background work or cause the just-used
+app to be suspended when a third window is selected.
+
+Pixel Runtime initiating `pointerdown`, `wheel`, and `keydown` input must also
+pass through the same host activation entry point before it is forwarded to
+the Runtime. A plain `pointermove` must not create focus-follows-mouse behavior
+or a Canvas write. An app that is already the canonical Active/MRU entry causes
+no redundant Canvas write; changing only the `onActivate` callback reference
+must not reconnect its Pixel WebSocket, and Warm-to-Active promotion must reuse
+that connection.
+
+If the persisted `active_app_id` is temporarily unavailable or lacks window
+state, the workspace transiently falls back to the most recent renderable window
+in `open_app_ids` as Active and selects Warm from the remaining order. Rendering
+this resilience state alone does not rewrite the persisted Canvas. On the
+user's first genuine interaction with that derived Active app, the host moves
+it to the MRU tail, writes `active_app_id`, and persists the repaired Canvas.
+
+Canvas bootstrap fetches snapshots for open apps concurrently. Those snapshots
+must merge through a functional state update keyed by app `id` and
+`manifest_revision`. If a WebSocket update for the same app arrives while a
+snapshot is pending, the current event version wins: the late bootstrap response
+must neither overwrite it nor create a duplicate app.
+
+Suspension is neither closing nor uninstalling: the app remains in `open_app_ids`, and its window geometry is preserved. Closing still only removes the app from the workspace; refocusing a suspended app rebuilds its runtime through the normal startup path.
+
+Suspended means a recoverable reload after releasing the Runtime, not a
+lossless browser freeze: unmounting destroys arbitrary React hook memory.
+Generated Apps must hydrate user drafts, form values, editor content, and any
+other work that must survive suspension from `ambient.storage`, then write
+through after every meaningful change. Canonical Graph/File data continues to
+use its approved capability. A debounced writer must register an async
+`ambient.lifecycle.onBeforeSuspend` handler and await the latest persistence
+write; this bounded handshake is a safety net, not an indefinite durability
+promise. Only transient presentation state such as hover
+or an open menu may reset. A legacy App that keeps user input only in memory
+can reset on resume and must upgrade its persistence logic; the Active/Warm
+budget is not a generic state-snapshot mechanism.
 
 ## Auxiliary surfaces
 

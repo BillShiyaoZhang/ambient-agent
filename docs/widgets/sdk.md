@@ -12,6 +12,7 @@
 | `ambient.theme.getSnapshot()` / `subscribe(listener)` | 读取主题快照并订阅同 session 内的主题变化 |
 | `ambient.presentation.getSnapshot()` / `subscribe(listener)` | 读取并订阅 `{ theme, locale, reducedMotion }` 展示上下文 |
 | `ambient.storage.get/set/delete/clear/list` | 保存当前浏览器、当前 App 的非秘密 JSON 状态 |
+| `ambient.lifecycle.onBeforeSuspend(handler)` | 注册唯一的异步挂起前刷盘 handler，并返回 unsubscribe |
 | `ambient.html` | 绑定 React createElement 的 HTM tag |
 | `ambient.react` | `useState`、`useEffect`、`useMemo`、`useRef`、`useCallback`、`useContext`、`useReducer`；发布前验证会拒绝其他未注入 hook |
 | `ambient.components` | `Column`、`Row`、`Card`、`Text`、`Button`、`TextField`、`Checkbox`、`List`、`Table`；发布前验证会拒绝其他未注入组件 |
@@ -48,6 +49,19 @@ await ambient.storage.clear();
 ```
 
 key 为 1–256 个字符，value 必须是无循环 JSON 且单值不超过 64 KiB；每个 App 最多 128 个 key、合计 1 MiB。缺失 key 返回 `null`。数据仅存在当前浏览器 profile，可能被用户清理或被浏览器回收；不得保存凭据、token、跨设备状态或用户数据的唯一副本。`VITE_WIDGET_UI_TRANSPORT=pixels` 旧回滚模式不提供此 API。
+
+用户输入应在有意义的修改后写穿。若为减少写入而使用 debounce，请把最新值保存在 ref，并注册有界刷盘：
+
+```javascript
+useEffect(
+  () => ambient.lifecycle.onBeforeSuspend(async () => {
+    await ambient.storage.set("draft", latestDraftRef.current);
+  }),
+  []
+);
+```
+
+后注册的 handler 替换前一个；effect cleanup 返回的旧 unsubscribe 不会移除更新的注册。宿主等待确认最多 1 秒，随后仍会卸载 Runtime，因此 handler 必须有界，且不能代替正常写穿。
 
 ## 3. Graph Grants
 

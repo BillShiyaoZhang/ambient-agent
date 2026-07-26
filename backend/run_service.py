@@ -444,6 +444,7 @@ class RunStore:
                     WHERE idempotency_key IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_runs_status_created ON runs(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_runs_runtime_status ON runs(runtime_id, status);
+                CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS run_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -939,6 +940,7 @@ class RunStore:
         source_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        summary_only: bool = False,
     ) -> list[dict[str, Any]]:
         where: list[str] = []
         params: list[Any] = []
@@ -957,9 +959,17 @@ class RunStore:
             params.append(source_id)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         params.extend([max(1, min(limit, 500)), max(0, offset)])
+        columns = (
+            "id, owner_id, action_id, action_title, source_type, source_id, "
+            "adapter_type, runtime_id, status, progress, summary, workflow_type, "
+            "parent_run_id, retry_of, attempt, created_at, updated_at, started_at, finished_at"
+            if summary_only
+            else "*"
+        )
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM runs {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?", params
+                f"SELECT {columns} FROM runs {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                params,
             ).fetchall()
         return [_decode_row(row) or {} for row in rows]
 
@@ -2425,19 +2435,42 @@ class RunCoordinator:
         tasks = [task for task in (self._scheduler, self._heartbeat, *self._active.values()) if task]
         for task in tasks:
             task.cancel()
+        cancellation_error: asyncio.CancelledError | None = None
+
+        async def wait_without_abandoning_cleanup(awaitable: Any) -> Any:
+            nonlocal cancellation_error
+
+            waiter = asyncio.ensure_future(awaitable)
+            while not waiter.done():
+                try:
+                    await asyncio.shield(waiter)
+                except asyncio.CancelledError as exc:
+                    # The caller may cancel application shutdown, but closing
+                    # shared resources while workers are still unwinding would
+                    # race their cleanup.  Preserve cancellation and re-raise
+                    # it only after the protected waiter finishes.
+                    if cancellation_error is None:
+                        cancellation_error = exc
+            return waiter.result()
+
         grace_seconds = max(0.0, float(os.getenv("RUNNER_SHUTDOWN_GRACE_SECONDS", "5")))
         if tasks:
-            done, pending = await asyncio.wait(tasks, timeout=grace_seconds)
+            done, pending = await wait_without_abandoning_cleanup(asyncio.wait(tasks, timeout=grace_seconds))
             if done:
-                await asyncio.gather(*done, return_exceptions=True)
-            for task in pending:
-                task.cancel()
+                await wait_without_abandoning_cleanup(asyncio.gather(*done, return_exceptions=True))
+            if pending:
+                # Cancellation begins before the grace window.  Tasks still
+                # pending afterwards are completing their cancellation
+                # cleanup; shared resources must outlive that cleanup.
+                await wait_without_abandoning_cleanup(asyncio.gather(*pending, return_exceptions=True))
         self.store.release_worker(self.worker_id)
         self._active.clear()
         self._event_callbacks.clear()
         self._completion_callbacks.clear()
         self._scheduler = None
         self._heartbeat = None
+        if cancellation_error is not None:
+            raise cancellation_error
 
     async def _heartbeat_loop(self) -> None:
         try:

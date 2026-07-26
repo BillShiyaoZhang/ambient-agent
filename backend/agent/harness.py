@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import os
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +21,7 @@ from backend.agent.tools import ToolEffect, registry as tool_registry
 from backend.app_manager import AppManager
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.context_manager import ContextManager
+from backend.graph_db import GraphDatabase
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 from backend.models import ChatMessage, ChatSession
@@ -37,6 +37,7 @@ class AgentOrchestrator:
         self,
         db_session: WorkspaceStorage,
         app_manager: AppManager,
+        graph_db: GraphDatabase,
         run_context: RunContext | None = None,
         context_summary: str | None = None,
         artifact_ids: list[str] | None = None,
@@ -45,6 +46,7 @@ class AgentOrchestrator:
     ) -> None:
         self.db = db_session
         self.app_manager = app_manager
+        self.graph_db = graph_db
         self.context_manager = ContextManager(db_session=db_session, app_manager=app_manager)
         self.run_context = run_context
         self.context_summary = context_summary
@@ -95,16 +97,14 @@ class AgentOrchestrator:
     async def _classify_intent(self, content: str, session_id: str, language: str = "zh") -> IntentPlan:
         router_context = None
         try:
-            from backend.graph_db import create_graph_database
             from backend.router_context import RouterContext
 
-            graph_db = create_graph_database(os.getenv("WORKSPACE_DIR", "workspace"))
             session_messages = [
                 {"role": message.role, "content": message.content} for message in self.db.get_messages(session_id)
             ]
             router_context = RouterContext.build(
                 app_manager=self.app_manager,
-                graph_db=graph_db,
+                graph_db=self.graph_db,
                 session_messages=session_messages,
                 recent_messages_count=5,
                 session_summary=self.context_summary,

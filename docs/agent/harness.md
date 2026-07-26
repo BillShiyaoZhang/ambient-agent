@@ -33,6 +33,17 @@ flowchart TB
 - `AgentOrchestrator`：保留部分路由、Converse 和格式化 domain helper；不再拥有 `/ws/chat` 的运行生命周期。
 - `ToolGateway`、MCP client 和 Coding Agent ACP：分别强制本地模型工具、外部 JSON-RPC 和代码生成边界。OpenCode 的原生 ACP server 与 Codex ACP bridge 使用完全相同的 Ambient session、权限、staging、验证和 repair 状态机。
 
+`backend/main.py` 作为组合根在每个活跃 application lifespan 中只创建一个 Graph adapter，并把同一个实例注入
+`DurableAgentWorkflow` 与每个 `AgentOrchestrator`。路由上下文、只读查询、mutation 和
+schema 阶段不得在请求或 reducer step 内再次调用 `create_graph_database()`；否则
+Neo4j deployment 会为每条消息重复创建 Driver、连接池并重做 ontology 初始化。
+Graph adapter 的生命周期也只属于组合根：所有 Run、Coding Agent 和 MCP 任务停止后，
+应用 shutdown 必须显式 `close()`；SQLite adapter 提供同一无副作用关闭契约。即使
+startup、应用上下文或任一较早的 shutdown 步骤失败，组合根仍必须按顺序尝试其余
+清理步骤，不能因为一个异常而泄漏后续进程或 Graph Driver。同一进程中的测试或嵌入式
+宿主可能多次进入 ASGI lifespan；组合根不得复用上一次 shutdown 已关闭的 Neo4j
+Driver，而要在下一次 startup 创建并重新注入一个新 adapter。
+
 ## 2. Reducer 协议
 
 ```mermaid

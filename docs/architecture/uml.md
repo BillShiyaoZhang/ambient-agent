@@ -183,13 +183,14 @@ Backend 镜像必须同时包含 Node.js 与由前端 lockfile 固定的 `@babel
 
 ```mermaid
 flowchart LR
-    Player[用户浏览器帧播放器] <-->|frame / input| Gateway[FastAPI WidgetRuntimeGateway]
-    Gateway <-->|NDJSON / Unix socket| Supervisor[零网络 widget-runtime]
-    Supervisor --> Chromium[固定 Chromium browser process]
-    Chromium --> A[App A BrowserContext]
-    Chromium --> B[App B BrowserContext]
+    Host[可信 React host] -->|固定 frame assets| Frame[opaque-origin iframe]
+    Host <-->|nonce + MessageChannel| Frame
+    Host <-->|ticket + client-runtime WebSocket| Gateway[FastAPI client runtime]
     Gateway -->|server-side session identity| Authorizer[CapabilityAuthorizer]
     Authorizer --> Adapters[Graph / HTTP / Files / Capability adapters]
+    Gateway <-.->|仅 pixel 回滚：Unix socket| Supervisor[零网络 widget-runtime]
+    Supervisor -.-> Chromium["按需共享 Chromium；空闲 60 秒关闭"]
+    Chromium -.-> Contexts[最多 4 个回滚 BrowserContext]
 ```
 
 ```mermaid
@@ -202,7 +203,15 @@ classDiagram
     }
 ```
 
-`WidgetRuntimeGateway` 是浏览器连接、Unix socket 和 capability adapter 之间的唯一桥。它持久读取 Manifest 并在内存中绑定 `session_id -> app_id/revision/grants_digest/artifact_digest`；所有 Controller payload 身份字段都被忽略。Runtime 不挂载工作区且使用 `network_mode: none`，因此 Controller 只能通过 Gateway 的 RPC 获得外部能力。每个 App 使用独立 BrowserContext；默认共享 Chromium 以控制个人笔记本的启动与内存成本。
+默认链路由 ticket 认证的 client-runtime Gateway 在内存中绑定
+`session_id -> app_id/revision/grants_digest/artifact_digest`；所有 Controller
+payload 身份字段都被忽略。Controller 只在 opaque-origin frame 内执行，并经
+MessageChannel 把 RPC 交给可信 host 和 Backend authorizer。Workspace 稳态最多
+驻留 Active + Warm 两个 Widget，挂起过渡最多再保留一个 Suspending Widget。
+
+`WidgetRuntimeGateway`、Unix socket、共享 Chromium 和独立 BrowserContext 仅属于
+显式 pixel 回滚链路。Runtime 不挂载工作区且使用 `network_mode: none`；浏览器
+按需启动，最后一个会话关闭 60 秒后回收，默认最多 4 个 Context。
 
 ## 6. 事件与恢复边界
 
@@ -218,6 +227,7 @@ classDiagram
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
         +apply_schema_proposal_atomic(proposal)
+        +close()
     }
     class Neo4jGraphDatabase {
         +from_env(workspace_dir)
@@ -236,7 +246,7 @@ classDiagram
     Neo4jGraphDatabase --> OntologyEntity
 ```
 
-`create_graph_database()` 是运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。两种 adapter 执行同一 `ambient-context` 本体契约；未知实体、抽象实体和未知属性都不能写入 record。
+`create_graph_database()` 是组合根唯一调用的运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。创建后的同一 adapter 被注入 Workflow、Agent 路由与工具；请求和 reducer step 不得创建第二个 Driver。两种 adapter 执行同一 `ambient-context` 本体契约，并由组合根在 shutdown 显式 `close()`；未知实体、抽象实体和未知属性都不能写入 record。
 
 ## 8. Coding Agent Runtime 与模型所有权
 

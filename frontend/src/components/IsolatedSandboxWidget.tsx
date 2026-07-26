@@ -22,6 +22,7 @@ const MAX_RPC_MESSAGE_BYTES = 1024 * 1024;
 const MAX_RPC_FIELD_LENGTH = 200;
 const MAX_HOST_MESSAGE_LENGTH = 16_384;
 const RUNTIME_HANDSHAKE_TIMEOUT_MS = 15_000;
+const SUSPEND_FLUSH_TIMEOUT_MS = 1_000;
 const IDENTITY_FIELDS = new Set([
   "app_id",
   "widget_id",
@@ -65,6 +66,8 @@ interface ClientRuntimeSession {
   initialized: boolean;
   ready: boolean;
   handshakeTimer: number | null;
+  suspendRequestId: string | null;
+  suspendTimer: number | null;
   closingReason: string | null;
   bootstrap: RuntimeBootstrap | null;
 }
@@ -207,13 +210,29 @@ const ticketFailureMessage = async (response: Response) => {
 export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
   widget,
   presentationContext = DEFAULT_PRESENTATION_CONTEXT,
+  suspendRequested = false,
+  onActivate,
   onFullscreen,
   onMinimize,
+  onSuspendReady,
 }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const sessionRef = useRef<ClientRuntimeSession | null>(null);
-  const hostCallbacksRef = useRef({ onFullscreen, onMinimize });
-  hostCallbacksRef.current = { onFullscreen, onMinimize };
+  const hostCallbacksRef = useRef({
+    onActivate,
+    onFullscreen,
+    onMinimize,
+    onSuspendReady,
+  });
+  hostCallbacksRef.current = {
+    onActivate,
+    onFullscreen,
+    onMinimize,
+    onSuspendReady,
+  };
+  const suspendRequestedRef = useRef(suspendRequested);
+  suspendRequestedRef.current = suspendRequested;
+  const suspendCycleCompletedRef = useRef(false);
   const presentationContextRef = useRef(presentationContext);
   presentationContextRef.current = presentationContext;
   const storageBroker = useMemo(
@@ -229,6 +248,40 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       !session.disposed && sessionRef.current === session,
     [],
   );
+
+  const clearSuspendRequest = useCallback((session: ClientRuntimeSession) => {
+    if (session.suspendTimer !== null) {
+      window.clearTimeout(session.suspendTimer);
+      session.suspendTimer = null;
+    }
+    session.suspendRequestId = null;
+  }, []);
+
+  const completeSuspendCycle = useCallback(() => {
+    if (
+      !suspendRequestedRef.current
+      || suspendCycleCompletedRef.current
+    ) {
+      return;
+    }
+    suspendCycleCompletedRef.current = true;
+    hostCallbacksRef.current.onSuspendReady?.();
+  }, []);
+
+  const completeSuspendRequest = useCallback((
+    session: ClientRuntimeSession,
+    requestId: string,
+  ) => {
+    if (
+      !isCurrentSession(session)
+      || session.suspendRequestId !== requestId
+      || !suspendRequestedRef.current
+    ) {
+      return;
+    }
+    clearSuspendRequest(session);
+    completeSuspendCycle();
+  }, [clearSuspendRequest, completeSuspendCycle, isCurrentSession]);
 
   const initializeFrame = useCallback((session: ClientRuntimeSession) => {
     if (
@@ -253,6 +306,10 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
   }, [isCurrentSession]);
 
   const handleHostEvent = useCallback((message: Record<string, unknown>) => {
+    if (message.event === "focus") {
+      hostCallbacksRef.current.onActivate?.();
+      return;
+    }
     if (message.event === "fullscreen") {
       hostCallbacksRef.current.onFullscreen?.(widget.id);
       return;
@@ -296,6 +353,11 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       }
       setStatus("ready");
       setFailure(null);
+      return;
+    }
+    if (value.type === "suspend_ready") {
+      if (!boundedString(value.request_id, MAX_RPC_FIELD_LENGTH)) return;
+      completeSuspendRequest(session, value.request_id);
       return;
     }
     if (value.type === "runtime_error" || value.type === "error") {
@@ -353,6 +415,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     }
   }, [
     handleHostEvent,
+    completeSuspendRequest,
     initializeFrame,
     isCurrentSession,
     storageBroker,
@@ -386,6 +449,9 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       } else {
         session.socket?.close();
       }
+      if (session.suspendRequestId) {
+        completeSuspendRequest(session, session.suspendRequestId);
+      }
       session.disposed = true;
       return;
     }
@@ -414,7 +480,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       "*",
       [channel.port2],
     );
-  }, [handleFrameMessage, isCurrentSession]);
+  }, [completeSuspendRequest, handleFrameMessage, isCurrentSession]);
 
   useEffect(() => {
     const session: ClientRuntimeSession = {
@@ -427,6 +493,8 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       initialized: false,
       ready: false,
       handshakeTimer: null,
+      suspendRequestId: null,
+      suspendTimer: null,
       closingReason: null,
       bootstrap: null,
     };
@@ -596,6 +664,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
         window.clearTimeout(session.handshakeTimer);
         session.handshakeTimer = null;
       }
+      clearSuspendRequest(session);
       abortController.abort();
       if (sessionRef.current === session) sessionRef.current = null;
       if (session.port) {
@@ -619,9 +688,68 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       }
     };
   }, [
+    clearSuspendRequest,
     handleHostEvent,
     initializeFrame,
     isCurrentSession,
+    widget.grants_digest,
+    widget.id,
+    widget.manifest_revision,
+  ]);
+
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!suspendRequested) {
+      suspendCycleCompletedRef.current = false;
+      if (session) clearSuspendRequest(session);
+      return;
+    }
+    if (
+      suspendCycleCompletedRef.current
+      || session?.suspendRequestId
+    ) {
+      return;
+    }
+    if (
+      !session
+      || !isCurrentSession(session)
+      || !session.ready
+      || !session.port
+    ) {
+      completeSuspendCycle();
+      return;
+    }
+
+    let requestId: string;
+    try {
+      requestId = secureNonce();
+    } catch {
+      completeSuspendCycle();
+      return;
+    }
+    if (!boundedString(requestId, MAX_RPC_FIELD_LENGTH)) {
+      completeSuspendCycle();
+      return;
+    }
+
+    session.suspendRequestId = requestId;
+    session.suspendTimer = window.setTimeout(() => {
+      completeSuspendRequest(session, requestId);
+    }, SUSPEND_FLUSH_TIMEOUT_MS);
+    try {
+      session.port.postMessage({
+        type: "before_suspend",
+        request_id: requestId,
+      });
+    } catch {
+      completeSuspendRequest(session, requestId);
+    }
+  }, [
+    clearSuspendRequest,
+    completeSuspendCycle,
+    completeSuspendRequest,
+    isCurrentSession,
+    suspendRequested,
     widget.grants_digest,
     widget.id,
     widget.manifest_revision,

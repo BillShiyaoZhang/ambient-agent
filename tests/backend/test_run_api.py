@@ -114,7 +114,26 @@ def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
         assert created.status_code == 202
         run_id = created.json()["id"]
         assert client.get(f"/api/runs/{run_id}").json()["input"] == {"subject": "Hello"}
-        assert "events" not in client.get("/api/runs?limit=10").json()[0]
+        listed = client.get("/api/runs?limit=10").json()[0]
+        assert listed["input"] == {"subject": "Hello"}
+        assert "events" not in listed
+        summarized = client.get("/api/runs?limit=10&summary_only=true").json()[0]
+        assert summarized["id"] == run_id
+        assert summarized["status"] == "queued"
+        assert summarized["action_title"] == "Send"
+        assert {
+            "input",
+            "result",
+            "error",
+            "checkpoint",
+            "artifacts",
+            "state",
+            "correlation",
+            "events",
+        }.isdisjoint(summarized)
+        incompatible = client.get("/api/runs?limit=10&summary_only=true&include_details=true")
+        assert incompatible.status_code == 422
+        assert "mutually exclusive" in incompatible.json()["detail"]
         detailed = client.get("/api/runs?limit=10&include_details=true").json()[0]
         assert detailed["id"] == run_id
         assert detailed["events"][0]["type"] == "run_created"
@@ -143,6 +162,13 @@ def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
             assert websocket.receive_json()["type"] == "run_stream_ready"
             next_event = websocket.receive_json()
             assert next_event["event"]["sequence"] > first_sequence
+
+
+def test_run_summary_listing_has_a_created_at_index(tmp_path):
+    store = RunStore(str(tmp_path))
+    with store._connect() as connection:
+        indexes = {str(row["name"]) for row in connection.execute("PRAGMA index_list('runs')").fetchall()}
+    assert "idx_runs_created_at" in indexes
 
 
 def test_widget_run_requires_explicit_action_id():

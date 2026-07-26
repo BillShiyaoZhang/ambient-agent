@@ -19,6 +19,12 @@
 .app-window-title { display: flex; min-width: 0; align-items: center; justify-content: center; gap: 7px; color: var(--text-secondary); font-size: 12px; font-weight: 650; }
 .app-window-title span,.workspace-active-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-window-content { flex: 1; min-height: 0; overflow: auto; padding: 0; background: var(--app-content); }
+.app-window-suspended { display: flex; width: 100%; height: 100%; min-height: 132px; align-items: center; justify-content: center; flex-direction: column; gap: 7px; padding: 24px; border: 0; color: var(--text-secondary); background: color-mix(in srgb, var(--app-content), var(--surface-soft) 42%); cursor: pointer; }
+.app-window-suspended svg { box-sizing: content-box; padding: 10px; border: 1px solid var(--border-subtle); border-radius: 14px; color: var(--accent); background: var(--accent-soft); }
+.app-window-suspended strong { color: var(--text-primary); font-size: 12px; }
+.app-window-suspended span { color: var(--text-tertiary); font-size: 10px; }
+.app-window-suspended:hover { background: color-mix(in srgb, var(--app-content), var(--accent-soft) 38%); }
+.app-window-suspended:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; }
 .app-window-resize { position: absolute; z-index: 4; touch-action: none; }
 .resize-n,.resize-s { left: 12px; right: 12px; height: 8px; cursor: ns-resize; }.resize-n{top:-4px}.resize-s{bottom:-4px}
 .resize-e,.resize-w { top: 12px; bottom: 12px; width: 8px; cursor: ew-resize; }.resize-e{right:-4px}.resize-w{left:-4px}

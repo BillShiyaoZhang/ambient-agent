@@ -1702,6 +1702,79 @@ async def test_shutdown_requeues_inflight_restart_safe_agent(tmp_path, monkeypat
     assert released["steps"][0]["status"] == "interrupted"
 
 
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_cancelled_worker_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNNER_SHUTDOWN_GRACE_SECONDS", "0")
+    coordinator = RunCoordinator(
+        RunStore(str(tmp_path)),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+    cancellation_seen = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def worker_with_slow_cleanup():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            while not cleanup_finished.is_set():
+                try:
+                    await cleanup_finished.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    worker = asyncio.create_task(worker_with_slow_cleanup())
+    coordinator._active["run-with-cleanup"] = worker
+    shutdown = asyncio.create_task(coordinator.shutdown())
+    try:
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+    finally:
+        cleanup_finished.set()
+        await asyncio.wait_for(worker, timeout=1)
+        await asyncio.wait_for(shutdown, timeout=1)
+
+    assert worker.done()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_defers_external_cancellation_until_worker_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNNER_SHUTDOWN_GRACE_SECONDS", "0")
+    coordinator = RunCoordinator(
+        RunStore(str(tmp_path)),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+    cancellation_seen = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def worker_with_slow_cleanup():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await cleanup_finished.wait()
+
+    worker = asyncio.create_task(worker_with_slow_cleanup())
+    coordinator._active["run-with-cleanup"] = worker
+    shutdown = asyncio.create_task(coordinator.shutdown())
+    try:
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        shutdown.cancel()
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+    finally:
+        cleanup_finished.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(shutdown, timeout=1)
+    assert worker.done()
+
+
 def test_legacy_internal_is_excluded_but_internal_agent_is_claimable(tmp_path):
     store = RunStore(str(tmp_path))
     legacy = create(store, adapter_type="internal", runtime_id="internal:agent", action_id="legacy")

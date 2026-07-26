@@ -64,6 +64,29 @@ export interface AmbientRun {
   events?: RunEvent[];
 }
 
+export type AmbientRunSummary = Pick<
+  AmbientRun,
+  | "id"
+  | "owner_id"
+  | "action_id"
+  | "action_title"
+  | "source_type"
+  | "source_id"
+  | "adapter_type"
+  | "workflow_type"
+  | "runtime_id"
+  | "status"
+  | "progress"
+  | "summary"
+  | "parent_run_id"
+  | "retry_of"
+  | "attempt"
+  | "created_at"
+  | "updated_at"
+  | "started_at"
+  | "finished_at"
+>;
+
 export type RunEvent = GeneratedRunEvent;
 
 export type EffectReconciliation =
@@ -479,8 +502,27 @@ export class RunService {
     source_type?: string;
     source_id?: string;
     limit?: number;
+    include_details?: false;
+    summary_only: true;
+  }): Promise<AmbientRunSummary[]>;
+  async list(params?: {
+    status?: string;
+    owner_id?: string;
+    source_type?: string;
+    source_id?: string;
+    limit?: number;
     include_details?: boolean;
-  } = {}): Promise<AmbientRun[]> {
+    summary_only?: false;
+  }): Promise<AmbientRun[]>;
+  async list(params: {
+    status?: string;
+    owner_id?: string;
+    source_type?: string;
+    source_id?: string;
+    limit?: number;
+    include_details?: boolean;
+    summary_only?: boolean;
+  } = {}): Promise<AmbientRun[] | AmbientRunSummary[]> {
     const query = new URLSearchParams();
     if (params.status) query.set("status", params.status);
     if (params.owner_id) query.set("owner_id", params.owner_id);
@@ -488,6 +530,7 @@ export class RunService {
     if (params.source_id) query.set("source_id", params.source_id);
     if (params.limit) query.set("limit", String(params.limit));
     if (params.include_details) query.set("include_details", "true");
+    if (params.summary_only) query.set("summary_only", "true");
     const response = await fetch(`${API_BASE}/api/runs?${query}`);
     if (!response.ok) throw new Error(`Unable to list runs: HTTP ${response.status}`);
     const payload = await response.json();

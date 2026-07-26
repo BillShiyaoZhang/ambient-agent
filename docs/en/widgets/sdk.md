@@ -12,6 +12,7 @@
 | `ambient.theme.getSnapshot()` / `subscribe(listener)` | Read a theme snapshot and subscribe to in-session theme changes |
 | `ambient.presentation.getSnapshot()` / `subscribe(listener)` | Read and subscribe to the `{ theme, locale, reducedMotion }` presentation context |
 | `ambient.storage.get/set/delete/clear/list` | Persist non-secret JSON state for the current browser and App |
+| `ambient.lifecycle.onBeforeSuspend(handler)` | Register the single async pre-suspend flush handler and return its unsubscribe function |
 | `ambient.html` | HTM tag bound to React createElement |
 | `ambient.react` | `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, `useReducer`; pre-publication verification rejects any other non-injected hook |
 | `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table`; pre-publication verification rejects any other non-injected component |
@@ -48,6 +49,19 @@ await ambient.storage.clear();
 ```
 
 Keys contain 1–256 characters. Values must be acyclic JSON and no larger than 64 KiB each; each App is limited to 128 keys and 1 MiB total. A missing key returns `null`. Data exists only in the current browser profile and may be cleared by the user or reclaimed by the browser. Never store credentials, tokens, cross-device state, or the sole copy of user data. The legacy `VITE_WIDGET_UI_TRANSPORT=pixels` rollback does not provide this API.
+
+Write user input through after meaningful changes. If writes use a debounce, keep the latest value in a ref and register a bounded flush:
+
+```javascript
+useEffect(
+  () => ambient.lifecycle.onBeforeSuspend(async () => {
+    await ambient.storage.set("draft", latestDraftRef.current);
+  }),
+  []
+);
+```
+
+A later handler replaces the previous one; a stale effect-cleanup unsubscribe cannot remove a newer registration. The host waits at most one second for acknowledgement before it still unmounts the Runtime, so the handler must remain bounded and cannot replace normal write-through persistence.
 
 ## 3. Graph Grants
 

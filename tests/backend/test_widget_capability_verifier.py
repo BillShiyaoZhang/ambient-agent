@@ -195,6 +195,40 @@ def test_verifier_allows_only_the_declared_local_storage_surface(tmp_path):
     assert "Unknown ambient.storage method" in rejected.stderr
 
 
+def test_verifier_allows_only_the_declared_lifecycle_surface(tmp_path):
+    accepted_path = tmp_path / "accepted-lifecycle"
+    accepted_path.mkdir()
+    accepted = verify(
+        accepted_path,
+        """
+        export default function App() {
+          const unsubscribe = ambient.lifecycle.onBeforeSuspend(async () => {
+            await ambient.storage.set("draft", { text: "hello" });
+          });
+          unsubscribe();
+          return null;
+        }
+        """,
+        [],
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    rejected_path = tmp_path / "rejected-lifecycle"
+    rejected_path.mkdir()
+    rejected = verify(
+        rejected_path,
+        """
+        export default function App() {
+          ambient.lifecycle.preventSuspendForever();
+          return null;
+        }
+        """,
+        [],
+    )
+    assert rejected.returncode != 0
+    assert "Unknown ambient.lifecycle method" in rejected.stderr
+
+
 def test_verifier_rejects_navigation_and_peer_network_globals(tmp_path):
     for index, source in enumerate(
         (

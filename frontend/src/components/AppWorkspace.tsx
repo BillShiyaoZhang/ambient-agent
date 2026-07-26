@@ -1,4 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AppWindow,
   ChevronDown,
@@ -10,6 +17,7 @@ import {
   Minimize2,
   Moon,
   PanelLeft,
+  Play,
   Rows3,
   ShieldCheck,
   Store,
@@ -38,7 +46,12 @@ interface AppWorkspaceProps {
   widgets: Widget[];
   canvas: CanvasConfigV3;
   onCanvasChange: (canvas: CanvasConfigV3, persist?: boolean) => void;
-  renderWidgetContent: (widget: Widget) => React.ReactNode;
+  renderWidgetContent: (
+    widget: Widget,
+    lifecycle: Exclude<WidgetRuntimeLifecycle, "suspended">,
+    onActivate: () => void,
+    onSuspendReady: () => void,
+  ) => React.ReactNode;
   onOpenAppStore: () => void;
   onOpenAudit: () => void;
   onOpenTasks?: () => void;
@@ -50,8 +63,23 @@ interface AppWorkspaceProps {
   onThemeChange: (preference: ThemePreference) => void;
 }
 
+export type WidgetRuntimeLifecycle =
+  | "active"
+  | "warm"
+  | "suspending"
+  | "suspended";
+
 type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+interface ResidentRuntime {
+  id: string;
+  generation: number;
+  state: "resident" | "suspending";
+}
+
 const RESIZE_EDGES: ResizeEdge[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+// The iframe host times out at 1s. Keep a small independent margin so a broken
+// renderer cannot retain the one transient Runtime indefinitely.
+const WORKSPACE_SUSPEND_TIMEOUT_MS = 1_250;
 
 export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   widgets,
@@ -97,9 +125,112 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   }, []);
 
   const widgetMap = useMemo(() => new Map(widgets.map((widget) => [widget.id, widget])), [widgets]);
-  const activeId = canvas.active_app_id ?? canvas.open_app_ids.at(-1) ?? null;
+  const renderableIds = useMemo(
+    () => canvas.open_app_ids.filter(
+      (id) => widgetMap.has(id) && Boolean(canvas.windows[id]),
+    ),
+    [canvas.open_app_ids, canvas.windows, widgetMap],
+  );
+  const requestedActiveId = canvas.active_app_id ?? canvas.open_app_ids.at(-1) ?? null;
+  const activeId = requestedActiveId && renderableIds.includes(requestedActiveId)
+    ? requestedActiveId
+    : renderableIds.at(-1) ?? null;
   const activeWidget = activeId ? widgetMap.get(activeId) : undefined;
   const activeState = activeId ? canvas.windows[activeId] : undefined;
+  const warmId = [...renderableIds].reverse().find(
+    (id) => id !== activeId,
+  ) ?? null;
+  const desiredResidentIds = useMemo(
+    () => [activeId, warmId].filter(
+      (id): id is string => id !== null,
+    ),
+    [activeId, warmId],
+  );
+  const desiredResidentSet = useMemo(
+    () => new Set(desiredResidentIds),
+    [desiredResidentIds],
+  );
+  const renderableIdSet = useMemo(
+    () => new Set(renderableIds),
+    [renderableIds],
+  );
+  const residentGenerationRef = useRef(desiredResidentIds.length);
+  const [residentRuntimes, setResidentRuntimes] = useState<ResidentRuntime[]>(
+    () => desiredResidentIds.map((id, index) => ({
+      id,
+      generation: index + 1,
+      state: "resident",
+    })),
+  );
+  const suspendingRuntime = residentRuntimes.find(
+    ({ id }) => renderableIdSet.has(id) && !desiredResidentSet.has(id),
+  ) ?? null;
+  const suspendingId = suspendingRuntime?.id ?? null;
+
+  const completeSuspension = useCallback((id: string, generation: number) => {
+    setResidentRuntimes((current) => {
+      const next = current.filter((runtime) => !(
+        runtime.id === id
+        && runtime.generation === generation
+        && runtime.state === "suspending"
+      ));
+      return next.length === current.length ? current : next;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    setResidentRuntimes((current) => {
+      const byId = new Map(current.map((runtime) => [runtime.id, runtime]));
+      const desired = desiredResidentIds.map((id): ResidentRuntime => {
+        const existing = byId.get(id);
+        if (existing?.state === "resident") return existing;
+        return {
+          id,
+          generation: ++residentGenerationRef.current,
+          state: "resident",
+        };
+      });
+      const departing = current.find(
+        (runtime) => (
+          renderableIdSet.has(runtime.id)
+          && !desiredResidentSet.has(runtime.id)
+        ),
+      );
+      const next = [
+        ...desired,
+        ...(departing
+          ? [{
+              ...departing,
+              state: "suspending" as const,
+            }]
+          : []),
+      ];
+      if (
+        current.length === next.length
+        && current.every((runtime, index) => (
+          runtime.id === next[index].id
+          && runtime.generation === next[index].generation
+          && runtime.state === next[index].state
+        ))
+      ) {
+        return current;
+      }
+      return next;
+    });
+  }, [desiredResidentIds, desiredResidentSet, renderableIdSet]);
+
+  useEffect(() => {
+    if (!suspendingRuntime) return;
+    const timer = window.setTimeout(
+      () => completeSuspension(
+        suspendingRuntime.id,
+        suspendingRuntime.generation,
+      ),
+      WORKSPACE_SUSPEND_TIMEOUT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [completeSuspension, suspendingRuntime]);
+
   const chromeMode = resolveChromeMode(viewport.width);
   const chromeOwnsWindow = Boolean(activeId && (activeState?.mode === "maximized" || chromeMode === "mobile"));
 
@@ -117,6 +248,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   };
 
   const focusWindow = (id: string, persist = false) => {
+    if (canvas.active_app_id === id && canvas.open_app_ids.at(-1) === id) return;
     const nextOrder = [...canvas.open_app_ids.filter((appId) => appId !== id), id];
     updateCanvas({ ...canvas, open_app_ids: nextOrder, active_app_id: id }, persist);
   };
@@ -318,11 +450,19 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
           const pixels = boundsToPixels(state.bounds, viewport);
           const maximized = state.mode === "maximized";
           const localTitlebar = !maximized && chromeMode !== "mobile";
+          const runtimeLifecycle: WidgetRuntimeLifecycle = id === activeId
+            ? "active"
+            : id === warmId
+              ? "warm"
+              : id === suspendingId
+                ? "suspending"
+                : "suspended";
           return (
             <section
               key={id}
               className={`app-window ${maximized ? "is-maximized" : ""} ${id === activeId ? "is-active" : ""}`}
               data-window-id={id}
+              data-runtime-lifecycle={runtimeLifecycle}
               style={maximized ? { zIndex: zIndex + 2 } : {
                 zIndex: zIndex + 2,
                 width: pixels.width,
@@ -339,7 +479,42 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
                 <div className="app-window-title"><AppWindow size={14} /><span>{widget.title}</span></div>
                 <div className="app-window-title-spacer" />
               </header> : null}
-              <div className="app-window-content">{renderWidgetContent(widget)}</div>
+              <div className="app-window-content">
+                {runtimeLifecycle === "suspended" ? (
+                  <button
+                    type="button"
+                    className="app-window-suspended"
+                    aria-label={isZh ? `恢复 ${widget.title}` : `Resume ${widget.title}`}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => focusWindow(id, true)}
+                  >
+                    <Play size={20} aria-hidden="true" />
+                    <strong>{isZh ? `${widget.title} 已挂起` : `${widget.title} is suspended`}</strong>
+                    <span>
+                      {isZh
+                        ? "恢复已保存状态；纯内存状态会重置"
+                        : "Saved state restores; memory-only state resets"}
+                    </span>
+                  </button>
+                ) : renderWidgetContent(
+                  widget,
+                  runtimeLifecycle,
+                  () => {
+                    if (
+                      id !== activeId
+                      || canvas.active_app_id !== id
+                      || canvas.open_app_ids.at(-1) !== id
+                    ) {
+                      focusWindow(id, true);
+                    }
+                  },
+                  () => {
+                    if (suspendingRuntime?.id === id) {
+                      completeSuspension(id, suspendingRuntime.generation);
+                    }
+                  },
+                )}
+              </div>
               {!maximized && chromeMode !== "mobile" && RESIZE_EDGES.map((edge) => (
                 <div key={edge} className={`app-window-resize resize-${edge}`} onPointerDown={(event) => beginResize(event, id, edge)} />
               ))}

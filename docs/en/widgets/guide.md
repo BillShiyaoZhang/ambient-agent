@@ -21,7 +21,7 @@ Every create and modify operation uses the durable Widget workflow, writes stagi
 - Use `ambient.react` hooks for state and effects.
 - Use only the SDK listed by the Runtime Contract. Graph, network, files, and installed capabilities require matching grants.
 - Capability/source/catalog/action IDs are string literals and are never assembled at runtime.
-- Clean up subscriptions and timers. Do not use direct browser events, DOM, Cookies, browser storage globals, network, or dynamic-code APIs. Use only `ambient.storage` for local non-secret state.
+- Clean up subscriptions and timers. Do not use direct browser events, DOM, Cookies, browser storage globals, network, or dynamic-code APIs. Use only `ambient.storage` for local non-secret state. User drafts, form values, and editor content must hydrate during initialization and write through after meaningful changes; they must not live only in React hook memory because workspace suspension unmounts the Controller. A bounded debounce must register an async flush through `ambient.lifecycle.onBeforeSuspend(handler)`, write the latest ref-backed value to `ambient.storage`, await completion, and unsubscribe the handler during effect cleanup.
 
 ```javascript
 export default function TaskList({ ambient }) {

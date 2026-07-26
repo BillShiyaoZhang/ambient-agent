@@ -4,12 +4,13 @@
 
 ```mermaid
 flowchart LR
-    Browser[Presentation: React workspace and frame player] -->|REST / WebSocket| API[Composition root: FastAPI]
+    Browser[Presentation: React workspace] -->|REST / WebSocket| API[Composition root: FastAPI]
+    Browser -->|fixed static assets| Frame["widget-frame: opaque-origin iframe"]
     API --> Workflow[Application: Use Cases / Durable Workflow]
     Workflow --> Domain[Domain: Run / Ontology / Capability Policy]
     Workflow --> Infra[Infrastructure: Graph / Files / HTTP / MCP / LLM]
     Infra --> Workspace[Persistent workspace state]
-    API <-->|Unix socket| Runtime[Isolated widget-runtime + Chromium]
+    API <-.->|pixel rollback only: Unix socket| Runtime["On-demand widget-runtime + Chromium"]
 ```
 
 `backend/main.py` is the composition root. It only creates and connects workspace/Graph adapters, App/Capability services, `RunCoordinator`, and Workflows. Business rules belong to domain and application objects; routes do not decide authorization or operate storage directly. See [Widget Capability Security](/en/architecture/capability-security.md) for the dependency rules.
@@ -30,7 +31,22 @@ The old in-memory Agent loop and Widget DAG are no longer production paths. `Age
 
 Widgets have one publication path. The durable workflow confirms a plan, asks the user to approve a schema and capability proposal, then lets the selected OpenCode or Codex backend generate Manifest V2 plus a controller in staging. Promotion is atomic and happens only when code use is a subset of approved grants, manifest grants exactly equal the approved value, and syntax, security, and schema checks pass. Inline XML Widgets and unverified direct writes are not new-version paths.
 
-The frontend fetches App metadata from `/api/apps/{id}` but never executes the Controller. `SandboxWidget` connects to the Backend `WidgetRuntimeGateway` at `/ws/widgets/{id}/runtime`, displays frames from isolated Chromium, and forwards input only. Controller code, Babel, and the renderer execute in a `widget-runtime` container with no Docker network or workspace mount; each open App uses an independent BrowserContext. Graph, Network, Files, and capability RPC return to the Backend, which binds App identity from the server-side runtime session and authorizes every operation.
+The frontend fetches App metadata from `/api/apps/{id}`, but the trusted React
+host never evaluates a Controller. By default, `SandboxWidget` obtains a
+single-use ticket, connects to `/ws/widgets/{id}/client-runtime`, and transfers
+the Controller into a `sandbox="allow-scripts"` opaque-origin iframe. Babel,
+the renderer, and the Controller all run inside that frame. At steady state the
+Workspace retains only the Active Widget plus at most one Warm Widget; all
+others unmount after a bounded `before_suspend` flush. At most one additional
+Suspending Widget exists during the transition. Graph, Network, Files, and
+capability RPC return to the Backend, which binds App identity from its
+server-side session and authorizes every operation.
+
+Only `VITE_WIDGET_UI_TRANSPORT=pixels` enables the legacy
+`/ws/widgets/{id}/runtime` pixel stream. That rollback path starts one shared
+Chromium on demand in the zero-network `widget-runtime`, gives each session an
+independent BrowserContext, and reclaims the browser 60 seconds after the final
+session closes.
 
 ## 4. Data and communication responsibilities
 
@@ -44,8 +60,9 @@ The frontend fetches App metadata from `/api/apps/{id}` but never executes the C
 | REST `/api/apps/{id}/files/*` | File operations within `app://data/` after path-grant authorization |
 | REST `/api/apps/{id}/data-sources/*` | Public HTTPS JSON sources declared by `network.request` grants |
 | `/ws/chat` | Chat commands and App-scoped Graph subscriptions |
-| `/ws/widgets/{id}/runtime` | Widget frames, input, and lifecycle; never accepts a client-declared capability identity |
-| Unix socket `widget-runtime.sock` | Backend-to-zero-network Runtime start/frame/input/RPC protocol |
+| `/ws/widgets/{id}/client-runtime` | Ticket-authenticated bootstrap, RPC, and lifecycle for default iframe Widgets |
+| `/ws/widgets/{id}/runtime` | Frame, input, and lifecycle for pixel rollback only |
+| Unix socket `widget-runtime.sock` | Runtime protocol used only by pixel rollback and generation smoke tests |
 | `/ws/runs` | Recoverable stream with sequence, event ID, and stream epoch |
 | `workspace/sessions/*.json` | Sessions and messages |
 | `workspace/.ambient/runs.db` | Runs, steps, interactions, and canonical events |
@@ -61,7 +78,12 @@ The frontend fetches App metadata from `/api/apps/{id}` but never executes the C
 - A Coding Agent receives only a role projection generated from the [Agent System Capability Catalog](/en/agent/system-capabilities.md) and an immutable Runtime Contract. The generation contract forbids `fetch`, browser host globals, direct MCP, and unapproved access; staging failures return only bounded repair diagnostics.
 - Graph mutations must pass canonical-ontology preflight and commit atomically in one Neo4j transaction.
 - Widget external access is constrained by the Capability Ontology, approved grants, static verifier, SDK membrane, and backend authorizer. MCP, tools, and Coding Agents additionally retain their adapter policies.
-- Untrusted Widget code executes only in the separate `widget-runtime` container. It has no network, host/workspace/Docker-socket/credential mounts, and uses a read-only root filesystem, tmpfs, non-root user, and resource limits. Neither the user browser nor Backend evaluates a Controller.
+- On the default path, untrusted Widget code executes only inside an
+  opaque-origin iframe; neither the trusted React host nor Backend evaluates a
+  Controller. The pixel rollback path instead uses the separate
+  `widget-runtime` container, which has no network,
+  host/workspace/Docker-socket/credential mounts and uses a read-only root
+  filesystem, tmpfs, non-root user, and resource limits.
 - The Backend binds each Runtime session to `app_id + manifest revision + grants digest + artifact digest`. Identity fields in Controller payloads are ignored; a revocation or revision/digest change terminates the old session.
 - Effectful durable steps use effect/idempotency records, interactions, and fencing to avoid duplicate commits during recovery or concurrency.
 - Run events are a versioned contract; the frontend preserves unknown events for forward compatibility.

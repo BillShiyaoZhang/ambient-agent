@@ -9,6 +9,12 @@ const MAX_CONTROLLER_SOURCE_BYTES = 4 * 1024 * 1024;
 const MAX_PENDING_REQUESTS = 32;
 const MAX_NONCE_LENGTH = 512;
 const MAX_HOST_MESSAGE_LENGTH = 16_384;
+const MAX_SUSPEND_REQUEST_ID_LENGTH = 200;
+const TRUSTED_ACTIVATION_EVENT_TYPES = Object.freeze([
+  "pointerdown",
+  "keydown",
+  "wheel",
+]);
 
 
 function errorMessage(error, fallback) {
@@ -126,6 +132,8 @@ function createPortEndpoint(
   const deferredSubscriptions = [];
   let deferredPresentation;
   let controller;
+  let activeSuspendRequestId;
+  let lastSuspendResponse;
   let disposed = false;
 
   const sendRpc = createRequestSender(
@@ -196,11 +204,32 @@ function createPortEndpoint(
     pendingStorage.clear();
   };
 
+  const reportTrustedActivation = (event) => {
+    if (disposed || event?.isTrusted !== true) return;
+    try {
+      port.postMessage({
+        type: "host_event",
+        event: "focus",
+      });
+    } catch {
+      dispose();
+    }
+  };
+
   const dispose = (reason = "Widget frame was disposed") => {
     if (disposed) return;
     disposed = true;
     phase.current = "disposed";
+    for (const eventType of TRUSTED_ACTIVATION_EVENT_TYPES) {
+      targetWindow.removeEventListener(
+        eventType,
+        reportTrustedActivation,
+        true,
+      );
+    }
     rejectPending(reason);
+    activeSuspendRequestId = undefined;
+    lastSuspendResponse = undefined;
     controller?.dispose?.();
     controller = undefined;
     port.onmessage = null;
@@ -227,6 +256,75 @@ function createPortEndpoint(
     } else {
       pending.resolve(message.result);
     }
+  };
+
+  const postSuspendResponse = (response) => {
+    if (disposed || phase.current !== "ready") return false;
+    try {
+      port.postMessage(response);
+      return true;
+    } catch {
+      dispose();
+      return false;
+    }
+  };
+
+  const finishBeforeSuspend = async (requestId) => {
+    let response;
+    try {
+      await controller?.beforeSuspend?.();
+      response = {
+        type: "suspend_ready",
+        request_id: requestId,
+        ok: true,
+      };
+    } catch (error) {
+      response = {
+        type: "suspend_ready",
+        request_id: requestId,
+        ok: false,
+        error: {
+          message: errorMessage(
+            error,
+            "Widget pre-suspend flush failed",
+          ),
+        },
+      };
+    }
+    if (disposed || activeSuspendRequestId !== requestId) return;
+    activeSuspendRequestId = undefined;
+    lastSuspendResponse = response;
+    postSuspendResponse(response);
+  };
+
+  const handleBeforeSuspend = (message) => {
+    if (phase.current !== "ready") return;
+    const requestId = message.request_id;
+    if (
+      typeof requestId !== "string"
+      || requestId.length === 0
+      || requestId.length > MAX_SUSPEND_REQUEST_ID_LENGTH
+    ) {
+      return;
+    }
+    if (activeSuspendRequestId !== undefined) {
+      if (activeSuspendRequestId === requestId) return;
+      postSuspendResponse({
+        type: "suspend_ready",
+        request_id: requestId,
+        ok: false,
+        error: {
+          message: "Widget pre-suspend flush is already in progress",
+        },
+      });
+      return;
+    }
+    if (lastSuspendResponse?.request_id === requestId) {
+      postSuspendResponse(lastSuspendResponse);
+      return;
+    }
+    activeSuspendRequestId = requestId;
+    void finishBeforeSuspend(requestId);
   };
 
   const finishInitialization = async (message) => {
@@ -273,6 +371,10 @@ function createPortEndpoint(
 
   const receive = (message) => {
     if (disposed || typeof message !== "object" || message === null) return;
+    if (message.type === "before_suspend" && phase.current === "ready") {
+      handleBeforeSuspend(message);
+      return;
+    }
     if (message.type === "rpc_response") {
       settleResponse(
         pendingRpc,
@@ -359,6 +461,9 @@ function createPortEndpoint(
     );
     dispose();
   };
+  for (const eventType of TRUSTED_ACTIVATION_EVENT_TYPES) {
+    targetWindow.addEventListener(eventType, reportTrustedActivation, true);
+  }
   port.start?.();
   port.postMessage({ type: "port_ready", nonce });
 

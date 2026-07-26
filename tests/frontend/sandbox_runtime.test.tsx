@@ -172,6 +172,89 @@ describe("SandboxWidget remote runtime player", () => {
     });
   });
 
+  it("stops a warm Pixel screencast and resumes it without reconnecting", () => {
+    const { rerender } = render(
+      <SandboxWidget
+        widget={widget}
+        runtimeVisible={false}
+      />,
+    );
+    act(() => vi.runOnlyPendingTimers());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+
+    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
+      type: "visibility",
+      visible: false,
+    });
+    socket.sent = [];
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        runtimeVisible
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
+      type: "visibility",
+      visible: true,
+    });
+  });
+
+  it("releases the legacy Pixel runtime immediately when suspension is requested", () => {
+    const firstReady = vi.fn();
+    const secondReady = vi.fn();
+    const { rerender } = render(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested={false}
+        onSuspendReady={firstReady}
+      />,
+    );
+    act(() => vi.runOnlyPendingTimers());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    socket.sent = [];
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={secondReady}
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(firstReady).not.toHaveBeenCalled();
+    expect(secondReady).toHaveBeenCalledTimes(1);
+    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
+      type: "visibility",
+      visible: false,
+    });
+
+    rerender(
+      <SandboxWidget
+        widget={widget}
+        suspendRequested
+        onSuspendReady={secondReady}
+      />,
+    );
+    expect(secondReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the Pixel Runtime stream when the widget is unmounted", () => {
+    const { unmount } = render(<SandboxWidget widget={widget} />);
+    act(() => vi.runOnlyPendingTimers());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+
+    unmount();
+
+    expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+  });
+
   it("renders only runtime frames and surfaces structured runtime errors", () => {
     render(<SandboxWidget widget={widget} />);
     act(() => vi.runOnlyPendingTimers());
@@ -228,10 +311,52 @@ describe("SandboxWidget remote runtime player", () => {
     expect(socket.sent.join("\n")).not.toContain("manifest_revision");
   });
 
+  it("activates on initiating Pixel input without focus-follows-mouse writes", () => {
+    const events: string[] = [];
+    render(
+      <SandboxWidget
+        widget={widget}
+        onActivate={() => events.push("activate")}
+      />,
+    );
+    act(() => vi.runOnlyPendingTimers());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    socket.sent = [];
+    vi.spyOn(socket, "send").mockImplementation((payload) => {
+      events.push(`send:${JSON.parse(payload).type}`);
+      socket.sent.push(payload);
+    });
+
+    const player = screen.getByTestId("sandbox-notes-app");
+    fireEvent.pointerDown(player, { button: 0, buttons: 1 });
+    fireEvent.pointerUp(player, { button: 0, buttons: 0 });
+    fireEvent.pointerMove(player, { buttons: 0 });
+    fireEvent.wheel(player, { deltaY: 24 });
+    fireEvent.keyDown(player, { key: "a", code: "KeyA" });
+    fireEvent.keyUp(player, { key: "a", code: "KeyA" });
+
+    expect(events).toEqual([
+      "activate",
+      "send:focus",
+      "send:pointer",
+      "send:pointer",
+      "send:pointer",
+      "activate",
+      "send:wheel",
+      "activate",
+      "send:key",
+      "send:key",
+    ]);
+  });
+
   it("keeps the same runtime connection when parent callback references change", () => {
+    const firstActivate = vi.fn();
+    const secondActivate = vi.fn();
     const { rerender } = render(
       <SandboxWidget
         widget={widget}
+        onActivate={firstActivate}
         onFullscreen={() => undefined}
         onMinimize={() => undefined}
       />,
@@ -242,13 +367,18 @@ describe("SandboxWidget remote runtime player", () => {
     rerender(
       <SandboxWidget
         widget={widget}
+        onActivate={secondActivate}
         onFullscreen={() => undefined}
         onMinimize={() => undefined}
       />,
     );
 
+    fireEvent.wheel(screen.getByTestId("sandbox-notes-app"), { deltaY: 12 });
+
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(socket.readyState).toBe(MockWebSocket.CONNECTING);
+    expect(firstActivate).not.toHaveBeenCalled();
+    expect(secondActivate).toHaveBeenCalledTimes(1);
   });
 
   it("does not create a throwaway socket during StrictMode effect replay", () => {

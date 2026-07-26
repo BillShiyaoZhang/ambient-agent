@@ -406,6 +406,7 @@ export function mountController({
   const presentationListeners = new Set();
   const themeListeners = new Set();
   let subscriptionSequence = 0;
+  let beforeSuspendRegistration;
   let disposed = false;
   let currentPresentation;
 
@@ -476,6 +477,27 @@ export function mountController({
     },
   });
 
+  const lifecycleApi = Object.freeze({
+    onBeforeSuspend(handler) {
+      if (typeof handler !== "function") {
+        throw new TypeError(
+          "ambient.lifecycle.onBeforeSuspend requires a handler",
+        );
+      }
+      if (disposed) return () => undefined;
+      const registration = Object.freeze({ handler });
+      beforeSuspendRegistration = registration;
+      let subscribed = true;
+      return () => {
+        if (!subscribed) return;
+        subscribed = false;
+        if (beforeSuspendRegistration === registration) {
+          beforeSuspendRegistration = undefined;
+        }
+      };
+    },
+  });
+
   const ambient = {
     html,
     react: Object.freeze({
@@ -493,6 +515,7 @@ export function mountController({
     components: createComponents(h),
     theme: themeApi,
     presentation: presentationApi,
+    lifecycle: lifecycleApi,
     storage: createStorageApi(transport.storageRequest),
     sendMessage: (text) =>
       transport.hostEvent({ event: "send_message", text }),
@@ -598,6 +621,12 @@ export function mountController({
   render(h(Controller, { ambient }), root);
 
   return Object.freeze({
+    async beforeSuspend() {
+      if (disposed) return;
+      const registration = beforeSuspendRegistration;
+      if (!registration) return;
+      await registration.handler();
+    },
     updatePresentation(next) {
       if (!disposed) applyPresentation(next);
     },
@@ -623,6 +652,7 @@ export function mountController({
       subscriptions.clear();
       presentationListeners.clear();
       themeListeners.clear();
+      beforeSuspendRegistration = undefined;
       render(null, root);
     },
   });

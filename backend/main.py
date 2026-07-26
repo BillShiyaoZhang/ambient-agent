@@ -166,9 +166,10 @@ def _system_capability_catalog() -> SystemCapabilityCatalog:
     )
 
 
-from backend.graph_db import create_graph_database
+from backend.graph_db import GraphDatabase, create_graph_database
 
 graph_db = create_graph_database(WORKSPACE_DIR)
+_closed_graph_db: GraphDatabase | None = None
 
 
 def _graph_node_type(node_id: str) -> str | None:
@@ -391,43 +392,102 @@ async def _project_agent_run_status(run: dict[str, Any]) -> None:
 run_coordinator.register_status_listener(_project_agent_run_status)
 
 
+async def _shutdown_application_resources() -> list[tuple[str, BaseException]]:
+    """Attempt every composition-root cleanup and return failures in order."""
+
+    global _closed_graph_db
+
+    errors: list[tuple[str, BaseException]] = []
+    for name, cleanup in (
+        ("run coordinator", run_coordinator.shutdown),
+        ("coding agent runtime", coding_agent_config_store.runtime.shutdown),
+        ("backend manager", backend_manager.shutdown),
+    ):
+        try:
+            await cleanup()
+        except BaseException as exc:
+            errors.append((name, exc))
+    adapter = graph_db
+    if adapter is not _closed_graph_db:
+        try:
+            adapter.close()
+        except BaseException as exc:
+            errors.append(("graph adapter", exc))
+        finally:
+            if graph_db is adapter:
+                _closed_graph_db = adapter
+    return errors
+
+
+def _ensure_graph_database_open() -> None:
+    """Recreate a composition-root adapter closed by a prior lifespan."""
+
+    global graph_db, _closed_graph_db
+
+    if graph_db is not _closed_graph_db:
+        return
+    graph_db = create_graph_database(WORKSPACE_DIR)
+    durable_agent_workflow.graph_db = graph_db
+    _closed_graph_db = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Perform automated migration from db.sqlite3 and backend/apps to workspace
-    migrate_old_data(WORKSPACE_DIR)
-    active_running_sessions.clear()
-    active_running_sessions.update(_active_chat_session_ids())
-    db_storage.cleanup_audit_logs()
+    primary_error: BaseException | None = None
     try:
-        recover_interrupted_coding_agent_promotions(app_manager.apps_dir)
-    except (OSError, ValueError):
-        pass
-    try:
-        staging_grace = float(os.getenv("OPENCODE_STAGING_GRACE_SECONDS", "3600"))
-        failed_staging_retention = float(os.getenv("FAILED_STAGING_RETENTION_SECONDS", str(7 * 24 * 60 * 60)))
-        staging_references = run_store.retained_staging_paths(
-            failed_retention_seconds=failed_staging_retention,
-        )
-        cleanup_orphaned_coding_agent_staging(
-            app_manager.apps_dir,
-            referenced_staging_paths=staging_references,
-            grace_seconds=staging_grace,
-        )
-    except (OSError, ValueError):
-        # Invalid cleanup configuration must never make startup delete more
-        # aggressively; it simply disables this best-effort reaper pass.
-        pass
-    app_store.generating_ids.clear()
-    for active_run in run_store.list_runs(status=",".join(sorted(ACTIVE_STATUSES)), limit=500):
-        active_state = active_run.get("state") if isinstance(active_run.get("state"), dict) else {}
-        active_data = active_state.get("data") if isinstance(active_state.get("data"), dict) else {}
-        if active_data.get("capability_catalog_id"):
-            app_store.generating_ids.add(str(active_data["capability_catalog_id"]))
-    await run_coordinator.start()
-    yield
-    await run_coordinator.shutdown()
-    await coding_agent_config_store.runtime.shutdown()
-    await backend_manager.shutdown()
+        _ensure_graph_database_open()
+        # Perform automated migration from db.sqlite3 and backend/apps to workspace
+        migrate_old_data(WORKSPACE_DIR)
+        active_running_sessions.clear()
+        active_running_sessions.update(_active_chat_session_ids())
+        db_storage.cleanup_audit_logs()
+        try:
+            recover_interrupted_coding_agent_promotions(app_manager.apps_dir)
+        except (OSError, ValueError):
+            pass
+        try:
+            staging_grace = float(os.getenv("OPENCODE_STAGING_GRACE_SECONDS", "3600"))
+            failed_staging_retention = float(os.getenv("FAILED_STAGING_RETENTION_SECONDS", str(7 * 24 * 60 * 60)))
+            staging_references = run_store.retained_staging_paths(
+                failed_retention_seconds=failed_staging_retention,
+            )
+            cleanup_orphaned_coding_agent_staging(
+                app_manager.apps_dir,
+                referenced_staging_paths=staging_references,
+                grace_seconds=staging_grace,
+            )
+        except (OSError, ValueError):
+            # Invalid cleanup configuration must never make startup delete more
+            # aggressively; it simply disables this best-effort reaper pass.
+            pass
+        app_store.generating_ids.clear()
+        for active_run in run_store.list_runs(status=",".join(sorted(ACTIVE_STATUSES)), limit=500):
+            active_state = active_run.get("state") if isinstance(active_run.get("state"), dict) else {}
+            active_data = active_state.get("data") if isinstance(active_state.get("data"), dict) else {}
+            if active_data.get("capability_catalog_id"):
+                app_store.generating_ids.add(str(active_data["capability_catalog_id"]))
+        await run_coordinator.start()
+        yield
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        cleanup_errors = await _shutdown_application_resources()
+        if cleanup_errors:
+            if primary_error is not None:
+                for name, error in cleanup_errors:
+                    primary_error.add_note(f"{name} cleanup also failed: {error!r}")
+            else:
+                selected_index = next(
+                    (index for index, (_name, error) in enumerate(cleanup_errors) if not isinstance(error, Exception)),
+                    0,
+                )
+                selected_name, selected_error = cleanup_errors[selected_index]
+                for index, (name, error) in enumerate(cleanup_errors):
+                    if index != selected_index:
+                        selected_error.add_note(f"{name} cleanup also failed: {error!r}")
+                selected_error.add_note(f"cleanup stage: {selected_name}")
+                raise selected_error
 
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
@@ -848,7 +908,13 @@ async def list_runs(
     limit: int = 100,
     offset: int = 0,
     include_details: bool = False,
+    summary_only: bool = False,
 ):
+    if include_details and summary_only:
+        raise HTTPException(
+            status_code=422,
+            detail="include_details and summary_only are mutually exclusive",
+        )
     runs = run_store.list_runs(
         status=status,
         owner_id=owner_id,
@@ -856,13 +922,12 @@ async def list_runs(
         source_id=source_id,
         limit=limit,
         offset=offset,
+        summary_only=summary_only,
     )
     if not include_details:
         return runs
     return [
-        detailed
-        for run in runs
-        if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
+        detailed for run in runs if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
     ]
 
 
@@ -1075,16 +1140,13 @@ def _client_runtime_ticket_from_subprotocols(websocket: WebSocket) -> str | None
     if len(protocols) != 2 or protocols.count(CLIENT_WIDGET_RUNTIME_PROTOCOL) != 1:
         return None
     ticket_protocols = tuple(
-        protocol
-        for protocol in protocols
-        if protocol.startswith(CLIENT_WIDGET_RUNTIME_TICKET_PREFIX)
+        protocol for protocol in protocols if protocol.startswith(CLIENT_WIDGET_RUNTIME_TICKET_PREFIX)
     )
     if len(ticket_protocols) != 1:
         return None
     token = ticket_protocols[0][len(CLIENT_WIDGET_RUNTIME_TICKET_PREFIX) :]
     if len(token) != 43 or any(
-        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        for character in token
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in token
     ):
         return None
     return token
@@ -1487,9 +1549,7 @@ async def _handle_widget_runtime_rpc(
         completed = await _run_approved_graph_mutation(
             actions,
             session_id=f"widget-runtime:{binding.session_id}",
-            idempotency_key=(
-                f"widget:{binding.app_id}:{binding.session_id}:{runtime_request_id}"
-            ),
+            idempotency_key=(f"widget:{binding.app_id}:{binding.session_id}:{runtime_request_id}"),
             title=f"{binding.app_id} Graph mutation",
         )
         if completed["status"] != "succeeded":
@@ -1562,15 +1622,8 @@ async def _handle_widget_runtime_rpc(
         action_id = str(params.get("action_id") or "")
         runtime_request_id = str(params.get("_runtime_request_id") or "")
         input_data = params.get("input")
-        if (
-            not catalog_id
-            or not action_id
-            or not runtime_request_id
-            or len(runtime_request_id) > 200
-        ):
-            raise ValueError(
-                "capabilities.invoke requires catalog_id, action_id, and a bounded Runtime request ID"
-            )
+        if not catalog_id or not action_id or not runtime_request_id or len(runtime_request_id) > 200:
+            raise ValueError("capabilities.invoke requires catalog_id, action_id, and a bounded Runtime request ID")
         capability_authorizer.authorize_invocation(
             binding.app_id,
             catalog_id,
@@ -1585,8 +1638,7 @@ async def _handle_widget_runtime_rpc(
             source_type="widget",
             source_id=binding.app_id,
             idempotency_key=(
-                f"widget:{binding.app_id}:{binding.session_id}:"
-                f"{catalog_id}:{action_id}:{runtime_request_id}"
+                f"widget:{binding.app_id}:{binding.session_id}:{catalog_id}:{action_id}:{runtime_request_id}"
             ),
             correlation={"widget_runtime_session": binding.session_id},
         )
@@ -1612,9 +1664,7 @@ async def websocket_widget_client_runtime(
         origin = _client_runtime_origin(websocket.headers)
         token = _client_runtime_ticket_from_subprotocols(websocket)
         if token is None:
-            raise ClientWidgetRuntimeTicketError(
-                "Client Runtime WebSocket subprotocols are invalid"
-            )
+            raise ClientWidgetRuntimeTicketError("Client Runtime WebSocket subprotocols are invalid")
         ticket = client_widget_runtime_tickets.consume(
             token,
             app_id=app_id,
@@ -1645,11 +1695,7 @@ async def websocket_widget_client_runtime(
     except RuntimeError as exc:
         client_widget_runtime_sessions.close(binding.session_id)
         message = str(exc)
-        if (
-            "websocket.accept" in message
-            and "websocket.send" in message
-            and "websocket.close" in message
-        ):
+        if "websocket.accept" in message and "websocket.send" in message and "websocket.close" in message:
             return
         raise
     except Exception:
@@ -1679,13 +1725,9 @@ async def websocket_widget_client_runtime(
                     ).encode("utf-8")
                 )
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "Client Runtime message must be JSON serializable"
-                ) from exc
+                raise ValueError("Client Runtime message must be JSON serializable") from exc
             if encoded_size > widget_runtime_gateway.limits.max_message_bytes:
-                raise ValueError(
-                    "Client Runtime message exceeds the configured byte limit"
-                )
+                raise ValueError("Client Runtime message exceeds the configured byte limit")
             response = await build_widget_runtime_rpc_response(
                 binding,
                 message,

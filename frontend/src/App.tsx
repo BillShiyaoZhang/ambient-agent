@@ -70,6 +70,31 @@ import {
 
 const API_BASE = `http://${window.location.hostname}:8000`;
 
+function mergeBootstrapWidgets(current: Widget[], snapshots: Widget[]): Widget[] {
+  if (snapshots.length === 0) return current;
+  const next = [...current];
+  const currentIds = new Set(current.map((widget) => widget.id));
+  const currentRevisions = new Set(
+    current.map((widget) => `${widget.id}\0${widget.manifest_revision ?? ""}`),
+  );
+  let changed = false;
+
+  for (const snapshot of snapshots) {
+    if (!snapshot?.id) continue;
+    const revisionKey = `${snapshot.id}\0${snapshot.manifest_revision ?? ""}`;
+    if (currentRevisions.has(revisionKey)) continue;
+    // A different revision already in current state may be a WebSocket update
+    // delivered while this bootstrap request was pending, so current wins.
+    if (currentIds.has(snapshot.id)) continue;
+    currentIds.add(snapshot.id);
+    currentRevisions.add(revisionKey);
+    next.push(snapshot);
+    changed = true;
+  }
+
+  return changed ? next : current;
+}
+
 function localizedLLMError(code: string, language: "zh" | "en"): string {
   const messages: Record<string, [string, string]> = {
     llm_configuration_required: ["请先在“模型与 Provider”中完成配置。", "Configure a model and provider before sending a request."],
@@ -584,7 +609,8 @@ function App() {
             return null;
           }
         }));
-        setWidgets(loaded.filter((widget): widget is Widget => Boolean(widget)));
+        const snapshots = loaded.filter((widget): widget is Widget => Boolean(widget));
+        setWidgets((current) => mergeBootstrapWidgets(current, snapshots));
         if (raw.version !== 3) saveCanvasConfig(config);
       } catch (err) {
         console.error("Error loading canvas configuration:", err);
@@ -966,11 +992,15 @@ function App() {
             widgets={uniqueWidgets}
             canvas={canvasConfig}
             onCanvasChange={handleCanvasChange}
-            renderWidgetContent={(widget) => (
+            renderWidgetContent={(widget, lifecycle, onActivate, onSuspendReady) => (
               <ErrorBoundary key={`${widget.id}:${widget.manifest_revision ?? widget.grants_digest ?? "runtime"}`}>
                 <SandboxWidget
                   widget={widget}
                   presentationContext={widgetPresentationContext}
+                  runtimeVisible={lifecycle === "active"}
+                  suspendRequested={lifecycle === "suspending"}
+                  onActivate={onActivate}
+                  onSuspendReady={onSuspendReady}
                   onFullscreen={(id) => setAppWindowMode(id, "maximized")}
                   onMinimize={(id) => setAppWindowMode(id, "floating")}
                 />

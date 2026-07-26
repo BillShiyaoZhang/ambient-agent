@@ -448,11 +448,7 @@ class DurableAgentWorkflow:
                 await self._emit(run, payload)
                 return
             detail = str(
-                payload.get("message")
-                or payload.get("detail")
-                or payload.get("summary")
-                or payload_type
-                or ""
+                payload.get("message") or payload.get("detail") or payload.get("summary") or payload_type or ""
             )
         else:
             detail = str(payload)
@@ -811,9 +807,7 @@ class DurableAgentWorkflow:
             app_id = app_id or "unknown-app"
             reason = " ".join(str(message).strip().split())[:2_000] or "Unknown generation failure"
             repair_decision = (
-                state.data.get("repair_decision")
-                if isinstance(state.data.get("repair_decision"), dict)
-                else {}
+                state.data.get("repair_decision") if isinstance(state.data.get("repair_decision"), dict) else {}
             )
             automatic_repair_stalled = repair_decision.get("action") == "human"
             if state.data.get("language") == "zh":
@@ -821,8 +815,7 @@ class DurableAgentWorkflow:
                     "自动修复已停止：同一校验错误连续出现，或修复没有改变受校验文件。"
                     f"失败草稿已安全保留；如有新的修复思路，可回复 `/repair {app_id} <具体说明>`。"
                     if automatic_repair_stalled
-                    else f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；"
-                    "也可以在命令后补充具体要求。"
+                    else f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；也可以在命令后补充具体要求。"
                 )
                 content = (
                     f"Widget “{app_id}” 生成失败，尚未发布到应用中心。\n"
@@ -908,6 +901,7 @@ class DurableAgentWorkflow:
         orchestrator = AgentOrchestrator(
             db_session=storage,
             app_manager=self.app_manager,
+            graph_db=self.graph_db,
             run_context=self._run_context(run, state),
             context_summary=context_summary,
             artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
@@ -967,6 +961,7 @@ class DurableAgentWorkflow:
         orchestrator = AgentOrchestrator(
             db_session=storage,
             app_manager=self.app_manager,
+            graph_db=self.graph_db,
             run_context=self._run_context(run, state),
             context_summary=context_summary,
             artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
