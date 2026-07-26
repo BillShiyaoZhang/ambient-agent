@@ -3,7 +3,7 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ErrorBoundary } from "../../frontend/src/components/ErrorBoundary";
-import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
+import { PixelSandboxWidget as SandboxWidget } from "../../frontend/src/components/SandboxWidget";
 import type { Widget } from "../../frontend/src/components/DashboardCanvas";
 
 

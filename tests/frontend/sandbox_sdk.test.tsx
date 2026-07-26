@@ -2,7 +2,7 @@ import React from "react";
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
+import { PixelSandboxWidget as SandboxWidget } from "../../frontend/src/components/SandboxWidget";
 import type { Widget } from "../../frontend/src/components/DashboardCanvas";
 import wsService from "../../frontend/src/services/websocket";
 import { runService } from "../../frontend/src/services/runs";

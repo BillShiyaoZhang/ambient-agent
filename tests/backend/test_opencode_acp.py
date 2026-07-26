@@ -17,6 +17,7 @@ from acp.schema import (
     CreateTerminalResponse,
     DeniedOutcome,
     EnvVariable,
+    FileEditToolCallContent,
     InitializeResponse,
     NewSessionResponse,
     PermissionOption,
@@ -24,6 +25,8 @@ from acp.schema import (
     ReadTextFileResponse,
     RequestPermissionResponse,
     TerminalOutputResponse,
+    ToolCall,
+    ToolCallProgress,
     ToolCallStart,
     WaitForTerminalExitResponse,
     WriteTextFileResponse,
@@ -315,7 +318,7 @@ async def test_client_request_permission():
     client = FastAPIACPClient(workspace_root=Path("."), on_update_callback=lambda x: None)
 
     options = [
-        PermissionOption(option_id="opt-allow", name="Allow", kind="allow_always"),
+        PermissionOption(option_id="opt-allow", name="Allow", kind="allow_once"),
         PermissionOption(option_id="opt-deny", name="Deny", kind="reject_always"),
     ]
 
@@ -325,6 +328,569 @@ async def test_client_request_permission():
     assert isinstance(resp.outcome, AllowedOutcome)
     assert resp.outcome.option_id == "opt-allow"
     assert resp.outcome.outcome == "selected"
+
+
+def _codex_file_edit_start(tool_call_id: str, *paths: str) -> ToolCallStart:
+    return ToolCallStart(
+        session_update="tool_call",
+        tool_call_id=tool_call_id,
+        title="Editing files",
+        kind="edit",
+        status="pending",
+        content=[
+            FileEditToolCallContent(
+                type="diff",
+                path=path,
+                old_text=None,
+                new_text=f"generated content for {path}",
+                field_meta={"kind": "add"},
+            )
+            for path in paths
+        ],
+        locations=None,
+        raw_input=None,
+    )
+
+
+def _codex_file_operation_start(
+    tool_call_id: str,
+    path: str,
+    *,
+    kind: str,
+    old_text: str | None,
+    new_text: str,
+) -> ToolCallStart:
+    return ToolCallStart(
+        session_update="tool_call",
+        tool_call_id=tool_call_id,
+        title="Editing files",
+        kind="edit",
+        status="pending",
+        content=[
+            FileEditToolCallContent(
+                type="diff",
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+                field_meta={"kind": kind},
+            )
+        ],
+        locations=None,
+        raw_input=None,
+    )
+
+
+def _pathless_file_permission(tool_call_id: str) -> ToolCall:
+    return ToolCall(
+        tool_call_id=tool_call_id,
+        title="File edit: ",
+        kind="edit",
+        status="pending",
+        content=None,
+        locations=None,
+        raw_input=None,
+    )
+
+
+def _file_permission_options() -> list[PermissionOption]:
+    return [
+        PermissionOption(option_id="opt-allow", name="Allow", kind="allow_once"),
+        PermissionOption(option_id="opt-deny", name="Deny", kind="reject_once"),
+    ]
+
+
+def _codex_permission_kwargs(tool_call_id: str) -> dict:
+    return {"codex": {"params": {"itemId": tool_call_id, "grantRoot": None}}}
+
+
+@pytest.mark.asyncio
+async def test_pathless_codex_file_permission_uses_preceding_tool_call_content(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-1", "controller.js"),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-1"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-1"),
+    )
+
+    assert isinstance(response.outcome, AllowedOutcome)
+    assert response.outcome.option_id == "opt-allow"
+
+
+@pytest.mark.asyncio
+async def test_pathless_codex_file_permission_requires_codex_metadata(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-no-meta", "controller.js"),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-no-meta"),
+        options=_file_permission_options(),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_existing_file_update_with_matching_old_text_is_allowed(tmp_path):
+    old_text = "export default function App() { return null; }\n"
+    new_text = "export default function App() { return 'updated'; }\n"
+    controller = tmp_path / "controller.js"
+    controller.write_text(old_text, encoding="utf-8")
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_operation_start(
+            "tool-update",
+            "controller.js",
+            kind="update",
+            old_text=old_text,
+            new_text=new_text,
+        ),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-update"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-update"),
+    )
+
+    assert isinstance(response.outcome, AllowedOutcome)
+    assert controller.read_text(encoding="utf-8") == old_text
+
+
+@pytest.mark.asyncio
+async def test_update_for_missing_target_is_denied_as_ambiguous_move(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_operation_start(
+            "tool-move",
+            "controller.js",
+            kind="update",
+            old_text="content from an unreported source",
+            new_text="content at the destination",
+        ),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-move"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-move"),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_add_for_existing_allowed_file_is_denied(tmp_path):
+    controller = tmp_path / "controller.js"
+    controller.write_text("existing controller", encoding="utf-8")
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_operation_start(
+            "tool-add",
+            "controller.js",
+            kind="add",
+            old_text=None,
+            new_text="replacement controller",
+        ),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-add"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-add"),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+    assert controller.read_text(encoding="utf-8") == "existing controller"
+
+
+@pytest.mark.asyncio
+async def test_pathless_file_permission_without_cached_tool_call_is_denied(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("missing"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("missing"),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_pathless_permission_cache_requires_exact_session_and_tool_call_id(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess-a",
+        update=_codex_file_edit_start("tool-1", "controller.js"),
+    )
+
+    wrong_session, wrong_tool = await asyncio.gather(
+        client.request_permission(
+            session_id="sess-b",
+            tool_call=_pathless_file_permission("tool-1"),
+            options=_file_permission_options(),
+            **_codex_permission_kwargs("tool-1"),
+        ),
+        client.request_permission(
+            session_id="sess-a",
+            tool_call=_pathless_file_permission("tool-2"),
+            options=_file_permission_options(),
+            **_codex_permission_kwargs("tool-2"),
+        ),
+    )
+    correct = await client.request_permission(
+        session_id="sess-a",
+        tool_call=_pathless_file_permission("tool-1"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-1"),
+    )
+
+    assert isinstance(wrong_session.outcome, DeniedOutcome)
+    assert isinstance(wrong_tool.outcome, DeniedOutcome)
+    assert isinstance(correct.outcome, AllowedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_pathless_file_permission_cache_is_consumed_once(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-1", "controller.js"),
+    )
+
+    first = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-1"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-1"),
+    )
+    replay = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-1"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-1"),
+    )
+
+    assert isinstance(first.outcome, AllowedOutcome)
+    assert isinstance(replay.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("paths", "expected_outcome"),
+    [
+        (("controller.js", "manifest.json", "README.md"), AllowedOutcome),
+        (("controller.js", "secrets.txt", "manifest.json"), DeniedOutcome),
+    ],
+)
+async def test_pathless_batch_file_permission_validates_every_path_atomically(
+    tmp_path,
+    paths,
+    expected_outcome,
+):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-batch", *paths),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-batch"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-batch"),
+    )
+
+    assert isinstance(response.outcome, expected_outcome)
+
+
+@pytest.mark.asyncio
+async def test_pathless_permission_cache_does_not_cross_sessions_with_same_tool_id(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await asyncio.gather(
+        client.session_update(
+            session_id="sess-safe",
+            update=_codex_file_edit_start("shared-tool", "controller.js"),
+        ),
+        client.session_update(
+            session_id="sess-unsafe",
+            update=_codex_file_edit_start("shared-tool", "secrets.txt"),
+        ),
+    )
+
+    safe, unsafe = await asyncio.gather(
+        client.request_permission(
+            session_id="sess-safe",
+            tool_call=_pathless_file_permission("shared-tool"),
+            options=_file_permission_options(),
+            **_codex_permission_kwargs("shared-tool"),
+        ),
+        client.request_permission(
+            session_id="sess-unsafe",
+            tool_call=_pathless_file_permission("shared-tool"),
+            options=_file_permission_options(),
+            **_codex_permission_kwargs("shared-tool"),
+        ),
+    )
+
+    assert isinstance(safe.outcome, AllowedOutcome)
+    assert isinstance(unsafe.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+async def test_completed_or_failed_tool_call_update_clears_cached_file_permission(tmp_path, terminal_status):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-1", "controller.js"),
+    )
+    await client.session_update(
+        session_id="sess",
+        update=ToolCallProgress(
+            session_update="tool_call_update",
+            tool_call_id="tool-1",
+            kind="edit",
+            status=terminal_status,
+            title="Editing files",
+        ),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-1"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-1"),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_pathless_cached_diff_without_operation_kind_is_denied(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=ToolCallStart(
+            session_update="tool_call",
+            tool_call_id="tool-no-kind",
+            title="Editing files",
+            kind="edit",
+            status="pending",
+            content=[
+                FileEditToolCallContent(
+                    type="diff",
+                    path="controller.js",
+                    old_text=None,
+                    new_text="generated content",
+                )
+            ],
+        ),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-no-kind"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-no-kind"),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_mutation_permission_does_not_infer_partial_path_from_title(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    tool_call = ToolCall(
+        tool_call_id="tool-title",
+        title="Edit controller.js and secrets.txt",
+        kind="edit",
+        status="pending",
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=_file_permission_options(),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_read_permission_does_not_infer_path_from_title(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    tool_call = ToolCall(
+        tool_call_id="tool-read-title",
+        title="Read controller.js and ../../secret.env",
+        kind="read",
+        status="pending",
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=_file_permission_options(),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_kind", ["edit", "delete", "move"])
+async def test_direct_mutation_permission_requires_operation_evidence(tmp_path, tool_kind):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    tool_call = ToolCall(
+        tool_call_id=f"tool-{tool_kind}",
+        title=f"{tool_kind} controller.js",
+        kind=tool_kind,
+        status="pending",
+        raw_input={"path": "controller.js"},
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=_file_permission_options(),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_file_permission_never_selects_persistent_allow_option(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    tool_call = ToolCall(
+        tool_call_id="tool-read",
+        title="Read controller.js",
+        kind="read",
+        status="pending",
+        raw_input={"path": "controller.js"},
+    )
+    options = [
+        PermissionOption(option_id="always", name="Always", kind="allow_always"),
+        PermissionOption(option_id="once", name="Once", kind="allow_once"),
+    ]
+
+    selected_once = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=options,
+    )
+    persistent_only = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=options[:1],
+    )
+
+    assert isinstance(selected_once.outcome, AllowedOutcome)
+    assert selected_once.outcome.option_id == "once"
+    assert isinstance(persistent_only.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_conflicting_duplicate_tool_call_evidence_is_denied(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-reused", "controller.js"),
+    )
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-reused", "manifest.json"),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-reused"),
+        options=_file_permission_options(),
+        **_codex_permission_kwargs("tool-reused"),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "codex_meta",
+    [
+        {"params": {"itemId": "different-tool", "grantRoot": None}},
+        {"params": {"itemId": "tool-meta", "grantRoot": "/tmp"}},
+        {"params": "malformed"},
+    ],
+)
+async def test_codex_file_permission_metadata_must_match_without_root_grant(tmp_path, codex_meta):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    await client.session_update(
+        session_id="sess",
+        update=_codex_file_edit_start("tool-meta", "controller.js"),
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=_pathless_file_permission("tool-meta"),
+        options=_file_permission_options(),
+        codex=codex_meta,
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_file_permission_with_unknown_raw_input_fields_is_denied(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    tool_call = ToolCall(
+        tool_call_id="tool-raw-input",
+        title="Editing files",
+        kind="edit",
+        status="pending",
+        raw_input={"path": "controller.js", "unreportedPath": "secrets.txt"},
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=_file_permission_options(),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_file_permission_rejects_json_encoded_raw_input(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
+    tool_call = ToolCall(
+        tool_call_id="tool-json-string",
+        title="Read files",
+        kind="read",
+        status="pending",
+        raw_input='{"path":"secrets.txt","path":"controller.js"}',
+    )
+
+    response = await client.request_permission(
+        session_id="sess",
+        tool_call=tool_call,
+        options=_file_permission_options(),
+    )
+
+    assert isinstance(response.outcome, DeniedOutcome)
 
 
 @pytest.mark.asyncio

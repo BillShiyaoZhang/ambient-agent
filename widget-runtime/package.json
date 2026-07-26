@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node runtime.mjs",
+    "start:frame": "node frame_server.mjs",
     "test": "node --test"
   },
   "dependencies": {

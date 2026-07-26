@@ -11,7 +11,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -30,6 +38,22 @@ from backend.coding_agent import (
     run_coding_agent,
 )
 from backend.coding_agent_runtime import CodingAgentRuntimeError, spec_for
+from backend.client_widget_runtime import (
+    CLIENT_WIDGET_RUNTIME_POLICY_VIOLATION,
+    CLIENT_WIDGET_RUNTIME_PROTOCOL,
+    CLIENT_WIDGET_RUNTIME_PROTOCOL_ERROR,
+    CLIENT_WIDGET_RUNTIME_PROTOCOL_VERSION,
+    CLIENT_WIDGET_RUNTIME_SESSION_LIMIT,
+    CLIENT_WIDGET_RUNTIME_TICKET_PREFIX,
+    ClientWidgetRuntimeBinding,
+    ClientWidgetRuntimeSessionStore,
+    ClientWidgetRuntimeSessionLimitError,
+    ClientWidgetRuntimeTicketError,
+    ClientWidgetRuntimeTicketStore,
+    LockedClientWidgetRuntimeConnection,
+    client_runtime_frame_url,
+    client_runtime_origin,
+)
 from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
@@ -45,6 +69,7 @@ from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 from backend.widget_runtime import (
     WidgetRuntimeBinding,
     WidgetRuntimeGateway,
+    build_widget_runtime_rpc_response,
 )
 from backend.widget_runtime_smoke import WidgetRuntimeSmokeTester
 
@@ -114,6 +139,8 @@ llm_config_store = LLMConfigStore(WORKSPACE_DIR)
 coding_agent_config_store = CodingAgentConfigStore(WORKSPACE_DIR)
 set_default_llm_store(llm_config_store)
 app_store = AppStoreService(WORKSPACE_DIR, app_manager)
+client_widget_runtime_tickets = ClientWidgetRuntimeTicketStore(app_manager)
+client_widget_runtime_sessions = ClientWidgetRuntimeSessionStore()
 
 
 def _system_capability_catalog() -> SystemCapabilityCatalog:
@@ -955,6 +982,74 @@ async def list_apps():
     return app_manager.list_apps()
 
 
+def _client_runtime_origin(headers: Any) -> str:
+    """Apply the browser Runtime's dedicated Origin policy."""
+
+    return client_runtime_origin(headers)
+
+
+def _client_runtime_ticket_from_subprotocols(websocket: WebSocket) -> str | None:
+    protocols = tuple(
+        protocol.strip()
+        for protocol in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if protocol.strip()
+    )
+    if len(protocols) != 2 or protocols.count(CLIENT_WIDGET_RUNTIME_PROTOCOL) != 1:
+        return None
+    ticket_protocols = tuple(
+        protocol
+        for protocol in protocols
+        if protocol.startswith(CLIENT_WIDGET_RUNTIME_TICKET_PREFIX)
+    )
+    if len(ticket_protocols) != 1:
+        return None
+    token = ticket_protocols[0][len(CLIENT_WIDGET_RUNTIME_TICKET_PREFIX) :]
+    if len(token) != 43 or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        for character in token
+    ):
+        return None
+    return token
+
+
+@app.post("/api/apps/{app_id}/client-runtime-ticket")
+async def issue_client_widget_runtime_ticket(
+    request: Request,
+    response: Response,
+    app_id: str,
+):
+    try:
+        origin = _client_runtime_origin(request.headers)
+    except ClientWidgetRuntimeTicketError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "client_runtime_origin_denied",
+                "message": str(exc),
+            },
+        ) from exc
+    try:
+        frame_url = client_runtime_frame_url(origin)
+        ticket = client_widget_runtime_tickets.issue(app_id, origin)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="App not found") from exc
+    except (ClientWidgetRuntimeTicketError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "client_runtime_ticket_unavailable",
+                "message": str(exc),
+            },
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "ticket": ticket.token,
+        "expires_at": ticket.expires_at.isoformat(),
+        "frame_url": frame_url,
+        "protocol": CLIENT_WIDGET_RUNTIME_PROTOCOL,
+    }
+
+
 @app.get("/api/apps/{app_id}")
 async def get_app_files(app_id: str):
     try:
@@ -1096,7 +1191,7 @@ async def _send_graph_subscription_payload(target: Any, payload: dict[str, Any])
     """Project Graph updates to chat sockets or isolated Runtime sessions."""
 
     try:
-        if isinstance(target, WidgetRuntimeBinding):
+        if isinstance(target, (WidgetRuntimeBinding, ClientWidgetRuntimeBinding)):
             if payload.get("type") == "graph_query_update":
                 runtime_payload = {
                     "type": "subscription_event",
@@ -1109,7 +1204,13 @@ async def _send_graph_subscription_payload(target: Any, payload: dict[str, Any])
                     "subscription_id": payload.get("subscription_id"),
                     "error": payload.get("error"),
                 }
-            await widget_runtime_gateway.send_to_runtime(target.session_id, runtime_payload)
+            if isinstance(target, ClientWidgetRuntimeBinding):
+                await target.connection.send_json(runtime_payload)
+            else:
+                await widget_runtime_gateway.send_to_runtime(
+                    target.session_id,
+                    runtime_payload,
+                )
             return
         await target.send_json(payload)
     except Exception:
@@ -1257,7 +1358,7 @@ async def _wait_for_widget_capability_run(run_id: str, *, timeout: float = 30.0)
 
 
 async def _handle_widget_runtime_rpc(
-    binding: WidgetRuntimeBinding,
+    binding: WidgetRuntimeBinding | ClientWidgetRuntimeBinding,
     method: str,
     params: dict[str, Any],
 ) -> Any:
@@ -1420,6 +1521,124 @@ widget_runtime_gateway = WidgetRuntimeGateway(
     app_manager=app_manager,
     rpc_handler=_handle_widget_runtime_rpc,
 )
+
+
+@app.websocket("/ws/widgets/{app_id}/client-runtime")
+async def websocket_widget_client_runtime(
+    websocket: WebSocket,
+    app_id: str,
+):
+    """Serve one ticket-bound Controller session running in the user's browser."""
+
+    try:
+        origin = _client_runtime_origin(websocket.headers)
+        token = _client_runtime_ticket_from_subprotocols(websocket)
+        if token is None:
+            raise ClientWidgetRuntimeTicketError(
+                "Client Runtime WebSocket subprotocols are invalid"
+            )
+        ticket = client_widget_runtime_tickets.consume(
+            token,
+            app_id=app_id,
+            origin=origin,
+        )
+    except (ClientWidgetRuntimeTicketError, KeyError, ValueError):
+        try:
+            await websocket.close(code=CLIENT_WIDGET_RUNTIME_POLICY_VIOLATION)
+        except Exception:
+            pass
+        return
+
+    connection = LockedClientWidgetRuntimeConnection(websocket)
+    try:
+        binding = client_widget_runtime_sessions.open(ticket, connection)
+    except ClientWidgetRuntimeSessionLimitError:
+        try:
+            await connection.close(code=CLIENT_WIDGET_RUNTIME_SESSION_LIMIT)
+        except Exception:
+            pass
+        return
+
+    try:
+        await websocket.accept(subprotocol=CLIENT_WIDGET_RUNTIME_PROTOCOL)
+    except WebSocketDisconnect:
+        client_widget_runtime_sessions.close(binding.session_id)
+        return
+    except RuntimeError as exc:
+        client_widget_runtime_sessions.close(binding.session_id)
+        message = str(exc)
+        if (
+            "websocket.accept" in message
+            and "websocket.send" in message
+            and "websocket.close" in message
+        ):
+            return
+        raise
+    except Exception:
+        client_widget_runtime_sessions.close(binding.session_id)
+        raise
+
+    closed = False
+    try:
+        await connection.send_json(
+            {
+                "type": "bootstrap",
+                "protocol_version": CLIENT_WIDGET_RUNTIME_PROTOCOL_VERSION,
+                "controller_source": ticket.artifact.controller_source,
+                "capability_ids": list(ticket.artifact.capability_ids),
+            }
+        )
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                raise ValueError("Client Runtime messages must be JSON objects")
+            try:
+                encoded_size = len(
+                    json.dumps(
+                        message,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Client Runtime message must be JSON serializable"
+                ) from exc
+            if encoded_size > widget_runtime_gateway.limits.max_message_bytes:
+                raise ValueError(
+                    "Client Runtime message exceeds the configured byte limit"
+                )
+            response = await build_widget_runtime_rpc_response(
+                binding,
+                message,
+                _handle_widget_runtime_rpc,
+                include_session_id=False,
+            )
+            await connection.send_json(response)
+    except WebSocketDisconnect:
+        pass
+    except ValueError:
+        try:
+            await connection.close(code=CLIENT_WIDGET_RUNTIME_PROTOCOL_ERROR)
+            closed = True
+        except Exception:
+            pass
+    except Exception:
+        try:
+            await connection.close(code=1011)
+            closed = True
+        except Exception:
+            pass
+    finally:
+        from backend.graph_subscription import subscription_manager
+
+        subscription_manager.unregister_all(binding)
+        client_widget_runtime_sessions.close(binding.session_id)
+        if not closed:
+            try:
+                await connection.close()
+            except Exception:
+                pass
 
 
 @app.websocket("/ws/widgets/{app_id}/runtime")

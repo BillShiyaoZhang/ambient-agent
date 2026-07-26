@@ -1,6 +1,6 @@
 # Widget Format and Lifecycle
 
-Current Widgets use Manifest V2 plus a single React/HTM Controller. The Controller executes in isolated Chromium inside Docker; the user's browser only displays frames. Do not generate inline XML Widgets, `index.html`, `style.css`, or removed legacy SDK APIs.
+Current Widgets use Manifest V2 plus a single React/HTM Controller. By default, the Controller executes and renders natively inside an opaque-origin sandbox iframe in the user's browser; the Docker Chromium pixel stream is only a temporary rollback path. Do not generate inline XML Widgets, `index.html`, `style.css`, or removed legacy SDK APIs.
 
 ## 1. One carrier form
 
@@ -21,7 +21,7 @@ Every create and modify operation uses the durable Widget workflow, writes stagi
 - Use `ambient.react` hooks for state and effects.
 - Use only the SDK listed by the Runtime Contract. Graph, network, files, and installed capabilities require matching grants.
 - Capability/source/catalog/action IDs are string literals and are never assembled at runtime.
-- Clean up subscriptions and timers. Do not use direct browser events, DOM, storage, network, or dynamic-code APIs.
+- Clean up subscriptions and timers. Do not use direct browser events, DOM, Cookies, browser storage globals, network, or dynamic-code APIs. Use only `ambient.storage` for local non-secret state.
 
 ```javascript
 export default function TaskList({ ambient }) {
@@ -70,7 +70,7 @@ Only then is staging atomically promoted. Failure, cancellation, or denial prese
 
 ## 5. Debugging
 
-- The Widget Runtime returns compilation/render failures as structured `runtime_error` events displayed in the Widget; Controller console output never enters the host-page realm.
+- The isolated iframe Runtime returns compilation/render failures as structured `runtime_error` events displayed in the Widget; Controller console output never enters the host-page realm.
 - Generation failures appear in chat with the App ID, failed phase, error code, and cause. Reply with `/repair <app-id> [feedback]` to continue from the retained draft.
 - For `capability_denied`, first check Manifest entity/operation/source/path/action scope.
 - Handle interactions and `needs_attention` in the Task Drawer.

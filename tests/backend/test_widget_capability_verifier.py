@@ -160,3 +160,52 @@ def test_verifier_explains_graph_action_dsl_instead_of_misreporting_grant_scope(
     assert "action 'create' is invalid" in diagnostic["message"]
     assert "create_node" in diagnostic["message"]
     assert "authorization values" in diagnostic["hint"]
+
+
+def test_verifier_allows_only_the_declared_local_storage_surface(tmp_path):
+    accepted_path = tmp_path / "accepted"
+    accepted_path.mkdir()
+    accepted = verify(
+        accepted_path,
+        """
+        export default function App() {
+          ambient.storage.set("draft", { text: "hello" });
+          ambient.storage.get("draft");
+          ambient.storage.list();
+          return null;
+        }
+        """,
+        [],
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    rejected_path = tmp_path / "rejected"
+    rejected_path.mkdir()
+    rejected = verify(
+        rejected_path,
+        """
+        export default function App() {
+          ambient.storage.openDatabase("other-widget");
+          return null;
+        }
+        """,
+        [],
+    )
+    assert rejected.returncode != 0
+    assert "Unknown ambient.storage method" in rejected.stderr
+
+
+def test_verifier_rejects_navigation_and_peer_network_globals(tmp_path):
+    for index, source in enumerate(
+        (
+            "export default function App() { location.href = 'https://example.com'; return null; }",
+            "export default function App() { new RTCPeerConnection(); return null; }",
+            "export default function App() { new WebTransport('https://example.com'); return null; }",
+            "export default function App() { getComputedStyle({}); return null; }",
+        )
+    ):
+        case_path = tmp_path / f"case-{index}"
+        case_path.mkdir()
+        completed = verify(case_path, source, [])
+        assert completed.returncode != 0
+        assert "Forbidden" in json.loads(completed.stderr)["message"]

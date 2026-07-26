@@ -1,6 +1,6 @@
 # Widget 格式与生命周期
 
-当前 Widget 使用 Manifest V2 + 单文件 React/HTM Controller。Controller 在 Docker 内的隔离 Chromium 执行，用户浏览器只播放画面。不要生成内联 XML Widget、`index.html`、`style.css` 或已删除的旧 SDK。
+当前 Widget 使用 Manifest V2 + 单文件 React/HTM Controller。默认情况下，Controller 在用户浏览器的 opaque-origin sandbox iframe 内执行并原生渲染；Docker 中的 Chromium 像素流只作为临时回滚路径。不要生成内联 XML Widget、`index.html`、`style.css` 或已删除的旧 SDK。
 
 ## 1. 唯一承载形式
 
@@ -21,7 +21,7 @@ workspace/apps/<app-id>/
 - 状态与副作用使用 `ambient.react` hooks。
 - 只使用 Runtime Contract 中列出的 SDK；Graph、Network、Files 或 installed capabilities 需要对应 grant。
 - Capability/source/catalog/action ID 使用字符串字面量，不能在运行时拼接。
-- 卸载时清理订阅和 timer；禁止直接浏览器事件、DOM、storage、网络和动态代码 API。
+- 卸载时清理订阅和 timer；禁止直接浏览器事件、DOM、Cookie、浏览器 storage globals、网络和动态代码 API。本地非秘密状态只使用 `ambient.storage`。
 
 ```javascript
 export default function TaskList({ ambient }) {
@@ -70,7 +70,7 @@ Runtime Contract 是发布协调器使用的审批信封，不是 `manifest.json
 
 ## 5. 调试
 
-- 编译/渲染错误由 Widget Runtime 以结构化 `runtime_error` 返回并显示在 Widget 区域；Controller console 不进入宿主页面 realm。
+- 编译/渲染错误由隔离 iframe Runtime 以结构化 `runtime_error` 返回并显示在 Widget 区域；Controller console 不进入宿主页面 realm。
 - 生成失败时，聊天会显示 App ID、失败阶段、错误码和原因；直接回复 `/repair <app-id> [补充说明]` 可在保留草稿上继续修复。
 - `capability_denied` 先检查 Manifest grant 的 entity/operation/source/path/action scope。
 - 有 interaction 或 `needs_attention` 时到任务抽屉处理。

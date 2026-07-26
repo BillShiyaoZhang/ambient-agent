@@ -55,6 +55,11 @@ _MAX_TERMINAL_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
 _MAX_CONTROLLER_BYTES = 2 * 1024 * 1024
 _PROCESS_TERMINATION_GRACE_SECONDS = 2.0
 _MAX_AUTOMATIC_REPAIRS = 3
+_MAX_PENDING_FILE_CHANGES = 128
+_MAX_FILE_CHANGES_PER_TOOL_CALL = 16
+_MAX_ACP_PATH_LENGTH = 4096
+_FILE_CHANGE_KINDS = frozenset({"add", "update", "delete"})
+_RAW_FILE_PATH_KEYS = frozenset({"path", "source", "destination", "target", "new_path", "newPath", "paths"})
 _SHELL_CONTROL_PATTERN = re.compile(r"[\x00\r\n;&|<>`]|\$\(")
 _TERMINAL_INHERITED_ENV = {
     "HOME",
@@ -136,6 +141,26 @@ class CodingAgentStagedResult:
     artifact_hash: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _FileChangeEvidence:
+    """One path advertised by an ACP file-change notification."""
+
+    path: str
+    kind: str | None = None
+    old_text_digest: str | None = None
+    old_text_present: bool = False
+    new_text_present: bool = False
+    new_text_empty: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingFileChange:
+    """File paths correlated with a later pathless permission request."""
+
+    changes: tuple[_FileChangeEvidence, ...]
+    malformed: bool = False
+
+
 class CodingAgentDraftError(CodingAgentACPError):
     """Return a failed durable generation together with its retained draft handle."""
 
@@ -206,6 +231,157 @@ def _resolve_in_workspace(path_str: str | Path, workspace_root: Path) -> Path:
         if _is_link_or_junction(cursor):
             raise ValueError("Symbolic links are not allowed in the workspace path")
     return resolved
+
+
+def _tool_call_value(value: Any, field: str, alias: str | None = None) -> Any:
+    if isinstance(value, Mapping):
+        if field in value:
+            return value[field]
+        if alias is not None:
+            return value.get(alias)
+        return None
+    return getattr(value, field, None)
+
+
+def _valid_acp_path(path: Any) -> bool:
+    return isinstance(path, str) and 0 < len(path) <= _MAX_ACP_PATH_LENGTH
+
+
+def _file_change_content(tool_call: Any) -> tuple[list[_FileChangeEvidence], bool]:
+    content = getattr(tool_call, "content", None)
+    if content is None:
+        return [], False
+    if not isinstance(content, (list, tuple)):
+        return [], True
+
+    changes: list[_FileChangeEvidence] = []
+    malformed = False
+    for item in content:
+        path = _tool_call_value(item, "path")
+        if not _valid_acp_path(path):
+            malformed = True
+            continue
+
+        meta = _tool_call_value(item, "field_meta", "_meta")
+        kind = meta.get("kind") if isinstance(meta, Mapping) else None
+        if kind is not None and not isinstance(kind, str):
+            malformed = True
+            kind = None
+
+        old_text = _tool_call_value(item, "old_text", "oldText")
+        new_text = _tool_call_value(item, "new_text", "newText")
+        if old_text is not None and not isinstance(old_text, str):
+            malformed = True
+            old_text = None
+        if new_text is not None and not isinstance(new_text, str):
+            malformed = True
+            new_text = None
+
+        changes.append(
+            _FileChangeEvidence(
+                path=path,
+                kind=kind,
+                old_text_digest=(
+                    hashlib.sha256(old_text.encode("utf-8")).hexdigest() if isinstance(old_text, str) else None
+                ),
+                old_text_present=isinstance(old_text, str),
+                new_text_present=isinstance(new_text, str),
+                new_text_empty=new_text == "",
+            )
+        )
+        if len(changes) > _MAX_FILE_CHANGES_PER_TOOL_CALL:
+            return changes[:_MAX_FILE_CHANGES_PER_TOOL_CALL], True
+    return changes, malformed
+
+
+def _file_change_locations(tool_call: Any) -> tuple[list[_FileChangeEvidence], bool]:
+    locations = getattr(tool_call, "locations", None)
+    if locations is None:
+        return [], False
+    if not isinstance(locations, (list, tuple)):
+        # ACP schema validation guarantees a list here. Test doubles and older
+        # clients may expose placeholder attributes such as MagicMock objects.
+        return [], False
+
+    changes: list[_FileChangeEvidence] = []
+    malformed = False
+    for item in locations:
+        path = _tool_call_value(item, "path")
+        if not _valid_acp_path(path):
+            malformed = True
+            continue
+        changes.append(_FileChangeEvidence(path=path))
+        if len(changes) > _MAX_FILE_CHANGES_PER_TOOL_CALL:
+            return changes[:_MAX_FILE_CHANGES_PER_TOOL_CALL], True
+    return changes, malformed
+
+
+def _file_change_raw_input(tool_call: Any) -> tuple[list[_FileChangeEvidence], bool]:
+    raw_input = getattr(tool_call, "raw_input", None)
+    if isinstance(raw_input, str):
+        # ACP rawInput is structured JSON, not a JSON-encoded string. Refuse a
+        # second parsing layer so duplicate-key/parser-differential tricks
+        # cannot hide an additional path.
+        return [], True
+    if raw_input is None:
+        return [], False
+    if not isinstance(raw_input, Mapping):
+        return [], True
+
+    malformed = any(not isinstance(key, str) or key not in _RAW_FILE_PATH_KEYS for key in raw_input)
+    raw_paths: list[Any] = []
+    for key in ("path", "source", "destination", "target", "new_path", "newPath"):
+        if key in raw_input:
+            raw_paths.append(raw_input[key])
+    if "paths" in raw_input:
+        paths = raw_input["paths"]
+        if isinstance(paths, (list, tuple)):
+            raw_paths.extend(paths)
+        else:
+            raw_paths.append(paths)
+
+    changes: list[_FileChangeEvidence] = []
+    for path in raw_paths:
+        if not _valid_acp_path(path):
+            malformed = True
+            continue
+        changes.append(_FileChangeEvidence(path=path))
+        if len(changes) > _MAX_FILE_CHANGES_PER_TOOL_CALL:
+            return changes[:_MAX_FILE_CHANGES_PER_TOOL_CALL], True
+    return changes, malformed
+
+
+def _deduplicate_file_changes(changes: list[_FileChangeEvidence]) -> tuple[_FileChangeEvidence, ...]:
+    unique: list[_FileChangeEvidence] = []
+    seen: set[tuple[str, str | None, str | None, bool, bool, bool]] = set()
+    for change in changes:
+        identity = (
+            change.path,
+            change.kind,
+            change.old_text_digest,
+            change.old_text_present,
+            change.new_text_present,
+            change.new_text_empty,
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(change)
+    return tuple(unique)
+
+
+def _file_change_evidence(tool_call: Any) -> _PendingFileChange:
+    content, malformed_content = _file_change_content(tool_call)
+    locations, malformed_locations = _file_change_locations(tool_call)
+    raw_input, malformed_raw_input = _file_change_raw_input(tool_call)
+    changes = [*content, *locations, *raw_input]
+    malformed = malformed_content or malformed_locations or malformed_raw_input
+
+    deduplicated = _deduplicate_file_changes(changes)
+    if len(deduplicated) > _MAX_FILE_CHANGES_PER_TOOL_CALL:
+        deduplicated = deduplicated[:_MAX_FILE_CHANGES_PER_TOOL_CALL]
+        malformed = True
+    return _PendingFileChange(changes=deduplicated, malformed=malformed)
 
 
 def _parse_command_argv(command: str, args: list[str] | None = None) -> list[str]:
@@ -851,7 +1027,89 @@ class FastAPIACPClient(Client):
         self.terminal_output_bytes: dict[str, int] = {}
         self.terminal_output_truncated: dict[str, bool] = {}
         self.terminal_process_groups: set[str] = set()
+        self.pending_file_changes: dict[tuple[str, str], _PendingFileChange] = {}
         self.output_buffer: list[str] = []
+
+    @staticmethod
+    def _pending_file_change_key(session_id: str, tool_call: Any) -> tuple[str, str] | None:
+        tool_call_id = getattr(tool_call, "tool_call_id", None)
+        if not isinstance(session_id, str) or not session_id or not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        return session_id, tool_call_id
+
+    def _remember_file_change(self, session_id: str, tool_call: Any) -> None:
+        key = self._pending_file_change_key(session_id, tool_call)
+        if key is None:
+            return
+
+        status = getattr(tool_call, "status", None)
+        if status in {"completed", "failed"}:
+            self.pending_file_changes.pop(key, None)
+            return
+
+        evidence = _file_change_evidence(tool_call)
+        if not evidence.changes:
+            evidence = _PendingFileChange(changes=(), malformed=True)
+
+        existing = self.pending_file_changes.get(key)
+        if existing is not None:
+            if existing == evidence:
+                return
+            # A tool-call ID is the authorization correlation key. Reuse with
+            # different evidence is ambiguous, so keep the union for logging
+            # and poison the eventual permission decision.
+            merged_changes = _deduplicate_file_changes([*existing.changes, *evidence.changes])
+            evidence = _PendingFileChange(
+                changes=merged_changes[:_MAX_FILE_CHANGES_PER_TOOL_CALL],
+                malformed=True,
+            )
+            self.pending_file_changes.pop(key, None)
+        while len(self.pending_file_changes) >= _MAX_PENDING_FILE_CHANGES:
+            oldest = next(iter(self.pending_file_changes))
+            self.pending_file_changes.pop(oldest, None)
+        self.pending_file_changes[key] = evidence
+
+    def _forget_file_change(self, session_id: str, tool_call: Any) -> None:
+        key = self._pending_file_change_key(session_id, tool_call)
+        if key is not None:
+            self.pending_file_changes.pop(key, None)
+
+    def _consume_file_change(self, session_id: str, tool_call: Any) -> _PendingFileChange | None:
+        key = self._pending_file_change_key(session_id, tool_call)
+        if key is None:
+            return None
+        return self.pending_file_changes.pop(key, None)
+
+    def _validate_file_change_evidence(
+        self,
+        change: _FileChangeEvidence,
+        policy_mgr: PermissionPolicyManager,
+    ) -> bool:
+        if not policy_mgr.validate_file_path(change.path, self.workspace_root):
+            return False
+        if change.kind is None:
+            return True
+        if change.kind not in _FILE_CHANGE_KINDS:
+            return False
+
+        try:
+            full_path = _resolve_in_workspace(change.path, self.workspace_root)
+            if change.kind == "add":
+                return not change.old_text_present and change.new_text_present and not full_path.exists()
+
+            if not full_path.is_file() or not change.old_text_present or change.old_text_digest is None:
+                return False
+            current_digest = hashlib.sha256(full_path.read_bytes()).hexdigest()
+            if current_digest != change.old_text_digest:
+                # The Codex bridge drops a move's source path and advertises only
+                # its destination. Requiring the advertised path to match oldText
+                # rejects ordinary moves instead of approving an unseen source.
+                return False
+            if change.kind == "update":
+                return change.new_text_present
+            return change.new_text_present and change.new_text_empty
+        except (OSError, UnicodeError, ValueError):
+            return False
 
     def _artifact_path(self, path: str) -> Path:
         full_path = _resolve_in_workspace(path, self.workspace_root)
@@ -903,7 +1161,11 @@ class FastAPIACPClient(Client):
         policy_mgr = PermissionPolicyManager()
         tool_kind = getattr(tool_call, "kind", "other")
         logger.info(
-            f"request_permission request received: tool_kind={tool_kind}, title={getattr(tool_call, 'title', None)}, raw_input={getattr(tool_call, 'raw_input', None)}"
+            "request_permission request received: tool_kind=%s, tool_call_id=%s, title=%s, has_raw_input=%s",
+            tool_kind,
+            getattr(tool_call, "tool_call_id", None),
+            getattr(tool_call, "title", None),
+            getattr(tool_call, "raw_input", None) is not None,
         )
 
         is_allowed = False
@@ -929,47 +1191,60 @@ class FastAPIACPClient(Client):
             is_allowed = policy_mgr.validate_argv(argv)
 
         elif tool_kind in ("edit", "read", "delete", "move"):
-            # File system operations
-            path_str = ""
-            raw_in = getattr(tool_call, "raw_input", None)
-            if isinstance(raw_in, str):
+            # Codex ACP 1.1.x emits the full file diff as a preceding tool_call
+            # notification, then sends a pathless permission request with the
+            # same tool-call ID. Consume that evidence exactly once and validate
+            # every advertised path. Other ACP agents may still provide paths
+            # directly on the permission request.
+            direct = _file_change_evidence(tool_call)
+            pending = self._consume_file_change(session_id, tool_call)
+            changes = [*(pending.changes if pending is not None else ()), *direct.changes]
+            changes = list(_deduplicate_file_changes(changes))
+            malformed = direct.malformed or (pending.malformed if pending is not None else False)
+            if pending is not None and any(change.kind not in _FILE_CHANGE_KINDS for change in pending.changes):
+                malformed = True
+            if tool_kind == "read":
+                if any(change.kind is not None for change in changes):
+                    malformed = True
+            elif any(change.kind is None for change in changes):
+                malformed = True
+            if tool_kind == "delete" and any(change.kind != "delete" for change in changes):
+                malformed = True
+            if tool_kind == "move":
+                # ACP 1.x has no portable structured representation that proves
+                # both move endpoints and their roles.
+                malformed = True
+
+            codex_meta = kwargs.get("codex")
+            if pending is not None and codex_meta is None:
+                malformed = True
+            if codex_meta is not None:
+                params = codex_meta.get("params") if isinstance(codex_meta, Mapping) else None
+                if not isinstance(params, Mapping):
+                    malformed = True
+                else:
+                    request_item_id = params.get("itemId")
+                    if request_item_id != getattr(tool_call, "tool_call_id", None) or params.get("grantRoot") is not None:
+                        malformed = True
+            paths = list(dict.fromkeys(change.path for change in changes))
+            details = f"File {tool_kind}: {', '.join(paths) if paths else '<missing>'}"
+
+            for path_str in paths:
                 try:
-                    import json
+                    _resolve_in_workspace(path_str, self.workspace_root)
+                except (OSError, ValueError):
+                    logger.warning("Blocking directory traversal attempt in permission request: %s", path_str)
+                    return RequestPermissionResponse(
+                        outcome=DeniedOutcome(outcome="cancelled", message="Directory traversal blocked")
+                    )
 
-                    raw_in = json.loads(raw_in)
-                except Exception:
-                    pass
-
-            if isinstance(raw_in, dict):
-                path_str = raw_in.get("path", "")
-
-            if not path_str and tool_call.content:
-                for item in tool_call.content:
-                    if hasattr(item, "path"):
-                        path_str = item.path
-                        break
-                    elif isinstance(item, dict) and "path" in item:
-                        path_str = item["path"]
-                        break
-
-            if not path_str and getattr(tool_call, "title", None):
-                import re
-
-                match = re.search(r"([\w\-_\.\/]+\.[a-zA-Z0-9]+)", tool_call.title)
-                if match:
-                    path_str = match.group(1)
-
-            details = f"File {tool_kind}: {path_str}"
-
-            try:
-                _resolve_in_workspace(path_str, self.workspace_root)
-            except (OSError, ValueError):
-                logger.warning(f"Blocking directory traversal attempt in permission request: {path_str}")
-                return RequestPermissionResponse(
-                    outcome=DeniedOutcome(outcome="cancelled", message="Directory traversal blocked")
-                )
-
-            is_allowed = policy_mgr.validate_file_path(path_str, self.workspace_root)
+            if tool_kind == "move" and len(paths) < 2:
+                malformed = True
+            is_allowed = (
+                bool(changes)
+                and not malformed
+                and all(self._validate_file_change_evidence(change, policy_mgr) for change in changes)
+            )
 
         else:
             logger.warning("Blocking unknown ACP tool kind: %r", tool_kind)
@@ -979,7 +1254,7 @@ class FastAPIACPClient(Client):
 
         if is_allowed:
             for opt in options:
-                if opt.kind in ("allow_once", "allow_always"):
+                if opt.kind == "allow_once":
                     return RequestPermissionResponse(
                         outcome=AllowedOutcome(option_id=opt.option_id, outcome="selected")
                     )
@@ -1145,8 +1420,12 @@ class FastAPIACPClient(Client):
                 if hasattr(update.content, "text"):
                     content_text = update.content.text
             elif u_type == "tool_call":
+                if getattr(update, "kind", None) in {"edit", "delete", "move"}:
+                    self._remember_file_change(session_id, update)
                 content_text = f"\n🛠️ Calling tool: {update.title or update.kind}..."
             elif u_type == "tool_call_update":
+                if getattr(update, "status", None) in {"completed", "failed"}:
+                    self._forget_file_change(session_id, update)
                 if update.status == "completed":
                     content_text = f"\n✅ Tool call completed: {update.title or update.kind}"
                 elif update.status == "failed":

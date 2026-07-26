@@ -1,148 +1,113 @@
 # Widget 隔离运行时
 
-Widget Controller 不在用户浏览器或 Backend 进程中执行。默认 `balanced` 模式使用一个固定镜像的 `widget-runtime` 容器和一个受管理的 Chromium 进程；每个打开的 App 获得独立的 BrowserContext、Page、CDP session、临时存储与运行预算。用户浏览器只显示运行时产生的画面，并把经过归一化的输入事件送回运行时。
+Widget 默认作为微前端在用户浏览器中的隔离 iframe 内渲染，不再把服务端 Chromium 的 JPEG/PNG 帧持续传给前端。Controller 仍使用 Manifest V2 + `controller.js`，但它只在 `sandbox="allow-scripts"` 的 opaque-origin frame 中求值；宿主 React 页面和 Backend 都不会执行 Controller 源码。
 
-该设计把浏览器兼容性与代码隔离分开：macOS、Windows、Linux 上的 Chrome、Safari、Edge 或 Firefox 都只是画面播放器，App 的实际 DOM、CSS 和 JavaScript 始终由 Docker 内固定版本的 Chromium 执行。
+旧的服务端 Chromium 像素流保留一个发布周期作为显式回滚路径，见第 7 节。
 
 ## 1. 部署与信任边界
 
 ```mermaid
 flowchart LR
-    UI["用户浏览器：Canvas 播放器"] <-->|"帧 / 输入 WebSocket"| API["FastAPI：WidgetRuntimeGateway"]
-    API <-->|"NDJSON / Unix socket"| Runtime["widget-runtime 容器"]
-    Runtime --> Browser["固定 Chromium"]
-    Browser --> C1["App A BrowserContext"]
-    Browser --> C2["App B BrowserContext"]
+    Host["可信 Frontend：SandboxWidget"] -->|"固定 frame.html"| Frame["opaque-origin iframe"]
+    Host <-->|"nonce + MessageChannel"| Frame
+    Host <-->|"一次性 ticket WebSocket"| API["FastAPI"]
     API --> Auth["CapabilityAuthorizer"]
     Auth --> Graph["Graph adapter"]
     Auth --> Files["App file adapter"]
     Auth --> Net["HTTP data-source adapter"]
     Auth --> Caps["Capability / Run adapter"]
+    Host --> Storage["宿主 IndexedDB：按 App 隔离"]
 ```
 
-`widget-runtime` 必须满足：
+Docker Compose 新增 `widget-frame` 服务，在浏览器可访问的 8001 端口只提供固定 Shell、renderer 和编译器资源。它不接收 App ID、ticket、Controller 或用户数据，也不设置 Cookie。Backend 仍在 8000 端口签发 ticket 和处理 capability RPC。
 
-- `network_mode: none`，运行时没有 Docker 网络、公网、Backend 或 Graph 直连；
-- 只与 Backend 共享一个仅用于 Unix domain socket 的命名卷；
-- 不挂载项目、`workspace/`、Docker socket、Provider 凭据、Graph 凭据或宿主目录；
-- root filesystem 只读，临时 profile/artifact 写入有大小上限的 tmpfs；
-- 非 root 用户运行，`cap_drop: ALL`、`no-new-privileges`、进程/CPU/内存上限；
-- 为让 Chromium 在 Docker Desktop/Linux 中建立自己的 user-namespace + seccomp renderer sandbox，容器放开 Docker 外层 seccomp profile；这不是 `--no-sandbox`：Chromium 沙盒保持开启，容器仍无网络、无 capability、只读且无宿主挂载；
-- 不开放 remote-debugging TCP 端口。Supervisor 只通过本地 pipe/CDP session 控制 Chromium。
+本地 Compose 固定公开 8001。HTTPS 或带路径前缀的反向代理部署应同时设置浏览器构建变量 `VITE_API_BASE_URL` 和 Backend 的 `WIDGET_FRAME_URL`，两者都必须是浏览器可访问的公网 URL；不能把 Docker service name 发送给浏览器。
 
-Backend 仍可访问工作区和 Graph，因此它不是不可信代码执行环境。任何 Controller 源码、浏览器进程或 Controller 派生数据都不能在 Backend 中求值。
+iframe 同时使用：
 
-## 2. 会话与身份
+- HTML 属性 `sandbox="allow-scripts"`，不包含 `allow-same-origin`、表单、弹窗、下载、顶层导航或其他权限；
+- `allow=""`、`referrerPolicy="no-referrer"`；
+- 响应 CSP：`sandbox allow-scripts`、`default-src 'none'`、`connect-src 'none'`，并禁止 worker、子 frame、object、media、font、manifest、form 和 base URL；
+- Permissions Policy 禁止相机、麦克风、定位、剪贴板、USB、串口、支付、凭据等浏览器能力；
+- `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`。
 
-打开 Widget 时，Frontend 连接 `/ws/widgets/{app_id}/runtime`。Backend 读取当前持久 Manifest，计算 artifact digest，并创建不可猜测的 runtime session。Backend 保存：
+CSP 允许固定的同服务脚本和 Babel 所需的 `'unsafe-eval'`。由于 CSP sandbox 使文档成为 opaque origin，固定 ES modules 带无凭据 `Access-Control-Allow-Origin: *`；该响应不包含 App 数据，Controller 的 `fetch`/WebSocket 仍被 `connect-src 'none'` 阻断。
+
+## 2. Ticket、会话与身份
+
+打开 Widget 时，可信宿主执行：
+
+1. `POST /api/apps/{app_id}/client-runtime-ticket`；
+2. Backend 校验请求 `Origin` 是否在 `AMBIENT_FRONTEND_ORIGINS`；
+3. Backend 返回 30 秒有效、256-bit、单次使用的 ticket，以及固定 `frame_url`；
+4. 宿主连接 `/ws/widgets/{app_id}/client-runtime`，WebSocket 子协议为 `ambient-widget-client-v1` 与 `ticket.<token>`；
+5. Backend 消费 ticket，并把会话绑定到签发时的 Origin、App ID、Manifest revision、grants digest 和 Controller artifact digest。
+
+ticket 不进入 iframe、URL、DOM 或本地存储。WebSocket 建立前 Backend 会重新读取 App snapshot；ticket 过期、重复使用、Origin/App 不匹配或 artifact 已变化都会失败。默认最多保留 256 个待使用 ticket 和 16 个活动 client-runtime session。
+
+Controller RPC 只允许 `{ request_id, method, params }`。Frontend 与 Backend 都会移除 payload 中伪造的 `app_id`、session、revision、grants 和 artifact 字段；授权和幂等身份只使用 Backend 保存的 session binding。每次 Graph、Network、Files 或 installed-capability 操作仍进入既有 `CapabilityAuthorizer`。
+
+## 3. Frame 启动与通信协议
+
+`frame.html` 加载后不读取 query、Cookie、`localStorage` 或 `IndexedDB`。可信宿主创建 `MessageChannel` 和随机 nonce，把一个 port 发送给 iframe。iframe 只接受来自直接 parent、协议版本匹配且携带一个 port 的首次消息，回显 nonce 后立即移除全局 `window.message` listener。
+
+后续通信只走转移后的 port：
 
 ```text
-runtime_session_id -> {
-  app_id,
-  manifest_revision,
-  grants_digest,
-  artifact_digest,
-  frontend_connection,
-  runtime_connection
-}
+Backend -> trusted host WS: bootstrap(controller_source, capability_ids)
+Host -> frame port:          init(nonce, controller_source, capabilities, presentation)
+Frame -> host port:          rpc_request / storage_request / host_event
+Host -> frame port:          rpc_response / storage_response / subscription_event
 ```
 
-随后 Backend 通过 Unix socket 发送 `start`，包含 Controller 源码、digest、viewport 和经过校验的 `presentation_context`。Runtime 不能通过文件路径读取 App；源码只以消息传入并保存在 tmpfs/内存中。
+宿主不会用 `eval`、`Function`、Babel 或 React 渲染 Controller。Babel 转译、module wrapper 和 Preact 渲染全部发生在隔离 frame。端口、WebSocket 或组件卸载时会关闭 session、拒绝 pending request 并注销 Graph subscriptions；服务端并发发送由单一锁串行化。
 
-Controller 发出的 RPC 只包含 `request_id`、方法和参数。`app_id`、revision、grants digest 或 artifact digest 即使出现在 payload 中也必须忽略；`WidgetRuntimeGateway` 只使用 server-side session binding 调用 `CapabilityAuthorizer`。Manifest 修改、撤权、artifact digest 改变、Frontend 断线或 Runtime 重启都会关闭旧 session，下一次连接重新加载授权事实。
+## 4. 本地持久数据
 
-## 3. 画面与输入协议
+Controller 使用 `ambient.storage` 保存当前浏览器、当前 App 的非秘密状态：
 
-Runtime 使用 `Page.startScreencast` 获取画面，并在每帧处理后发送 `Page.screencastFrameAck`。Backend 将帧和元数据转发给当前 Widget：
-
-```json
-{
-  "type": "frame",
-  "session_id": "opaque",
-  "frame_id": 42,
-  "format": "jpeg",
-  "data": "<base64>",
-  "width": 640,
-  "height": 480,
-  "device_scale_factor": 1
-}
+```javascript
+const draft = await ambient.storage.get("draft");
+await ambient.storage.set("draft", { text: "local only" });
+const keys = await ambient.storage.list();
+await ambient.storage.delete("draft");
+await ambient.storage.clear();
 ```
 
-Frontend 只渲染最新帧；慢客户端不能形成无界队列。鼠标、触摸、滚轮、按键、文本输入、焦点与 viewport resize 被归一化后发送到 Backend，再由 Runtime 转换为 CDP `Input.*`。输入消息不允许携带 capability 身份。Runtime WebSocket 首次连接必须携带 Widget 的实际逻辑 viewport 和 device-pixel ratio；低成本 screencast 事件作为画面变化信号，交付帧再由 `Page.captureScreenshot` 按对应物理像素抓取。viewport resize 后重启 screencast，避免把默认低分辨率帧拉伸。Runtime WebSocket 只在 App 身份、revision 或 grants digest 改变时重建；父组件 render 或事件回调引用变化不能中断正在建立或已建立的连接。基础设施断连使用有上限的指数退避自动重连，不要求用户刷新页面。
+数据实际由可信宿主写入 IndexedDB，而不是写入 iframe Cookie 或 storage。namespace 永远取自宿主已知的 `widget.id`，忽略 Controller payload 中的身份字段，因此一个 Widget 不能选择或访问另一个 Widget 的 namespace。同一个 App ID 关闭、重开或升级后复用数据。
 
-### 展示上下文
+约束如下：
 
-主题、语言和减少动画偏好属于不授予数据权限的展示上下文，与 Manifest grants、Graph scope 和 Runtime session identity 分开：
+- key 为 1–256 个字符；
+- value 必须是有限深度、无循环的 JSON 值，单值最大 64 KiB；
+- 每个 App 最多 128 个 key、合计最多 1 MiB，避免一个 Widget 耗尽整个 origin 的浏览器配额；
+- 缺失 key 返回 `null`，修改操作返回 `{ status: "ok" }`；
+- 数据只存在当前浏览器 profile，清理站点数据、隐私模式结束或浏览器配额回收都可能删除它；
+- 不用于凭据、API key、access token、跨设备同步或用户数据的唯一副本。
 
-```json
-{
-  "theme": {
-    "preference": "system",
-    "effective": "light"
-  },
-  "locale": "zh-CN",
-  "reduced_motion": false
-}
-```
+## 5. 展示上下文与宿主事件
 
-Frontend 在 WebSocket 建立时通过 query 参数提供初始上下文，使 Chromium 在 Controller 首次渲染前使用正确的 `colorScheme`、locale 和 reduced-motion media emulation。Backend 必须将主题枚举、BCP 47 locale 和布尔值归一化后再创建 Runtime session，Runtime 不信任原始 Frontend payload。
+主题、语言和减少动画偏好通过同一个 port 发送，不需要重建 iframe 或 WebSocket。Runtime 更新 `documentElement`、CSS variables，并通知 `ambient.presentation` / `ambient.theme` subscribers。
 
-主题、语言或系统减少动画偏好改变时，Frontend 在同一个 WebSocket session 中发送完整的 `presentation_context` 输入；这类变化不得重建 BrowserContext 或 Runtime WebSocket。Runtime 更新 `documentElement.lang`、`data-theme`、`color-scheme`、主题 CSS variables 和 media emulation，然后通知 `ambient.presentation` / `ambient.theme` 订阅者。`ambient.theme.preference` 和 `ambient.theme.effective` 保持为读取当前值的兼容访问器，而不是只反映首次连接的静态快照。动态 locale 以 `ambient.presentation` 和 `documentElement.lang` 为准；BrowserContext 的 `navigator.language` 只保证与初始 locale 一致。
+Controller 可请求 `fullscreen`、`minimize` 和 `sendMessage`。宿主只处理这三个固定事件，消息文本上限为 16 KiB。它不能通过 port 请求任意 DOM 操作、浏览器 API 或宿主函数。
 
-默认预算：
+## 6. 安全性质与限制
 
-- 仅可见 Widget 保持活跃；最小化/不可见 Widget 停止 screencast，并可在空闲后销毁 Context；
-- 每个 session 只保留一个待发送帧，较旧帧可丢弃；
-- 帧率和 JPEG 质量按交互/静止状态自适应；
-- Context 数、viewport、消息大小、RPC 并发、CPU、内存和会话时长都有硬上限；
-- Chromium 退出、Context 崩溃、协议错误或预算超限产生结构化 `runtime_error`，并清理该 session 的订阅和 pending RPC。
-- 同一 Runtime socket 上的 `start`、输入、RPC response、subscription event、`close` 和断连清理必须串行执行。断连清理只能在正在执行的 `start` 完成或取消后关闭 Context，不能与 Playwright 创建 Page/CDP session 并发。
+这一方案把不可信 Controller 与宿主页面的 DOM、Cookie、storage、JS realm 和浏览器高权限 API 分开，也避免视频编码、帧延迟、输入法映射、清晰度与无障碍树丢失。Backend 仍是最终授权边界：客户端隔离不能替代逐次 capability 校验。
 
-MVP 使用 CDP screencast，先保证隔离和跨浏览器一致性。若后续对视频效率或输入法支持要求更高，可以在不改变 capability 边界的前提下替换为 WebRTC 编码和数据通道。
+它不是 VM 级强沙箱。需要明确保留的风险包括：
 
-## 4. SDK 与 capability RPC
+- 浏览器引擎漏洞，以及同一浏览器进程中的侧信道；
+- 恶意 Controller 消耗当前 tab 的 CPU/内存；
+- sandboxed frame 可以导航自身，因此浏览器沙箱与 CSP 只把直接网络能力降到很低，不承诺数学意义上的零外联或零隐蔽信道；
+- verifier 是防误用和缩小攻击面，不是 JavaScript 的完整证明系统。
 
-Runtime 在 Page 创建最小 `ambient` facade。Graph、Network、Files 和 installed capability 的调用都通过 Runtime Supervisor 转发到 Backend：
+因此 Controller 和本地 storage 都不能接触秘密；来自 Controller 的所有 RPC、数据和 UI 事件都按不可信输入处理。高风险 capability 必须继续由 Backend policy、用户确认和审计保护。
 
-```text
-Controller -> ambient.graph.subscribe(...)
-           -> isolated Page binding
-           -> runtime rpc_request
-           -> WidgetRuntimeGateway(session binding)
-           -> CapabilityAuthorizer
-           -> adapter
-           -> rpc_response / subscription_event
-```
+## 7. 像素流回滚
 
-Runtime 不能自行读取 Manifest 或判断 grant。Backend 每次操作都以当前持久 Manifest 为准重新授权：
+构建 Frontend 时设置 `VITE_WIDGET_UI_TRANSPORT=pixels` 可恢复原 `PixelSandboxWidget`、`/ws/widgets/{app_id}/runtime` 和零网络 `widget-runtime` Chromium 容器。Compose 暂时同时保留两个 runtime 服务。
 
-- `graph.subscribe` / `graph.mutate` 进入规范本体和 operation scope 检查；
-- `net.request` 进入 HTTPS source allowlist、DNS/IP/redirect/size/content-type 限制；
-- `files.*` 进入 `app://data/` path scope 与原子写边界；
-- `capabilities.invoke` 进入 catalog/action/input/output 与 Run interaction policy。
+该模式用于紧急兼容回滚，不是默认路径。它继续承担视频带宽、输入转发和较高资源占用，并且不提供新的宿主 IndexedDB `ambient.storage`；依赖本地存储的新 Widget 不应在 pixel 模式运行。一个发布周期后，在部署指标与兼容性验证完成时可删除旧链路。
 
-订阅由 Backend 所有。session 关闭时 Gateway 注销全部 Graph listeners；Runtime 只持有 session-local subscription ID，不能把它复用于其他 App。
-
-Graph mutation 和 installed-capability invocation 的幂等身份由 Runtime Supervisor 的 `request_id` 与 Backend 保存的 session binding 共同产生。Controller/Page 不生成或提交 invocation identity，也不能依赖安全上下文专属的 `crypto.randomUUID()`。
-
-## 5. Controller 兼容与发布验证
-
-现有 Manifest V2 + `controller.js` 产物格式保持不变，不要求修改已生成 App。Runtime 在隔离 Page 内提供与现有 `ambient.html`、`ambient.react` hooks 和标准组件兼容的 renderer。Babel 转译和 module wrapper 从用户浏览器移入 Runtime。
-
-发布 verifier 仍是第一道防线，拒绝 import、dynamic import、host global、直接网络/storage、动态 capability ID 与超出 Runtime Contract 的调用。运行时容器和后端逐次授权是独立的第二、第三道防线；任何一层都不能因为另外一层存在而放宽。
-
-生成/修改 Widget 的 staging smoke test 必须经过与生产相同的 Runtime Gateway，至少证明：
-
-1. Controller 能在隔离 Chromium 中加载并产生首帧；
-2. 申请的 Graph query/mutation 在批准 schema 与 grant 下成功；
-3. 未批准的 capability、伪造 App ID 和过期 revision 被 Backend 拒绝；
-4. 直接公网访问与宿主/工作区文件读取失败；
-5. runtime error 被分类为代码、授权/设计或基础设施问题，再决定自动修复还是请求用户/运维介入。
-
-## 6. 隔离等级与限制
-
-默认 `balanced` 模式在一个容器和 Chromium browser process 内复用多个独立 BrowserContext。它显著降低每 App 启动和内存成本，但 Chromium/browser-process 或容器内核逃逸仍属于共享 TCB；BrowserContext 不是虚拟机安全边界。
-
-未来可选 `strict` 模式为每个 App 启动独立 runtime 容器和 Chromium，并复用同一 Gateway 协议。它改善 App 间故障与进程隔离，但消耗更多内存和启动时间。个人笔记本默认不启用 microVM：Docker Desktop 在 macOS/Windows 已位于 Linux VM 内；Linux 可选 rootless Docker 或 gVisor 作为额外宿主边界。这些部署增强不能替代无网络、无宿主挂载、后端身份绑定和 capability 授权。
-
-完整类目与 scope 见 [Widget 能力安全架构](/architecture/capability-security.md)，生成与修复信息见 [Widget 生成信息契约](/architecture/widget-generation.md)。
+完整 API 见 [ambient SDK](/widgets/sdk.md)，授权语义见 [Widget 能力安全架构](/architecture/capability-security.md)，生成流程见 [Widget 生成信息契约](/architecture/widget-generation.md)。

@@ -115,9 +115,66 @@ class WidgetRuntimeBinding:
 
 RuntimeConnector = Callable[[], RuntimeConnection | Awaitable[RuntimeConnection]]
 RuntimeRpcHandler = Callable[
-    [WidgetRuntimeBinding, str, dict[str, Any]],
+    [Any, str, dict[str, Any]],
     Any | Awaitable[Any],
 ]
+
+
+async def build_widget_runtime_rpc_response(
+    binding: Any,
+    message: dict[str, Any],
+    rpc_handler: RuntimeRpcHandler | None,
+    *,
+    include_session_id: bool,
+) -> dict[str, Any]:
+    """Build one capability RPC response for either Runtime transport."""
+
+    if not isinstance(message, dict) or message.get("type") != "rpc_request":
+        raise ValueError("Widget Runtime message must be an RPC request object")
+    request_id = message.get("request_id")
+    method = message.get("method")
+    params = message.get("params", {})
+    if (
+        not isinstance(request_id, str)
+        or not request_id
+        or len(request_id) > 200
+    ):
+        raise ValueError("Widget Runtime RPC request_id must be between 1 and 200 characters")
+    if not isinstance(method, str) or not method or len(method) > 200:
+        raise ValueError("Widget Runtime RPC method must be between 1 and 200 characters")
+    if not isinstance(params, dict):
+        raise ValueError("Widget Runtime RPC params must be an object")
+    sanitized_params = {
+        **{key: value for key, value in params.items() if key not in _IDENTITY_FIELDS},
+        "_runtime_request_id": request_id,
+    }
+    response: dict[str, Any] = {
+        "type": "rpc_response",
+        "request_id": request_id,
+    }
+    if include_session_id:
+        response["session_id"] = binding.session_id
+    if rpc_handler is None:
+        response["error"] = {
+            "code": "runtime_rpc_unavailable",
+            "message": "Widget Runtime capability RPC is not configured",
+        }
+        return response
+    try:
+        result = rpc_handler(binding, method, sanitized_params)
+        if inspect.isawaitable(result):
+            result = await result
+        response["result"] = result
+    except Exception as exc:
+        response["error"] = (
+            exc.to_dict()
+            if hasattr(exc, "to_dict")
+            else {
+                "code": "runtime_rpc_failed",
+                "message": str(exc),
+            }
+        )
+    return response
 
 
 class WidgetRuntimeGateway:
@@ -389,12 +446,6 @@ class WidgetRuntimeGateway:
             {"type": "input", "session_id": binding.session_id, "event": event}
         )
 
-    @staticmethod
-    def _sanitize_rpc_params(params: Any) -> dict[str, Any]:
-        if not isinstance(params, dict):
-            raise ValueError("Widget Runtime RPC params must be an object")
-        return {key: value for key, value in params.items() if key not in _IDENTITY_FIELDS}
-
     async def handle_runtime_message(
         self,
         session_id: str,
@@ -408,47 +459,12 @@ class WidgetRuntimeGateway:
 
         message_type = message.get("type")
         if message_type == "rpc_request":
-            request_id = self._require_string(message.get("request_id"), "RPC request ID")
-            method = self._require_string(message.get("method"), "RPC method")
-            params = {
-                **self._sanitize_rpc_params(message.get("params", {})),
-                "_runtime_request_id": request_id,
-            }
-            if self._rpc_handler is None:
-                error = {
-                    "code": "runtime_rpc_unavailable",
-                    "message": "Widget Runtime capability RPC is not configured",
-                }
-                await binding.connection.send_json(
-                    {
-                        "type": "rpc_response",
-                        "session_id": binding.session_id,
-                        "request_id": request_id,
-                        "error": error,
-                    }
-                )
-                return None
-            try:
-                result = self._rpc_handler(binding, method, params)
-                if inspect.isawaitable(result):
-                    result = await result
-                response = {
-                    "type": "rpc_response",
-                    "session_id": binding.session_id,
-                    "request_id": request_id,
-                    "result": result,
-                }
-            except Exception as exc:
-                error = exc.to_dict() if hasattr(exc, "to_dict") else {
-                    "code": "runtime_rpc_failed",
-                    "message": str(exc),
-                }
-                response = {
-                    "type": "rpc_response",
-                    "session_id": binding.session_id,
-                    "request_id": request_id,
-                    "error": error,
-                }
+            response = await build_widget_runtime_rpc_response(
+                binding,
+                message,
+                self._rpc_handler,
+                include_session_id=True,
+            )
             await binding.connection.send_json(response)
             return None
 

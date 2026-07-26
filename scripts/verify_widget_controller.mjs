@@ -50,6 +50,9 @@ const forbiddenGlobals = new Set([
   "parent",
   "top",
   "opener",
+  "location",
+  "open",
+  "getComputedStyle",
   "localStorage",
   "sessionStorage",
   "indexedDB",
@@ -59,6 +62,9 @@ const forbiddenGlobals = new Set([
   "EventSource",
   "Worker",
   "SharedWorker",
+  "RTCPeerConnection",
+  "webkitRTCPeerConnection",
+  "WebTransport",
   "navigator",
   "eval",
   "Function",
@@ -68,7 +74,10 @@ const forbiddenGlobals = new Set([
 const ambientSdkMembers = new Map([
   ["components", new Set(["Column", "Row", "Card", "Text", "Button", "TextField", "Checkbox", "List", "Table"])],
   ["react", new Set(["useState", "useEffect", "useMemo", "useRef", "useCallback", "useContext", "useReducer"])],
+  ["storage", new Set(["get", "set", "delete", "clear", "list"])],
 ]);
+const ambientMemberLabel = (namespace) =>
+  namespace === "components" ? "primitive" : namespace === "react" ? "hook" : "method";
 
 const securityPlugin = ({ types: t }) => ({
   visitor: {
@@ -97,7 +106,7 @@ const securityPlugin = ({ types: t }) => ({
             ? property.key.value
             : "";
         if (!allowed.has(name)) {
-          const label = namespace === "components" ? "primitive" : "hook";
+          const label = ambientMemberLabel(namespace);
           throw path.buildCodeFrameError(`Unknown ambient.${namespace} ${label}: ${name || "<computed>"}`);
         }
       }
@@ -117,7 +126,7 @@ const securityPlugin = ({ types: t }) => ({
         ? t.isStringLiteral(path.node.property) ? path.node.property.value : ""
         : t.isIdentifier(path.node.property) ? path.node.property.name : "";
       if (!allowed.has(name)) {
-        const label = namespace === "components" ? "primitive" : "hook";
+        const label = ambientMemberLabel(namespace);
         throw path.buildCodeFrameError(`Unknown ambient.${namespace} ${label}: ${name || "<computed>"}`);
       }
     },

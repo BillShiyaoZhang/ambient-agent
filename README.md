@@ -18,7 +18,7 @@ Ambient Agent 是一个开源、自托管、以应用工作区为核心的个人
 - 结构化 Agent 能力目录：按 Router、Converse、Schema、Coding、Verification 角色投影真实可用能力，避免 prompt 漂移。
 - 后端权限与审计：Tool Gateway、MCP、Coding Agent、mutation interaction 和 LLM audit。
 
-`SandboxWidget` 使用静态 verifier、最小 SDK membrane 与后端授权限制宿主 I/O；Controller 仍与宿主页同 realm 执行，因此这不是执行任意第三方 JavaScript 的通用强沙箱。
+`SandboxWidget` 默认把 Controller 放进独立 `widget-frame` 服务提供的 opaque-origin sandbox iframe，通过一次性 ticket、MessageChannel 和后端逐次授权访问能力。Widget 的非秘密本地状态由宿主按 App 隔离保存在 IndexedDB；旧的服务端 Chromium 像素流暂时保留为显式回滚路径。浏览器 sandbox 不是 VM，Controller 仍按不可信代码处理。
 
 ## 快速开始
 
@@ -47,6 +47,7 @@ npm --prefix frontend run dev
 ```text
 backend/          FastAPI、Agent durable workflow、Run、Graph、应用与集成
 frontend/src/     React 工作区、应用中心、Widget 宿主和客户端服务
+widget-runtime/   浏览器 iframe Shell 与旧 Chromium 像素流 Runtime
 docs/             严格对应的中文与 docs/en/ 英文文档
 scripts/          契约生成与 UML、文档、Widget 校验
 tests/            Pytest 与 Vitest 测试
@@ -73,7 +74,7 @@ Ambient Agent is an open-source, self-hosted personal AI assistant built around 
 
 Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged Manifest V2 Widget publication, schema-first Graph data, user-approved least-authority Widget grants, a structured Agent capability catalog, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, and backend enforcement for tools, MCP, mutations, and audit records.
 
-`SandboxWidget` combines static verification, a least-authority SDK membrane, and backend I/O authorization. Controllers still execute in the host page realm, so this is not a general strong sandbox for arbitrary third-party JavaScript.
+By default, `SandboxWidget` runs a Controller in an opaque-origin sandbox iframe served by the separate `widget-frame` service. A one-time ticket, transferred MessageChannel, and per-operation Backend authorization mediate capabilities. Non-secret local Widget state is host-owned IndexedDB scoped by App; the former server-Chromium pixel stream remains as an explicit temporary rollback. The browser sandbox is not a VM, so Controllers are still treated as untrusted code.
 
 Start with:
 
