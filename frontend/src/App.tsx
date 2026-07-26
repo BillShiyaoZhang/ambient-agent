@@ -18,6 +18,14 @@ import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
 import { mergeIncomingMessage } from "./lib/messages";
 import {
+  EMPTY_CONVERSATION_PROJECTION,
+  markRunCancelling,
+  orderedRunCards,
+  projectRunEvent,
+  projectRunSnapshot,
+  type ConversationProjection,
+} from "./lib/chatProjection";
+import {
   createCustomOntologyEntity,
   parseEquivalentOntologyIris,
 } from "./lib/ontology";
@@ -74,6 +82,7 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [chatProjection, setChatProjection] = useState<ConversationProjection>(EMPTY_CONVERSATION_PROJECTION);
   const [widgets, setWidgets] = useState<Widget[]>([]);
   const [canvasConfig, setCanvasConfig] = useState<CanvasConfigV3>(() => ({ ...EMPTY_CANVAS, windows: {} }));
   const [llmCatalog, setLLMCatalog] = useState<ProviderPreset[]>([]);
@@ -531,6 +540,8 @@ function App() {
   // 2. Fetch messages and connect the selected chat session.
   useEffect(() => {
     if (!activeSessionId) return;
+    let disposed = false;
+    setChatProjection(EMPTY_CONVERSATION_PROJECTION);
 
     // Load message history from DB
     const loadSessionHistory = async () => {
@@ -548,9 +559,19 @@ function App() {
     };
 
     loadSessionHistory();
+    void runService.list({ limit: 100 }).then((runs) => {
+      if (disposed) return;
+      const sessionRuns = runs
+        .filter((run) => run.source_type === "chat" && run.source_id === activeSessionId)
+        .sort((left, right) => left.created_at.localeCompare(right.created_at));
+      setChatProjection((current) => sessionRuns.reduce(projectRunSnapshot, current));
+    }).catch((error) => {
+      console.error("Error loading chat runs:", error);
+    });
 
     const handleProjection = (data: any) => {
       if (data.type === "ack" || data.type === "reply") {
+        if (data.message?.id === -1) return;
         if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
           setUnreadCount((count) => count + 1);
         }
@@ -670,6 +691,7 @@ function App() {
     ]);
     const unsubscribeRunEvents = runService.subscribe((event) => {
       if (event.session_id !== activeSessionId) return;
+      setChatProjection((current) => projectRunEvent(current, event));
       const payload = event.payload;
       if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
       const type = (payload as Record<string, unknown>).type;
@@ -679,6 +701,7 @@ function App() {
     });
 
     return () => {
+      disposed = true;
       unsubscribeRunEvents();
       wsService.disconnect();
     };
@@ -729,6 +752,22 @@ function App() {
       content: text,
     });
   };
+
+  const handleCancelRun = useCallback(async (runId: string) => {
+    setChatProjection((current) => markRunCancelling(current, runId));
+    try {
+      const run = await runService.cancel(runId);
+      setChatProjection((current) => projectRunSnapshot(current, run));
+    } catch (error) {
+      console.error("Error cancelling run:", error);
+      try {
+        const run = await runService.get(runId);
+        setChatProjection((current) => projectRunSnapshot(current, run));
+      } catch (refreshError) {
+        console.error("Error refreshing run after cancellation failed:", refreshError);
+      }
+    }
+  }, []);
 
   const handleRemoveWidget = (id: string) => {
     setCanvasConfig((previous) => {
@@ -889,6 +928,7 @@ function App() {
         open={isChatOpen}
         unreadCount={unreadCount}
         messages={messages}
+        runCards={orderedRunCards(chatProjection)}
         sessions={sessions}
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
@@ -899,6 +939,7 @@ function App() {
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
+        onCancelRun={handleCancelRun}
         providers={llmProviders}
         modelSelection={sessions.find((session) => session.id === activeSessionId)?.model_selection ?? llmSettings.default_model}
         onModelChange={handleSessionModelChange}

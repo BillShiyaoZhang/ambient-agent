@@ -30,12 +30,15 @@ export interface AmbientRun {
   source_type: string;
   source_id?: string | null;
   adapter_type: string;
+  workflow_type?: string;
   runtime_id: string;
   status: RunStatus;
   progress: number;
   summary: string;
   input: unknown;
   result?: unknown;
+  state?: unknown;
+  checkpoint?: unknown;
   artifacts?: Array<{ type: string; id?: string; path?: string; title?: string }>;
   correlation?: {
     projection_type?: string;

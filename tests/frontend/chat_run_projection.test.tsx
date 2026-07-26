@@ -72,6 +72,23 @@ function canonicalReply(sessionId: string, content: string): Record<string, unkn
   };
 }
 
+function canonicalProgress(sessionId: string, sequence: number, type: string, payload: unknown): Record<string, unknown> {
+  return {
+    sequence,
+    event_id: `event-progress-${sequence}`,
+    schema_version: 1,
+    stream_epoch: "epoch-one",
+    run_id: "run-progress",
+    session_id: sessionId,
+    step_id: "stage_code",
+    attempt: 1,
+    trace_id: "trace-progress",
+    type,
+    payload,
+    created_at: `2026-07-19T00:00:0${sequence}Z`,
+  };
+}
+
 describe("canonical RunEvent chat projection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -146,5 +163,33 @@ describe("canonical RunEvent chat projection", () => {
 
     await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
     expect(createCalls).toBe(1);
+  });
+
+  it("groups ephemeral streaming replies into a Run card", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      harness.runListeners.forEach((listener) => {
+        listener(canonicalProgress("session-one", 1, "step_started", {
+          step_key: "stage_code",
+          attempt: 1,
+          lease_epoch: 1,
+        }));
+        listener(canonicalProgress("session-one", 2, "agent_update", {
+          type: "reply",
+          message: { id: -1, sender: "agent", content: "正在准备组件文件" },
+        }));
+        listener(canonicalProgress("session-one", 3, "agent_update", {
+          type: "reply",
+          message: { id: -1, sender: "agent", content: "正在写入组件文件" },
+        }));
+      });
+    });
+
+    expect(await screen.findByText("生成中 · 生成应用")).toBeDefined();
+    expect(screen.getAllByText("正在写入组件文件")).toHaveLength(1);
+    expect(screen.getByText("2 条进度已归并")).toBeDefined();
   });
 });

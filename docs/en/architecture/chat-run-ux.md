@@ -1,6 +1,6 @@
 # Chat and Run Information Experience
 
-> Status: discussion draft. This document defines information architecture, event contracts, and rollout order; it does not directly change the frontend visuals.
+> Status: Phase A implemented; Phases B–D remain for later iterations. This document records the information architecture, event contracts, current implementation, and rollout order.
 
 ## 1. Goals and principles
 
@@ -197,6 +197,7 @@ Show the latest finding by default and keep prior findings in the expanded timel
 
 - Add `ConversationProjection` and `RunCard`, initially consuming existing durable events.
 - Move phase notices and accumulated `id=-1` logs into the activity timeline.
+- Change the desktop chat overlay default to about 432 × 600 px and add viewport-constrained resizing with persisted dimensions.
 - Preserve current reply/widget/approval API compatibility.
 
 ### Phase B: true live deltas
@@ -217,7 +218,25 @@ Show the latest finding by default and keep prior findings in the expanded timel
 - Remove the `id=-1` single-pending-message convention.
 - Persist only user messages, final answers, and necessary interaction summaries in chat history.
 
-## 10. Acceptance criteria and decisions
+## 10. Confirmed product choices and acceptance criteria
+
+The following choices are confirmed:
+
+1. Collapse process after Run completion and leave the final answer expanded.
+2. Show human-readable actions by default and expose raw commands only in detail/debug views.
+3. Use a desktop default width around 420–440 px while allowing user resizing; keep mobile as a full-screen drawer.
+4. Put low-risk plan/Schema choices inline and retain blocking dialogs for high-risk permission requests.
+
+Desktop resize contract:
+
+- Default to about 432 × 600 CSS px; use a suggested minimum of 360 × 420 px, maximum width `min(720px, viewport - 32px)`, and maximum height `viewport - 96px`.
+- Keep the overlay anchored to the lower-right corner. Dragging the top, left, or top-left edges changes size without moving the chat launcher.
+- Store dimensions in a dedicated workspace UI preference. Reopening chat and refreshing restore the size; changing conversations does not.
+- Clamp to the visible area when the viewport shrinks without overwriting the saved preference, so the prior size can return when space is available again.
+- Below 720 px, ignore desktop dimensions, use the existing full-screen drawer, and hide resize handles.
+- Provide Compact, Default, Wide, and Reset size presets. Resize handles support arrow keys so precise pointer input is not required.
+- Use pointer capture and animation frames while resizing, and persist only when the gesture ends.
+- Resizing must preserve the message scroll anchor and keep the composer, stop button, and interaction actions visible.
 
 Acceptance criteria:
 
@@ -226,11 +245,5 @@ Acceptance criteria:
 - Reconnect produces no duplicate activity, half-final answer, or regressed approval state.
 - Consecutive repairs update one activity instead of producing repeated manual-repair messages.
 - Streaming does not steal scroll position while the user reads older content.
+- A resized desktop overlay restores after refresh, never overflows narrow viewports, and preserves the user's preferred size when returning to desktop.
 - Keyboard and screen-reader users can expand, approve, stop, and open artifacts.
-
-Product choices to confirm:
-
-1. Collapse process after completion and leave the final answer expanded (recommended).
-2. Show human-readable actions by default; expose raw commands only in detail/debug views (recommended).
-3. Increase desktop chat width from 380 px to about 420–440 px for Run cards; keep mobile as a full-screen drawer (recommended).
-4. Put low-risk plan/Schema choices inline and retain blocking dialogs for high-risk permission requests (recommended).

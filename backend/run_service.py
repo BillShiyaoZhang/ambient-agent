@@ -872,7 +872,10 @@ class RunStore:
                         started_at,
                     ),
                 )
-                created_payload: dict[str, Any] = {"status": status}
+                created_payload: dict[str, Any] = {
+                    "status": status,
+                    "workflow_type": resolved_workflow_type,
+                }
                 if correlation is not None:
                     created_payload["correlation"] = correlation
                 self._append_event(connection, run_id, "run_created", created_payload)
@@ -1714,6 +1717,9 @@ class RunStore:
                         "tokens": normalized_state.budget.tokens_used,
                         "cost_usd": normalized_state.budget.cost_usd,
                     },
+                    "workflow_type": normalized_state.workflow_type,
+                    "repair_count": normalized_state.data.get("repair_count", 0),
+                    "artifact_count": len(normalized_state.artifact_refs),
                     "outcome": outcome_json,
                 },
             )
