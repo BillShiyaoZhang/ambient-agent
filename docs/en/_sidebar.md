@@ -12,6 +12,7 @@
   - [Widgets and App Center](/en/architecture/apps.md)
   - [Durable Runs and Runtimes](/en/architecture/runs.md)
   - [Graph Database](/en/architecture/graph-db.md)
+  - [Privacy Data Map](/en/architecture/privacy-data-map.md)
   - [Backend UML](/en/architecture/uml.md)
 
 - **Agent Engine**

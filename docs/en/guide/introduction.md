@@ -14,6 +14,7 @@ A normal chat interface works well for one-off answers but poorly for tasks that
 - **Shared graph data**: Widgets and the Agent read and write user-context facts in the canonical Neo4j knowledge graph through ontology-validated Graph APIs.
 - **Model and tool integrations**: Providers, default models, and per-session models are configured in the UI. The Agent can reach external capabilities through the Tool Gateway, MCP, or OpenCode.
 - **Audit and confirmation**: LLM requests are written to the workspace audit log. Backend policy, interactions, and persistent effect records govern effectful flows.
+- **Privacy data map**: A redacted topology is derived on demand from existing Audit evidence, Manifest V2 declarations, and canonical schema IDs from the active graph adapter, with observed, declared, and uninstrumented paths kept distinct.
 - **Least-authority grants**: A Widget receives only Graph, network, file, or installed-capability grants approved during schema alignment, and the backend reauthorizes every operation.
 
 ## Boundaries to understand
@@ -21,6 +22,7 @@ A normal chat interface works well for one-off answers but poorly for tasks that
 - `SandboxWidget` is a component name, not a strong sandbox for untrusted JavaScript. Widget controllers execute in the page JavaScript realm and should only load trusted workspace code.
 - WebSockets carry chat projections, graph subscriptions, and Run events. The current code has no user identity, device pairing, or conflict-merge protocol, so this documentation does not present it as a complete multi-user or multi-device collaboration system.
 - Whether a local model is “offline” depends on the configured provider and tools. Cloud models, MCP, and Widget network requests still create external traffic.
+- The Privacy Map is a read-only derived view, not a second audit database. V1 coverage is always `partial`: missing evidence does not mean no transmission, and a Manifest declaration is neither permission nor runtime proof.
 
 ## Recommended reading order
 
@@ -28,4 +30,5 @@ A normal chat interface works well for one-off answers but poorly for tasks that
 2. [Project Structure](/en/architecture/project-structure.md): learn the directories and module responsibilities.
 3. [System and Request Flow](/en/architecture/overview.md): follow input through Runs, data, and UI.
 4. [Widget Capability Security](/en/architecture/capability-security.md): understand declaration, approval, generation, and runtime enforcement.
-5. Continue with the Agent, Widget, Graph, or integration section relevant to your work.
+5. [Privacy Data Map V1](/en/architecture/privacy-data-map.md): understand the evidence boundary and known blind spots of the redacted data-flow projection.
+6. Continue with the Agent, Widget, Graph, or integration section relevant to your work.

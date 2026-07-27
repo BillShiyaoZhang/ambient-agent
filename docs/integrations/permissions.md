@@ -41,3 +41,9 @@ Coding Agent 只在 per-Run staging App 中工作：
 - Tool/adapter events 对敏感参数脱敏并限制大小；LLM audit 保存有界 preview、hash、usage 与 latency。
 - 终态 Run events 与 LLM audit 按 retention policy 清理，但仍是敏感 workspace 数据。
 - 用户批准不能代替最小 scope、schema 校验、幂等、fencing、补偿和 `needs_attention` reconciliation。
+
+## 6. Privacy Map 的证据边界
+
+Privacy Map 只从已有 LLM Audit metadata、Manifest V2 `schema_refs` 与当前 graph adapter 的规范 schema ID 派生只读拓扑。它不复制 raw prompt、response、credential、tool arguments 或 graph values，也不建立第二个审计数据库。
+
+界面中的 `observed` 只表示受支持的 Audit path 产生了记录；`declared` 只表示 Manifest 与已注册 schema 的关联；`unknown` 表示通道未被完整 instrument。三者都不能替代 capability authorization、Run interaction 或 runtime policy。V1 coverage 固定为 `partial`，详见 [Privacy Data Map V1](/architecture/privacy-data-map.md)。

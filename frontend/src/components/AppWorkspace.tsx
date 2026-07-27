@@ -13,6 +13,7 @@ import {
   Grid2X2,
   Languages,
   ListTodo,
+  Map as MapIcon,
   Maximize2,
   Minimize2,
   Moon,
@@ -53,6 +54,7 @@ interface AppWorkspaceProps {
     onSuspendReady: () => void,
   ) => React.ReactNode;
   onOpenAppStore: () => void;
+  onOpenPrivacyMap: (trigger: HTMLElement) => void;
   onOpenAudit: () => void;
   onOpenTasks?: () => void;
   onOpenLLMSettings?: () => void;
@@ -87,6 +89,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   onCanvasChange,
   renderWidgetContent,
   onOpenAppStore,
+  onOpenPrivacyMap,
   onOpenAudit,
   onOpenTasks = () => {},
   onOpenLLMSettings = () => {},
@@ -389,7 +392,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
           <div className="workspace-active-title"><AppWindow size={15} /><span>{chromeOwnsWindow ? activeWidget?.title : (isZh ? "工作区" : "Workspace")}</span></div>
         </div>
 
-        <nav className="workspace-chrome-island" aria-label={isZh ? "工作区工具栏" : "Workspace toolbar"}>
+        <nav className="workspace-chrome-island" data-system-toolbar tabIndex={-1} aria-label={isZh ? "工作区工具栏" : "Workspace toolbar"}>
           <SystemIconButton label={isZh ? "打开应用中心" : "Open App Center"} onClick={onOpenAppStore}><Store size={18} /></SystemIconButton>
           <SystemIconButton className="workspace-task-button" label={isZh ? "打开任务中心" : "Open Task Center"} onClick={onOpenTasks}><ListTodo size={18} />{taskCount > 0 && <span>{Math.min(taskCount, 99)}</span>}</SystemIconButton>
           <div className="workspace-toolbar-divider" />
@@ -401,7 +404,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
           </div>
         </nav>
 
-        <div className="workspace-chrome-trailing">
+        <div className="workspace-chrome-trailing" data-system-toolbar tabIndex={-1}>
           <div className="workspace-desktop-actions">
             <div className="workspace-menu-anchor">
               <SystemIconButton ref={layoutTriggerRef} label={isZh ? "布局" : "Layout"} onClick={() => setOpenMenu((value) => value === "layout" ? null : "layout")} aria-expanded={openMenu === "layout"}><Grid2X2 size={17} /><ChevronDown size={10} /></SystemIconButton>
@@ -411,6 +414,15 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
                 <button onClick={() => applyLayout("grid")}><Grid2X2 size={15} />{isZh ? "自动网格" : "Adaptive grid"}</button>
               </SystemPopover>
             </div>
+            <SystemIconButton
+              label={isZh ? "隐私地图" : "Privacy Map"}
+              onClick={(event) => {
+                setOpenMenu(null);
+                onOpenPrivacyMap(event.currentTarget);
+              }}
+            >
+              <MapIcon size={17} />
+            </SystemIconButton>
             <SystemIconButton label={isZh ? "审计日志" : "Audit log"} onClick={onOpenAudit}><ShieldCheck size={17} /></SystemIconButton>
             <SystemIconButton label={isZh ? "模型与 Provider" : "Models & Providers"} onClick={onOpenLLMSettings}><Settings2 size={17} /></SystemIconButton>
             <SystemIconButton label={isZh ? "切换为英文" : "Switch to Chinese"} onClick={() => onLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
@@ -427,6 +439,10 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
               <button className="mobile-only-action" onClick={() => { onOpenAppStore(); setOpenMenu(null); }}><Store size={15} />{isZh ? "应用中心" : "App Center"}</button>
               <button className="mobile-only-action" onClick={() => { onOpenTasks(); setOpenMenu(null); }}><ListTodo size={15} />{isZh ? "任务中心" : "Task Center"}</button>
               <button onClick={() => applyLayout("focus")}><PanelLeft size={15} />{isZh ? "聚焦当前 App" : "Focus current app"}</button>
+              <button onClick={(event) => {
+                onOpenPrivacyMap(moreTriggerRef.current ?? event.currentTarget);
+                setOpenMenu(null);
+              }}><MapIcon size={15} />{isZh ? "隐私地图" : "Privacy Map"}</button>
               <button onClick={() => { onOpenAudit(); setOpenMenu(null); }}><ShieldCheck size={15} />{isZh ? "审计日志" : "Audit log"}</button>
               <button onClick={() => { onOpenLLMSettings(); setOpenMenu(null); }}><Settings2 size={15} />{isZh ? "模型与 Provider" : "Models & Providers"}</button>
               <button onClick={() => { onLanguageChange(language === "zh" ? "en" : "zh"); setOpenMenu(null); }}><Languages size={15} />{isZh ? "切换为英文" : "Switch to Chinese"}</button>

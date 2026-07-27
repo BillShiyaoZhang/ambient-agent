@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from backend.ontology import (
@@ -17,6 +18,21 @@ from backend.ontology import (
     validate_correspondences,
     validate_property_definition,
 )
+
+
+class GraphSchemaReadError(Exception):
+    """Raised when the active graph adapter cannot read canonical schema IDs."""
+
+
+def _validate_schema_id_bounds(*, limit: int, max_id_codepoints: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("limit must be a positive integer")
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    if isinstance(max_id_codepoints, bool) or not isinstance(max_id_codepoints, int):
+        raise TypeError("max_id_codepoints must be a positive integer")
+    if max_id_codepoints <= 0:
+        raise ValueError("max_id_codepoints must be a positive integer")
 
 
 class GraphDatabase:
@@ -51,6 +67,17 @@ class GraphDatabase:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _get_read_conn(self):
+        database_uri = f"{Path(self.db_path).resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(database_uri, timeout=30.0, uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON;")
+            yield conn
         finally:
             conn.close()
 
@@ -442,6 +469,28 @@ class GraphDatabase:
                 }
                 for row in rows
             ]
+
+    def list_schema_ids(self, *, limit: int, max_id_codepoints: int) -> list[str]:
+        """Read a deterministic, bounded projection of registered schema IDs."""
+
+        _validate_schema_id_bounds(
+            limit=limit,
+            max_id_codepoints=max_id_codepoints,
+        )
+        try:
+            with self._get_read_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT substr(id, 1, ?) AS id
+                    FROM graph_schemas
+                    ORDER BY graph_schemas.id COLLATE BINARY
+                    LIMIT ?
+                    """,
+                    (max_id_codepoints, limit),
+                ).fetchall()
+                return [row["id"] for row in rows]
+        except sqlite3.Error:
+            raise GraphSchemaReadError from None
 
     def routing_snapshot(self, recent_per_type: int = 5) -> dict[str, Any]:
         """Return bounded graph context without exposing adapter internals."""

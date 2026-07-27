@@ -10,7 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.graph_db import GraphDatabase
+from neo4j.exceptions import DriverError, Neo4jError
+
+from backend.graph_db import GraphDatabase, GraphSchemaReadError, _validate_schema_id_bounds
 from backend.ontology import (
     ONTOLOGY_ID,
     ONTOLOGY_VERSION,
@@ -305,6 +307,34 @@ class Neo4jGraphDatabase(GraphDatabase):
             return [self._schema_from_record(record) for record in result]
 
         return self._read(fetch)
+
+    def list_schema_ids(self, *, limit: int, max_id_codepoints: int) -> list[str]:
+        """Read bounded schema identifiers without materializing definitions."""
+
+        _validate_schema_id_bounds(
+            limit=limit,
+            max_id_codepoints=max_id_codepoints,
+        )
+
+        def fetch(tx: Any) -> list[str]:
+            result = tx.run(
+                """
+                MATCH (e:OntologyEntity {ontology_id: $ontology_id})
+                WITH e
+                ORDER BY e.id
+                LIMIT $limit
+                RETURN substring(toString(e.id), 0, $max_id_codepoints) AS id
+                """,
+                ontology_id=ONTOLOGY_ID,
+                limit=limit,
+                max_id_codepoints=max_id_codepoints,
+            )
+            return [record["id"] for record in result]
+
+        try:
+            return self._read(fetch)
+        except (DriverError, Neo4jError):
+            raise GraphSchemaReadError from None
 
     def validate_properties(self, node_type: str, properties: dict[str, Any]) -> dict[str, Any]:
         schema = self.get_schema(node_type)

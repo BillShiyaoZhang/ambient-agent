@@ -1,11 +1,34 @@
 import asyncio
 import os
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import backend.main as main_module
-from backend.graph_db import GraphDatabase
+from backend.graph_db import GraphDatabase, GraphSchemaReadError
+
+
+def _replace_schema_ids(db: GraphDatabase, schema_ids: list[str]) -> None:
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM graph_schemas")
+        conn.executemany(
+            """
+            INSERT INTO graph_schemas (id, name, description, properties, is_core, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    schema_id,
+                    "Test schema",
+                    None,
+                    "{}",
+                    0,
+                    "2026-07-20T00:00:00+00:00",
+                )
+                for schema_id in schema_ids
+            ],
+        )
 
 
 def test_graph_db_crud(tmp_path):
@@ -85,6 +108,128 @@ def test_sqlite_graph_adapter_exposes_idempotent_close(tmp_path):
     assert db.close() is None
 
 
+def test_list_schema_ids_is_ordered_bounded_and_does_not_parse_definitions(tmp_path):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+    with db.get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO graph_schemas (id, name, description, properties, is_core, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Aardvark",
+                "Aardvark",
+                None,
+                "not-valid-json",
+                0,
+                "2026-07-20T00:00:00+00:00",
+            ),
+        )
+
+    assert db.list_schema_ids(limit=2, max_id_codepoints=128) == [
+        "Aardvark",
+        "Document",
+    ]
+
+
+def test_list_schema_ids_bounds_legacy_ids_before_python_materialization(tmp_path):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+    oversized_legacy_id = "legacy-" + ("x" * 2_000_000)
+    _replace_schema_ids(db, [oversized_legacy_id])
+
+    result = db.list_schema_ids(limit=1, max_id_codepoints=129)
+
+    assert result == [oversized_legacy_id[:129]]
+    assert len(result[0]) == 129
+
+
+def test_list_schema_ids_uses_query_only_read_only_connection(tmp_path, monkeypatch):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+    _replace_schema_ids(db, ["Zulu", "Alpha-two", "Alpha-one", "Middle"])
+    original_connect = sqlite3.connect
+    connection_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    executed_statements: list[str] = []
+
+    def recording_connect(*args, **kwargs):
+        connection_calls.append((args, kwargs))
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(executed_statements.append)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+
+    assert db.list_schema_ids(limit=3, max_id_codepoints=7) == [
+        "Alpha-o",
+        "Alpha-t",
+        "Middle",
+    ]
+    assert len(connection_calls) == 1
+    args, kwargs = connection_calls[0]
+    assert str(args[0]).startswith("file:")
+    assert "mode=ro" in str(args[0])
+    assert kwargs["uri"] is True
+    assert any("PRAGMA query_only=ON" in statement for statement in executed_statements)
+    assert not any("journal_mode" in statement for statement in executed_statements)
+
+
+@pytest.mark.parametrize("limit", [True, 1.5, "1", None])
+def test_list_schema_ids_rejects_non_integer_limits(tmp_path, limit):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+
+    with pytest.raises(TypeError, match="positive integer"):
+        db.list_schema_ids(limit=limit, max_id_codepoints=128)
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_list_schema_ids_rejects_non_positive_limits(tmp_path, limit):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+
+    with pytest.raises(ValueError, match="positive integer"):
+        db.list_schema_ids(limit=limit, max_id_codepoints=128)
+
+
+@pytest.mark.parametrize("max_id_codepoints", [True, 1.5, "128", None])
+def test_list_schema_ids_rejects_non_integer_max_id_codepoints(
+    tmp_path,
+    max_id_codepoints,
+):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+
+    with pytest.raises(TypeError, match="max_id_codepoints must be a positive integer"):
+        db.list_schema_ids(
+            limit=1,
+            max_id_codepoints=max_id_codepoints,
+        )
+
+
+@pytest.mark.parametrize("max_id_codepoints", [0, -1])
+def test_list_schema_ids_rejects_non_positive_max_id_codepoints(
+    tmp_path,
+    max_id_codepoints,
+):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+
+    with pytest.raises(ValueError, match="max_id_codepoints must be a positive integer"):
+        db.list_schema_ids(
+            limit=1,
+            max_id_codepoints=max_id_codepoints,
+        )
+
+
+def test_list_schema_ids_translates_sqlite_read_failures(tmp_path, monkeypatch):
+    db = GraphDatabase(str(tmp_path / "workspace"))
+
+    def failing_connection(*_args, **_kwargs):
+        raise sqlite3.OperationalError("sensitive adapter detail")
+
+    monkeypatch.setattr(sqlite3, "connect", failing_connection)
+
+    with pytest.raises(GraphSchemaReadError) as exc_info:
+        db.list_schema_ids(limit=1, max_id_codepoints=128)
+
+    assert str(exc_info.value) == ""
+
+
 @pytest.mark.asyncio
 async def test_application_lifespan_closes_composition_root_graph_adapter(
     monkeypatch: pytest.MonkeyPatch,
@@ -115,11 +260,35 @@ async def test_application_lifespan_recreates_graph_adapter_after_prior_shutdown
 ) -> None:
     first_graph_db = MagicMock()
     second_graph_db = MagicMock()
+    first_graph_db.list_schema_ids.return_value = ["Legacy"]
+    second_graph_db.list_schema_ids.return_value = ["Task"]
     graph_factory = MagicMock(return_value=second_graph_db)
+    audit_stream = object()
+    app_snapshot = object()
+    privacy_response = object()
+    app_reader = MagicMock()
+    app_reader.read.return_value = app_snapshot
+    privacy_service = MagicMock()
+    privacy_service.build.return_value = privacy_response
     monkeypatch.setattr(main_module, "graph_db", first_graph_db)
     monkeypatch.setattr(main_module, "_closed_graph_db", None)
     monkeypatch.setattr(main_module, "create_graph_database", graph_factory)
     monkeypatch.setattr(main_module.durable_agent_workflow, "graph_db", first_graph_db)
+    monkeypatch.setattr(
+        main_module,
+        "WorkspaceAuditProjectionStream",
+        MagicMock(return_value=audit_stream),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "AppDeclarationSnapshotReader",
+        MagicMock(return_value=app_reader),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "PrivacyDataMapService",
+        MagicMock(return_value=privacy_service),
+    )
     monkeypatch.setattr(main_module, "migrate_old_data", lambda _workspace: None)
     monkeypatch.setattr(main_module.db_storage, "cleanup_audit_logs", lambda: 0)
     monkeypatch.setattr(main_module, "recover_interrupted_coding_agent_promotions", lambda _apps_dir: None)
@@ -137,6 +306,12 @@ async def test_application_lifespan_recreates_graph_adapter_after_prior_shutdown
     async with main_module.lifespan(main_module.app):
         assert main_module.graph_db is second_graph_db
         assert main_module.durable_agent_workflow.graph_db is second_graph_db
+        assert main_module.build_privacy_data_map_response() is privacy_response
+
+    first_graph_db.list_schema_ids.assert_not_called()
+    second_graph_db.list_schema_ids.assert_called_once()
+    schema_snapshot = privacy_service.build.call_args.args[2]
+    assert schema_snapshot.schema_ids == ("Task",)
 
     graph_factory.assert_called_once_with(main_module.WORKSPACE_DIR)
     first_graph_db.close.assert_called_once_with()

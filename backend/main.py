@@ -63,8 +63,16 @@ from backend.coding_agent_acp import (
     cleanup_orphaned_coding_agent_staging,
     recover_interrupted_coding_agent_promotions,
 )
-from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
+from backend.privacy_data_map import (
+    AppDeclarationSnapshotReader,
+    GraphSchemaSnapshotReader,
+    PrivacyDataMapResponse,
+    PrivacyDataMapService,
+    WorkspaceAuditProjectionStream,
+)
+from backend.privacy_data_map_api import install_privacy_data_map
 from backend.run_live import RunLiveBroker
+from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
 from backend.session_title import is_placeholder_title, sanitize_title
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 from backend.widget_runtime import (
@@ -182,6 +190,14 @@ capability_authorizer = CapabilityAuthorizer(
     node_type_loader=_graph_node_type,
 )
 app_file_gateway = AppFileGateway(app_manager)
+
+
+def build_privacy_data_map_response() -> PrivacyDataMapResponse:
+    return PrivacyDataMapService(clock=lambda: datetime.now(UTC)).build(
+        WorkspaceAuditProjectionStream(WORKSPACE_DIR),
+        AppDeclarationSnapshotReader(os.path.join(WORKSPACE_DIR, "apps")).read(),
+        GraphSchemaSnapshotReader(graph_db).read(),
+    )
 
 
 def get_db():
@@ -500,6 +516,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_privacy_data_map(app, builder=build_privacy_data_map_response)
 
 
 @app.get("/health")

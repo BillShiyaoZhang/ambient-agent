@@ -12,6 +12,7 @@ import { MutationPreview, type MutationPreviewData } from "./components/Mutation
 import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
 import type { RunInteractionAction } from "./components/ChatRunCard";
+import { PrivacyDataMapPanel } from "./components/PrivacyDataMapPanel";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { LLMSettingsDialog } from "./components/LLMSettings";
 import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
@@ -39,7 +40,7 @@ import {
   schemaProposalDependencyErrors,
   type WidgetSchemaProposal,
 } from "./lib/widgetDesign";
-import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
+import { Languages, ListTodo, Map as MapIcon, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
   clearCodingAgentAuth,
@@ -69,6 +70,76 @@ import {
 } from "./services/llm";
 
 const API_BASE = `http://${window.location.hostname}:8000`;
+type SystemDrawerId = "privacy-map" | "audit" | "tasks";
+type PrivacyMapFocusContext = {
+  trigger: HTMLElement;
+  toolbar: HTMLElement | null;
+};
+
+const SYSTEM_TOOLBAR_SELECTOR = "[data-system-toolbar]";
+const SYSTEM_TOOLBAR_FOCUSABLE = [
+  "button:not([disabled])",
+  "a[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(", ");
+
+function isVisibleFocusTarget(element: HTMLElement): boolean {
+  if (!element.isConnected || element.matches("[disabled], [aria-disabled='true']")) {
+    return false;
+  }
+
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    if (
+      current.hidden
+      || current.hasAttribute("inert")
+      || current.getAttribute("aria-hidden") === "true"
+    ) {
+      return false;
+    }
+    const style = window.getComputedStyle(current);
+    if (
+      style.display === "none"
+      || style.visibility === "hidden"
+      || style.visibility === "collapse"
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function focusPrivacyMapReturnTarget(context: PrivacyMapFocusContext | null): boolean {
+  if (!context) return false;
+  if (isVisibleFocusTarget(context.trigger)) {
+    context.trigger.focus();
+    return true;
+  }
+
+  const toolbars = [
+    context.toolbar,
+    ...document.querySelectorAll<HTMLElement>(SYSTEM_TOOLBAR_SELECTOR),
+  ];
+  const visited = new Set<HTMLElement>();
+  for (const toolbar of toolbars) {
+    if (!toolbar || visited.has(toolbar) || !isVisibleFocusTarget(toolbar)) continue;
+    visited.add(toolbar);
+
+    const fallback = [...toolbar.querySelectorAll<HTMLElement>(SYSTEM_TOOLBAR_FOCUSABLE)]
+      .find(isVisibleFocusTarget);
+    if (fallback) {
+      fallback.focus();
+      return true;
+    }
+    toolbar.focus();
+    return true;
+  }
+
+  return false;
+}
 
 function mergeBootstrapWidgets(current: Widget[], snapshots: Widget[]): Widget[] {
   if (snapshots.length === 0) return current;
@@ -216,9 +287,60 @@ function App() {
     }
   }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
-  const [isAuditOpen, setIsAuditOpen] = useState(false);
-  const [isTaskDrawerOpen, setIsTaskDrawerOpen] = useState(false);
+  const [activeSystemDrawer, setActiveSystemDrawer] = useState<SystemDrawerId | null>(null);
+  const privacyMapFocusContextRef = useRef<PrivacyMapFocusContext | null>(null);
   const [taskCounts, setTaskCounts] = useState({ active: 0, attention: 0 });
+
+  const closeSystemDrawersBeforeBlockingSurface = useCallback(() => {
+    const context = privacyMapFocusContextRef.current;
+    privacyMapFocusContextRef.current = null;
+    focusPrivacyMapReturnTarget(context);
+    setActiveSystemDrawer(null);
+  }, []);
+
+  const openSystemDrawer = useCallback((drawer: SystemDrawerId, trigger?: HTMLElement) => {
+    if (drawer !== "privacy-map") {
+      const context = privacyMapFocusContextRef.current;
+      privacyMapFocusContextRef.current = null;
+      const activeElement = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+      const toolbarOwner = trigger
+        ?? (activeElement?.closest(SYSTEM_TOOLBAR_SELECTOR) ? activeElement : null);
+      if (toolbarOwner && isVisibleFocusTarget(toolbarOwner)) {
+        toolbarOwner.focus();
+      } else {
+        focusPrivacyMapReturnTarget(context);
+      }
+    }
+    setIsLLMSettingsOpen(false);
+    setActiveSystemDrawer(drawer);
+  }, []);
+
+  const openPrivacyMap = useCallback((trigger: HTMLElement) => {
+    privacyMapFocusContextRef.current = {
+      trigger,
+      toolbar: trigger.closest<HTMLElement>(SYSTEM_TOOLBAR_SELECTOR),
+    };
+    setIsAppStoreOpen(false);
+    setIsLLMSettingsOpen(false);
+    setActiveSystemDrawer("privacy-map");
+  }, []);
+
+  const closePrivacyMap = useCallback(() => {
+    const context = privacyMapFocusContextRef.current;
+    privacyMapFocusContextRef.current = null;
+    setActiveSystemDrawer(null);
+    requestAnimationFrame(() => {
+      focusPrivacyMapReturnTarget(context);
+    });
+  }, []);
+
+  const openLLMSettings = useCallback(() => {
+    closeSystemDrawersBeforeBlockingSurface();
+    setIsLLMSettingsOpen(true);
+    void refreshLLMConfiguration();
+  }, [closeSystemDrawersBeforeBlockingSurface, refreshLLMConfiguration]);
   
   interface PermissionRequest {
     request_id: string;
@@ -396,17 +518,20 @@ function App() {
     }
   };
 
-  const handleInspectRunInteraction = (interaction: RunInteractionState) => {
+  const handleInspectRunInteraction = useCallback((interaction: RunInteractionState) => {
     if (interaction.status !== "pending") return;
     const payload = interaction.payload;
     if (interaction.kind === "plan_approval") {
+      closeSystemDrawersBeforeBlockingSurface();
       setPendingPlanRequest(payload as unknown as PlanApprovalRequest);
     } else if (interaction.kind === "schema_approval") {
+      closeSystemDrawersBeforeBlockingSurface();
       setPendingSchemaRequest(payload as unknown as SchemaApprovalRequest);
     } else if (interaction.kind === "verification_approval") {
+      closeSystemDrawersBeforeBlockingSurface();
       setPendingVerificationRequest(payload as unknown as VerificationApprovalRequest);
     }
-  };
+  }, [closeSystemDrawersBeforeBlockingSurface]);
 
   // Helper functions for editing Reused Schema extensions
   const handleAddExtendedProperty = (schemaIndex: number) => {
@@ -713,8 +838,10 @@ function App() {
       } else if (typeof data.type === "string" && data.type.startsWith("capability_ui_generation_")) {
         window.dispatchEvent(new CustomEvent("app-store-refresh", { detail: data }));
       } else if (data.type === "permission_request") {
+        closeSystemDrawersBeforeBlockingSurface();
         setPendingPermission(data);
       } else if (data.type === "backend_permission_request") {
+        closeSystemDrawersBeforeBlockingSurface();
         setPendingBackendPermission(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
@@ -729,8 +856,7 @@ function App() {
           timestamp: new Date().toISOString(),
         }]);
         if (data.action === "open_llm_settings" || data.code === "llm_configuration_required") {
-          setIsLLMSettingsOpen(true);
-          void refreshLLMConfiguration();
+          openLLMSettings();
         }
       } else if (data.type === "mutation_preview") {
         setMutationPreview({
@@ -797,7 +923,14 @@ function App() {
       unsubscribeRunEvents();
       wsService.disconnect();
     };
-  }, [activeSessionId, language, refreshLLMConfiguration, saveCanvasConfig]);
+  }, [
+    activeSessionId,
+    closeSystemDrawersBeforeBlockingSurface,
+    language,
+    openLLMSettings,
+    refreshLLMConfiguration,
+    saveCanvasConfig,
+  ]);
 
   const handleCreateSession = async () => {
     if (creatingSessionRef.current) return;
@@ -930,7 +1063,7 @@ function App() {
         : session));
     } catch (error) {
       console.error("Error updating session model:", error);
-      setIsLLMSettingsOpen(true);
+      openLLMSettings();
     }
   };
 
@@ -965,12 +1098,13 @@ function App() {
       onPinWidget={handleOpenApp}
       onUnpinWidget={handleRemoveWidget}
       onRunFullscreen={handleOpenApp}
-      onRunCreated={() => setIsTaskDrawerOpen(true)}
+      onRunCreated={() => openSystemDrawer("tasks")}
       language={language}
-      headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
-        <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
-        <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={() => setIsAuditOpen(true)}><ShieldCheck size={17} /></SystemIconButton>
-        <SystemIconButton label={language === "zh" ? "模型与 Provider" : "Models & Providers"} onClick={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}><Settings2 size={17} /></SystemIconButton>
+      headerActions={<div className="app-center-system-actions" data-system-toolbar tabIndex={-1} aria-label={language === "zh" ? "系统设置" : "System settings"}>
+        <SystemIconButton label={language === "zh" ? "隐私数据地图" : "Privacy Map"} onClick={(event) => openPrivacyMap(event.currentTarget)}><MapIcon size={17} /></SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={(event) => openSystemDrawer("tasks", event.currentTarget)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={(event) => openSystemDrawer("audit", event.currentTarget)}><ShieldCheck size={17} /></SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "模型与 Provider" : "Models & Providers"} onClick={openLLMSettings}><Settings2 size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "切换为英文" : "Switch to Chinese"} onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
         <label className="system-theme-select" aria-label={language === "zh" ? "主题" : "Theme"}>
           {theme.effective === "dark" ? <Moon size={16} /> : <Sun size={16} />}
@@ -1006,9 +1140,10 @@ function App() {
                 />
               </ErrorBoundary>
             )}
-            onOpenAudit={() => setIsAuditOpen(true)}
-            onOpenTasks={() => setIsTaskDrawerOpen(true)}
-            onOpenLLMSettings={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
+            onOpenPrivacyMap={openPrivacyMap}
+            onOpenAudit={() => openSystemDrawer("audit")}
+            onOpenTasks={() => openSystemDrawer("tasks")}
+            onOpenLLMSettings={openLLMSettings}
             taskCount={taskCounts.active + taskCounts.attention}
             onOpenAppStore={() => setIsAppStoreOpen(true)}
             language={language}
@@ -1043,7 +1178,7 @@ function App() {
         providers={llmProviders}
         modelSelection={sessions.find((session) => session.id === activeSessionId)?.model_selection ?? llmSettings.default_model}
         onModelChange={handleSessionModelChange}
-        onManageModels={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
+        onManageModels={openLLMSettings}
         codingAgent={codingAgents?.find((agent) => agent.id === codingAgentSettings?.default_agent)}
         codingAgentModel={codingAgentSettings?.agent_models?.[codingAgentSettings.default_agent]}
       />
@@ -1073,18 +1208,28 @@ function App() {
         onUpdateCodingAgentModel={(agentId, config) => updateCodingAgentModel(API_BASE, agentId, config)}
       />
 
-      {/* Audit Log Panel Overlay */}
-      <AuditLogPanel isOpen={isAuditOpen} onClose={() => setIsAuditOpen(false)} />
-      <TaskDrawer
-        open={isTaskDrawerOpen}
+      <PrivacyDataMapPanel
+        open={activeSystemDrawer === "privacy-map"}
         language={language}
-        onClose={() => setIsTaskDrawerOpen(false)}
+        apiBase={API_BASE}
+        onClose={closePrivacyMap}
+      />
+
+      {/* Audit Log Panel Overlay */}
+      <AuditLogPanel
+        isOpen={activeSystemDrawer === "audit"}
+        onClose={() => setActiveSystemDrawer(null)}
+      />
+      <TaskDrawer
+        open={activeSystemDrawer === "tasks"}
+        language={language}
+        onClose={() => setActiveSystemDrawer(null)}
         onCountsChange={setTaskCounts}
         onOpenSource={(run: AmbientRun) => {
           if (run.source_type === "chat" && run.source_id) {
             handleSelectSession(run.source_id);
             handleChatOpenChange(true);
-            setIsTaskDrawerOpen(false);
+            setActiveSystemDrawer(null);
           }
         }}
       />

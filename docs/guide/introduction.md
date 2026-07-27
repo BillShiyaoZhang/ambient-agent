@@ -14,6 +14,7 @@ Ambient Agent 是一个开源、自托管的个人 AI 助理。它把对话、�
 - **统一图数据**：Widget 和 Agent 通过经过本体校验的 Graph API，在规范 Neo4j 知识图谱中读写用户上下文事实。
 - **模型与工具集成**：Provider、模型默认值和会话模型在界面中配置；Agent 可经 Tool Gateway、MCP 或 OpenCode 调用外部能力。
 - **审计与确认**：LLM 请求写入工作区审计日志；有副作用的流程由后端策略、interaction 和持久 effect 记录约束。
+- **隐私数据地图**：从已有 Audit evidence、Manifest V2 声明和当前 graph adapter 的规范 schema ID 按需派生脱敏拓扑，明确区分 observed、declared 与尚未观测的通道。
 - **最小能力授权**：Widget 只获得在 schema 对齐时批准的 Graph、Network、File 或 installed-capability grants，后端对每次访问重新授权。
 
 ## 需要理解的边界
@@ -21,6 +22,7 @@ Ambient Agent 是一个开源、自托管的个人 AI 助理。它把对话、�
 - `SandboxWidget` 是组件名称，不是运行不受信任 JavaScript 的强安全沙箱。Widget controller 仍在页面 JavaScript realm 中执行，只应加载可信工作区代码。
 - WebSocket 用于聊天投影、图订阅和 Run 事件更新；当前代码没有用户身份、设备配对或冲突合并协议，因此文档不把它描述为完整的多用户或多设备协同系统。
 - 本地模型是否“离线”取决于所配置的 Provider 和工具。使用云模型、MCP 或 Widget 网络请求时仍会产生外部通信。
+- Privacy Map 是只读派生视图，不是第二个审计数据库。V1 coverage 固定为 `partial`；缺少 evidence 不表示没有传输，Manifest 声明也不表示 permission 或 runtime proof。
 
 ## 推荐阅读顺序
 
@@ -28,4 +30,5 @@ Ambient Agent 是一个开源、自托管的个人 AI 助理。它把对话、�
 2. [项目结构](/architecture/project-structure.md)：了解目录和模块职责。
 3. [系统与请求链路](/architecture/overview.md)：理解从输入到 Run、数据和 UI 的完整路径。
 4. [Widget 能力安全架构](/architecture/capability-security.md)：理解声明、审批、生成和运行时 enforcement。
-5. 根据工作内容继续阅读 Agent、Widget、Graph 或集成章节。
+5. [Privacy Data Map V1](/architecture/privacy-data-map.md)：理解脱敏数据流投影的证据边界与已知盲区。
+6. 根据工作内容继续阅读 Agent、Widget、Graph 或集成章节。

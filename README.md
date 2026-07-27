@@ -17,8 +17,11 @@ Ambient Agent 是一个开源、自托管、以应用工作区为核心的个人
 - 最小能力授权：Widget 只获得 schema 对齐阶段批准的 Graph、Network、File 或 installed-capability grants，后端逐次执行默认拒绝 policy。
 - 结构化 Agent 能力目录：按 Router、Converse、Schema、Coding、Verification 角色投影真实可用能力，避免 prompt 漂移。
 - 后端权限与审计：Tool Gateway、MCP、Coding Agent、mutation interaction 和 LLM audit。
+- Privacy Map：从现有 Audit evidence、Manifest V2 声明与规范 graph schema ID 按需派生脱敏拓扑，区分 observed、declared 与未观测通道。
 
 `SandboxWidget` 默认把 Controller 放进独立 `widget-frame` 服务提供的 opaque-origin sandbox iframe，通过一次性 ticket、MessageChannel 和后端逐次授权访问能力。Widget 的非秘密本地状态由宿主按 App 隔离保存在 IndexedDB；旧的服务端 Chromium 像素流暂时保留为显式回滚路径。浏览器 sandbox 不是 VM，Controller 仍按不可信代码处理。
+
+Privacy Map 是只读派生视图，不复制 raw prompt、response、credential、tool arguments 或 graph values，也不建立第二个审计数据库。V1 coverage 固定为 `partial`：缺少 evidence 不表示没有传输，Manifest 声明也不表示 permission 或 runtime proof。
 
 ## 快速开始
 
@@ -72,9 +75,11 @@ npm --prefix frontend run build
 
 Ambient Agent is an open-source, self-hosted personal AI assistant built around an app-first workspace. It combines chat, durable background Runs, graph data, and React/HTM Widgets in one desktop-style interface.
 
-Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged Manifest V2 Widget publication, schema-first Graph data, user-approved least-authority Widget grants, a structured Agent capability catalog, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, and backend enforcement for tools, MCP, mutations, and audit records.
+Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged Manifest V2 Widget publication, schema-first Graph data, user-approved least-authority Widget grants, a structured Agent capability catalog, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, backend enforcement for tools, MCP, mutations, and audit records, and a Privacy Map derived from existing Audit evidence, Manifest declarations, and canonical graph schema IDs.
 
 By default, `SandboxWidget` runs a Controller in an opaque-origin sandbox iframe served by the separate `widget-frame` service. A one-time ticket, transferred MessageChannel, and per-operation Backend authorization mediate capabilities. Non-secret local Widget state is host-owned IndexedDB scoped by App; the former server-Chromium pixel stream remains as an explicit temporary rollback. The browser sandbox is not a VM, so Controllers are still treated as untrusted code.
+
+The Privacy Map is a read-only derived view. It does not copy raw prompts, responses, credentials, tool arguments, or graph values, and it does not create a second audit database. V1 coverage is always `partial`: missing evidence does not mean no transmission, and a Manifest declaration is neither permission nor runtime proof.
 
 Start with:
 

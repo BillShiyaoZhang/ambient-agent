@@ -227,6 +227,7 @@ Run event payloads are redacted and bounded before insertion, while the envelope
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +list_schema_ids(limit, max_id_codepoints)
         +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
@@ -235,6 +236,7 @@ classDiagram
     }
     class Neo4jGraphDatabase {
         +from_env(workspace_dir)
+        +list_schema_ids(limit, max_id_codepoints)
         +migrate_from_sqlite(path)
     }
     class OntologyEntity {
@@ -274,3 +276,27 @@ ACP is the only code-generation orchestration boundary. A built-in adapter decla
 Each CLI is downloaded to a dedicated persistent volume only after the user requests installation. Installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
 
 Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.
+
+## 9. Privacy Data Map read-only projection
+
+```mermaid
+flowchart LR
+    Audit["Audit JSONL<br/>metadata evidence"]:::source --> AuditReader["WorkspaceAuditProjectionStream"]:::reader
+    Manifests["Manifest V2<br/>schema_refs"]:::source --> AppReader["AppDeclarationSnapshotReader"]:::reader
+    Graph["Active graph adapter<br/>canonical IDs"]:::source --> SchemaReader["GraphSchemaSnapshotReader"]:::reader
+
+    AuditReader --> Service{"PrivacyDataMapService"}:::hero
+    AppReader --> Service
+    SchemaReader --> Service
+    Coverage["Coverage registry<br/>known blind spots"]:::source --> Service
+
+    Service --> API["GET /api/privacy-data-map<br/>strict + no-store"]:::output
+    API --> Drawer["System drawer<br/>Observed · Declared · Unknown"]:::output
+
+    classDef source fill:#F2F6FA,stroke:#B9C8D8,color:#29435C,stroke-width:1px;
+    classDef reader fill:#E7EEF5,stroke:#9FB2C5,color:#29435C,stroke-width:1.5px;
+    classDef output fill:#F6ECE8,stroke:#D4B7AD,color:#6A4439,stroke-width:1px;
+    classDef hero fill:#25252A,stroke:#25252A,color:#FFFFFF,stroke-width:2px;
+```
+
+This path reuses the graph adapter created by the composition root and reads only bounded schema IDs; it does not open a second Driver. The Audit reader drops prompt/response content before the projection boundary. The service returns a deterministic metadata projection without writing another database. `observed`, `declared`, and `unknown` remain distinct, and V1 coverage is always `partial`.

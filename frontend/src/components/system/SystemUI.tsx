@@ -85,7 +85,14 @@ export function SystemPopover({ open, onClose, triggerRef, label, className = ""
 
 const FOCUSABLE = "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
-function useDialogFocus(open: boolean, containerRef: React.RefObject<HTMLElement | null>, blocking: boolean, onClose?: () => void) {
+function useDialogFocus(
+  open: boolean,
+  containerRef: React.RefObject<HTMLElement | null>,
+  blocking: boolean,
+  onClose?: () => void,
+  restoreFocusOnClose = true,
+  initialFocusRef?: React.RefObject<HTMLElement | null>,
+) {
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
@@ -95,7 +102,7 @@ function useDialogFocus(open: boolean, containerRef: React.RefObject<HTMLElement
     returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const frame = requestAnimationFrame(() => {
       const focusable = containerRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
-      (focusable?.[0] ?? containerRef.current)?.focus();
+      (initialFocusRef?.current ?? focusable?.[0] ?? containerRef.current)?.focus();
     });
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -126,9 +133,11 @@ function useDialogFocus(open: boolean, containerRef: React.RefObject<HTMLElement
     return () => {
       cancelAnimationFrame(frame);
       document.removeEventListener("keydown", handleKeyDown);
-      requestAnimationFrame(() => returnFocusRef.current?.focus());
+      if (restoreFocusOnClose) {
+        requestAnimationFrame(() => returnFocusRef.current?.focus());
+      }
     };
-  }, [blocking, containerRef, open]);
+  }, [blocking, containerRef, initialFocusRef, open, restoreFocusOnClose]);
 }
 
 export interface SystemDialogProps {
@@ -180,14 +189,29 @@ export interface SystemDrawerProps {
   onClose: () => void;
   side?: "right" | "left";
   className?: string;
+  restoreFocusOnClose?: boolean;
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
   children: React.ReactNode;
 }
 
-export function SystemDrawer({ open, label, onClose, side = "right", className = "", children }: SystemDrawerProps) {
+export function SystemDrawer({
+  open,
+  label,
+  onClose,
+  side = "right",
+  className = "",
+  restoreFocusOnClose = true,
+  initialFocusRef,
+  children,
+}: SystemDrawerProps) {
   const drawerRef = useRef<HTMLElement>(null);
-  useDialogFocus(open, drawerRef, false, onClose);
+  useDialogFocus(open, drawerRef, false, onClose, restoreFocusOnClose, initialFocusRef);
   return (
-    <div className={`system-layer system-drawer-layer ${open ? "is-open" : ""}`} aria-hidden={!open}>
+    <div
+      className={`system-layer system-drawer-layer ${open ? "is-open" : ""}`}
+      aria-hidden={!open}
+      inert={open ? undefined : true}
+    >
       <button type="button" className="system-scrim" onClick={onClose} tabIndex={open ? 0 : -1} aria-label={`Close ${label}`} />
       <aside ref={drawerRef} className={`system-drawer is-${side} ${className}`.trim()} role="dialog" aria-modal="true" aria-label={label} tabIndex={-1}>
         {children}

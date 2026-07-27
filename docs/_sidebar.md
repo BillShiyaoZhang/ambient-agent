@@ -12,6 +12,7 @@
   - [Widget 与应用中心](/architecture/apps.md)
   - [持久 Run 与 Runtime](/architecture/runs.md)
   - [图数据库](/architecture/graph-db.md)
+  - [Privacy Data Map](/architecture/privacy-data-map.md)
   - [后端 UML](/architecture/uml.md)
 
 - **智能体引擎**

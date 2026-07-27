@@ -223,6 +223,7 @@ Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/m
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +list_schema_ids(limit, max_id_codepoints)
         +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
@@ -231,6 +232,7 @@ classDiagram
     }
     class Neo4jGraphDatabase {
         +from_env(workspace_dir)
+        +list_schema_ids(limit, max_id_codepoints)
         +migrate_from_sqlite(path)
     }
     class OntologyEntity {
@@ -270,3 +272,27 @@ ACP 是唯一的代码生成 orchestration 边界。内置 Adapter 只声明受�
 CLI 只有在用户选择安装时才下载到独立持久卷。安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
 
 Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。
+
+## 9. Privacy Data Map 只读投影
+
+```mermaid
+flowchart LR
+    Audit["Audit JSONL<br/>metadata evidence"]:::source --> AuditReader["WorkspaceAuditProjectionStream"]:::reader
+    Manifests["Manifest V2<br/>schema_refs"]:::source --> AppReader["AppDeclarationSnapshotReader"]:::reader
+    Graph["Active graph adapter<br/>canonical IDs"]:::source --> SchemaReader["GraphSchemaSnapshotReader"]:::reader
+
+    AuditReader --> Service{"PrivacyDataMapService"}:::hero
+    AppReader --> Service
+    SchemaReader --> Service
+    Coverage["Coverage registry<br/>known blind spots"]:::source --> Service
+
+    Service --> API["GET /api/privacy-data-map<br/>strict + no-store"]:::output
+    API --> Drawer["System drawer<br/>Observed · Declared · Unknown"]:::output
+
+    classDef source fill:#F2F6FA,stroke:#B9C8D8,color:#29435C,stroke-width:1px;
+    classDef reader fill:#E7EEF5,stroke:#9FB2C5,color:#29435C,stroke-width:1.5px;
+    classDef output fill:#F6ECE8,stroke:#D4B7AD,color:#6A4439,stroke-width:1px;
+    classDef hero fill:#25252A,stroke:#25252A,color:#FFFFFF,stroke-width:2px;
+```
+
+该链路使用组合根已经创建的 Graph adapter，只读取有界 schema ID，不创建第二个 Driver。Audit reader 在 projection boundary 前丢弃 prompt/response；Service 只返回确定性 metadata projection，不写入新数据库。`observed`、`declared` 与 `unknown` 保持不同语义，V1 coverage 永远为 `partial`。

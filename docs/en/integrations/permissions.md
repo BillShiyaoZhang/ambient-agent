@@ -41,3 +41,9 @@ Path/argv/environment/staging policy reduces risk but is not full OS network/fil
 - Tool and adapter events redact sensitive arguments and bound size. LLM audit stores bounded previews, hashes, usage, and latency.
 - Terminal Run events and LLM audit follow retention policy but remain sensitive workspace data.
 - User approval never replaces least scope, schema validation, idempotency, fencing, compensation, or `needs_attention` reconciliation.
+
+## 6. Privacy Map evidence boundary
+
+The Privacy Map derives a read-only topology only from existing LLM Audit metadata, Manifest V2 `schema_refs`, and canonical schema IDs returned by the active graph adapter. It does not copy raw prompts, responses, credentials, tool arguments, or graph values, and it does not create a second audit database.
+
+`observed` means a supported Audit path produced a record; `declared` means a Manifest is associated with a registered schema; `unknown` means a channel is not fully instrumented. None of these states replaces capability authorization, a Run interaction, or runtime policy. V1 coverage is always `partial`. See [Privacy Data Map V1](/en/architecture/privacy-data-map.md).

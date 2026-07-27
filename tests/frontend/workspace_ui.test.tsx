@@ -38,21 +38,25 @@ const RuntimeProbe: React.FC<{
 );
 
 describe("App-first workspace UI", () => {
-  const renderWorkspace = (change = vi.fn()) => render(<AppWorkspace
-    widgets={[
-      { id: "weather", title: "Weather", html: "", css: "", js: "" },
-      { id: "tasks", title: "Tasks", html: "", css: "", js: "" },
-    ]}
-    canvas={canvas}
-    onCanvasChange={change}
-    renderWidgetContent={(widget) => <div>{widget.id} content</div>}
-    onOpenAppStore={vi.fn()}
-    onOpenAudit={vi.fn()}
-    language="en"
-    onLanguageChange={vi.fn()}
-    theme={{ preference: "system", effective: "dark" }}
-    onThemeChange={vi.fn()}
-  />);
+  const renderWorkspace = (
+    change = vi.fn(),
+    onOpenPrivacyMap = vi.fn()
+  ) => render(<AppWorkspace
+      widgets={[
+        { id: "weather", title: "Weather", html: "", css: "", js: "" },
+        { id: "tasks", title: "Tasks", html: "", css: "", js: "" },
+      ]}
+      canvas={canvas}
+      onCanvasChange={change}
+      renderWidgetContent={(widget) => <div>{widget.id} content</div>}
+      onOpenAppStore={vi.fn()}
+      onOpenPrivacyMap={onOpenPrivacyMap}
+      onOpenAudit={vi.fn()}
+      language="en"
+      onLanguageChange={vi.fn()}
+      theme={{ preference: "system", effective: "dark" }}
+      onThemeChange={vi.fn()}
+    />);
 
   it("keeps active and warm apps mounted and closes a window without uninstalling it", () => {
     const change = vi.fn();
@@ -482,6 +486,35 @@ describe("App-first workspace UI", () => {
     expect(resolveChromeMode(900)).toBe("compact");
     expect(resolveChromeMode(720)).toBe("compact");
     expect(resolveChromeMode(719)).toBe("mobile");
+  });
+
+  it("opens Privacy Map from desktop chrome with the exact trigger", () => {
+    const onOpenPrivacyMap = vi.fn();
+    renderWorkspace(vi.fn(), onOpenPrivacyMap);
+
+    fireEvent.click(screen.getByRole("button", { name: "Layout" }));
+    expect(screen.getByText("Focus current app")).toBeDefined();
+
+    const action = within(
+      screen.getByTestId("workspace-system-chrome")
+    ).getByRole("button", { name: "Privacy Map" });
+    fireEvent.click(action);
+
+    expect(onOpenPrivacyMap).toHaveBeenCalledWith(action);
+    expect(screen.queryByText("Focus current app")).toBeNull();
+  });
+
+  it("opens Privacy Map from the mobile menu and restores to the More trigger", () => {
+    const onOpenPrivacyMap = vi.fn();
+    renderWorkspace(vi.fn(), onOpenPrivacyMap);
+
+    const moreTrigger = screen.getByRole("button", { name: "More" });
+    fireEvent.click(moreTrigger);
+    const menu = screen.getByRole("menu", { name: "More workspace actions" });
+    fireEvent.click(within(menu).getByRole("button", { name: "Privacy Map" }));
+
+    expect(onOpenPrivacyMap).toHaveBeenCalledWith(moreTrigger);
+    expect(screen.queryByRole("menu", { name: "More workspace actions" })).toBeNull();
   });
 
   it("opens chat without changing the workspace dimensions", () => {
