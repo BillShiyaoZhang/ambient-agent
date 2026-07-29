@@ -82,6 +82,10 @@ flowchart LR
 
 条目状态为 `ready`、`needs_ui`、`generating` 或 `unavailable`。布局以 revision 乐观并发控制；冲突返回 `409`，客户端重新加载后再提交。
 
+生成 App 的图标支持右键或保持按压约 500 ms 打开管理菜单；指针移动超过容差、抬起或取消时不得误触发长按，成功打开菜单后不得继续启动 App。菜单提供查看详情、配置属性、重命名和卸载；键盘上下文菜单继续可用。
+
+`PATCH /api/apps/{app_id}` 只更新用户可管理的 Manifest 展示属性：`title`、`description`、`app_version` 和 `intents`。请求为 partial update，未知字段、空更新和不满足 Manifest V2 约束的值返回 `422`，不存在的 App 返回 `404`。重命名只修改 `title`；稳定的 App ID、目录、grant、schema reference 与 Controller 不变。配置成功后，应用中心和已打开窗口必须刷新为最新属性。
+
 ## 5. 数据与能力边界
 
 - Graph 只保存用户上下文；App cache、cursor、UI state 和原始 provider payload 放在 `data/`。

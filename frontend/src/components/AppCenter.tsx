@@ -32,18 +32,20 @@ import {
   Info,
   LoaderCircle,
   MoreHorizontal,
+  Pencil,
   Pin,
   PinOff,
   Play,
   RotateCw,
   Search,
+  Settings2,
   Sparkles,
   Trash2,
   WandSparkles,
   X,
 } from "lucide-react";
 import wsService from "../services/websocket";
-import { SystemIconButton } from "./system/SystemUI";
+import { SystemDialog, SystemIconButton } from "./system/SystemUI";
 import "./AppCenter.css";
 
 export type CatalogKind = "generated_app" | "skill" | "mcp";
@@ -101,11 +103,20 @@ interface AppCenterProps {
   onUnpinWidget: (id: string) => void;
   onRunFullscreen: (id: string) => void;
   onRunCreated?: (run: { id: string }) => void;
+  onAppUpdated?: (id: string) => void | Promise<void>;
   language?: "zh" | "en";
   headerActions?: React.ReactNode;
 }
 
 type FilterKind = "all" | CatalogKind;
+type AppEditorState = {
+  mode: "rename" | "configure";
+  itemId: string;
+  title: string;
+  description: string;
+  version: string;
+  tags: string;
+};
 
 const API_BASE = `http://${window.location.hostname}:8000`;
 const FALLBACK_ACCENTS = ["#7c5cff", "#12b8a6", "#f59e58", "#e85d9e", "#4f8cff", "#76b852"];
@@ -161,7 +172,7 @@ interface TileProps {
   folderItems?: CatalogItem[];
   isZh: boolean;
   onActivate: () => void;
-  onMenu?: (event: React.MouseEvent | React.PointerEvent) => void;
+  onMenu?: (position: { clientX: number; clientY: number }) => void;
   dragListeners?: Record<string, any>;
   dragAttributes?: Record<string, any>;
   setNodeRef?: (node: HTMLElement | null) => void;
@@ -183,16 +194,42 @@ function AppTileView({
   style,
   isDragging,
 }: TileProps) {
-  const longPressRef = useRef<number | null>(null);
+  const longPressRef = useRef<{
+    timer: number;
+    pointerId: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
   const clearLongPress = () => {
-    if (longPressRef.current !== null) window.clearTimeout(longPressRef.current);
+    if (longPressRef.current) window.clearTimeout(longPressRef.current.timer);
     longPressRef.current = null;
   };
-  const handlePointerDown = (event: React.PointerEvent) => {
-    dragListeners?.onPointerDown?.(event);
-    if (event.pointerType === "touch" && onMenu) {
-      longPressRef.current = window.setTimeout(() => onMenu(event), 520);
-    }
+  const handleIconPointerDown = (event: React.PointerEvent<HTMLSpanElement>) => {
+    if (!onMenu || event.button !== 0) return;
+    event.stopPropagation();
+    clearLongPress();
+    const gesture = {
+      timer: 0,
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    };
+    gesture.timer = window.setTimeout(() => {
+      suppressClickRef.current = true;
+      onMenu({ clientX: gesture.x, clientY: gesture.y });
+    }, 500);
+    longPressRef.current = gesture;
+  };
+  const handleIconPointerMove = (event: React.PointerEvent<HTMLSpanElement>) => {
+    event.stopPropagation();
+    const gesture = longPressRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 10) clearLongPress();
+  };
+  const handleIconPointerEnd = (event: React.PointerEvent<HTMLSpanElement>) => {
+    event.stopPropagation();
+    clearLongPress();
   };
   const title = item?.title ?? folder?.name ?? "";
   return (
@@ -202,15 +239,20 @@ function AppTileView({
       data-launcher-entry={entryId}
       className={`app-center-tile ${isDragging ? "is-dragging" : ""}`}
       style={style}
-      onClick={onActivate}
+      onClick={(event) => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        onActivate();
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
-        onMenu?.(event);
+        onMenu?.({ clientX: event.clientX, clientY: event.clientY });
       }}
-      onPointerDown={handlePointerDown}
-      onPointerUp={clearLongPress}
-      onPointerCancel={clearLongPress}
-      onPointerMove={clearLongPress}
+      onPointerDown={(event) => dragListeners?.onPointerDown?.(event)}
       aria-label={
         folder
           ? `${isZh ? "打开文件夹" : "Open folder"} ${title}`
@@ -219,7 +261,14 @@ function AppTileView({
       {...dragAttributes}
       {...Object.fromEntries(Object.entries(dragListeners ?? {}).filter(([key]) => key !== "onPointerDown"))}
     >
-      <span className="app-center-tile-visual">
+      <span
+        className="app-center-tile-visual"
+        data-app-icon={item ? entryId : undefined}
+        onPointerDown={handleIconPointerDown}
+        onPointerMove={handleIconPointerMove}
+        onPointerUp={handleIconPointerEnd}
+        onPointerCancel={handleIconPointerEnd}
+      >
         {item ? <AppIcon item={item} /> : folder ? <FolderIcon folder={folder} items={folderItems} /> : null}
       </span>
       <span className="app-center-tile-title">{title}</span>
@@ -265,6 +314,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   onUnpinWidget,
   onRunFullscreen,
   onRunCreated,
+  onAppUpdated,
   language = "zh",
   headerActions,
 }) => {
@@ -285,6 +335,9 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   const [actionInput, setActionInput] = useState<Record<string, unknown>>({});
   const [actionError, setActionError] = useState("");
   const [actionSubmitting, setActionSubmitting] = useState(false);
+  const [editor, setEditor] = useState<AppEditorState | null>(null);
+  const [editorError, setEditorError] = useState("");
+  const [editorSaving, setEditorSaving] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const overRef = useRef<{ id: string | null; since: number }>({ id: null, since: 0 });
   const pageFlipRef = useRef(0);
@@ -390,6 +443,73 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     },
     [store, isZh]
   );
+
+  const openAppEditor = (item: CatalogItem, mode: AppEditorState["mode"]) => {
+    setMenu(null);
+    setEditorError("");
+    setEditor({
+      mode,
+      itemId: item.catalog_id,
+      title: item.title,
+      description: item.description,
+      version: item.version,
+      tags: item.tags.join(", "),
+    });
+  };
+
+  const saveAppEditor = async () => {
+    if (!editor) return;
+    const item = itemsById.get(editor.itemId);
+    if (!item?.ui_app_id || item.kind !== "generated_app") return;
+    const intents = [...new Set(
+      editor.tags
+        .split(/[,\n]/)
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    )];
+    const update = editor.mode === "rename"
+      ? { title: editor.title.trim() }
+      : {
+          description: editor.description.trim(),
+          app_version: editor.version.trim(),
+          intents,
+        };
+    setEditorSaving(true);
+    setEditorError("");
+    try {
+      const response = await fetch(`${API_BASE}/api/apps/${encodeURIComponent(item.ui_app_id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(update),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.message;
+        throw new Error(detail || `HTTP ${response.status}`);
+      }
+      setStore((current) => current ? {
+        ...current,
+        items: current.items.map((candidate) => candidate.catalog_id === item.catalog_id ? {
+          ...candidate,
+          title: payload.title ?? candidate.title,
+          description: payload.description ?? candidate.description,
+          version: payload.app_version ?? candidate.version,
+          tags: payload.intents ?? candidate.tags,
+        } : candidate),
+      } : current);
+      setEditor(null);
+      setNotice(editor.mode === "rename"
+        ? (isZh ? "应用已重命名。" : "App renamed.")
+        : (isZh ? "应用属性已保存。" : "App properties saved."));
+      Promise.resolve(onAppUpdated?.(item.ui_app_id)).catch((refreshError) => {
+        console.error("Unable to refresh the updated App window", refreshError);
+      });
+    } catch (saveError) {
+      setEditorError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setEditorSaving(false);
+    }
+  };
 
   const activateItem = (item: CatalogItem) => {
     setMenu(null);
@@ -581,7 +701,8 @@ export const AppCenter: React.FC<AppCenterProps> = ({
         searchRef.current?.focus();
       }
       if (event.key === "Escape") {
-        if (activeId) setActiveId(null);
+        if (editor) setEditor(null);
+        else if (activeId) setActiveId(null);
         else if (menu) setMenu(null);
         else if (detailsId) setDetailsId(null);
         else if (openFolderId) setOpenFolderId(null);
@@ -600,7 +721,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, mode, activeId, menu, detailsId, openFolderId, query, onClose]);
+  }, [isOpen, mode, editor, activeId, menu, detailsId, openFolderId, query, onClose]);
 
   if (!isOpen && mode !== "home") return null;
 
@@ -629,7 +750,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       isZh,
       onActivate: () => item ? activateItem(item) : setOpenFolderId(folder!.id),
       onMenu: item
-        ? (event: React.MouseEvent | React.PointerEvent) => setMenu({ itemId: item.catalog_id, x: event.clientX, y: event.clientY })
+        ? (position: { clientX: number; clientY: number }) => setMenu({ itemId: item.catalog_id, x: position.clientX, y: position.clientY })
         : undefined,
     };
     return sortable ? <SortableTile key={entryId} {...common} /> : <AppTileView key={entryId} {...common} />;
@@ -794,16 +915,107 @@ export const AppCenter: React.FC<AppCenterProps> = ({
 
       {menu && menuItem && (
         <div className="app-center-menu-scrim" onMouseDown={() => setMenu(null)}>
-          <div className="app-center-menu" style={{ left: Math.min(menu.x, window.innerWidth - 250), top: Math.min(menu.y, window.innerHeight - 300) }} onMouseDown={(event) => event.stopPropagation()}>
+          <div
+            className="app-center-menu"
+            role="menu"
+            aria-label={isZh ? `管理 ${menuItem.title}` : `Manage ${menuItem.title}`}
+            style={{
+              left: Math.max(8, Math.min(menu.x, window.innerWidth - 250)),
+              top: Math.max(8, Math.min(menu.y, window.innerHeight - 360)),
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
             <div className="app-center-menu-heading"><AppIcon item={menuItem} compact /><span><strong>{menuItem.title}</strong><small>{menuItem.provider}</small></span><MoreHorizontal size={17} /></div>
-            {menuItem.ui_app_id && <button onClick={() => activateItem(menuItem)}><Play size={16} />{isZh ? "打开" : "Open"}</button>}
-            {menuItem.ui_app_id && (pinnedWidgetIds.includes(menuItem.ui_app_id) ? <button onClick={() => { onUnpinWidget(menuItem.ui_app_id!); setMenu(null); }}><PinOff size={16} />{isZh ? "从画布取消固定" : "Unpin from Canvas"}</button> : <button onClick={() => { onPinWidget(menuItem.ui_app_id!); setMenu(null); }}><Pin size={16} />{isZh ? "固定到画布" : "Pin to Canvas"}</button>)}
-            <button onClick={() => { setDetailsId(menuItem.catalog_id); setMenu(null); }}><Info size={16} />{isZh ? "查看详情" : "View details"}</button>
-            {menuItem.kind !== "generated_app" && <button onClick={() => requestGeneration(menuItem)}><RotateCw size={16} />{menuItem.ui_app_id ? (isZh ? "重新生成界面" : "Regenerate UI") : (isZh ? "生成界面" : "Generate UI")}</button>}
-            {menuItem.kind !== "generated_app" && menuItem.ui_app_id && <button className="is-danger" onClick={() => deleteCapabilityUi(menuItem)}><Trash2 size={16} />{isZh ? "删除生成界面" : "Delete generated UI"}</button>}
-            {menuItem.kind === "generated_app" && <button className="is-danger" onClick={() => deleteGeneratedApp(menuItem)}><Trash2 size={16} />{isZh ? "卸载应用" : "Uninstall app"}</button>}
+            {menuItem.ui_app_id && <button role="menuitem" onClick={() => activateItem(menuItem)}><Play size={16} />{isZh ? "打开" : "Open"}</button>}
+            {menuItem.ui_app_id && (pinnedWidgetIds.includes(menuItem.ui_app_id) ? <button role="menuitem" onClick={() => { onUnpinWidget(menuItem.ui_app_id!); setMenu(null); }}><PinOff size={16} />{isZh ? "从画布取消固定" : "Unpin from Canvas"}</button> : <button role="menuitem" onClick={() => { onPinWidget(menuItem.ui_app_id!); setMenu(null); }}><Pin size={16} />{isZh ? "固定到画布" : "Pin to Canvas"}</button>)}
+            <button role="menuitem" onClick={() => { setDetailsId(menuItem.catalog_id); setMenu(null); }}><Info size={16} />{isZh ? "查看详情" : "View details"}</button>
+            {menuItem.kind === "generated_app" && <button role="menuitem" onClick={() => openAppEditor(menuItem, "configure")}><Settings2 size={16} />{isZh ? "配置属性" : "Configure properties"}</button>}
+            {menuItem.kind === "generated_app" && <button role="menuitem" onClick={() => openAppEditor(menuItem, "rename")}><Pencil size={16} />{isZh ? "重命名" : "Rename"}</button>}
+            {menuItem.kind !== "generated_app" && <button role="menuitem" onClick={() => requestGeneration(menuItem)}><RotateCw size={16} />{menuItem.ui_app_id ? (isZh ? "重新生成界面" : "Regenerate UI") : (isZh ? "生成界面" : "Generate UI")}</button>}
+            {menuItem.kind !== "generated_app" && menuItem.ui_app_id && <button role="menuitem" className="is-danger" onClick={() => deleteCapabilityUi(menuItem)}><Trash2 size={16} />{isZh ? "删除生成界面" : "Delete generated UI"}</button>}
+            {menuItem.kind === "generated_app" && <button role="menuitem" className="is-danger" onClick={() => deleteGeneratedApp(menuItem)}><Trash2 size={16} />{isZh ? "卸载应用" : "Uninstall app"}</button>}
           </div>
         </div>
+      )}
+
+      {editor && (
+        <SystemDialog
+          open
+          size="compact"
+          title={editor.mode === "rename"
+            ? (isZh ? "重命名应用" : "Rename app")
+            : (isZh ? "配置应用属性" : "Configure app properties")}
+          description={editor.mode === "rename"
+            ? (isZh ? "只修改显示名称，稳定的 App ID 不会变化。" : "Only the display name changes; the stable App ID stays the same.")
+            : (isZh ? "修改应用描述、版本与用于搜索的标签。" : "Edit the description, version, and searchable tags.")}
+          onClose={() => { if (!editorSaving) setEditor(null); }}
+        >
+          <form
+            className="system-dialog-body app-center-property-editor"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveAppEditor();
+            }}
+          >
+            {editor.mode === "rename" ? (
+              <label>
+                <span>{isZh ? "应用名称" : "App name"}</span>
+                <input
+                  autoFocus
+                  required
+                  maxLength={200}
+                  value={editor.title}
+                  onChange={(event) => setEditor((current) => current ? { ...current, title: event.target.value } : current)}
+                />
+              </label>
+            ) : (
+              <>
+                <label>
+                  <span>{isZh ? "描述" : "Description"}</span>
+                  <textarea
+                    maxLength={2000}
+                    rows={4}
+                    value={editor.description}
+                    onChange={(event) => setEditor((current) => current ? { ...current, description: event.target.value } : current)}
+                  />
+                </label>
+                <label>
+                  <span>{isZh ? "版本" : "Version"}</span>
+                  <input
+                    required
+                    maxLength={64}
+                    value={editor.version}
+                    onChange={(event) => setEditor((current) => current ? { ...current, version: event.target.value } : current)}
+                  />
+                </label>
+                <label>
+                  <span>{isZh ? "标签" : "Tags"}</span>
+                  <input
+                    aria-label={isZh ? "标签" : "Tags"}
+                    value={editor.tags}
+                    onChange={(event) => setEditor((current) => current ? { ...current, tags: event.target.value } : current)}
+                    placeholder={isZh ? "用逗号分隔" : "Separate with commas"}
+                  />
+                  <small>{isZh ? "标签用于应用中心搜索，不会改变 App 权限。" : "Tags improve App Center search and do not change permissions."}</small>
+                </label>
+              </>
+            )}
+            {editorError && <p className="app-center-editor-error" role="alert">{editorError}</p>}
+            <div className="system-dialog-actions">
+              <button type="button" className="system-button" disabled={editorSaving} onClick={() => setEditor(null)}>{isZh ? "取消" : "Cancel"}</button>
+              <button
+                type="submit"
+                className="system-button is-primary"
+                disabled={editorSaving || (editor.mode === "rename" ? !editor.title.trim() : !editor.version.trim())}
+              >
+                {editorSaving && <LoaderCircle className="animate-spin" size={15} />}
+                {editor.mode === "rename"
+                  ? (isZh ? "保存名称" : "Save name")
+                  : (isZh ? "保存属性" : "Save properties")}
+              </button>
+            </div>
+          </form>
+        </SystemDialog>
       )}
     </div>
   );

@@ -1,4 +1,6 @@
 import React from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatOverlay } from "../../frontend/src/components/AgentChatOverlay";
@@ -44,6 +46,29 @@ describe("AgentChatOverlay", () => {
       width: 380,
       height: 520,
     });
+  });
+
+  it("keeps the chat-history delete control compact so the title owns the row", () => {
+    render(<AgentChatOverlay
+      {...commonProps}
+      messages={[]}
+      sessions={[{
+        id: "session-one",
+        title: "A conversation title that needs room",
+        updated_at: "2026-07-29T00:00:00Z",
+      }]}
+      activeSessionId="session-one"
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat history" }));
+    const deleteButton = screen.getByRole("button", { name: "Delete A conversation title that needs room" });
+    expect(deleteButton.classList.contains("chat-history-delete")).toBe(true);
+    const stylesheet = readFileSync(
+      resolve(process.cwd(), "src/components/Workspace.css"),
+      "utf8",
+    );
+    expect(stylesheet).toMatch(/\.chat-history-delete\s*\{[^}]*width:\s*28px[^}]*min-width:\s*28px/);
+    expect(stylesheet).toMatch(/\.chat-history-list\s*\{[^}]*overflow-x:\s*hidden/);
   });
 
   it("restores the preferred size after a temporary viewport clamp", () => {

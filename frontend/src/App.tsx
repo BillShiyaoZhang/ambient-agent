@@ -899,6 +899,18 @@ function App() {
     });
   };
 
+  const handleAppUpdated = useCallback(async (id: string) => {
+    const response = await fetch(`${API_BASE}/api/apps/${id}`);
+    if (!response.ok) return;
+    const appData = await response.json() as Widget;
+    setWidgets((previous) => {
+      const exists = previous.some((widget) => widget.id === id);
+      return exists
+        ? previous.map((widget) => widget.id === id ? appData : widget)
+        : previous;
+    });
+  }, []);
+
   const handleOpenApp = async (id: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/apps/${id}`);
@@ -993,6 +1005,7 @@ function App() {
       onUnpinWidget={handleRemoveWidget}
       onRunFullscreen={handleOpenApp}
       onRunCreated={() => setIsTaskDrawerOpen(true)}
+      onAppUpdated={handleAppUpdated}
       language={language}
       headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
         <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>

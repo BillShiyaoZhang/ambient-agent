@@ -1,4 +1,6 @@
 import React from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { SystemDialog, SystemIconButton, SystemPopover } from "../../frontend/src/components/system/SystemUI";
@@ -9,6 +11,13 @@ describe("System UI primitives", () => {
     const button = screen.getByRole("button", { name: "Open settings" });
     expect(button.getAttribute("data-tooltip")).toBe("Open settings");
     expect(button.hasAttribute("aria-pressed")).toBe(false);
+  });
+
+  it("uses a light tooltip surface in light mode", () => {
+    const stylesheet = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+    expect(stylesheet).toMatch(
+      /:root\[data-theme="light"\]\s*\{[\s\S]*?--surface-tooltip:\s*rgba\(252,252,254,.98\)/,
+    );
   });
 
   it("keeps only one system popover open across independent owners", () => {

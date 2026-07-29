@@ -129,7 +129,7 @@
   --surface-panel-solid: #f4f6fa;
   --surface-dialog: linear-gradient(145deg, rgba(255,255,255,.98), rgba(240,243,249,.98));
   --surface-dialog-solid: #f6f7fa;
-  --surface-tooltip: rgba(32,35,44,.96);
+  --surface-tooltip: rgba(252,252,254,.98);
   --surface-scrim: rgba(48,54,72,.24);
   --shadow-chrome: 0 12px 32px rgba(66,73,94,.15), inset 0 1px #fff;
   --shadow-popover: 0 20px 54px rgba(60,67,88,.20), inset 0 1px #fff;

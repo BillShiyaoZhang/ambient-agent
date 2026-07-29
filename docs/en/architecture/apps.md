@@ -82,6 +82,10 @@ See [Widget Capability Security](/en/architecture/capability-security.md) for th
 
 Items are `ready`, `needs_ui`, `generating`, or `unavailable`. Layout uses revision-based optimistic concurrency. A conflict returns `409`, after which the client reloads before submitting again.
 
+A generated App icon opens its management menu through right-click or a hold of about 500 ms. Movement beyond the gesture tolerance, pointer release, or cancellation must cancel the hold; a successful hold must not subsequently launch the App. The menu provides details, property configuration, rename, and uninstall actions, while the keyboard context-menu path remains available.
+
+`PATCH /api/apps/{app_id}` updates only user-manageable Manifest presentation properties: `title`, `description`, `app_version`, and `intents`. It is a partial update; unknown fields, empty updates, and values that violate Manifest V2 return `422`, while a missing App returns `404`. Rename changes `title` only. The stable App ID, directory, grants, schema references, and Controller remain unchanged. After a successful update, App Center and any open window refresh to the latest properties.
+
 ## 5. Data and capability boundaries
 
 - The Graph stores only user context. App caches, cursors, UI state, and raw provider payloads live under `data/`.

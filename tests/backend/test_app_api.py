@@ -45,6 +45,59 @@ def test_app_api_preserves_existing_shape_and_adds_manifest_fields():
     assert detail["schema_refs"] == ["Task"]
 
 
+def test_patch_app_updates_only_user_manageable_properties():
+    app_manager.create_or_update_app(
+        "planner",
+        "Planner",
+        js="console.log('plan')",
+        description="Plans a day.",
+        app_version="1.2.0",
+        intents=["plan my day"],
+        schema_refs=["Task"],
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/apps/planner",
+            json={
+                "title": "Day Planner",
+                "description": "Plans days and weeks.",
+                "app_version": "1.3.0",
+                "intents": ["plan my week", "review tasks"],
+            },
+        )
+        store_response = client.get("/api/app-store")
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Day Planner"
+    assert response.json()["description"] == "Plans days and weeks."
+    assert response.json()["app_version"] == "1.3.0"
+    assert response.json()["intents"] == ["plan my week", "review tasks"]
+
+    stored = app_manager.get_app_files("planner")
+    assert stored is not None
+    assert stored["id"] == "planner"
+    assert stored["js"] == "console.log('plan')"
+    assert stored["schema_refs"] == ["Task"]
+    assert next(item for item in store_response.json()["items"] if item["catalog_id"] == "app:planner")["title"] == "Day Planner"
+
+
+def test_patch_app_rejects_empty_unknown_and_invalid_updates():
+    app_manager.create_or_update_app("planner", "Planner", js="console.log('plan')")
+
+    with TestClient(app) as client:
+        empty_response = client.patch("/api/apps/planner", json={})
+        unknown_response = client.patch("/api/apps/planner", json={"accent": "#fff"})
+        invalid_response = client.patch("/api/apps/planner", json={"title": "  "})
+        missing_response = client.patch("/api/apps/missing", json={"title": "Missing"})
+
+    assert empty_response.status_code == 422
+    assert unknown_response.status_code == 422
+    assert invalid_response.status_code == 422
+    assert missing_response.status_code == 404
+    assert app_manager.get_manifest("planner").title == "Planner"
+
+
 def test_invalid_manifest_is_not_exposed_or_hidden_by_metadata(isolate_apps_dir):
     app_dir = isolate_apps_dir / "broken"
     app_dir.mkdir()

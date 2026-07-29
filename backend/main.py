@@ -23,12 +23,13 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
+from backend.app_manifest import ManifestValidationError
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.capabilities.files import AppFileError, AppFileGateway
 from backend.capabilities.catalog import SystemCapabilityCatalog
@@ -1319,6 +1320,33 @@ async def get_app_files(app_id: str):
     if files:
         return {key: value for key, value in files.items() if key != "js"}
     raise HTTPException(status_code=404, detail="App not found")
+
+
+class AppPropertiesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    description: str | None = None
+    app_version: str | None = None
+    intents: list[str] | None = None
+
+
+@app.patch("/api/apps/{app_id}")
+async def update_app_properties(app_id: str, data: AppPropertiesUpdate):
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="At least one App property is required")
+    try:
+        app_manager.app_path(app_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        updated = app_manager.update_app_properties(app_id, **changes)
+    except ManifestValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="App not found")
+    return updated
 
 
 class AppDataSourceRequest(BaseModel):
