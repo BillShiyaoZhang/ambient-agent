@@ -227,6 +227,8 @@ Run event payloads are redacted and bounded before insertion, while the envelope
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +list_nodes(node_type)
+        +list_edges()
         +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
@@ -250,7 +252,7 @@ classDiagram
     Neo4jGraphDatabase --> OntologyEntity
 ```
 
-`create_graph_database()` is a runtime factory called only by the composition root: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. The same created adapter is injected into Workflows, Agent routing, and tools; requests and reducer steps must not create a second Driver. Both adapters enforce the same `ambient-context` ontology contract and are explicitly `close()`d by the composition root during shutdown; unknown entities, abstract entities, and unknown properties cannot be written as records.
+`create_graph_database()` is a runtime factory called only by the composition root: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. The same created adapter is injected into Workflows, Agent routing, and tools; requests and reducer steps must not create a second Driver. Both adapters enforce the same `ambient-context` ontology contract and are explicitly `close()`d by the composition root during shutdown; unknown entities, abstract entities, and unknown properties cannot be written as records. A bounded trusted-Host graph snapshot is assembled only through `list_schemas()`, `list_nodes()`, and one `list_edges()` call; it cannot depend on a private SQLite connection or issue an N+1 relationship query per node.
 
 ## 8. Coding Agent Runtime and model ownership
 

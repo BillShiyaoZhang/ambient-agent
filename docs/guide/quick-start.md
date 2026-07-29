@@ -99,7 +99,14 @@ npm --prefix docs install
 
 本地测试显式使用 SQLite 兼容适配器。若要运行接近生产的本机后端，请先启动 Neo4j，并在启动 Uvicorn 前设置 `GRAPH_DATABASE_BACKEND=neo4j`、`NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD` 与 `NEO4J_DATABASE`。
 
-然后使用与 Dev Container 相同的后端和前端命令。若要预览文档：
+本机后端应只监听 loopback；再在另一个终端启动前端：
+
+```bash
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+npm --prefix frontend run dev
+```
+
+若要预览文档：
 
 ```bash
 npm --prefix docs run dev

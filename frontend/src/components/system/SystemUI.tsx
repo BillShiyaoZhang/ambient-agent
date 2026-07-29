@@ -137,7 +137,7 @@ export interface SystemDialogProps {
   description?: string;
   onClose?: () => void;
   blocking?: boolean;
-  size?: "compact" | "medium" | "large";
+  size?: "compact" | "medium" | "large" | "workbench";
   className?: string;
   children: React.ReactNode;
 }

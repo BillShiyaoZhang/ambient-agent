@@ -223,6 +223,8 @@ Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/m
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +list_nodes(node_type)
+        +list_edges()
         +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
@@ -246,7 +248,7 @@ classDiagram
     Neo4jGraphDatabase --> OntologyEntity
 ```
 
-`create_graph_database()` 是组合根唯一调用的运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。创建后的同一 adapter 被注入 Workflow、Agent 路由与工具；请求和 reducer step 不得创建第二个 Driver。两种 adapter 执行同一 `ambient-context` 本体契约，并由组合根在 shutdown 显式 `close()`；未知实体、抽象实体和未知属性都不能写入 record。
+`create_graph_database()` 是组合根唯一调用的运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。创建后的同一 adapter 被注入 Workflow、Agent 路由与工具；请求和 reducer step 不得创建第二个 Driver。两种 adapter 执行同一 `ambient-context` 本体契约，并由组合根在 shutdown 显式 `close()`；未知实体、抽象实体和未知属性都不能写入 record。可信 Host 的有界图谱快照只能通过 `list_schemas()`、`list_nodes()` 与一次性 `list_edges()` 组装，不能依赖 SQLite 私有连接，也不能按节点执行 N+1 关系查询。
 
 ## 8. Coding Agent Runtime 与模型所有权
 

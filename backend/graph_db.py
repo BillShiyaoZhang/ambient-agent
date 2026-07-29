@@ -627,6 +627,25 @@ class GraphDatabase:
                 for row in rows
             ]
 
+    def list_edges(self) -> list[dict[str, Any]]:
+        """Return every context-record relationship in stable adapter order."""
+
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT from_id, to_id, type, properties
+                   FROM graph_edges
+                   ORDER BY from_id, to_id, type"""
+            ).fetchall()
+            return [
+                {
+                    "from_id": row["from_id"],
+                    "to_id": row["to_id"],
+                    "type": row["type"],
+                    "properties": json.loads(row["properties"] or "{}"),
+                }
+                for row in rows
+            ]
+
     def delete_edge(self, from_id: str, to_id: str, edge_type: str) -> bool:
         with self.get_conn() as conn:
             cursor = conn.execute(

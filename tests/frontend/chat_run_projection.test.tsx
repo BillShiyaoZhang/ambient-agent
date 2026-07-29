@@ -1,5 +1,5 @@
 import React from "react";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
@@ -319,6 +319,77 @@ describe("canonical RunEvent chat projection", () => {
       request_id: "interaction-plan",
       approved: true,
       plan: "生成天气概览与逐小时预报。",
+      feedback: "",
+    });
+  });
+
+  it("keeps server schema diagnostics visible but stops them blocking after the proposal is edited", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "schema_approval_request", {
+          type: "schema_approval_request",
+          request_id: "interaction-schema",
+          app_id: "release-app",
+          proposal: {
+            reused_schemas: [],
+            new_schemas: [{
+              id: "Release",
+              name: "Release",
+              description: "A software release",
+              properties: { title: "string" },
+              subclass_of: "Thing",
+              ontology_iri: "urn:ambient:ontology:Release",
+              equivalent_to: [],
+              data_scope: "user_context",
+            }],
+            capabilities: [],
+          },
+          validation_errors: ["Server validation rejected the previous Release description"],
+        }),
+      ));
+    });
+
+    expect(await screen.findByText("确认数据与能力方案")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "查看 / 编辑" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Schema 与能力授权对齐" });
+    const approve = within(dialog).getByRole("button", { name: "确认对齐并编码 (Approve)" });
+    expect((approve as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).getByText("Server validation rejected the previous Release description")).toBeDefined();
+
+    fireEvent.change(within(dialog).getByPlaceholderText("实体说明"), {
+      target: { value: "An edited software release" },
+    });
+
+    expect((approve as HTMLButtonElement).disabled).toBe(false);
+    expect(within(dialog).getByText("上次提交的服务端诊断（已过期）")).toBeDefined();
+    expect(within(dialog).getByText("Server validation rejected the previous Release description")).toBeDefined();
+
+    const entityId = within(dialog).getByPlaceholderText("实体 ID（例如 Habit）");
+    fireEvent.change(entityId, { target: { value: "" } });
+
+    expect((approve as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).getAllByText("Every schema entity must have a non-empty ID.").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("上次提交的服务端诊断（已过期）")).toBeDefined();
+
+    fireEvent.change(entityId, { target: { value: "Release" } });
+    expect((approve as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(approve);
+    expect(harness.chatSend).toHaveBeenCalledWith({
+      type: "schema_approval_response",
+      request_id: "interaction-schema",
+      approved: true,
+      proposal: expect.objectContaining({
+        new_schemas: [expect.objectContaining({
+          id: "Release",
+          description: "An edited software release",
+        })],
+      }),
       feedback: "",
     });
   });

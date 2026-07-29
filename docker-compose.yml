@@ -50,6 +50,9 @@ services:
       NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
       GRAPH_MIGRATE_SQLITE: ${GRAPH_MIGRATE_SQLITE:-0}
       RUNNER_MAX_CONCURRENCY: ${RUNNER_MAX_CONCURRENCY:-1}
+      # Browser traffic reaches Uvicorn through Docker's bridge gateway while
+      # the published Backend port remains loopback-only on the Host.
+      AMBIENT_TRUSTED_HOST_PEERS: ${AMBIENT_TRUSTED_HOST_PEERS:-172.16.0.0/12}
       WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
       WIDGET_RUNTIME_SMOKE_ENABLED: ${WIDGET_RUNTIME_SMOKE_ENABLED:-1}
     security_opt:

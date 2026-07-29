@@ -20,6 +20,8 @@ services:
       NEO4J_PASSWORD: ambient-agent-dev
       NEO4J_DATABASE: neo4j
       GRAPH_MIGRATE_SQLITE: "0"
+      # VS Code forwards the browser request through the container bridge.
+      AMBIENT_TRUSTED_HOST_PEERS: 172.16.0.0/12
       WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
       WIDGET_RUNTIME_SMOKE_ENABLED: "1"
     security_opt:

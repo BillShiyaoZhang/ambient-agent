@@ -16,6 +16,7 @@ import {
   Maximize2,
   Minimize2,
   Moon,
+  Network,
   PanelLeft,
   Play,
   Rows3,
@@ -54,6 +55,7 @@ interface AppWorkspaceProps {
   ) => React.ReactNode;
   onOpenAppStore: () => void;
   onOpenAudit: () => void;
+  onOpenGraph?: () => void;
   onOpenTasks?: () => void;
   onOpenLLMSettings?: () => void;
   taskCount?: number;
@@ -88,6 +90,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
   renderWidgetContent,
   onOpenAppStore,
   onOpenAudit,
+  onOpenGraph = () => {},
   onOpenTasks = () => {},
   onOpenLLMSettings = () => {},
   taskCount = 0,
@@ -411,6 +414,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
                 <button onClick={() => applyLayout("grid")}><Grid2X2 size={15} />{isZh ? "自动网格" : "Adaptive grid"}</button>
               </SystemPopover>
             </div>
+            <SystemIconButton label={isZh ? "打开图谱探索" : "Open Graph Explorer"} onClick={onOpenGraph}><Network size={17} /></SystemIconButton>
             <SystemIconButton label={isZh ? "审计日志" : "Audit log"} onClick={onOpenAudit}><ShieldCheck size={17} /></SystemIconButton>
             <SystemIconButton label={isZh ? "模型与 Provider" : "Models & Providers"} onClick={onOpenLLMSettings}><Settings2 size={17} /></SystemIconButton>
             <SystemIconButton label={isZh ? "切换为英文" : "Switch to Chinese"} onClick={() => onLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
@@ -427,6 +431,7 @@ export const AppWorkspace: React.FC<AppWorkspaceProps> = ({
               <button className="mobile-only-action" onClick={() => { onOpenAppStore(); setOpenMenu(null); }}><Store size={15} />{isZh ? "应用中心" : "App Center"}</button>
               <button className="mobile-only-action" onClick={() => { onOpenTasks(); setOpenMenu(null); }}><ListTodo size={15} />{isZh ? "任务中心" : "Task Center"}</button>
               <button onClick={() => applyLayout("focus")}><PanelLeft size={15} />{isZh ? "聚焦当前 App" : "Focus current app"}</button>
+              <button onClick={() => { onOpenGraph(); setOpenMenu(null); }}><Network size={15} />{isZh ? "图谱探索" : "Graph Explorer"}</button>
               <button onClick={() => { onOpenAudit(); setOpenMenu(null); }}><ShieldCheck size={15} />{isZh ? "审计日志" : "Audit log"}</button>
               <button onClick={() => { onOpenLLMSettings(); setOpenMenu(null); }}><Settings2 size={15} />{isZh ? "模型与 Provider" : "Models & Providers"}</button>
               <button onClick={() => { onLanguageChange(language === "zh" ? "en" : "zh"); setOpenMenu(null); }}><Languages size={15} />{isZh ? "切换为英文" : "Switch to Chinese"}</button>

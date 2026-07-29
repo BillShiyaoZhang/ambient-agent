@@ -114,7 +114,15 @@ npm --prefix docs install
 
 Local tests use the explicit SQLite compatibility adapter. For a local production-like backend, start Neo4j and set `GRAPH_DATABASE_BACKEND=neo4j`, `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` before running Uvicorn.
 
-Then use the same backend and frontend commands as the Dev Container. To preview the documentation:
+Keep a Host-native Backend bound to loopback, then start the Frontend in
+another terminal:
+
+```bash
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+npm --prefix frontend run dev
+```
+
+To preview the documentation:
 
 ```bash
 npm --prefix docs run dev

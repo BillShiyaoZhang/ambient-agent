@@ -5,6 +5,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from ipaddress import ip_address, ip_network
 from typing import Any
 
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Query,
     Request,
     Response,
     WebSocket,
@@ -58,6 +60,7 @@ from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
 from backend.llm_service import set_default_llm_store
+from backend.graph_visualization import build_graph_explorer_snapshot, project_data_map
 from backend.coding_agent_acp import (
     CodingAgentStagedResult,
     cleanup_orphaned_coding_agent_staging,
@@ -507,9 +510,126 @@ async def health_check():
     return {"status": "ok", "message": "Ambient Agent is running"}
 
 
+def _require_trusted_host(
+    request: Request,
+    *,
+    denied_code: str,
+    denied_message: str,
+) -> None:
+    """Reject sensitive reads unless they come from the trusted local Host.
+
+    Every request must originate from loopback or an explicitly configured
+    peer network. Browser requests must additionally use the frontend Origin
+    allowlist, so a remote client cannot gain access by spoofing Origin.
+    """
+
+    def denied(cause: Exception | None = None) -> None:
+        error = HTTPException(
+            status_code=403,
+            detail={
+                "code": denied_code,
+                "message": denied_message,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+        if cause is None:
+            raise error
+        raise error from cause
+
+    client_host = request.client.host if request.client is not None else ""
+    try:
+        client_address = ip_address(client_host)
+    except ValueError:
+        denied()
+
+    peer_is_trusted = client_address.is_loopback
+    if not peer_is_trusted and client_address.version == 6 and client_address.ipv4_mapped:
+        peer_is_trusted = client_address.ipv4_mapped.is_loopback
+    if not peer_is_trusted:
+        for value in os.getenv("AMBIENT_TRUSTED_HOST_PEERS", "").split(","):
+            value = value.strip()
+            if not value:
+                continue
+            try:
+                network = ip_network(value, strict=False)
+            except ValueError:
+                continue
+            if client_address.version == network.version and client_address in network:
+                peer_is_trusted = True
+                break
+    if not peer_is_trusted:
+        denied()
+
+    if request.headers.get("origin"):
+        try:
+            client_runtime_origin(request.headers)
+        except ClientWidgetRuntimeTicketError as exc:
+            denied(exc)
+
+
 @app.get("/api/audit-logs")
-async def get_audit_logs(session: WorkspaceStorage = Depends(get_db)):
+def get_audit_logs(
+    request: Request,
+    response: Response,
+    session: WorkspaceStorage = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="audit_log_origin_denied",
+        denied_message="Raw Audit Logs are only available to the trusted Host",
+    )
     return session.get_audit_logs()
+
+
+@app.get("/api/graph/explorer")
+def get_graph_explorer(
+    request: Request,
+    response: Response,
+    record_limit: int = Query(default=200, ge=1, le=500),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="graph_visualization_origin_denied",
+        denied_message="Graph visualization is only available to the trusted Host",
+    )
+    try:
+        return build_graph_explorer_snapshot(graph_db, record_limit=record_limit)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "graph_explorer_unavailable",
+                "message": "Graph explorer snapshot is temporarily unavailable",
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+
+
+@app.get("/api/data-map")
+def get_data_map(
+    request: Request,
+    response: Response,
+    session: WorkspaceStorage = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="graph_visualization_origin_denied",
+        denied_message="Graph visualization is only available to the trusted Host",
+    )
+    try:
+        return project_data_map(session.get_audit_logs(), app_manager.list_apps())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "data_map_unavailable",
+                "message": "Privacy data map is temporarily unavailable",
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
 
 
 # --- Multi-Session REST endpoints ---

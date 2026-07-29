@@ -16,7 +16,7 @@ Closing a window removes it from the workspace without uninstalling it. Closing 
 
 The desktop workspace reserves a 52 px system-chrome row above the app stage. A maximized app moves its close/restore controls and title into system chrome. Floating and snapped windows retain local title bars, so there is no duplicate title bar.
 
-- At least 1024 px: show active-app information, the centered app/task switcher, and layout, audit, model, language, and theme actions.
+- At least 1024 px: show active-app information, the centered app/task switcher, and layout, Graph Explorer, audit, model, language, and theme actions.
 - 720–1023 px: keep core switcher actions and move the rest into More.
 - Below 720 px: the active app fills the stage, system chrome keeps only its title and close action, and all other actions move into More.
 - Chrome and overlays honor `safe-area-inset-*`.
@@ -91,6 +91,7 @@ budget is not a generic state-snapshot mechanism.
 - Chat opens from a bottom-right button as a 380 × 560 px overlay and becomes a bottom sheet/full-screen drawer on small screens.
 - The Task Drawer shows active, attention, historical Runs, and runtimes. User confirmation happens in a blocking dialog.
 - App Center is the Home surface with no windows and opens as an overlay when windows exist.
+- The Graph Explorer workbench reuses one interactive graph component for Ontology, KG, Agent orchestration, and the privacy data map. It is a trusted-Host auxiliary surface rather than an installed generated App.
 - Audit logs, model settings, and system menus use shared `SystemDialog`, `SystemDrawer`, `SystemPopover`, and `SystemIconButton` primitives.
 
 Popovers support Escape, outside press, and focus return. Approval dialogs are blocking: Escape or a scrim press is not interpreted as approval or rejection.

@@ -36,7 +36,7 @@ docker compose up --build
 ```bash
 uv sync
 npm --prefix frontend install
-uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 npm --prefix frontend run dev
 ```
 

@@ -30,6 +30,10 @@
 .task-run-detail > header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
 .task-run-detail > header h3 { font-size: 15px; }
 .task-run-detail > header small { color: var(--text-muted); font-size: 10px; }
+.task-detail-tabs { display: flex; gap: 5px; margin: -7px 0 15px; padding: 3px; border: 1px solid var(--glass-border); border-radius: 11px; background: color-mix(in srgb,var(--workspace-bg-solid),transparent 45%); }
+.task-detail-tabs button { display: inline-flex; flex: 1; align-items: center; justify-content: center; gap: 5px; padding: 7px 8px; border: 0; border-radius: 8px; color: var(--text-muted); background: transparent; cursor: pointer; font-size: 10px; }
+.task-detail-tabs button.is-active { color: var(--text-primary); background: var(--control-hover); }
+.task-run-graph { height: calc(100% - 75px); min-height: 420px; overflow: hidden; border: 1px solid var(--glass-border); border-radius: 13px; background: var(--surface-panel); }
 .task-run-detail > p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .task-source-link { margin: 13px 0; }
 .task-run-detail h4 { margin: 18px 0 7px; color: var(--text-muted); font-size: 10px; text-transform: uppercase; }

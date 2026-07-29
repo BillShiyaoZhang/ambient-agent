@@ -1,6 +1,10 @@
-import React, { useState, useEffect } from "react";
-import { RotateCw, X } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { FileClock, Network, RotateCw, X } from "lucide-react";
+import type { GraphDataset } from "../lib/graphVisualization";
+import { dataMapToGraph } from "../lib/graphScenes";
+import { DeferredGraphExplorer } from "./graph/DeferredGraph";
 import { SystemDrawer, SystemIconButton } from "./system/SystemUI";
+import "./AuditLogPanel.css";
 
 export interface AuditLogEntry {
   id: number;
@@ -20,6 +24,12 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [view, setView] = useState<"log" | "map">("log");
+  const [dataMap, setDataMap] = useState<GraphDataset | null>(null);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapError, setMapError] = useState("");
+  const [mapRequested, setMapRequested] = useState(false);
+  const mapRequestGeneration = useRef(0);
 
   const fetchLogs = async () => {
     setLoading(true);
@@ -37,11 +47,41 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
     }
   };
 
+  const fetchDataMap = async () => {
+    const generation = ++mapRequestGeneration.current;
+    setMapRequested(true);
+    setMapLoading(true);
+    setMapError("");
+    try {
+      const response = await fetch(`http://${window.location.hostname}:8000/api/data-map`);
+      if (!response.ok) throw new Error(`Data map request failed (${response.status})`);
+      const nextDataMap = dataMapToGraph(await response.json());
+      if (generation === mapRequestGeneration.current) setDataMap(nextDataMap);
+    } catch (error) {
+      if (generation === mapRequestGeneration.current) {
+        setMapError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (generation === mapRequestGeneration.current) setMapLoading(false);
+    }
+  };
+
   useEffect(() => {
+    mapRequestGeneration.current += 1;
+    setDataMap(null);
+    setMapRequested(false);
+    setMapLoading(false);
+    setMapError("");
     if (isOpen) {
-      fetchLogs();
+      void fetchLogs();
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && view === "map" && !dataMap && !mapRequested) {
+      void fetchDataMap();
+    }
+  }, [dataMap, isOpen, mapRequested, view]);
 
   return (
     <SystemDrawer open={isOpen} onClose={onClose} label="Data Transmission Audit Log" className="audit-panel flex flex-col">
@@ -57,18 +97,55 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
           </div>
           <div className="flex items-center gap-2">
             <SystemIconButton
-              onClick={fetchLogs}
-              disabled={loading}
-              label="Refresh logs"
+              onClick={() => view === "log" ? void fetchLogs() : void fetchDataMap()}
+              disabled={view === "log" ? loading : mapLoading}
+              label={view === "log" ? "Refresh logs" : "Refresh data map"}
             >
-              <RotateCw className={loading ? "animate-spin" : ""} size={17} />
+              <RotateCw className={loading || mapLoading ? "animate-spin" : ""} size={17} />
             </SystemIconButton>
             <SystemIconButton onClick={onClose} label="Close audit log"><X size={18} /></SystemIconButton>
           </div>
         </div>
 
+        <nav className="audit-panel-tabs" aria-label="Audit views">
+          <button
+            aria-pressed={view === "log"}
+            className={view === "log" ? "is-active" : ""}
+            onClick={() => setView("log")}
+            type="button"
+          >
+            <FileClock size={14} />
+            Audit log
+          </button>
+          <button
+            aria-pressed={view === "map"}
+            className={view === "map" ? "is-active" : ""}
+            onClick={() => setView("map")}
+            type="button"
+          >
+            <Network size={14} />
+            Data map
+          </button>
+        </nav>
+
         {/* Content list */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {view === "map" ? (
+          <div className="audit-data-map">
+            {mapLoading && !dataMap ? (
+              <div className="audit-map-message" role="status">Loading privacy data map…</div>
+            ) : mapError ? (
+              <div className="audit-map-message is-error" role="alert">{mapError}</div>
+            ) : dataMap ? (
+              <DeferredGraphExplorer
+                ariaLabel="Privacy data map"
+                className="audit-data-map-explorer"
+                dataset={dataMap}
+                loadingLabel="Privacy data map loading"
+              />
+            ) : null}
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {loading && logs.length === 0 ? (
             <div className="h-48 flex items-center justify-center text-sm text-white/30">
               Loading logs...
@@ -143,7 +220,8 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, onClose })
               </div>
             ))
           )}
-        </div>
+          </div>
+        )}
     </SystemDrawer>
   );
 };

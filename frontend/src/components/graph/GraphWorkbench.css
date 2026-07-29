@@ -1,0 +1,119 @@
+.graph-workbench-dialog {
+  display: flex;
+  flex-direction: column;
+}
+
+.graph-workbench-dialog > .system-dialog-header {
+  flex: 0 0 auto;
+  padding-bottom: 10px;
+}
+
+.graph-workbench {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding: 0 20px 20px;
+}
+
+.graph-workbench-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+}
+
+.graph-workbench-tabs {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--workspace-bg-solid), transparent 45%);
+}
+
+.graph-workbench-tabs button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.graph-workbench-tabs button.is-active {
+  color: var(--text-primary);
+  background: var(--control-hover);
+}
+
+.graph-workbench-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.graph-workbench-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--workspace-bg-solid), transparent 34%);
+}
+
+.graph-workbench-explorer {
+  height: 100%;
+  min-height: 520px;
+}
+
+.graph-workbench-message {
+  display: grid;
+  height: 100%;
+  min-height: 360px;
+  place-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.graph-workbench-message.is-error {
+  color: var(--danger);
+}
+
+.graph-workbench-message p {
+  margin: 0;
+}
+
+.graph-workbench .is-spinning {
+  animation: graph-workbench-spin 1s linear infinite;
+}
+
+@keyframes graph-workbench-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 719px) {
+  .graph-workbench {
+    padding: 0 10px 10px;
+  }
+
+  .graph-workbench-toolbar {
+    align-items: flex-start;
+  }
+
+  .graph-workbench-tabs {
+    flex: 1;
+  }
+
+  .graph-workbench-explorer {
+    min-height: 440px;
+  }
+}

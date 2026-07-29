@@ -22,6 +22,17 @@ export interface RunInteraction {
   resolved_at?: string | null;
 }
 
+export interface RunStep {
+  id?: number;
+  run_id?: string;
+  step_key: string;
+  status: string;
+  attempt: number;
+  output?: unknown;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface AmbientRun {
   id: string;
   owner_id: string;
@@ -31,6 +42,7 @@ export interface AmbientRun {
   source_id?: string | null;
   adapter_type: string;
   workflow_type?: string;
+  workflow_version?: number;
   runtime_id: string;
   status: RunStatus;
   progress: number;
@@ -61,6 +73,7 @@ export interface AmbientRun {
   started_at?: string | null;
   finished_at?: string | null;
   interactions?: RunInteraction[];
+  steps?: RunStep[];
   events?: RunEvent[];
 }
 
@@ -74,6 +87,7 @@ export type AmbientRunSummary = Pick<
   | "source_id"
   | "adapter_type"
   | "workflow_type"
+  | "workflow_version"
   | "runtime_id"
   | "status"
   | "progress"

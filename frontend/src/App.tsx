@@ -5,6 +5,10 @@ import type { Widget } from "./components/DashboardCanvas";
 import { SandboxWidget } from "./components/SandboxWidget";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AuditLogPanel } from "./components/AuditLogPanel";
+import {
+  DeferredGraphExplorer,
+  DeferredGraphWorkbench,
+} from "./components/graph/DeferredGraph";
 import type { Session } from "./components/SessionSidebar";
 import { AppCenter } from "./components/AppCenter";
 import { AppPermissionModal } from "./components/AppPermissionModal";
@@ -39,7 +43,8 @@ import {
   schemaProposalDependencyErrors,
   type WidgetSchemaProposal,
 } from "./lib/widgetDesign";
-import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
+import { schemaProposalToGraph } from "./lib/graphScenes";
+import { Languages, ListTodo, Moon, Network, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
   clearCodingAgentAuth,
@@ -217,6 +222,7 @@ function App() {
   }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
+  const [isGraphOpen, setIsGraphOpen] = useState(false);
   const [isTaskDrawerOpen, setIsTaskDrawerOpen] = useState(false);
   const [taskCounts, setTaskCounts] = useState({ active: 0, attention: 0 });
   
@@ -281,6 +287,7 @@ function App() {
 
   const [pendingSchemaRequest, setPendingSchemaRequest] = useState<SchemaApprovalRequest | null>(null);
   const [editedProposal, setEditedProposal] = useState<SchemaProposal | null>(null);
+  const [schemaServerDiagnosticsStale, setSchemaServerDiagnosticsStale] = useState(false);
   const [pendingPlanRequest, setPendingPlanRequest] = useState<PlanApprovalRequest | null>(null);
   const [planFeedback, setPlanFeedback] = useState("");
   const [runningSessions, setRunningSessions] = useState<string[]>([]);
@@ -294,9 +301,11 @@ function App() {
       const proposal = JSON.parse(JSON.stringify(pendingSchemaRequest.proposal));
       proposal.capabilities = Array.isArray(proposal.capabilities) ? proposal.capabilities : [];
       setEditedProposal(proposal);
+      setSchemaServerDiagnosticsStale(false);
       setSchemaFeedback("");
     } else {
       setEditedProposal(null);
+      setSchemaServerDiagnosticsStale(false);
       setSchemaFeedback("");
     }
   }, [pendingSchemaRequest]);
@@ -310,6 +319,19 @@ function App() {
   const schemaDependencyErrors = editedProposal
     ? schemaProposalDependencyErrors(editedProposal)
     : [];
+  const schemaServerDiagnostics = [...new Set(
+    pendingSchemaRequest?.validation_errors || [],
+  )];
+  const schemaApprovalErrors = [...new Set([
+    ...(schemaServerDiagnosticsStale ? [] : schemaServerDiagnostics),
+    ...schemaDependencyErrors,
+  ])];
+  const staleSchemaServerDiagnostics = schemaServerDiagnosticsStale
+    ? schemaServerDiagnostics
+    : [];
+  const schemaVisualization = editedProposal
+    ? schemaProposalToGraph(editedProposal, schemaApprovalErrors)
+    : null;
 
   const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
     if (!pendingSchemaRequest) return;
@@ -408,6 +430,11 @@ function App() {
     }
   };
 
+  const updateEditedSchemaProposal = (proposal: SchemaProposal) => {
+    setEditedProposal(proposal);
+    setSchemaServerDiagnosticsStale(true);
+  };
+
   // Helper functions for editing Reused Schema extensions
   const handleAddExtendedProperty = (schemaIndex: number) => {
     if (!editedProposal) return;
@@ -420,7 +447,7 @@ function App() {
       newKey = `new_field_${counter}`;
     }
     schema.extended_properties[newKey] = "string";
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateExtendedPropertyKey = (schemaIndex: number, oldKey: string, newKey: string) => {
@@ -432,21 +459,21 @@ function App() {
     const val = schema.extended_properties[oldKey];
     delete schema.extended_properties[oldKey];
     schema.extended_properties[newKey] = val;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateExtendedPropertyType = (schemaIndex: number, key: string, newType: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.reused_schemas[schemaIndex].extended_properties[key] = newType;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleRemoveExtendedProperty = (schemaIndex: number, key: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     delete updated.reused_schemas[schemaIndex].extended_properties[key];
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   // Helper functions for editing New Schemas
@@ -461,7 +488,7 @@ function App() {
       newKey = `field_${counter}`;
     }
     schema.properties[newKey] = "string";
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateNewSchemaPropertyKey = (schemaIndex: number, oldKey: string, newKey: string) => {
@@ -473,21 +500,21 @@ function App() {
     const val = schema.properties[oldKey];
     delete schema.properties[oldKey];
     schema.properties[newKey] = val;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateNewSchemaPropertyType = (schemaIndex: number, key: string, newType: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.new_schemas[schemaIndex].properties[key] = newType;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleRemoveNewSchemaProperty = (schemaIndex: number, key: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     delete updated.new_schemas[schemaIndex].properties[key];
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateNewSchemaMeta = (
@@ -505,17 +532,17 @@ function App() {
       if (schema.ontology_iri === `urn:ambient:ontology:${previousId}`) {
         schema.ontology_iri = `urn:ambient:ontology:${val}`;
       }
-      setEditedProposal(reconcileProposalGraphEntity(updated, previousId, val));
+      updateEditedSchemaProposal(reconcileProposalGraphEntity(updated, previousId, val));
       return;
     }
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateEquivalentOntologyIris = (schemaIndex: number, value: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.new_schemas[schemaIndex].equivalent_to = parseEquivalentOntologyIris(value);
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleRemoveNewSchema = (schemaIndex: number) => {
@@ -523,7 +550,7 @@ function App() {
     const updated = { ...editedProposal };
     const removedId = updated.new_schemas[schemaIndex]?.id;
     updated.new_schemas.splice(schemaIndex, 1);
-    setEditedProposal(
+    updateEditedSchemaProposal(
       removedId ? reconcileProposalGraphEntity(updated, removedId, null) : updated,
     );
   };
@@ -532,7 +559,7 @@ function App() {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.new_schemas.push(createCustomOntologyEntity(updated.new_schemas.map((schema) => schema.id)));
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const [mutationPreview, setMutationPreview] = useState<MutationPreviewData | null>(null);
@@ -969,6 +996,7 @@ function App() {
       language={language}
       headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
         <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "图谱探索" : "Graph Explorer"} onClick={() => setIsGraphOpen(true)}><Network size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={() => setIsAuditOpen(true)}><ShieldCheck size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "模型与 Provider" : "Models & Providers"} onClick={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}><Settings2 size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "切换为英文" : "Switch to Chinese"} onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
@@ -1007,6 +1035,7 @@ function App() {
               </ErrorBoundary>
             )}
             onOpenAudit={() => setIsAuditOpen(true)}
+            onOpenGraph={() => setIsGraphOpen(true)}
             onOpenTasks={() => setIsTaskDrawerOpen(true)}
             onOpenLLMSettings={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
             taskCount={taskCounts.active + taskCounts.attention}
@@ -1075,6 +1104,11 @@ function App() {
 
       {/* Audit Log Panel Overlay */}
       <AuditLogPanel isOpen={isAuditOpen} onClose={() => setIsAuditOpen(false)} />
+      <DeferredGraphWorkbench
+        open={isGraphOpen}
+        language={language}
+        onClose={() => setIsGraphOpen(false)}
+      />
       <TaskDrawer
         open={isTaskDrawerOpen}
         language={language}
@@ -1138,8 +1172,31 @@ function App() {
 
       {/* 🧠 Canonical ontology alignment modal */}
       {pendingSchemaRequest && editedProposal && (
-        <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
+        <SystemDialog className="schema-alignment-dialog" open blocking size="workbench" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
           <div className="system-dialog-body flex flex-col gap-4">
+
+            {schemaVisualization && (
+              <section aria-label={language === "zh" ? "Schema 提案关系预览" : "Schema proposal relationship preview"}>
+                <div className="mb-2">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                    {language === "zh" ? "关系预览" : "Relationship preview"}
+                  </h4>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    {language === "zh"
+                      ? "修改实体、父类或能力范围时，图会同步更新；红色节点表示批准前必须关注的问题。"
+                      : "The graph updates as entities, parents, and capability scopes change; red nodes flag issues to review before approval."}
+                  </p>
+                </div>
+                <DeferredGraphExplorer
+                  ariaLabel={language === "zh" ? "Schema 提案关系图" : "Schema proposal graph"}
+                  className="h-[360px] min-h-[360px] overflow-hidden rounded-xl border border-white/10"
+                  compact
+                  dataset={schemaVisualization}
+                  loadingLabel={language === "zh" ? "正在加载 Schema 提案关系图" : "Schema proposal graph loading"}
+                  loadingMessage={language === "zh" ? "正在加载交互式关系图…" : "Loading interactive relationship graph…"}
+                />
+              </section>
+            )}
 
             {pendingSchemaRequest.plan && (
               <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-4">
@@ -1152,7 +1209,7 @@ function App() {
               </div>
             )}
 
-            {((pendingSchemaRequest.validation_errors?.length || 0) > 0 || schemaDependencyErrors.length > 0) && (
+            {schemaApprovalErrors.length > 0 && (
               <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4">
                 <h4 className="text-xs font-semibold text-red-300">
                   {language === "zh" ? "设计依赖尚未对齐" : "Design dependencies are not aligned"}
@@ -1163,10 +1220,27 @@ function App() {
                     : "Schema edits affect Graph grants. Fix the issues below, or ask the agent to realign the proposal before approval."}
                 </p>
                 <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-red-200">
-                  {[...new Set([
-                    ...(pendingSchemaRequest.validation_errors || []),
-                    ...schemaDependencyErrors,
-                  ])].map((error) => <li key={error}>{error}</li>)}
+                  {schemaApprovalErrors.map((error) => <li key={error}>{error}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {staleSchemaServerDiagnostics.length > 0 && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4">
+                <h4 className="text-xs font-semibold text-amber-300">
+                  {language === "zh"
+                    ? "上次提交的服务端诊断（已过期）"
+                    : "Server diagnostics from the previous submission (stale)"}
+                </h4>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  {language === "zh"
+                    ? "当前提案已编辑；这些诊断仅保留作参考，不会阻止批准。提交后端时仍会以当前内容重新执行权威校验。"
+                    : "The proposal has changed. These diagnostics remain for context but no longer block approval; the backend will validate the current submission authoritatively."}
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-amber-200">
+                  {staleSchemaServerDiagnostics.map((diagnostic) => (
+                    <li key={diagnostic}>{diagnostic}</li>
+                  ))}
                 </ul>
               </div>
             )}
@@ -1440,8 +1514,8 @@ function App() {
                 )}
                 <button
                   onClick={() => handleResolveSchemaRequest(true)}
-                  disabled={schemaDependencyErrors.length > 0}
-                  title={schemaDependencyErrors.length > 0
+                  disabled={schemaApprovalErrors.length > 0}
+                  title={schemaApprovalErrors.length > 0
                     ? (language === "zh" ? "请先修复 Schema 与 Graph grant 的依赖" : "Fix Schema and Graph grant dependencies first")
                     : undefined}
                   className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-40 transition-all text-white text-xs shadow-md shadow-cyan-600/10"

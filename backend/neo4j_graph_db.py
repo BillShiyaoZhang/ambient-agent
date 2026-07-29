@@ -634,6 +634,22 @@ class Neo4jGraphDatabase(GraphDatabase):
 
         return self._read(fetch)
 
+    def list_edges(self) -> list[dict[str, Any]]:
+        """Return every ContextRecord relationship with one stable Cypher query."""
+
+        def fetch(tx: Any) -> list[dict[str, Any]]:
+            result = tx.run(
+                """
+                MATCH (a:ContextRecord)-[r:GRAPH_EDGE]->(b:ContextRecord)
+                RETURN a.id AS from_id, b.id AS to_id,
+                       r.edge_type AS type, r.properties_json AS properties_json
+                ORDER BY from_id, to_id, type
+                """
+            )
+            return [self._edge_from_record(record) for record in result]
+
+        return self._read(fetch)
+
     def delete_edge(self, from_id: str, to_id: str, edge_type: str) -> bool:
         def delete(tx: Any) -> bool:
             record = tx.run(

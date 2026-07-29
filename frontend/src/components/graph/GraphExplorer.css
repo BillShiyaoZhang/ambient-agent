@@ -1,0 +1,695 @@
+.graph-explorer {
+  --graph-border: var(--glass-border, rgba(148, 163, 184, .24));
+  --graph-panel: var(--surface-panel-solid, #101827);
+  --graph-panel-soft: var(--control-hover, rgba(148, 163, 184, .1));
+  --graph-text: var(--text-primary, #f8fafc);
+  --graph-muted: var(--text-muted, #94a3b8);
+  --graph-accent: var(--accent, #6366f1);
+  --graph-danger: var(--danger, #ef4444);
+  --graph-warning: var(--warning, #f59e0b);
+  display: flex;
+  min-width: 0;
+  min-height: 620px;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--graph-border);
+  border-radius: 16px;
+  color: var(--graph-text);
+  background: color-mix(in srgb, var(--graph-panel), transparent 2%);
+}
+
+.graph-explorer.is-compact {
+  min-height: 460px;
+}
+
+.graph-explorer button,
+.graph-explorer input,
+.graph-explorer a {
+  font: inherit;
+}
+
+.graph-explorer button:focus-visible,
+.graph-explorer input:focus-visible,
+.graph-explorer a:focus-visible,
+.graph-explorer .react-flow__node:focus-visible,
+.graph-explorer .react-flow__edge:focus-visible {
+  outline: 2px solid var(--graph-accent);
+  outline-offset: 2px;
+}
+
+.graph-explorer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 16px 11px;
+  border-bottom: 1px solid var(--graph-border);
+}
+
+.graph-explorer-header h3,
+.graph-explorer-header p,
+.graph-explorer-details h4,
+.graph-explorer-details h5,
+.graph-explorer-details p {
+  margin: 0;
+}
+
+.graph-explorer-header h3 {
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.graph-explorer-header p {
+  max-width: 720px;
+  margin-top: 4px;
+  color: var(--graph-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.graph-explorer-layout-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.graph-explorer-layout-controls button,
+.graph-explorer-detail-actions button,
+.graph-explorer-detail-actions a,
+.graph-explorer-empty button {
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--graph-border);
+  border-radius: 8px;
+  color: var(--graph-muted);
+  background: var(--graph-panel-soft);
+  cursor: pointer;
+  font-size: 10px;
+  text-decoration: none;
+}
+
+.graph-explorer-layout-controls button:hover,
+.graph-explorer-layout-controls button[aria-pressed="true"],
+.graph-explorer-detail-actions button:hover,
+.graph-explorer-detail-actions a:hover,
+.graph-explorer-empty button:hover {
+  border-color: color-mix(in srgb, var(--graph-accent), transparent 45%);
+  color: var(--graph-text);
+  background: color-mix(in srgb, var(--graph-accent), transparent 84%);
+}
+
+.graph-explorer-toolbar {
+  display: grid;
+  grid-template-columns: minmax(190px, 280px) minmax(0, 1fr);
+  align-items: end;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--graph-border);
+}
+
+.graph-explorer-search,
+.graph-explorer-toolbar fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.graph-explorer-search > span,
+.graph-explorer-toolbar legend {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--graph-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.graph-explorer-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--graph-border);
+  border-radius: 9px;
+  color: var(--graph-text);
+  background: color-mix(in srgb, var(--graph-panel), white 2%);
+  font-size: 11px;
+}
+
+.graph-explorer-search input::placeholder {
+  color: color-mix(in srgb, var(--graph-muted), transparent 18%);
+}
+
+.graph-explorer-toolbar fieldset > div {
+  display: flex;
+  max-height: 58px;
+  flex-wrap: wrap;
+  gap: 4px;
+  overflow: auto;
+}
+
+.graph-explorer-toolbar fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid var(--graph-border);
+  border-radius: 999px;
+  color: var(--graph-muted);
+  background: var(--graph-panel-soft);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.graph-explorer-toolbar fieldset label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--graph-accent), transparent 56%);
+  color: var(--graph-text);
+}
+
+.graph-explorer-toolbar input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--graph-accent);
+}
+
+.graph-explorer-alert {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 9px 12px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--graph-border);
+  border-radius: 9px;
+  color: var(--graph-muted);
+  background: var(--graph-panel-soft);
+  font-size: 10px;
+}
+
+.graph-explorer-alert.is-error {
+  border-color: color-mix(in srgb, var(--graph-danger), transparent 55%);
+  color: var(--graph-danger);
+  background: color-mix(in srgb, var(--graph-danger), transparent 91%);
+}
+
+.graph-explorer-alert.is-truncated {
+  border-color: color-mix(in srgb, var(--graph-warning), transparent 60%);
+  color: color-mix(in srgb, var(--graph-warning), var(--graph-text) 30%);
+  background: color-mix(in srgb, var(--graph-warning), transparent 93%);
+}
+
+.graph-explorer-content {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 27%);
+}
+
+.graph-explorer-canvas {
+  position: relative;
+  min-width: 0;
+  min-height: 390px;
+  background:
+    radial-gradient(circle at 45% 35%, color-mix(in srgb, var(--graph-accent), transparent 94%), transparent 52%),
+    color-mix(in srgb, var(--graph-panel), black 2%);
+}
+
+.graph-explorer.is-compact .graph-explorer-canvas {
+  min-height: 300px;
+}
+
+.graph-explorer-canvas .react-flow {
+  position: absolute;
+  inset: 0;
+}
+
+.graph-explorer .react-flow__attribution {
+  padding: 2px 4px;
+  color: var(--graph-muted);
+  background: color-mix(in srgb, var(--graph-panel), transparent 16%);
+  font-size: 8px;
+}
+
+.graph-explorer .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--graph-border);
+  border-radius: 9px;
+  box-shadow: none;
+}
+
+.graph-explorer .react-flow__controls-button {
+  border-color: var(--graph-border);
+  color: var(--graph-text);
+  background: var(--graph-panel);
+  fill: currentColor;
+}
+
+.graph-explorer .react-flow__controls-button:hover {
+  background: var(--graph-panel-soft);
+}
+
+.graph-explorer .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--graph-border);
+  border-radius: 9px;
+  background: var(--graph-panel);
+}
+
+.graph-explorer .react-flow__node-default {
+  width: 210px;
+  padding: 10px;
+  border: 1px solid var(--graph-border);
+  border-left: 3px solid var(--graph-accent);
+  border-radius: 11px;
+  color: var(--graph-text);
+  background: color-mix(in srgb, var(--graph-panel), white 3%);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+  text-align: left;
+}
+
+.graph-explorer .react-flow__node-default:hover,
+.graph-explorer .react-flow__node-default.selected {
+  border-color: color-mix(in srgb, var(--graph-accent), transparent 18%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--graph-accent), transparent 72%);
+}
+
+.graph-explorer .react-flow__node-default.is-status-failed,
+.graph-explorer .react-flow__node-default.is-status-error {
+  border-left-color: var(--graph-danger);
+}
+
+.graph-explorer .react-flow__node-default.is-status-warning,
+.graph-explorer .react-flow__node-default.is-status-needs_attention,
+.graph-explorer .react-flow__node-default.is-status-waiting,
+.graph-explorer .react-flow__node-default.is-status-declared,
+.graph-explorer .react-flow__node-default.is-status-unknown {
+  border-left-color: var(--graph-warning);
+}
+
+.graph-explorer .react-flow__node-default.is-status-succeeded,
+.graph-explorer .react-flow__node-default.is-status-existing,
+.graph-explorer .react-flow__node-default.is-status-observed {
+  border-left-color: #22c55e;
+}
+
+.graph-explorer-node-label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+
+.graph-explorer-node-label strong,
+.graph-explorer-node-label small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-explorer-node-label strong {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.graph-explorer-node-label small {
+  margin-top: 3px;
+  color: var(--graph-muted);
+  font-size: 8px;
+  text-transform: none;
+}
+
+.graph-explorer-status-symbol {
+  display: inline-grid;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--graph-muted);
+  background: var(--graph-panel-soft);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.graph-explorer-status-symbol.is-succeeded,
+.graph-explorer-status-symbol.is-existing,
+.graph-explorer-status-symbol.is-observed {
+  color: #22c55e;
+  background: color-mix(in srgb, #22c55e, transparent 87%);
+}
+
+.graph-explorer-status-symbol.is-running {
+  color: var(--graph-accent);
+  background: color-mix(in srgb, var(--graph-accent), transparent 87%);
+}
+
+.graph-explorer-status-symbol.is-waiting,
+.graph-explorer-status-symbol.is-waiting_user,
+.graph-explorer-status-symbol.is-warning,
+.graph-explorer-status-symbol.is-needs_attention,
+.graph-explorer-status-symbol.is-declared,
+.graph-explorer-status-symbol.is-unknown {
+  color: var(--graph-warning);
+  background: color-mix(in srgb, var(--graph-warning), transparent 87%);
+}
+
+.graph-explorer-status-symbol.is-failed,
+.graph-explorer-status-symbol.is-error,
+.graph-explorer-status-symbol.is-cancelled {
+  color: var(--graph-danger);
+  background: color-mix(in srgb, var(--graph-danger), transparent 88%);
+}
+
+.graph-explorer .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--graph-muted), transparent 20%);
+  stroke-width: 1.4;
+}
+
+.graph-explorer .react-flow__edge.is-status-warning .react-flow__edge-path,
+.graph-explorer .react-flow__edge.is-status-error .react-flow__edge-path {
+  stroke: var(--graph-warning);
+  stroke-dasharray: 5 4;
+}
+
+.graph-explorer .react-flow__edge.is-status-failed .react-flow__edge-path {
+  stroke: var(--graph-danger);
+}
+
+.graph-explorer .react-flow__edge.selected .react-flow__edge-path,
+.graph-explorer .react-flow__edge:focus .react-flow__edge-path {
+  stroke: var(--graph-accent);
+  stroke-width: 2.4;
+}
+
+.graph-explorer .react-flow__edge-text {
+  fill: var(--graph-muted);
+  font-size: 8px;
+}
+
+.graph-explorer .react-flow__edge-textbg {
+  fill: var(--graph-panel);
+  fill-opacity: .92;
+}
+
+.graph-explorer-empty {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 20px;
+  color: var(--graph-muted);
+  background: color-mix(in srgb, var(--graph-panel), transparent 8%);
+  text-align: center;
+}
+
+.graph-explorer-empty strong {
+  color: var(--graph-text);
+  font-size: 12px;
+}
+
+.graph-explorer-empty span {
+  font-size: 10px;
+}
+
+.graph-explorer-details {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--graph-border);
+  background: color-mix(in srgb, var(--graph-panel), white 1%);
+}
+
+.graph-explorer-detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.graph-explorer-detail-heading h4 {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.graph-explorer-detail-heading p {
+  margin-top: 2px;
+  color: var(--graph-muted);
+  font-size: 9px;
+}
+
+.graph-explorer-summary {
+  margin-top: 11px !important;
+  color: var(--graph-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.graph-explorer-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.graph-explorer-badges li {
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: var(--graph-muted);
+  background: var(--graph-panel-soft);
+  font-size: 8px;
+}
+
+.graph-explorer-detail-list {
+  margin: 12px 0 0;
+}
+
+.graph-explorer-detail-list > div {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--graph-border);
+}
+
+.graph-explorer-detail-list dt {
+  color: var(--graph-muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.graph-explorer-detail-list dd {
+  max-height: 110px;
+  margin: 3px 0 0;
+  overflow: auto;
+  color: var(--graph-text);
+  font: 9px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.graph-explorer-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.graph-explorer-inspection-hint {
+  display: grid;
+  min-height: 150px;
+  place-content: center;
+  gap: 6px;
+  color: var(--graph-muted);
+  text-align: center;
+}
+
+.graph-explorer-inspection-hint strong {
+  color: var(--graph-text);
+  font-size: 11px;
+}
+
+.graph-explorer-inspection-hint span {
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.graph-explorer-coverage {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--graph-border);
+}
+
+.graph-explorer-coverage h5 {
+  margin: 0 0 8px;
+  color: var(--graph-muted);
+  font-size: 8px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.graph-explorer-coverage > div {
+  margin-top: 8px;
+}
+
+.graph-explorer-coverage strong,
+.graph-explorer-coverage span {
+  display: block;
+}
+
+.graph-explorer-coverage strong {
+  color: var(--graph-muted);
+  font-size: 8px;
+}
+
+.graph-explorer-coverage span,
+.graph-explorer-coverage li {
+  margin-top: 2px;
+  color: var(--graph-text);
+  font: 8px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.graph-explorer-coverage ul {
+  margin: 3px 0 0;
+  padding-left: 15px;
+}
+
+.graph-explorer-edge-picker {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--graph-border);
+}
+
+.graph-explorer-edge-picker > span {
+  color: var(--graph-muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.graph-explorer-edge-picker select {
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid var(--graph-border);
+  border-radius: 8px;
+  color: var(--graph-text);
+  background: var(--graph-panel-soft);
+  font-size: 9px;
+}
+
+.graph-explorer-legend {
+  margin-top: auto;
+  padding-top: 15px;
+}
+
+.graph-explorer-legend h5 {
+  color: var(--graph-muted);
+  font-size: 8px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.graph-explorer-legend > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.graph-explorer-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--graph-muted);
+  font-size: 8px;
+}
+
+.graph-explorer-legend .graph-explorer-status-symbol {
+  width: 14px;
+  height: 14px;
+  font-size: 8px;
+}
+
+@media (max-width: 760px) {
+  .graph-explorer,
+  .graph-explorer.is-compact {
+    height: 82vh;
+    height: min(720px, 82dvh);
+    min-height: 0;
+    max-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .graph-explorer-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .graph-explorer-layout-controls {
+    justify-content: flex-start;
+  }
+
+  .graph-explorer-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-explorer-content {
+    min-height: 0;
+    flex: 0 0 auto;
+    grid-template-rows: minmax(300px, 52dvh) minmax(210px, auto);
+    grid-template-columns: 1fr;
+  }
+
+  .graph-explorer-details {
+    min-height: 210px;
+    max-height: none;
+    overflow: visible;
+    border-top: 1px solid var(--graph-border);
+    border-left: 0;
+  }
+
+  .graph-explorer-detail-list dd,
+  .graph-explorer-coverage span,
+  .graph-explorer-coverage li {
+    font-size: 10px;
+    line-height: 1.55;
+  }
+
+  .graph-explorer-detail-list dt,
+  .graph-explorer-coverage strong,
+  .graph-explorer-coverage h5,
+  .graph-explorer-edge-picker > span,
+  .graph-explorer-legend h5 {
+    font-size: 9px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .graph-explorer *,
+  .graph-explorer *::before,
+  .graph-explorer *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .001ms !important;
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
