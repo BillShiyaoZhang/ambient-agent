@@ -23,7 +23,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
@@ -70,6 +70,15 @@ from backend.coding_agent_acp import (
 from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
 from backend.run_live import RunLiveBroker
 from backend.session_title import is_placeholder_title, sanitize_title
+from backend.skill_manager import SkillManager, SkillOntologyReferenceError
+from backend.skill_market import SkillMarketError
+from backend.skill_store import (
+    SkillNotInstalledError,
+    SkillPackageIntegrityError,
+    SkillRevisionConflict,
+    SkillStoreCorruptionError,
+    SkillStoreError,
+)
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 from backend.widget_runtime import (
     WidgetRuntimeBinding,
@@ -165,6 +174,7 @@ def _system_capability_catalog() -> SystemCapabilityCatalog:
     ]
     return SystemCapabilityCatalog.build(
         installed_capabilities=app_store.list_capabilities(),
+        installed_skills=skill_manager.discovery_metadata(),
         model_tools=model_tools,
         coding_agents=coding_agent_config_store.catalog(),
     )
@@ -173,6 +183,20 @@ def _system_capability_catalog() -> SystemCapabilityCatalog:
 from backend.graph_db import GraphDatabase, create_graph_database
 
 graph_db = create_graph_database(WORKSPACE_DIR)
+_configured_skill_market_dir = os.getenv("SKILL_MARKET_DIR", "").strip()
+skill_manager = (
+    SkillManager(
+        WORKSPACE_DIR,
+        market_dir=_configured_skill_market_dir,
+        ontology_ids_factory=lambda: graph_db.list_schemas(),
+    )
+    if _configured_skill_market_dir
+    else SkillManager(
+        WORKSPACE_DIR,
+        ontology_ids_factory=lambda: graph_db.list_schemas(),
+    )
+)
+app_store.add_provider(skill_manager)
 _closed_graph_db: GraphDatabase | None = None
 
 
@@ -250,6 +274,7 @@ durable_agent_workflow = DurableAgentWorkflow(
     live_event_sink=run_live_broker.publish,
     app_diagnostic_loader=app_data_source_gateway.recent_diagnostics,
     capability_catalog_factory=_system_capability_catalog,
+    skill_manager=skill_manager,
 )
 run_coordinator.register_internal_agent_executor(durable_agent_workflow)
 
@@ -962,6 +987,20 @@ class AppStoreLayoutUpdate(BaseModel):
     folders: list[dict[str, Any]]
 
 
+class SkillInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    market_id: str
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
+class SkillEnabledUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
 class RunCreate(BaseModel):
     catalog_id: str
     action_id: str | None = None
@@ -978,6 +1017,31 @@ class RunInteractionResolve(BaseModel):
 class RunEffectReconcile(BaseModel):
     resolution: str
     note: str | None = None
+
+
+def _public_run_payload(value: Any) -> Any:
+    """Copy a Run payload while removing private, replay-only Skill bodies."""
+
+    if isinstance(value, list):
+        return [_public_run_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "active_skills" and isinstance(item, list):
+            result[key] = [
+                {
+                    snapshot_key: _public_run_payload(snapshot_value)
+                    for snapshot_key, snapshot_value in snapshot.items()
+                    if snapshot_key not in {"instructions", "allowed_tools"}
+                }
+                if isinstance(snapshot, dict)
+                else None
+                for snapshot in item
+            ]
+            continue
+        result[key] = _public_run_payload(item)
+    return result
 
 
 @app.post("/api/runs", status_code=202)
@@ -1003,14 +1067,16 @@ async def create_run(data: RunCreate):
                 str(source["manifest_revision"]) if source.get("manifest_revision") is not None else None,
                 str(source["grants_digest"]),
             )
-        return run_coordinator.submit(
-            data.catalog_id,
-            action_id,
-            {} if data.input is None else data.input,
-            source_type=str(source.get("type", "user")),
-            source_id=str(source["id"]) if source.get("id") is not None else None,
-            idempotency_key=data.idempotency_key,
-            parent_run_id=data.parent_run_id,
+        return _public_run_payload(
+            run_coordinator.submit(
+                data.catalog_id,
+                action_id,
+                {} if data.input is None else data.input,
+                source_type=str(source.get("type", "user")),
+                source_id=str(source["id"]) if source.get("id") is not None else None,
+                idempotency_key=data.idempotency_key,
+                parent_run_id=data.parent_run_id,
+            )
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1046,9 +1112,11 @@ async def list_runs(
         summary_only=summary_only,
     )
     if not include_details:
-        return runs
+        return _public_run_payload(runs)
     return [
-        detailed for run in runs if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
+        _public_run_payload(detailed)
+        for run in runs
+        if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
     ]
 
 
@@ -1057,13 +1125,13 @@ async def get_run(run_id: str):
     run = run_store.get_run(run_id, include_events=True)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return _public_run_payload(run)
 
 
 @app.post("/api/runs/{run_id}/cancel")
 async def cancel_run(run_id: str):
     try:
-        return run_coordinator.cancel(run_id)
+        return _public_run_payload(run_coordinator.cancel(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     except ValueError as exc:
@@ -1073,7 +1141,7 @@ async def cancel_run(run_id: str):
 @app.post("/api/runs/{run_id}/reconcile")
 async def reconcile_run_effect(run_id: str, data: RunEffectReconcile):
     try:
-        return run_store.reconcile_effect(run_id, data.resolution, note=data.note)
+        return _public_run_payload(run_store.reconcile_effect(run_id, data.resolution, note=data.note))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     except ValueError as exc:
@@ -1083,7 +1151,7 @@ async def reconcile_run_effect(run_id: str, data: RunEffectReconcile):
 @app.post("/api/runs/{run_id}/retry", status_code=202)
 async def retry_run(run_id: str):
     try:
-        return run_coordinator.retry(run_id)
+        return _public_run_payload(run_coordinator.retry(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     except ValueError as exc:
@@ -1097,7 +1165,7 @@ async def resolve_run_interaction(interaction_id: str, data: RunInteractionResol
         if interaction is None:
             raise KeyError(interaction_id)
         response = data.response if isinstance(data.response, dict) else {"approved": bool(data.response)}
-        return run_coordinator.resolve_interaction(interaction_id, response)
+        return _public_run_payload(run_coordinator.resolve_interaction(interaction_id, response))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Interaction not found") from exc
     except ValueError as exc:
@@ -1159,7 +1227,9 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_e
             events = run_store.events_after(sequence)
             for event in events:
                 sequence = max(sequence, int(event["sequence"]))
-                await websocket.send_json({"type": "run_event", "event": event})
+                await websocket.send_json(
+                    {"type": "run_event", "event": _public_run_payload(event)}
+                )
             idle_ticks += 1
             if idle_ticks >= 40:
                 await websocket.send_json(
@@ -1197,6 +1267,117 @@ async def get_app_store():
     return app_store.get_state()
 
 
+def _require_skill_market_host(request: Request, response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="skill_market_origin_denied",
+        denied_message="Skill installation state is only available to the trusted Host",
+    )
+
+
+def _raise_skill_api_error(exc: Exception) -> None:
+    if isinstance(exc, SkillRevisionConflict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_revision_conflict",
+                "message": str(exc),
+                "expected_revision": exc.expected,
+                "actual_revision": exc.actual,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillNotInstalledError):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "skill_not_installed", "message": "Skill is not installed"},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, KeyError):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "skill_market_item_not_found", "message": "Skill market item was not found"},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, (SkillOntologyReferenceError, SkillMarketError, ValueError)):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_skill_package", "message": str(exc)},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, (SkillStoreCorruptionError, OSError)):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "skill_registry_unavailable", "message": "Skill registry is unavailable"},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, (SkillPackageIntegrityError, SkillStoreError)):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "skill_installation_conflict", "message": str(exc)},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    raise exc
+
+
+@app.get("/api/skill-market")
+def get_skill_market(request: Request, response: Response):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.list_market()
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.post("/api/skills/install")
+def install_skill(data: SkillInstallRequest, request: Request, response: Response):
+    _require_skill_market_host(request, response)
+    try:
+        entry = skill_manager.market.get(data.market_id)
+        if app_store.get_capability(entry.catalog_id) is not None:
+            raise SkillStoreError(
+                f"Catalog id '{entry.catalog_id}' is already used by an executable capability"
+            )
+        return skill_manager.install(data.market_id, expected_revision=data.expected_revision)
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.patch("/api/skills/{catalog_id}")
+def set_skill_enabled(
+    catalog_id: str,
+    data: SkillEnabledUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.set_enabled(
+            catalog_id,
+            data.enabled,
+            expected_revision=data.expected_revision,
+        )
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.delete("/api/skills/{catalog_id}")
+def uninstall_skill(
+    catalog_id: str,
+    request: Request,
+    response: Response,
+    expected_revision: int | None = Query(default=None, ge=0),
+):
+    _require_skill_market_host(request, response)
+    try:
+        if not skill_manager.uninstall(catalog_id, expected_revision=expected_revision):
+            raise SkillNotInstalledError(catalog_id)
+        return {"status": "ok", "catalog_id": catalog_id, "revision": skill_manager.revision}
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
 @app.put("/api/app-store/layout")
 async def update_app_store_layout(data: AppStoreLayoutUpdate):
     try:
@@ -1215,6 +1396,11 @@ async def register_capability(catalog_id: str, data: CapabilityManifest):
     expected = app_store.catalog_id(data)
     if catalog_id != expected:
         raise HTTPException(status_code=400, detail=f"catalog id must be {expected}")
+    if skill_manager.store.get(catalog_id, verify_package=False) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Catalog id is already used by an installed Instruction Skill",
+        )
     return app_store.register_capability(data)
 
 
@@ -2126,6 +2312,7 @@ async def websocket_chat(
             data={
                 "workspace_dir": session.workspace_dir,
                 "user_message_id": user_msg.id,
+                "skill_selection_state": "pending",
             },
         )
         run = run_coordinator.submit_internal_agent(

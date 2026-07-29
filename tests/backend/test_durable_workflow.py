@@ -179,6 +179,7 @@ def _workflow(
     emitted: list[dict[str, Any]] | None = None,
     live_emitted: list[dict[str, Any]] | None = None,
     app_diagnostic_loader: Any = None,
+    skill_manager: Any = None,
 ) -> DurableAgentWorkflow:
     async def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("OpenCode must not be called in this workflow tape")
@@ -201,6 +202,7 @@ def _workflow(
         event_sink=event_sink,
         live_event_sink=live_event_sink,
         app_diagnostic_loader=app_diagnostic_loader,
+        skill_manager=skill_manager,
     )
 
 
@@ -348,7 +350,7 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     store = RunStore(str(tmp_path))
     graph_db = GraphDatabase(str(tmp_path))
     workflow = _workflow(tmp_path, store, graph_db)
-    state = _state()
+    state = _state(data={"skill_selection_state": "pending"})
     run = _create_run(store, state, content="say hello")
     converse_calls = 0
 
@@ -400,6 +402,179 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     assert reply_event.payload["message"]["content"] == "hello"
     assert "schema_version" not in reply_event.payload
     assert "event_id" not in reply_event.payload
+
+
+@pytest.mark.asyncio
+async def test_route_pins_selected_skill_body_and_digest_for_converse_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSkillManager:
+        def __init__(self) -> None:
+            self.select_calls = 0
+            self.selection = [
+                {
+                    "catalog_id": "agent-skill:test:daily-planning",
+                    "name": "daily-planning",
+                    "title": "Daily Planning",
+                    "version": "1.0.0",
+                    "digest": f"sha256:{'a' * 64}",
+                    "instructions": "Use the original installed procedure.",
+                }
+            ]
+
+        def select_for_context(self, content: str) -> list[dict[str, Any]]:
+            assert content == "plan my day"
+            self.select_calls += 1
+            return json.loads(json.dumps(self.selection))
+
+        def render_context(self, snapshots: list[dict[str, Any]]) -> str:
+            return f"[INSTALLED SKILL CONTEXT]\n{snapshots[0]['instructions']}"
+
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    skill_manager = FakeSkillManager()
+    workflow = _workflow(
+        tmp_path,
+        store,
+        graph_db,
+        skill_manager=skill_manager,
+    )
+    state = _state(data={"skill_selection_state": "pending"})
+    run = _create_run(store, state, content="plan my day")
+
+    async def scripted_route(
+        _self: AgentOrchestrator,
+        content: str,
+        session_id: str,
+        language: str,
+    ) -> IntentPlan:
+        return IntentPlan(kind=IntentKind.CONVERSE, confidence=1.0, rationale="skill tape")
+
+    async def scripted_converse(
+        self: AgentOrchestrator,
+        plan: IntentPlan,
+        session_id: str,
+        content: str,
+        language: str,
+        on_update: Any,
+    ) -> tuple[ChatMessage, None]:
+        assert "Use the original installed procedure." in (self.skill_context or "")
+        assert "Use a newer procedure." not in (self.skill_context or "")
+        message = ChatMessage(session_id=session_id, role="agent", sender="agent", content="planned")
+        self.db.add(message)
+        self.db.commit()
+        self.db.refresh(message)
+        return message, None
+
+    monkeypatch.setattr(AgentOrchestrator, "_classify_intent", scripted_route)
+    monkeypatch.setattr(AgentOrchestrator, "_handle_converse", scripted_converse)
+
+    routed = await workflow(run, state)
+    assert isinstance(routed, Continue)
+    assert state.data["active_skills"][0]["instructions"] == "Use the original installed procedure."
+    assert DurableAgentWorkflow._run_context(run, state).artifact_hashes == {
+        "agent-skill:test:daily-planning": "a" * 64
+    }
+
+    skill_manager.selection[0]["instructions"] = "Use a newer procedure."
+    state.phase = routed.next_phase
+    completed = await workflow(run, state)
+
+    assert isinstance(completed, Succeeded)
+    assert completed.result == {"message": "planned", "app_id": None}
+    assert skill_manager.select_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_skill_route_checkpoint_does_not_gain_later_installed_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedSkillManager:
+        def select_for_context(self, _content: str) -> list[dict[str, Any]]:
+            raise AssertionError("legacy checkpoint must not resolve current Skill state")
+
+        def render_context(self, _snapshots: list[dict[str, Any]]) -> str:
+            raise AssertionError("legacy checkpoint has no Skill snapshot")
+
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(
+        tmp_path,
+        store,
+        graph_db,
+        skill_manager=UnexpectedSkillManager(),
+    )
+    # Absence of skill_selection_state identifies a checkpoint created before
+    # this feature, even when it is still waiting in the route phase.
+    state = _state()
+    run = _create_run(store, state, content="plan my day")
+
+    async def scripted_route(
+        _self: AgentOrchestrator,
+        content: str,
+        session_id: str,
+        language: str,
+    ) -> IntentPlan:
+        return IntentPlan(kind=IntentKind.CONVERSE, confidence=1.0, rationale="legacy")
+
+    monkeypatch.setattr(AgentOrchestrator, "_classify_intent", scripted_route)
+
+    routed = await workflow(run, state)
+
+    assert isinstance(routed, Continue)
+    assert state.data["skill_selection_state"] == "pinned_none"
+    assert state.data["active_skills"] == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"skill_selection_state": "pinned"},
+        {"skill_selection_state": "unknown"},
+        {
+            "skill_selection_state": "pinned_none",
+            "active_skills": [
+                {
+                    "catalog_id": "agent-skill:test:daily-planning",
+                    "name": "daily-planning",
+                    "title": "Daily Planning",
+                    "version": "1.0.0",
+                    "digest": f"sha256:{'a' * 64}",
+                    "instructions": "Unexpected body.",
+                }
+            ],
+        },
+        {"skill_selection_state": "pending", "active_skills": []},
+    ],
+)
+def test_skill_checkpoint_rejects_missing_unknown_or_contradictory_state(
+    tmp_path: Path,
+    data: dict[str, Any],
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    state = _state(data=data)
+
+    with pytest.raises(durable_workflow_module.WorkflowError) as exc_info:
+        workflow._select_active_skills("plan my day", state)
+
+    assert exc_info.value.code == "invalid_skill_snapshot"
+
+
+def test_pinned_none_skill_checkpoint_normalizes_missing_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    state = _state(data={"skill_selection_state": "pinned_none"})
+
+    workflow._select_active_skills("plan my day", state)
+
+    assert state.data["active_skills"] == []
 
 
 @pytest.mark.asyncio

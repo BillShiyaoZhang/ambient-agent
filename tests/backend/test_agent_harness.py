@@ -158,18 +158,30 @@ async def test_intent_router(monkeypatch):
     assert plan.app_id == "calculator-app"
     assert plan.instruction == "Add a new divide button"
 
-    # 3. Chinese creation phrase
+    # 3. Explicit Skill activation stays on the read-only Agent path.
+    plan = await IntentRouter.route("/skill daily-planning plan tomorrow", RouterContext())
+    assert plan.kind == IntentKind.CONVERSE
+    assert plan.instruction == "plan tomorrow"
+
+    plan = await IntentRouter.route(
+        "/skill daily-planning\nplan tomorrow\nand preserve two buffer blocks",
+        RouterContext(),
+    )
+    assert plan.kind == IntentKind.CONVERSE
+    assert plan.instruction == "plan tomorrow\nand preserve two buffer blocks"
+
+    # 4. Chinese creation phrase
     plan = await IntentRouter.route("给我创建一个待办 widget", RouterContext())
     assert plan.kind == IntentKind.WIDGET_CREATE
     assert "todo-app-" in (plan.app_id or "")
     assert plan.instruction == "给我创建一个待办 widget"
 
-    # 4. English creation pattern
+    # 5. English creation pattern
     plan = await IntentRouter.route("build a new widget to show weather", RouterContext())
     assert plan.kind == IntentKind.WIDGET_CREATE
     assert "weather-app-" in (plan.app_id or "")
 
-    # 5. Existing app modification mention — single match
+    # 6. Existing app modification mention — single match
     plan = await IntentRouter.route(
         "Make clock-app-1234 look glassmorphic",
         RouterContext(app_manifests=[{"id": "clock-app-1234", "title": "My Clock"}]),
@@ -177,7 +189,7 @@ async def test_intent_router(monkeypatch):
     assert plan.kind == IntentKind.WIDGET_MODIFY
     assert plan.app_id == "clock-app-1234"
 
-    # 6. Existing app mention — multiple matches → downgrade to clarify
+    # 7. Existing app mention — multiple matches → downgrade to clarify
     plan = await IntentRouter.route(
         "把时钟修改一下",
         RouterContext(
@@ -253,6 +265,7 @@ async def test_agent_orchestrator_conversational(monkeypatch):
         db_session=db_session,
         app_manager=app_manager,
         graph_db=graph_db,
+        skill_context="[INSTALLED SKILL CONTEXT]\nUse the pinned daily-planning procedure.",
     )
 
     on_update = AsyncMock()
@@ -264,3 +277,8 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     assert agent_msg.content == "Hello! I am here to help you."
     assert agent_msg.role == "agent"
     assert widget is None
+    generated_messages = mock_provider.generate.await_args.kwargs["messages"]
+    system_messages = [message for message in generated_messages if message["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "You are Ambient Agent" in system_messages[0]["content"]
+    assert "Use the pinned daily-planning procedure." in system_messages[0]["content"]

@@ -26,8 +26,10 @@ import {
   AlertCircle,
   AppWindow,
   Blocks,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Download,
   Folder,
   Info,
   LoaderCircle,
@@ -36,15 +38,28 @@ import {
   Pin,
   PinOff,
   Play,
+  Power,
+  PowerOff,
   RotateCw,
   Search,
   Settings2,
+  ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Trash2,
   WandSparkles,
   X,
 } from "lucide-react";
 import wsService from "../services/websocket";
+import {
+  installSkill,
+  loadSkillMarket,
+  setSkillEnabled,
+  uninstallSkill,
+  type MarketSkill,
+  type SkillMarket,
+  type SkillSurface,
+} from "../services/skills";
 import { SystemDialog, SystemIconButton } from "./system/SystemUI";
 import "./AppCenter.css";
 
@@ -75,10 +90,27 @@ export interface CatalogItem {
   icon?: string | null;
   accent?: string | null;
   ui_app_id?: string | null;
-  launch_mode?: "ui" | "actions";
+  launch_mode?: "ui" | "actions" | "details";
+  surfaces?: SkillSurface[];
   actions?: CatalogAction[];
   status: CatalogStatus;
+  skill?: {
+    enabled: boolean;
+    digest: string;
+    source: string;
+    verified: boolean;
+    installed_at: string;
+    ontology_refs: string[];
+    license?: string | null;
+    compatibility?: string | null;
+  };
 }
+
+type InstructionSkillItem = CatalogItem & {
+  kind: "skill";
+  launch_mode: "details";
+  surfaces: SkillSurface[];
+};
 
 export interface AppFolder {
   id: string;
@@ -109,6 +141,7 @@ interface AppCenterProps {
 }
 
 type FilterKind = "all" | CatalogKind;
+type AppCenterSection = "installed" | "discover";
 type AppEditorState = {
   mode: "rename" | "configure";
   itemId: string;
@@ -126,6 +159,34 @@ function accentFor(item: CatalogItem): string {
   let hash = 0;
   for (const char of item.catalog_id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   return FALLBACK_ACCENTS[hash % FALLBACK_ACCENTS.length];
+}
+
+function isInstructionSkill(
+  item: CatalogItem | undefined,
+): item is InstructionSkillItem {
+  return Boolean(
+    item
+    && item.kind === "skill"
+    && item.launch_mode === "details"
+    && item.surfaces?.includes("agent_context"),
+  );
+}
+
+function skillAsCatalogItem(skill: MarketSkill): CatalogItem {
+  return {
+    catalog_id: skill.catalog_id,
+    kind: "skill",
+    title: skill.title,
+    description: skill.description,
+    version: skill.version,
+    provider: skill.provider,
+    tags: skill.tags,
+    icon: skill.icon,
+    accent: skill.accent,
+    launch_mode: "details",
+    surfaces: skill.surfaces,
+    status: "ready",
+  };
 }
 
 function ItemGlyph({ item, size = 34 }: { item: CatalogItem; size?: number }) {
@@ -232,6 +293,7 @@ function AppTileView({
     clearLongPress();
   };
   const title = item?.title ?? folder?.name ?? "";
+  const detailsOnly = isInstructionSkill(item);
   return (
     <button
       ref={setNodeRef as React.Ref<HTMLButtonElement>}
@@ -256,6 +318,8 @@ function AppTileView({
       aria-label={
         folder
           ? `${isZh ? "打开文件夹" : "Open folder"} ${title}`
+          : detailsOnly
+            ? `${isZh ? "查看技能" : "View skill"} ${title}`
           : `${isZh ? "打开" : "Open"} ${title}`
       }
       {...dragAttributes}
@@ -274,6 +338,15 @@ function AppTileView({
       <span className="app-center-tile-title">{title}</span>
       {item?.status === "needs_ui" && item.launch_mode !== "actions" && (
         <span className="app-center-tile-status">{isZh ? "需要界面" : "Needs UI"}</span>
+      )}
+      {detailsOnly && (
+        <span className="app-center-tile-status">
+          {item.skill?.enabled === false
+            ? (isZh ? "已停用" : "Disabled")
+            : item.status === "unavailable"
+              ? (isZh ? "不可用" : "Unavailable")
+              : (isZh ? "Agent 技能" : "Agent skill")}
+        </span>
       )}
     </button>
   );
@@ -305,6 +378,98 @@ function FolderExitDrop({ isZh }: { isZh: boolean }) {
   );
 }
 
+function MarketSkillCard({
+  skill,
+  busy,
+  isZh,
+  onInstall,
+}: {
+  skill: MarketSkill;
+  busy: boolean;
+  isZh: boolean;
+  onInstall: () => void;
+}) {
+  const item = skillAsCatalogItem(skill);
+  const installed = skill.install_state === "installed";
+  const updateAvailable = skill.install_state === "update_available";
+  const marketOlder = skill.install_state === "market_older";
+  const integrityConflict = skill.install_state === "integrity_conflict";
+  const blocked = marketOlder || integrityConflict;
+  const actionLabel = installed
+    ? (isZh ? "已安装" : "Installed")
+    : updateAvailable
+      ? (isZh ? "更新" : "Update")
+      : marketOlder
+        ? (isZh ? "已安装较新版本" : "Newer version installed")
+        : integrityConflict
+          ? (isZh ? "版本内容冲突" : "Version conflict")
+          : (isZh ? "安装" : "Install");
+  return (
+    <article className="app-center-market-card">
+      <header>
+        <AppIcon item={item} compact />
+        <div>
+          <h2>{skill.title}</h2>
+          <p>{skill.provider} · {skill.version}</p>
+        </div>
+        <span className={`app-center-market-trust ${skill.provenance.verified ? "is-verified" : ""}`}>
+          {skill.provenance.verified ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
+          {skill.provenance.verified
+            ? (isZh ? "已验证" : "Verified")
+            : (isZh ? "未验证" : "Not verified")}
+        </span>
+      </header>
+      <p className="app-center-market-description">{skill.description}</p>
+      <div className="app-center-market-meta">
+        <span>{isZh ? "按需 Agent 上下文" : "On-demand agent context"}</span>
+        {updateAvailable && (
+          <span className="is-update">
+            <span>{isZh ? "有可用更新" : "Update available"}</span>
+            {skill.installed_version ? ` · ${skill.installed_version} → ${skill.version}` : ""}
+          </span>
+        )}
+        {marketOlder && (
+          <span>
+            {isZh ? "Market 版本较旧，已阻止降级" : "Market version is older; downgrade blocked"}
+          </span>
+        )}
+        {integrityConflict && (
+          <span>
+            {isZh ? "同一版本的内容摘要不同" : "Same version has a different digest"}
+          </span>
+        )}
+      </div>
+      {skill.ontology_refs.length > 0 && (
+        <div className="app-center-market-refs" aria-label={isZh ? "本体引用" : "Ontology references"}>
+          {skill.ontology_refs.map((reference) => <span key={reference}>{reference}</span>)}
+        </div>
+      )}
+      <dl className="app-center-market-provenance">
+        <div><dt>{isZh ? "来源" : "Source"}</dt><dd title={skill.provenance.source}>{skill.provenance.source}</dd></div>
+        <div><dt>Digest</dt><dd title={skill.provenance.digest}>{skill.provenance.digest}</dd></div>
+      </dl>
+      <button
+        type="button"
+        className="app-center-market-install"
+        aria-label={`${actionLabel} ${skill.title}`}
+        disabled={installed || blocked || busy}
+        onClick={onInstall}
+      >
+        {busy
+          ? <LoaderCircle className="animate-spin" size={15} />
+          : installed
+            ? <CheckCircle2 size={15} />
+            : updateAvailable
+              ? <RotateCw size={15} />
+              : blocked
+                ? <ShieldAlert size={15} />
+                : <Download size={15} />}
+        {busy ? (isZh ? "处理中…" : "Working…") : actionLabel}
+      </button>
+    </article>
+  );
+}
+
 export const AppCenter: React.FC<AppCenterProps> = ({
   isOpen,
   mode = "overlay",
@@ -319,9 +484,14 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   headerActions,
 }) => {
   const isZh = language === "zh";
+  const [section, setSection] = useState<AppCenterSection>("installed");
   const [store, setStore] = useState<AppStoreState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [market, setMarket] = useState<SkillMarket | null>(null);
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketError, setMarketError] = useState("");
+  const [skillBusyId, setSkillBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterKind>("all");
@@ -363,15 +533,39 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     }
   }, [isZh]);
 
+  const fetchMarket = useCallback(async () => {
+    setMarketLoading(true);
+    setMarketError("");
+    try {
+      setMarket(await loadSkillMarket(API_BASE));
+    } catch (fetchError) {
+      console.error("Unable to load skill market", fetchError);
+      setMarketError(
+        fetchError instanceof Error
+          ? fetchError.message
+          : (isZh ? "无法载入技能市场。" : "The skill market could not be loaded."),
+      );
+    } finally {
+      setMarketLoading(false);
+    }
+  }, [isZh]);
+
   useEffect(() => {
     if (isOpen || mode === "home") fetchStore();
   }, [isOpen, mode, fetchStore]);
 
   useEffect(() => {
-    const refresh = () => fetchStore();
+    if ((isOpen || mode === "home") && section === "discover") fetchMarket();
+  }, [fetchMarket, isOpen, mode, section]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void fetchStore();
+      if (section === "discover") void fetchMarket();
+    };
     window.addEventListener("app-store-refresh", refresh);
     return () => window.removeEventListener("app-store-refresh", refresh);
-  }, [fetchStore]);
+  }, [fetchMarket, fetchStore, section]);
 
   useEffect(() => {
     const updateCapacity = () => {
@@ -404,6 +598,26 @@ export const AppCenter: React.FC<AppCenterProps> = ({
         .includes(normalized);
     });
   }, [store?.items, query, filter, language]);
+
+  const filteredMarketSkills = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase(language);
+    if (!normalized) return market?.items ?? [];
+    return (market?.items ?? []).filter((skill) =>
+      [
+        skill.name,
+        skill.title,
+        skill.description,
+        skill.provider,
+        skill.license ?? "",
+        skill.compatibility ?? "",
+        ...skill.tags,
+        ...skill.ontology_refs,
+      ]
+        .join(" ")
+        .toLocaleLowerCase(language)
+        .includes(normalized)
+    );
+  }, [language, market?.items, query]);
 
   const isSearching = Boolean(query.trim()) || filter !== "all";
   const rootEntries = store?.root ?? [];
@@ -513,6 +727,10 @@ export const AppCenter: React.FC<AppCenterProps> = ({
 
   const activateItem = (item: CatalogItem) => {
     setMenu(null);
+    if (isInstructionSkill(item)) {
+      setDetailsId(item.catalog_id);
+      return;
+    }
     if (item.ui_app_id && item.status === "ready") {
       onRunFullscreen(item.ui_app_id);
       return;
@@ -556,6 +774,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   };
 
   const requestGeneration = (item: CatalogItem) => {
+    if (isInstructionSkill(item)) return;
     wsService.sendMessage({ type: "generate_capability_ui", catalog_id: item.catalog_id });
     setStore((current) => current ? {
       ...current,
@@ -590,6 +809,71 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       if (item.ui_app_id) onUnpinWidget(item.ui_app_id);
       setMenu(null);
       await fetchStore();
+    }
+  };
+
+  const installMarketSkill = async (skill: MarketSkill) => {
+    setSkillBusyId(`market:${skill.market_id}`);
+    setNotice("");
+    try {
+      await installSkill(API_BASE, skill.market_id);
+      await Promise.all([fetchMarket(), fetchStore()]);
+      setNotice(
+        skill.install_state === "update_available"
+          ? (isZh ? `“${skill.title}”已更新。` : `${skill.title} was updated.`)
+          : (isZh ? `“${skill.title}”已安装到当前工作区。` : `${skill.title} was installed in this workspace.`),
+      );
+    } catch (installError) {
+      setNotice(installError instanceof Error ? installError.message : String(installError));
+    } finally {
+      setSkillBusyId(null);
+    }
+  };
+
+  const toggleInstructionSkill = async (item: CatalogItem) => {
+    if (!isInstructionSkill(item) || !item.skill) return;
+    const enabled = !item.skill.enabled;
+    setSkillBusyId(`installed:${item.catalog_id}`);
+    setNotice("");
+    try {
+      await setSkillEnabled(API_BASE, item.catalog_id, enabled);
+      await fetchStore();
+      setNotice(
+        enabled
+          ? (isZh ? `“${item.title}”已启用。` : `${item.title} is enabled.`)
+          : (isZh ? `“${item.title}”已停用。` : `${item.title} is disabled.`),
+      );
+      setMenu(null);
+    } catch (updateError) {
+      setNotice(updateError instanceof Error ? updateError.message : String(updateError));
+    } finally {
+      setSkillBusyId(null);
+    }
+  };
+
+  const removeInstructionSkill = async (item: CatalogItem) => {
+    if (!isInstructionSkill(item)) return;
+    const confirmed = window.confirm(
+      isZh
+        ? `确定要卸载“${item.title}”吗？Agent 将不再加载此技能。`
+        : `Uninstall “${item.title}”? The agent will no longer load this skill.`,
+    );
+    if (!confirmed) return;
+    setSkillBusyId(`installed:${item.catalog_id}`);
+    setNotice("");
+    try {
+      await uninstallSkill(API_BASE, item.catalog_id);
+      setDetailsId(null);
+      setMenu(null);
+      await Promise.all([
+        fetchStore(),
+        market ? fetchMarket() : Promise.resolve(),
+      ]);
+      setNotice(isZh ? `“${item.title}”已卸载。` : `${item.title} was uninstalled.`);
+    } catch (uninstallError) {
+      setNotice(uninstallError instanceof Error ? uninstallError.message : String(uninstallError));
+    } finally {
+      setSkillBusyId(null);
     }
   };
 
@@ -727,6 +1011,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
 
   const openFolder = openFolderId ? foldersById.get(openFolderId) : undefined;
   const detailsItem = detailsId ? itemsById.get(detailsId) : undefined;
+  const detailsIsInstructionSkill = isInstructionSkill(detailsItem);
   const selectedAction = detailsItem?.actions?.find((action) => action.id === selectedActionId) ?? detailsItem?.actions?.[0];
   const menuItem = menu ? itemsById.get(menu.itemId) : undefined;
   const activeItem = activeId ? itemsById.get(activeId) : undefined;
@@ -774,8 +1059,12 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             ref={searchRef}
             value={query}
             onChange={(event) => { setQuery(event.target.value); setPage(0); }}
-            placeholder={isZh ? "搜索应用、技能或 MCP" : "Search apps, skills, or MCP"}
-            aria-label={isZh ? "搜索应用" : "Search apps"}
+            placeholder={section === "discover"
+              ? (isZh ? "搜索技能市场" : "Search the skill market")
+              : (isZh ? "搜索应用、技能或 MCP" : "Search apps, skills, or MCP")}
+            aria-label={section === "discover"
+              ? (isZh ? "搜索技能市场" : "Search skill market")
+              : (isZh ? "搜索应用" : "Search apps")}
           />
           <kbd>⌘ K</kbd>
         </div>
@@ -785,17 +1074,44 @@ export const AppCenter: React.FC<AppCenterProps> = ({
         </div>
       </header>
 
-      <nav className="app-center-filters" aria-label={isZh ? "应用类型" : "App types"}>
-        {filters.map((option) => (
+      <nav className="app-center-sections" role="tablist" aria-label={isZh ? "应用中心视图" : "App Center views"}>
+        {([
+          { id: "installed" as const, zh: "已安装", en: "Installed" },
+          { id: "discover" as const, zh: "发现技能", en: "Discover Skills" },
+        ]).map((option) => (
           <button
             key={option.id}
-            className={filter === option.id ? "is-active" : ""}
-            onClick={() => { setFilter(option.id); setPage(0); }}
+            type="button"
+            role="tab"
+            aria-selected={section === option.id}
+            className={section === option.id ? "is-active" : ""}
+            onClick={() => {
+              setSection(option.id);
+              setQuery("");
+              setPage(0);
+              setOpenFolderId(null);
+              setDetailsId(null);
+              setMenu(null);
+            }}
           >
             {isZh ? option.zh : option.en}
           </button>
         ))}
       </nav>
+
+      {section === "installed" && (
+        <nav className="app-center-filters" aria-label={isZh ? "应用类型" : "App types"}>
+          {filters.map((option) => (
+            <button
+              key={option.id}
+              className={filter === option.id ? "is-active" : ""}
+              onClick={() => { setFilter(option.id); setPage(0); }}
+            >
+              {isZh ? option.zh : option.en}
+            </button>
+          ))}
+        </nav>
+      )}
 
       {notice && (
         <button className="app-center-notice" onClick={() => setNotice("")}>
@@ -803,8 +1119,33 @@ export const AppCenter: React.FC<AppCenterProps> = ({
         </button>
       )}
 
-      <main className="app-center-content">
-        {loading && !store ? (
+      <main className={`app-center-content ${section === "discover" ? "is-market" : ""}`}>
+        {section === "discover" ? (
+          marketLoading && !market ? (
+            <div className="app-center-state"><LoaderCircle className="animate-spin" size={28} /><p>{isZh ? "正在载入技能市场…" : "Loading the skill market…"}</p></div>
+          ) : marketError ? (
+            <div className="app-center-state">
+              <AlertCircle size={30} />
+              <h2>{isZh ? "技能市场暂时不可用" : "Skill market unavailable"}</h2>
+              <p>{marketError}</p>
+              <button onClick={fetchMarket}>{isZh ? "重试" : "Try again"}</button>
+            </div>
+          ) : filteredMarketSkills.length === 0 ? (
+            <div className="app-center-state"><Search size={30} /><h2>{isZh ? "没有找到技能" : "No skills found"}</h2><p>{isZh ? "试试更短的关键词。" : "Try a shorter search term."}</p></div>
+          ) : (
+            <div className="app-center-market-grid">
+              {filteredMarketSkills.map((skill) => (
+                <MarketSkillCard
+                  key={skill.market_id}
+                  skill={skill}
+                  busy={skillBusyId === `market:${skill.market_id}`}
+                  isZh={isZh}
+                  onInstall={() => void installMarketSkill(skill)}
+                />
+              ))}
+            </div>
+          )
+        ) : loading && !store ? (
           <div className="app-center-state"><LoaderCircle className="animate-spin" size={28} /><p>{isZh ? "正在整理你的应用…" : "Organizing your apps…"}</p></div>
         ) : error ? (
           <div className="app-center-state"><AlertCircle size={30} /><h2>{isZh ? "目录暂时不可用" : "Catalog unavailable"}</h2><p>{error}</p><button onClick={fetchStore}>{isZh ? "重试" : "Try again"}</button></div>
@@ -832,7 +1173,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
         )}
       </main>
 
-      {!isSearching && pageCount > 1 && (
+      {section === "installed" && !isSearching && pageCount > 1 && (
         <div className="app-center-pagination">
           <button onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={page === 0} aria-label={isZh ? "上一页" : "Previous page"}><ChevronLeft size={18} /></button>
           <div>{Array.from({ length: pageCount }, (_, index) => <button key={index} className={page === index ? "is-active" : ""} onClick={() => setPage(index)} aria-label={`${isZh ? "第" : "Page "}${index + 1}${isZh ? "页" : ""}`} />)}</div>
@@ -878,10 +1219,79 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             <dl>
               <div><dt>{isZh ? "来源" : "Provider"}</dt><dd>{detailsItem.provider}</dd></div>
               <div><dt>{isZh ? "版本" : "Version"}</dt><dd>{detailsItem.version}</dd></div>
-              <div><dt>{isZh ? "状态" : "Status"}</dt><dd>{detailsItem.status === "ready" ? (isZh ? "可使用" : "Ready") : detailsItem.status === "generating" ? (isZh ? "正在生成" : "Generating") : (isZh ? "需要界面" : "Needs UI")}</dd></div>
+              <div>
+                <dt>{isZh ? "状态" : "Status"}</dt>
+                <dd>
+                  {detailsIsInstructionSkill
+                    ? detailsItem.skill?.enabled === false
+                      ? (isZh ? "已停用" : "Disabled")
+                      : detailsItem.status === "ready"
+                        ? (isZh ? "可供 Agent 使用" : "Available to agent")
+                        : (isZh ? "不可用" : "Unavailable")
+                    : detailsItem.status === "ready"
+                      ? (isZh ? "可使用" : "Ready")
+                      : detailsItem.status === "generating"
+                        ? (isZh ? "正在生成" : "Generating")
+                        : detailsItem.status === "unavailable"
+                          ? (isZh ? "不可用" : "Unavailable")
+                          : (isZh ? "需要界面" : "Needs UI")}
+                </dd>
+              </div>
+              {detailsIsInstructionSkill && detailsItem.skill && (
+                <>
+                  <div><dt>{isZh ? "技能来源" : "Source"}</dt><dd className="app-center-detail-value" title={detailsItem.skill.source}>{detailsItem.skill.source}</dd></div>
+                  <div><dt>Digest</dt><dd className="app-center-detail-value" title={detailsItem.skill.digest}>{detailsItem.skill.digest}</dd></div>
+                  <div><dt>{isZh ? "来源验证" : "Provenance"}</dt><dd>{detailsItem.skill.verified ? (isZh ? "已验证" : "Verified") : (isZh ? "未验证" : "Not verified")}</dd></div>
+                  {detailsItem.skill.license && <div><dt>{isZh ? "许可证" : "License"}</dt><dd>{detailsItem.skill.license}</dd></div>}
+                  {detailsItem.skill.compatibility && <div><dt>{isZh ? "兼容性" : "Compatibility"}</dt><dd>{detailsItem.skill.compatibility}</dd></div>}
+                </>
+              )}
             </dl>
             {detailsItem.tags.length > 0 && <div className="app-center-tags">{detailsItem.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
-            {detailsItem.ui_app_id ? (
+            {detailsIsInstructionSkill ? (
+              <div className="app-center-installed-skill">
+                <div className="app-center-agent-context-note">
+                  <WandSparkles size={17} />
+                  <p>
+                    {isZh
+                      ? "此技能安装在当前工作区。启用后，Agent 会在相关任务中按需加载它，而不是把它作为可执行工具运行。"
+                      : "This skill is installed in the current workspace. When enabled, the agent loads it on demand for relevant tasks; it is not an executable tool."}
+                  </p>
+                </div>
+                {(detailsItem.skill?.ontology_refs.length || 0) > 0 && (
+                  <section className="app-center-ontology-refs" aria-label={isZh ? "本体引用" : "Ontology references"}>
+                    <h3>{isZh ? "本体引用" : "Ontology references"}</h3>
+                    <div>{detailsItem.skill?.ontology_refs.map((reference) => <span key={reference}>{reference}</span>)}</div>
+                  </section>
+                )}
+                <button
+                  type="button"
+                  className="app-center-primary"
+                  aria-label={detailsItem.skill?.enabled === false ? (isZh ? "启用技能" : "Enable skill") : (isZh ? "停用技能" : "Disable skill")}
+                  disabled={!detailsItem.skill || skillBusyId === `installed:${detailsItem.catalog_id}`}
+                  onClick={() => void toggleInstructionSkill(detailsItem)}
+                >
+                  {skillBusyId === `installed:${detailsItem.catalog_id}`
+                    ? <LoaderCircle className="animate-spin" size={17} />
+                    : detailsItem.skill?.enabled === false
+                      ? <Power size={17} />
+                      : <PowerOff size={17} />}
+                  {detailsItem.skill?.enabled === false
+                    ? (isZh ? "启用技能" : "Enable skill")
+                    : (isZh ? "停用技能" : "Disable skill")}
+                </button>
+                <button
+                  type="button"
+                  className="app-center-secondary is-danger"
+                  aria-label={isZh ? "卸载技能" : "Uninstall skill"}
+                  disabled={skillBusyId === `installed:${detailsItem.catalog_id}`}
+                  onClick={() => void removeInstructionSkill(detailsItem)}
+                >
+                  <Trash2 size={16} />
+                  {isZh ? "卸载技能" : "Uninstall skill"}
+                </button>
+              </div>
+            ) : detailsItem.ui_app_id ? (
               <button className="app-center-primary" onClick={() => activateItem(detailsItem)}><Play size={17} />{isZh ? "打开应用" : "Open app"}</button>
             ) : detailsItem.launch_mode === "actions" && selectedAction ? (
               <div className="app-center-actions">
@@ -929,10 +1339,12 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             {menuItem.ui_app_id && <button role="menuitem" onClick={() => activateItem(menuItem)}><Play size={16} />{isZh ? "打开" : "Open"}</button>}
             {menuItem.ui_app_id && (pinnedWidgetIds.includes(menuItem.ui_app_id) ? <button role="menuitem" onClick={() => { onUnpinWidget(menuItem.ui_app_id!); setMenu(null); }}><PinOff size={16} />{isZh ? "从画布取消固定" : "Unpin from Canvas"}</button> : <button role="menuitem" onClick={() => { onPinWidget(menuItem.ui_app_id!); setMenu(null); }}><Pin size={16} />{isZh ? "固定到画布" : "Pin to Canvas"}</button>)}
             <button role="menuitem" onClick={() => { setDetailsId(menuItem.catalog_id); setMenu(null); }}><Info size={16} />{isZh ? "查看详情" : "View details"}</button>
+            {isInstructionSkill(menuItem) && <button role="menuitem" disabled={!menuItem.skill || skillBusyId === `installed:${menuItem.catalog_id}`} onClick={() => void toggleInstructionSkill(menuItem)}>{menuItem.skill?.enabled === false ? <Power size={16} /> : <PowerOff size={16} />}{menuItem.skill?.enabled === false ? (isZh ? "启用技能" : "Enable skill") : (isZh ? "停用技能" : "Disable skill")}</button>}
             {menuItem.kind === "generated_app" && <button role="menuitem" onClick={() => openAppEditor(menuItem, "configure")}><Settings2 size={16} />{isZh ? "配置属性" : "Configure properties"}</button>}
             {menuItem.kind === "generated_app" && <button role="menuitem" onClick={() => openAppEditor(menuItem, "rename")}><Pencil size={16} />{isZh ? "重命名" : "Rename"}</button>}
-            {menuItem.kind !== "generated_app" && <button role="menuitem" onClick={() => requestGeneration(menuItem)}><RotateCw size={16} />{menuItem.ui_app_id ? (isZh ? "重新生成界面" : "Regenerate UI") : (isZh ? "生成界面" : "Generate UI")}</button>}
-            {menuItem.kind !== "generated_app" && menuItem.ui_app_id && <button role="menuitem" className="is-danger" onClick={() => deleteCapabilityUi(menuItem)}><Trash2 size={16} />{isZh ? "删除生成界面" : "Delete generated UI"}</button>}
+            {menuItem.kind !== "generated_app" && !isInstructionSkill(menuItem) && <button role="menuitem" onClick={() => requestGeneration(menuItem)}><RotateCw size={16} />{menuItem.ui_app_id ? (isZh ? "重新生成界面" : "Regenerate UI") : (isZh ? "生成界面" : "Generate UI")}</button>}
+            {menuItem.kind !== "generated_app" && !isInstructionSkill(menuItem) && menuItem.ui_app_id && <button role="menuitem" className="is-danger" onClick={() => deleteCapabilityUi(menuItem)}><Trash2 size={16} />{isZh ? "删除生成界面" : "Delete generated UI"}</button>}
+            {isInstructionSkill(menuItem) && <button role="menuitem" className="is-danger" disabled={skillBusyId === `installed:${menuItem.catalog_id}`} onClick={() => void removeInstructionSkill(menuItem)}><Trash2 size={16} />{isZh ? "卸载技能" : "Uninstall skill"}</button>}
             {menuItem.kind === "generated_app" && <button role="menuitem" className="is-danger" onClick={() => deleteGeneratedApp(menuItem)}><Trash2 size={16} />{isZh ? "卸载应用" : "Uninstall app"}</button>}
           </div>
         </div>

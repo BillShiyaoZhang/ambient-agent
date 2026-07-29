@@ -13,6 +13,8 @@ from backend.capabilities.ontology import (
 from backend.capabilities.models import CapabilityGrant, normalize_grants
 from backend.ontology import ONTOLOGY_ID, PREBUILT_ONTOLOGY
 
+SYSTEM_CAPABILITY_CATALOG_VERSION = 2
+
 
 class AgentRole(StrEnum):
     INTENT_ROUTER = "intent_router"
@@ -31,12 +33,14 @@ class SystemCapabilityCatalog:
         cls,
         *,
         installed_capabilities: Iterable[Mapping[str, Any]] = (),
+        installed_skills: Iterable[Mapping[str, Any]] = (),
         model_tools: Iterable[Mapping[str, Any]] = (),
         coding_agents: Iterable[Mapping[str, Any]] = (),
     ) -> SystemCapabilityCatalog:
         return cls(
             {
-                "catalog_version": CAPABILITY_ONTOLOGY_VERSION,
+                "catalog_version": SYSTEM_CAPABILITY_CATALOG_VERSION,
+                "capability_ontology_version": CAPABILITY_ONTOLOGY_VERSION,
                 "runtime_contract": {
                     "flow": ["plan", "alignment_approval", "staging", "verification", "promotion"],
                     "durable_runs": True,
@@ -113,6 +117,7 @@ class SystemCapabilityCatalog:
                     ],
                 },
                 "installed_capabilities": cls._installed_capabilities(installed_capabilities),
+                "installed_skills": cls._installed_skills(installed_skills),
                 "model_tools": cls._model_tools(model_tools),
                 "coding_agents": cls._coding_agents(coding_agents),
             }
@@ -184,6 +189,36 @@ class SystemCapabilityCatalog:
         return result
 
     @classmethod
+    def _installed_skills(cls, items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Project instruction Skills as bounded metadata, never executable tools."""
+
+        result: list[dict[str, Any]] = []
+        for item in sorted(items, key=lambda value: str(value.get("catalog_id") or ""))[:100]:
+            catalog_id = str(item.get("catalog_id") or "").strip()
+            if not catalog_id:
+                continue
+            result.append(
+                {
+                    "catalog_id": catalog_id,
+                    "name": str(item.get("name") or catalog_id)[:64],
+                    "title": str(item.get("title") or item.get("name") or catalog_id)[:120],
+                    "description": str(item.get("description") or "")[:1_024],
+                    "version": str(item.get("version") or "")[:64],
+                    "provider": str(item.get("provider") or "")[:120],
+                    "tags": sorted({str(tag)[:80] for tag in item.get("tags") or ()})[:20],
+                    "ontology_refs": sorted(
+                        {str(entity_id)[:120] for entity_id in item.get("ontology_refs") or ()}
+                    )[:100],
+                    "enabled": bool(item.get("enabled", True)),
+                    "available": bool(item.get("available", True)),
+                    "digest": str(item.get("digest") or "")[:80],
+                    "trust": str(item.get("trust") or "local")[:40],
+                    "surfaces": ["agent_context"],
+                }
+            )
+        return result
+
+    @classmethod
     def _model_tools(cls, items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for item in sorted(items, key=lambda value: str(value.get("name") or ""))[:100]:
@@ -239,9 +274,28 @@ class SystemCapabilityCatalog:
             for item in items
         ]
 
+    @staticmethod
+    def _skill_summaries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "catalog_id": item["catalog_id"],
+                "name": item["name"],
+                "title": item["title"],
+                "description": item["description"],
+                "version": item["version"],
+                "tags": item["tags"],
+                "ontology_refs": item["ontology_refs"],
+                "enabled": item["enabled"],
+                "available": item["available"],
+                "surfaces": ["agent_context"],
+            }
+            for item in items
+        ]
+
     def project(self, role: AgentRole) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "catalog_version": self._payload["catalog_version"],
+            "capability_ontology_version": self._payload["capability_ontology_version"],
             "runtime_contract": self._payload["runtime_contract"],
             "context_graph": self._payload["context_graph"],
             "widget_runtime": self._payload["widget_runtime"],
@@ -252,16 +306,19 @@ class SystemCapabilityCatalog:
                 "capability_categories": self._payload["widget_runtime"]["capability_categories"],
             }
             payload["installed_capabilities"] = self._capability_summaries(self._payload["installed_capabilities"])
+            payload["installed_skills"] = self._skill_summaries(self._payload["installed_skills"])
             payload["coding_agents"] = self._payload["coding_agents"]
         elif role == AgentRole.CONVERSE:
             payload["model_tools"] = [item for item in self._payload["model_tools"] if item.get("effect") == "read"]
             payload["installed_capabilities"] = self._capability_summaries(self._payload["installed_capabilities"])
+            payload["installed_skills"] = self._skill_summaries(self._payload["installed_skills"])
             payload["widget_runtime"] = {
                 "manifest_version": self._payload["widget_runtime"]["manifest_version"],
                 "capability_categories": self._payload["widget_runtime"]["capability_categories"],
             }
         elif role == AgentRole.SCHEMA_ALIGNMENT:
             payload["installed_capabilities"] = self._payload["installed_capabilities"]
+            payload["installed_skills"] = self._skill_summaries(self._payload["installed_skills"])
         return json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
     def validate_grants(
@@ -305,6 +362,7 @@ class SystemCapabilityCatalog:
         if len(encoded) > max_chars:
             for section, id_key in (
                 ("installed_capabilities", "catalog_id"),
+                ("installed_skills", "catalog_id"),
                 ("model_tools", "name"),
                 ("coding_agents", "id"),
             ):
@@ -318,6 +376,7 @@ class SystemCapabilityCatalog:
         if len(encoded) > max_chars:
             payload = {
                 "catalog_version": self._payload["catalog_version"],
+                "capability_ontology_version": self._payload["capability_ontology_version"],
                 "truncated": True,
                 "capability_category_ids": list(capability_category_ids()),
             }

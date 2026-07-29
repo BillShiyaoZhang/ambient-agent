@@ -1,6 +1,6 @@
 import pytest
 
-from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog, SYSTEM_CAPABILITY_CATALOG_VERSION
 from backend.capabilities.ontology import capability_category_ids
 
 
@@ -8,7 +8,8 @@ def test_catalog_is_structured_versioned_and_uses_the_capability_ontology():
     catalog = SystemCapabilityCatalog.build()
     payload = catalog.project(AgentRole.SCHEMA_ALIGNMENT)
 
-    assert payload["catalog_version"] == 1
+    assert payload["catalog_version"] == SYSTEM_CAPABILITY_CATALOG_VERSION
+    assert payload["capability_ontology_version"] == 1
     assert tuple(item["id"] for item in payload["widget_runtime"]["capability_categories"]) == capability_category_ids()
     assert payload["context_graph"]["ontology_id"] == "ambient-context"
     assert "widget_runtime" in payload
@@ -37,7 +38,7 @@ def test_role_projection_uses_least_information_and_rendering_is_deterministic()
     assert "forbidden_apis" in coding["widget_runtime"]
     assert catalog.render(AgentRole.CODING_AGENT) == catalog.render(AgentRole.CODING_AGENT)
     rendered = catalog.render(AgentRole.CODING_AGENT)
-    assert "[SYSTEM CAPABILITY CATALOG v1]" in rendered
+    assert f"[SYSTEM CAPABILITY CATALOG v{SYSTEM_CAPABILITY_CATALOG_VERSION}]" in rendered
     assert "graph.query" in rendered
     assert "create_node" in rendered
     assert "secret" not in rendered.lower()
@@ -62,6 +63,23 @@ def test_runtime_sources_are_sanitized_and_projected_by_role():
                 ],
             }
         ],
+        installed_skills=[
+            {
+                "catalog_id": "agent-skill:ambient-agent:daily-planning",
+                "name": "daily-planning",
+                "title": "Daily Planning",
+                "description": "Use for daily planning.",
+                "version": "1.0.0",
+                "provider": "Ambient Agent",
+                "tags": ["planning"],
+                "ontology_refs": ["Task", "Event"],
+                "enabled": True,
+                "available": True,
+                "digest": "sha256:abc",
+                "trust": "bundled",
+                "instructions": "must not enter the global catalog",
+            }
+        ],
         model_tools=[
             {"name": "query_graph", "effect": "read", "scopes": ["workspace:read"]},
             {"name": "mutate_graph", "effect": "write", "scopes": ["workspace:write"]},
@@ -75,10 +93,26 @@ def test_runtime_sources_are_sanitized_and_projected_by_role():
     coding = catalog.project(AgentRole.CODING_AGENT)
 
     assert router["installed_capabilities"][0]["action_ids"] == ["list-events"]
+    assert router["installed_skills"] == [
+        {
+            "catalog_id": "agent-skill:ambient-agent:daily-planning",
+            "name": "daily-planning",
+            "title": "Daily Planning",
+            "description": "Use for daily planning.",
+            "version": "1.0.0",
+            "tags": ["planning"],
+            "ontology_refs": ["Event", "Task"],
+            "enabled": True,
+            "available": True,
+            "surfaces": ["agent_context"],
+        }
+    ]
     assert router["coding_agents"][0]["artifact_policy"]["manifest_version"] == 2
     assert [item["name"] for item in converse["model_tools"]] == ["query_graph"]
     assert "api_key" not in alignment["installed_capabilities"][0]["actions"][0]["input_schema"]["properties"]
     assert "installed_capabilities" not in coding
+    assert "installed_skills" not in coding
+    assert "must not enter the global catalog" not in catalog.render(AgentRole.CONVERSE)
 
     catalog.validate_grants(
         [

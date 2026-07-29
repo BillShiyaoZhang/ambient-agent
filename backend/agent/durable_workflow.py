@@ -52,6 +52,12 @@ from backend.run_service import (
 )
 from backend.schema_alignment import SchemaAlignmentService, validate_schema_capability_proposal
 from backend.schema_verification import SchemaVerificationService
+from backend.skill_manager import (
+    SkillContextBudgetError,
+    SkillExplicitSelectionError,
+    SkillManager,
+)
+from backend.skill_store import SkillPackageIntegrityError
 from backend.workspace_storage import WorkspaceStorage
 
 logger = logging.getLogger("agent.durable_workflow")
@@ -102,6 +108,7 @@ class DurableAgentWorkflow:
         live_event_sink: LiveEventSink | None = None,
         app_diagnostic_loader: Callable[[str], list[dict[str, Any]]] | None = None,
         capability_catalog_factory: Callable[[], SystemCapabilityCatalog] | None = None,
+        skill_manager: SkillManager | None = None,
     ) -> None:
         self.workspace_dir = workspace_dir
         self.run_store = run_store
@@ -113,6 +120,7 @@ class DurableAgentWorkflow:
         self.live_event_sink = live_event_sink
         self.app_diagnostic_loader = app_diagnostic_loader
         self.capability_catalog_factory = capability_catalog_factory or SystemCapabilityCatalog.build
+        self.skill_manager = skill_manager
         self._event_buffer: ContextVar[list[PendingRunEvent] | None] = ContextVar(
             "durable_agent_event_buffer",
             default=None,
@@ -278,6 +286,21 @@ class DurableAgentWorkflow:
             for ref in state.artifact_refs
             if isinstance(ref, dict) and ref.get("id") and ref.get("sha256")
         }
+        active_skills = state.data.get("active_skills", [])
+        if isinstance(active_skills, list):
+            for snapshot in active_skills:
+                if not isinstance(snapshot, dict):
+                    continue
+                catalog_id = snapshot.get("catalog_id")
+                digest = snapshot.get("digest")
+                if isinstance(catalog_id, str) and catalog_id and isinstance(digest, str) and digest:
+                    # Audit contexts use bare SHA-256 values. The durable
+                    # checkpoint retains the algorithm-qualified digest.
+                    artifact_hashes[catalog_id] = (
+                        digest.removeprefix("sha256:")
+                        if digest.startswith("sha256:")
+                        else digest
+                    )
         return RunContext(
             run_id=str(run["id"]),
             session_id=str(state.session_id or run.get("source_id") or ""),
@@ -288,6 +311,96 @@ class DurableAgentWorkflow:
             fast_model=dict(state.model_snapshot.get("fast") or {}),
             artifact_hashes=artifact_hashes,
         )
+
+    def _active_skill_context(self, state: AgentRunState) -> str | None:
+        snapshots = state.data.get("active_skills")
+        if snapshots is None:
+            return None
+        if not isinstance(snapshots, list) or any(not isinstance(item, dict) for item in snapshots):
+            raise WorkflowError("Durable Skill snapshot is malformed", code="invalid_skill_snapshot")
+        if not snapshots:
+            return None
+        if self.skill_manager is None:
+            # Old deployments can resume checkpoints without silently loading
+            # mutable package state, but cannot interpret an unknown snapshot.
+            raise WorkflowError("Skill runtime is unavailable", code="skill_runtime_unavailable")
+        try:
+            return self.skill_manager.render_context(snapshots)
+        except (SkillContextBudgetError, ValueError, TypeError) as exc:
+            raise WorkflowError("Durable Skill snapshot is invalid", code="invalid_skill_snapshot") from exc
+
+    def _select_active_skills(self, content: str, state: AgentRunState) -> None:
+        """Select once at route time and persist exact instructions for replay."""
+
+        marker = state.data.get("skill_selection_state")
+        has_snapshots = "active_skills" in state.data
+        snapshots = state.data.get("active_skills")
+
+        if marker is None:
+            if has_snapshots:
+                raise WorkflowError(
+                    "Legacy Skill checkpoint has an unexpected snapshot",
+                    code="invalid_skill_snapshot",
+                )
+            # Checkpoints created before Skill support have neither a marker
+            # nor snapshots. Pin an empty selection so an upgrade cannot inject
+            # a Skill installed after the Run began.
+            state.data["active_skills"] = []
+            state.data["skill_selection_state"] = "pinned_none"
+            return
+
+        if marker == "pinned":
+            if not has_snapshots or not isinstance(snapshots, list) or not snapshots:
+                raise WorkflowError(
+                    "Pinned Skill checkpoint is missing its snapshot",
+                    code="invalid_skill_snapshot",
+                )
+            # Never re-resolve a recovered Run against a newer installation.
+            self._active_skill_context(state)
+            return
+
+        if marker == "pinned_none":
+            if snapshots is not None and snapshots != []:
+                raise WorkflowError(
+                    "Empty Skill checkpoint contains an active snapshot",
+                    code="invalid_skill_snapshot",
+                )
+            state.data["active_skills"] = []
+            return
+
+        if marker != "pending":
+            raise WorkflowError(
+                "Skill checkpoint has an unknown selection state",
+                code="invalid_skill_snapshot",
+            )
+        if has_snapshots:
+            raise WorkflowError(
+                "Pending Skill checkpoint already contains a snapshot",
+                code="invalid_skill_snapshot",
+            )
+
+        if self.skill_manager is None:
+            state.data["active_skills"] = []
+            state.data["skill_selection_state"] = "pinned_none"
+            return
+        try:
+            state.data["active_skills"] = self.skill_manager.select_for_context(content)
+        except SkillExplicitSelectionError as exc:
+            raise WorkflowError(
+                f"Explicit Skill '{exc.target}' cannot be activated ({exc.reason})",
+                code=f"skill_{exc.reason}",
+            ) from exc
+        except SkillPackageIntegrityError as exc:
+            raise WorkflowError(
+                "The selected Skill package failed integrity verification",
+                code="skill_package_integrity_error",
+            ) from exc
+        except (SkillContextBudgetError, ValueError, TypeError) as exc:
+            raise WorkflowError("Skill context selection failed validation", code="invalid_skill_context") from exc
+        state.data["skill_selection_state"] = (
+            "pinned" if state.data["active_skills"] else "pinned_none"
+        )
+        self._active_skill_context(state)
 
     async def _emit_live(
         self,
@@ -897,6 +1010,7 @@ class DurableAgentWorkflow:
                 error_code="empty_command",
                 message="Chat command content must not be empty",
             )
+        self._select_active_skills(content, state)
         context_summary = self._ensure_context_summary(state, storage)
         orchestrator = AgentOrchestrator(
             db_session=storage,
@@ -907,6 +1021,7 @@ class DurableAgentWorkflow:
             artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
             tool_loop_budget=self._model_budget(state),
             capability_catalog=self.capability_catalog_factory(),
+            skill_context=self._active_skill_context(state),
         )
         intent = await orchestrator._classify_intent(
             content,
@@ -971,6 +1086,7 @@ class DurableAgentWorkflow:
                 max_tool_calls=12,
             ),
             capability_catalog=self.capability_catalog_factory(),
+            skill_context=self._active_skill_context(state),
         )
 
         async def on_update(payload: Any) -> None:

@@ -207,8 +207,21 @@ class AppStoreService:
         self.layout_path = self.store_dir / "app-store-layout.json"
         self.app_manager = app_manager
         self.generated_provider = GeneratedAppProvider(app_manager)
+        self.providers: list[CapabilityProvider] = []
         self._lock = threading.RLock()
         self.generating_ids: set[str] = set()
+
+    def add_provider(self, provider: CapabilityProvider) -> None:
+        """Add an installed-item provider without changing the legacy registry.
+
+        Providers are intentionally limited to already-installed workspace
+        items. Discovery/marketplace entries belong to a separate API and must
+        never enter the launcher layout.
+        """
+
+        with self._lock:
+            if provider not in self.providers:
+                self.providers.append(provider)
 
     @staticmethod
     def catalog_id(manifest: CapabilityManifest) -> str:
@@ -359,7 +372,16 @@ class AppStoreService:
         capabilities = self._capability_items()
         bound_app_ids = {item["ui_app_id"] for item in capabilities if item.get("ui_app_id")}
         apps = [item for item in self.generated_provider.list_catalog_items() if item["ui_app_id"] not in bound_app_ids]
-        return apps + capabilities
+        result = apps + capabilities
+        seen = {str(item["catalog_id"]) for item in result}
+        for provider in tuple(self.providers):
+            for item in provider.list_catalog_items():
+                catalog_id = str(item.get("catalog_id") or "")
+                if not catalog_id or catalog_id in seen:
+                    continue
+                seen.add(catalog_id)
+                result.append(item)
+        return result
 
     def list_capabilities(self) -> list[dict[str, Any]]:
         """Return only installed executable capability descriptors."""

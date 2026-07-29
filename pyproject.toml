@@ -17,6 +17,7 @@ dependencies = [
     "litellm==1.92.0",
     "neo4j>=6.0,<7",
     "orjson>=3.10.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

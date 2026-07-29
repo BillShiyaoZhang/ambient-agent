@@ -67,6 +67,10 @@ KG 只接受 `user_context` 数据。用户的任务、会议、项目、联系�
 
 仅为了让 App 持续运行的数据——缓存、同步 cursor、UI 状态、job checkpoint、凭据和 provider 原始 payload——必须放在该 App 的 workspace 目录中。如果“这份数据存在”本身对上下文有价值，KG 可以保存一个带 URI 与摘要的 `Document` 或类似 `SoftwareApplication` 的引用，但不能复制私有 payload。非上下文 scope 的 schema proposal 会被拒绝。
 
+Instruction Skill 的安装记录保存在 workspace 的 `.ambient/skills.db`，经过验证的 `SKILL.md` 与 `market.json` 保存在 `.ambient/skills/packages/<sha256>/` 内容寻址 snapshot。它们是系统安装状态，不是 `user_context`：安装、启用、更新或卸载 Skill 不得创建 `OntologyEntity`、`ContextRecord` 或 edge，也不得改变 ontology version。`market.json.ontology_refs` 只能引用已经存在的 canonical entity；它既不注册也不扩展 schema，也不授予 Graph 访问权限。
+
+Skill 运行后产生的用户事实可以进入 KG，但必须完整经过既有的 schema alignment、mutation preflight、用户审批和 atomic mutation 链路。Skill 不能绕过审批，也不能把自身正文、Market 描述符或安装元数据写入 KG。
+
 ## 4. 查询与 Mutation
 
 Widget 使用 `ambient.graph.subscribe(query, callback)` 注册实时查询。后端保存订阅，在 mutation 后重新执行有界查询并推送变化。Agent 只读查询通过 `graph_query_engine.execute_graph_query` 执行；`RouterContext` 通过 Graph adapter 的 `routing_snapshot()` 生成有上限的快照，不直接访问 SQLite 表，也不把整张图塞进 prompt。SQLite 与 Neo4j adapter 必须返回相同的计数、最近记录和 schema 快照契约。
@@ -94,3 +98,4 @@ Widget 声明和 manifest `schema_refs` 只提供上下文，不构成授权，�
 - SQLite 到 Neo4j 的迁移需显式开启、可重复执行且不会删除源文件。
 - Router 的快照构建不得依赖具体存储实现，在 Dev Container 的 Neo4j 后端与 SQLite 测试适配器上行为一致。
 - 静态 schema diff 不得把无法确定类型的动态 JavaScript 表达式误报为类型不匹配；实际 mutation 仍须通过后端 preflight。
+- Skill 的安装、启用、更新和卸载不得改变 ontology 或 KG；Skill 产生的用户事实仍须对齐 canonical entity，并通过既有审批与 mutation 流程。

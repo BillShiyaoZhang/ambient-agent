@@ -41,6 +41,10 @@ from backend.router_context import RouterContext
 logger = logging.getLogger("agent.router")
 
 _SLASH_APP_PATTERN = re.compile(r"^/app\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?$", re.IGNORECASE)
+_SLASH_SKILL_PATTERN = re.compile(
+    r"^/skill\s+([a-z0-9]+(?:[-:./][a-z0-9]+)*)(?:\s+(.*))?$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _default_context_sections() -> list[str]:
@@ -88,6 +92,17 @@ class IntentRouter:
                 rationale="explicit /app command",
                 app_id=app_id,
                 instruction=instruction,
+            )
+
+        # Explicit Skill activation remains a read-only Agent turn. Installing
+        # a Skill never grants effects or changes the Tool Gateway.
+        skill_match = _SLASH_SKILL_PATTERN.match(content_stripped)
+        if skill_match:
+            return IntentPlan(
+                kind=IntentKind.CONVERSE,
+                confidence=1.0,
+                rationale="explicit /skill command",
+                instruction=(skill_match.group(2) or content_stripped).strip(),
             )
 
         # 2. Normalize the optional structured context.

@@ -19,6 +19,7 @@
   - [Intent Router](/en/agent/intent-router.md)
   - [Agent Harness](/en/agent/harness.md)
   - [Agent System Capability Catalog](/en/agent/system-capabilities.md)
+  - [Agent Skills](/en/agent/skills.md)
 
 - **Widget Development**
   - [Widget Format and Lifecycle](/en/widgets/guide.md)

@@ -43,6 +43,7 @@ class AgentOrchestrator:
         artifact_ids: list[str] | None = None,
         tool_loop_budget: ToolLoopBudget | None = None,
         capability_catalog: SystemCapabilityCatalog | None = None,
+        skill_context: str | None = None,
     ) -> None:
         self.db = db_session
         self.app_manager = app_manager
@@ -53,6 +54,7 @@ class AgentOrchestrator:
         self.artifact_ids = artifact_ids
         self.tool_loop_budget = tool_loop_budget
         self.capability_catalog = capability_catalog or SystemCapabilityCatalog.build()
+        self.skill_context = skill_context
 
     async def handle_message(
         self,
@@ -167,6 +169,10 @@ class AgentOrchestrator:
             language=language,
             system_capabilities=self.capability_catalog.render(AgentRole.CONVERSE),
         )
+        if self.skill_context:
+            # Keep one system message so the core policy remains visibly ahead
+            # of the lower-priority, installed procedural guidance.
+            system_prompt = f"{system_prompt}\n\n{self.skill_context}"
         messages = self.context_manager.build_llm_prompt(
             session_id,
             context_summary=self.context_summary,

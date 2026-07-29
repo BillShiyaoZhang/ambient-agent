@@ -19,6 +19,7 @@
   - [意图路由](/agent/intent-router.md)
   - [Agent Harness](/agent/harness.md)
   - [Agent 系统能力目录](/agent/system-capabilities.md)
+  - [Agent Skills](/agent/skills.md)
 
 - **Widget 开发**
   - [Widget 格式与生命周期](/widgets/guide.md)

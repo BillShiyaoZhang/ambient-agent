@@ -39,6 +39,84 @@ const state = {
   folders: [],
 };
 
+const instructionSkill = {
+  catalog_id: "agent-skill:ambient:research-notes",
+  kind: "skill",
+  title: "Research Notes",
+  description: "Guidance for evidence-backed research.",
+  version: "1.2.0",
+  provider: "Ambient",
+  tags: ["research", "writing"],
+  ui_app_id: null,
+  launch_mode: "details",
+  surfaces: ["agent_context"],
+  status: "ready",
+  skill: {
+    enabled: true,
+    digest: "sha256:installed-research",
+    source: "registry://ambient/research-notes",
+    verified: true,
+    installed_at: "2026-07-29T10:00:00Z",
+    ontology_refs: ["Document", "Note"],
+    license: "MIT",
+    compatibility: "ambient-agent >= 0.1",
+  },
+};
+
+const skillState = {
+  version: 1,
+  revision: 4,
+  items: [instructionSkill],
+  root: [instructionSkill.catalog_id],
+  folders: [],
+};
+
+const marketState = {
+  version: 1,
+  items: [
+    {
+      market_id: "ambient/research-notes",
+      catalog_id: "agent-skill:ambient:research-notes",
+      name: "research-notes",
+      title: "Research Notes",
+      description: "Guidance for evidence-backed research.",
+      version: "1.3.0",
+      provider: "Ambient",
+      tags: ["research", "writing"],
+      license: "MIT",
+      compatibility: "ambient-agent >= 0.1",
+      ontology_refs: ["Document", "Note"],
+      surfaces: ["agent_context"],
+      provenance: {
+        source: "registry://ambient/research-notes",
+        digest: "sha256:market-research",
+        verified: true,
+      },
+      install_state: "update_available",
+      installed_version: "1.2.0",
+      enabled: true,
+    },
+    {
+      market_id: "acme/meeting-brief",
+      catalog_id: "agent-skill:acme:meeting-brief",
+      name: "meeting-brief",
+      title: "Meeting Brief",
+      description: "Prepare concise meeting briefs.",
+      version: "1.0.0",
+      provider: "Acme",
+      tags: ["meetings"],
+      ontology_refs: ["Event"],
+      surfaces: ["agent_context"],
+      provenance: {
+        source: "registry://acme/meeting-brief",
+        digest: "sha256:market-meeting",
+        verified: false,
+      },
+      install_state: "not_installed",
+    },
+  ],
+};
+
 describe("App Center", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -253,5 +331,130 @@ describe("App Center", () => {
       expect(appUpdated).toHaveBeenCalledTimes(2);
       expect(appUpdated).toHaveBeenLastCalledWith("weather");
     });
+  });
+
+  it("keeps marketplace skills out of the installed launcher and installs or updates by market id", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/skill-market")) {
+        return { ok: true, status: 200, json: async () => marketState } as Response;
+      }
+      if (url.endsWith("/api/skills/install") && init?.method === "POST") {
+        return { ok: true, status: 200, json: async () => ({ status: "installed" }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => skillState } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppCenter
+        isOpen
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="en"
+      />
+    );
+
+    expect(await screen.findByRole("button", { name: "View skill Research Notes" })).toBeDefined();
+    expect(screen.queryByText("Meeting Brief")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Discover Skills" }));
+    expect(await screen.findByText("Meeting Brief")).toBeDefined();
+    expect(screen.getByText("Update available")).toBeDefined();
+    expect(screen.getByText("Not verified")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Install Meeting Brief" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/skills\/install$/),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ market_id: "acme/meeting-brief" }),
+      })
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Update Research Notes" }));
+    await waitFor(() => {
+      const installCalls = fetchMock.mock.calls.filter(([url, init]) =>
+        String(url).endsWith("/api/skills/install") && init?.method === "POST"
+      );
+      expect(installCalls).toHaveLength(2);
+      expect(JSON.parse(String(installCalls[1][1]?.body))).toEqual({
+        market_id: "ambient/research-notes",
+      });
+    });
+
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+  });
+
+  it("manages an installed instruction-only skill without offering actions or generated UI", async () => {
+    let enabled = true;
+    let installed = true;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith(`/api/skills/${encodeURIComponent(instructionSkill.catalog_id)}`) && init?.method === "PATCH") {
+        enabled = JSON.parse(String(init.body)).enabled;
+        return { ok: true, status: 200, json: async () => ({ enabled }) } as Response;
+      }
+      if (url.endsWith(`/api/skills/${encodeURIComponent(instructionSkill.catalog_id)}`) && init?.method === "DELETE") {
+        installed = false;
+        return { ok: true, status: 200, json: async () => ({ status: "ok" }) } as Response;
+      }
+      if (url.endsWith("/api/skill-market")) {
+        return { ok: true, status: 200, json: async () => marketState } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => installed ? {
+          ...skillState,
+          items: [{ ...instructionSkill, skill: { ...instructionSkill.skill, enabled } }],
+          root: [instructionSkill.catalog_id],
+        } : { ...skillState, items: [], root: [] },
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppCenter
+        isOpen
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="en"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "View skill Research Notes" }));
+    expect(screen.getByText("Available to agent")).toBeDefined();
+    expect(screen.getByText("registry://ambient/research-notes")).toBeDefined();
+    expect(screen.getByText("sha256:installed-research")).toBeDefined();
+    expect(screen.getByText("Document")).toBeDefined();
+    expect(screen.getByText("Note")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Run in background/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Generate/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Disable skill" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(encodeURIComponent(instructionSkill.catalog_id)),
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ enabled: false }),
+      })
+    ));
+    expect(await screen.findByRole("button", { name: "Enable skill" })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall skill" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(encodeURIComponent(instructionSkill.catalog_id)),
+      expect.objectContaining({ method: "DELETE" })
+    ));
+    expect(confirm).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText("Research Notes")).toBeNull());
   });
 });
