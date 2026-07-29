@@ -59,7 +59,6 @@ RUN uv pip install --system .
 
 # Copy backend codebase
 COPY backend /app/backend/
-COPY forward /app/forward/
 COPY scripts /app/scripts/
 
 # Expose FastAPI port

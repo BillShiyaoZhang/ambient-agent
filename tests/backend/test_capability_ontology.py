@@ -94,11 +94,7 @@ def test_empty_graph_edge_scope_normalizes_to_node_only_authority():
         (
             {
                 "id": "network.request",
-                "scope": {
-                    "sources": {
-                        "api": {"base_url": "http://example.com", "paths": ["/v1"], "methods": ["GET"]}
-                    }
-                },
+                "scope": {"sources": {"api": {"base_url": "http://example.com", "paths": ["/v1"], "methods": ["GET"]}}},
             },
             "HTTPS",
         ),

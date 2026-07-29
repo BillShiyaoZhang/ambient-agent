@@ -60,8 +60,7 @@ class SchemaVerificationService:
             '"schema_type": str, "observed_value_repr": str}], '
             '"unknown_types": [{"type_name": str, "occurrences": int}]}\n'
             "No other text. No markdown fences."
-            "\n\n"
-            + (capability_catalog or SystemCapabilityCatalog.build()).render(AgentRole.VERIFICATION)
+            "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(AgentRole.VERIFICATION)
         )
         user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source[:8000]}\n```"
 

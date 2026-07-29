@@ -249,6 +249,4 @@ class CapabilityAuthorizer:
     ) -> None:
         grant = self._grant(app_id, "capability.invoke", "invoke", manifest_revision, grants_digest)
         if catalog_id not in grant.scope["catalog_ids"] or action_id not in grant.scope["actions"]:
-            raise self._scope_denied(
-                "capability.invoke", "invoke", {"catalog_id": catalog_id, "action_id": action_id}
-            )
+            raise self._scope_denied("capability.invoke", "invoke", {"catalog_id": catalog_id, "action_id": action_id})

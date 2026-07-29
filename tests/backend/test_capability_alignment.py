@@ -71,9 +71,7 @@ async def test_schema_alignment_proposes_capabilities_from_the_shared_ontology(t
 
 @pytest.mark.asyncio
 async def test_schema_alignment_rejects_unknown_capability_output(tmp_path, monkeypatch):
-    provider = Provider(
-        {"reused_schemas": [], "new_schemas": [], "capabilities": [{"id": "shell.exec", "scope": {}}]}
-    )
+    provider = Provider({"reused_schemas": [], "new_schemas": [], "capabilities": [{"id": "shell.exec", "scope": {}}]})
     monkeypatch.setattr(alignment_module, "get_llm_provider", lambda *_args: provider)
     monkeypatch.setattr(alignment_module, "primary_selection", lambda: object())
     monkeypatch.setattr(alignment_module, "selection_ids", lambda _selection: ("provider", "model"))

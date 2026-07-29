@@ -64,9 +64,7 @@ async def test_open_session_transfers_source_by_value_and_binds_artifact_identit
     assert binding.app_id == "notes-app"
     assert binding.manifest_revision == "2:1.0.0"
     assert binding.grants_digest == "sha256:notes"
-    assert binding.artifact_digest == hashlib.sha256(
-        b"export default function App() { return null; }"
-    ).hexdigest()
+    assert binding.artifact_digest == hashlib.sha256(b"export default function App() { return null; }").hexdigest()
     assert connection.sent == [
         {
             "type": "start",
@@ -274,9 +272,7 @@ def test_compose_runtime_has_no_network_or_host_workspace_mount() -> None:
     import yaml
     from pathlib import Path
 
-    compose = yaml.safe_load(
-        (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
-    )
+    compose = yaml.safe_load((Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8"))
     runtime = compose["services"]["widget-runtime"]
     backend = compose["services"]["backend"]
 

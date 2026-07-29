@@ -142,9 +142,7 @@ _CATEGORIES = (
         scope_contract={
             "required": ["entities"],
             "optional": [],
-            "fields": {
-                "entities": {"type": "array", "items": "approved ontology entity ID", "min_items": 1}
-            },
+            "fields": {"entities": {"type": "array", "items": "approved ontology entity ID", "min_items": 1}},
             "example": {"entities": ["Task"]},
         },
         effect="read",

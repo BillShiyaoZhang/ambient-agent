@@ -134,11 +134,7 @@ async def build_widget_runtime_rpc_response(
     request_id = message.get("request_id")
     method = message.get("method")
     params = message.get("params", {})
-    if (
-        not isinstance(request_id, str)
-        or not request_id
-        or len(request_id) > 200
-    ):
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
         raise ValueError("Widget Runtime RPC request_id must be between 1 and 200 characters")
     if not isinstance(method, str) or not method or len(method) > 200:
         raise ValueError("Widget Runtime RPC method must be between 1 and 200 characters")
@@ -260,19 +256,13 @@ class WidgetRuntimeGateway:
     def _normalize_presentation_context(cls, context: Any) -> dict[str, Any]:
         context = context if isinstance(context, dict) else {}
         locale = context.get("locale")
-        if (
-            not isinstance(locale, str)
-            or len(locale) > 35
-            or _LOCALE_PATTERN.fullmatch(locale) is None
-        ):
+        if not isinstance(locale, str) or len(locale) > 35 or _LOCALE_PATTERN.fullmatch(locale) is None:
             locale = "en-US"
         return {
             "theme": cls._normalize_theme(context.get("theme")),
             "locale": locale,
             "reduced_motion": (
-                context.get("reduced_motion")
-                if isinstance(context.get("reduced_motion"), bool)
-                else False
+                context.get("reduced_motion") if isinstance(context.get("reduced_motion"), bool) else False
             ),
         }
 
@@ -304,11 +294,7 @@ class WidgetRuntimeGateway:
         artifact_digest = hashlib.sha256(source_bytes).hexdigest()
         capabilities = app.get("capabilities") if isinstance(app.get("capabilities"), list) else []
         capability_ids = sorted(
-            {
-                item["id"]
-                for item in capabilities
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
+            {item["id"] for item in capabilities if isinstance(item, dict) and isinstance(item.get("id"), str)}
         )
 
         async with self._session_lock:
@@ -339,9 +325,7 @@ class WidgetRuntimeGateway:
                     "capability_ids": capability_ids,
                     "controller_source": source,
                     "viewport": normalized_viewport,
-                    "presentation_context": self._normalize_presentation_context(
-                        presentation_context
-                    ),
+                    "presentation_context": self._normalize_presentation_context(presentation_context),
                 }
             )
         except Exception:
@@ -363,18 +347,14 @@ class WidgetRuntimeGateway:
         if binding is None:
             return
         try:
-            await binding.connection.send_json(
-                {"type": "close", "session_id": binding.session_id}
-            )
+            await binding.connection.send_json({"type": "close", "session_id": binding.session_id})
         except Exception:
             pass
         await binding.connection.close()
 
     def _encoded_size(self, message: dict[str, Any]) -> int:
         try:
-            return len(
-                json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            )
+            return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         except (TypeError, ValueError) as exc:
             raise ValueError("Widget Runtime message must be JSON serializable") from exc
 
@@ -442,9 +422,7 @@ class WidgetRuntimeGateway:
         if self._encoded_size(message) > self.limits.max_message_bytes:
             raise ValueError("Widget Runtime message exceeds the configured byte limit")
         event = self._sanitize_input(message)
-        await binding.connection.send_json(
-            {"type": "input", "session_id": binding.session_id, "event": event}
-        )
+        await binding.connection.send_json({"type": "input", "session_id": binding.session_id, "event": event})
 
     async def handle_runtime_message(
         self,
@@ -510,6 +488,4 @@ class WidgetRuntimeGateway:
     async def send_to_runtime(self, session_id: str, message: dict[str, Any]) -> None:
         binding = self.binding(session_id)
         sanitized = {key: value for key, value in message.items() if key not in _IDENTITY_FIELDS}
-        await binding.connection.send_json(
-            {"session_id": binding.session_id, **sanitized}
-        )
+        await binding.connection.send_json({"session_id": binding.session_id, **sanitized})

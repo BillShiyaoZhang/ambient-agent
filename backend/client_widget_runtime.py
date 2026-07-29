@@ -143,39 +143,23 @@ def load_client_runtime_artifact(
     if not isinstance(app, dict):
         raise KeyError(f"App '{app_id}' was not found")
     if app.get("id") != app_id:
-        raise ClientWidgetRuntimeTicketError(
-            "Client Runtime App identity does not match the requested App"
-        )
+        raise ClientWidgetRuntimeTicketError("Client Runtime App identity does not match the requested App")
     source = app.get("js")
     revision = app.get("manifest_revision")
     grants_digest = app.get("grants_digest")
     if not isinstance(source, str) or not source:
-        raise ClientWidgetRuntimeTicketError(
-            "App Controller is required for a client Runtime session"
-        )
+        raise ClientWidgetRuntimeTicketError("App Controller is required for a client Runtime session")
     source_bytes = source.encode("utf-8")
     if len(source_bytes) > _MAX_CONTROLLER_BYTES:
-        raise ClientWidgetRuntimeTicketError(
-            "App Controller exceeds the client Runtime byte limit"
-        )
+        raise ClientWidgetRuntimeTicketError("App Controller exceeds the client Runtime byte limit")
     if not isinstance(revision, str) or not revision:
-        raise ClientWidgetRuntimeTicketError(
-            "App manifest revision is required for a client Runtime session"
-        )
+        raise ClientWidgetRuntimeTicketError("App manifest revision is required for a client Runtime session")
     if not isinstance(grants_digest, str) or not grants_digest:
-        raise ClientWidgetRuntimeTicketError(
-            "App grants digest is required for a client Runtime session"
-        )
+        raise ClientWidgetRuntimeTicketError("App grants digest is required for a client Runtime session")
     capabilities = app.get("capabilities")
     capabilities = capabilities if isinstance(capabilities, list) else []
     capability_ids = tuple(
-        sorted(
-            {
-                item["id"]
-                for item in capabilities
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-        )
+        sorted({item["id"] for item in capabilities if isinstance(item, dict) and isinstance(item.get("id"), str)})
     )
     return ClientWidgetRuntimeArtifact(
         app_id=app_id,
@@ -268,18 +252,12 @@ class ClientWidgetRuntimeTicketStore:
         with self._lock:
             ticket = self._tickets.get(token)
             if ticket is None:
-                raise ClientWidgetRuntimeTicketError(
-                    "Client Runtime ticket is invalid"
-                )
+                raise ClientWidgetRuntimeTicketError("Client Runtime ticket is invalid")
             if ticket.expires_monotonic <= now:
                 self._tickets.pop(token, None)
-                raise ClientWidgetRuntimeTicketError(
-                    "Client Runtime ticket has expired"
-                )
+                raise ClientWidgetRuntimeTicketError("Client Runtime ticket has expired")
             if ticket.artifact.app_id != app_id or ticket.origin != normalized_origin:
-                raise ClientWidgetRuntimeTicketError(
-                    "Client Runtime ticket binding does not match"
-                )
+                raise ClientWidgetRuntimeTicketError("Client Runtime ticket binding does not match")
             # The successful comparison and removal happen under one lock, so
             # concurrent handshakes cannot both consume the same ticket.
             self._tickets.pop(token, None)
@@ -292,9 +270,7 @@ class ClientWidgetRuntimeTicketStore:
             or current.grants_digest != expected.grants_digest
             or current.artifact_digest != expected.artifact_digest
         ):
-            raise ClientWidgetRuntimeTicketError(
-                "Client Runtime App snapshot changed after ticket issuance"
-            )
+            raise ClientWidgetRuntimeTicketError("Client Runtime App snapshot changed after ticket issuance")
         return ticket
 
     def clear(self) -> None:
@@ -328,9 +304,7 @@ class ClientWidgetRuntimeSessionStore:
         )
         with self._lock:
             if len(self._sessions) >= self.max_sessions:
-                raise ClientWidgetRuntimeSessionLimitError(
-                    "Client Runtime session limit reached"
-                )
+                raise ClientWidgetRuntimeSessionLimitError("Client Runtime session limit reached")
             self._sessions[binding.session_id] = binding
         return binding
 

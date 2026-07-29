@@ -20,9 +20,9 @@ def finding(message: str, *, attempt: int, artifact: str) -> RepairFinding:
 
 
 def test_finding_signature_only_ignores_whitespace_not_source_locations() -> None:
-    first = finding('Unexpected token (980:3)\n  980 | `;', attempt=1, artifact="one")
-    whitespace_variant = finding('Unexpected   token (980:3) 980 | `;', attempt=2, artifact="two")
-    moved_finding = finding('Unexpected token (1100:3)\n  1100 | `;', attempt=3, artifact="three")
+    first = finding("Unexpected token (980:3)\n  980 | `;", attempt=1, artifact="one")
+    whitespace_variant = finding("Unexpected   token (980:3) 980 | `;", attempt=2, artifact="two")
+    moved_finding = finding("Unexpected token (1100:3)\n  1100 | `;", attempt=3, artifact="three")
 
     assert first.signature == whitespace_variant.signature
     assert first.signature != moved_finding.signature
@@ -30,8 +30,7 @@ def test_finding_signature_only_ignores_whitespace_not_source_locations() -> Non
 
 def test_distinct_findings_keep_repairing_beyond_the_old_three_turn_limit() -> None:
     history = tuple(
-        finding(f"Verifier issue at line {index}", attempt=index, artifact=f"artifact-{index}")
-        for index in range(1, 8)
+        finding(f"Verifier issue at line {index}", attempt=index, artifact=f"artifact-{index}") for index in range(1, 8)
     )
     current = finding("Verifier issue at line 8", attempt=8, artifact="artifact-8")
 

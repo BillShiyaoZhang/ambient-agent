@@ -158,8 +158,7 @@ class AppManager:
             app_path.mkdir(parents=True, exist_ok=True)
             tracked_names = ("controller.js", "manifest.json", *_OBSOLETE_APP_FILES)
             originals = {
-                name: (app_path / name).read_bytes() if (app_path / name).is_file() else None
-                for name in tracked_names
+                name: (app_path / name).read_bytes() if (app_path / name).is_file() else None for name in tracked_names
             }
 
             def restore() -> None:
@@ -219,7 +218,11 @@ class AppManager:
                 if result is None:
                     return None
                 manifest, record = result
-                js = (app_path / "controller.js").read_text(encoding="utf-8") if (app_path / "controller.js").is_file() else ""
+                js = (
+                    (app_path / "controller.js").read_text(encoding="utf-8")
+                    if (app_path / "controller.js").is_file()
+                    else ""
+                )
                 return {**self._manifest_record(manifest, record), "js": js}
             except (OSError, UnicodeError, ManifestValidationError):
                 logger.warning("Unable to load App %s", app_id, exc_info=True)

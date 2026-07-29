@@ -60,12 +60,66 @@ def test_app_scoped_network_grant_round_trip():
 @pytest.mark.parametrize(
     "capabilities",
     [
-        [{"id": "network.request", "scope": {"sources": {"forecast": {"base_url": "http://api.example.com", "paths": ["/v1"], "methods": ["GET"]}}}}],
-        [{"id": "network.request", "scope": {"sources": {"forecast": {"base_url": "https://127.0.0.1", "paths": ["/v1"], "methods": ["GET"]}}}}],
-        [{"id": "network.request", "scope": {"sources": {"forecast": {"base_url": "https://localhost", "paths": ["/v1"], "methods": ["GET"]}}}}],
-        [{"id": "network.request", "scope": {"sources": {"forecast": {"base_url": "https://api.example.com/path", "paths": ["/v1"], "methods": ["GET"]}}}}],
-        [{"id": "network.request", "scope": {"sources": {"forecast": {"base_url": "https://api.example.com", "paths": ["https://evil.test/"], "methods": ["GET"]}}}}],
-        [{"id": "network.request", "scope": {"sources": {"forecast": {"base_url": "https://api.example.com", "paths": ["/v1"], "methods": ["DELETE"]}}}}],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {"base_url": "http://api.example.com", "paths": ["/v1"], "methods": ["GET"]}
+                    }
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {"forecast": {"base_url": "https://127.0.0.1", "paths": ["/v1"], "methods": ["GET"]}}
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {"forecast": {"base_url": "https://localhost", "paths": ["/v1"], "methods": ["GET"]}}
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {"base_url": "https://api.example.com/path", "paths": ["/v1"], "methods": ["GET"]}
+                    }
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {
+                            "base_url": "https://api.example.com",
+                            "paths": ["https://evil.test/"],
+                            "methods": ["GET"],
+                        }
+                    }
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {"base_url": "https://api.example.com", "paths": ["/v1"], "methods": ["DELETE"]}
+                    }
+                },
+            }
+        ],
     ],
 )
 def test_network_grants_reject_unsafe_or_unsupported_declarations(capabilities):

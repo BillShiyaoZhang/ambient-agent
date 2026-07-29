@@ -36,7 +36,7 @@ def test_devcontainer_runs_all_widget_dependencies_and_forwards_browser_frame() 
     assert "NEO4J_AUTH: neo4j/ambient-agent-dev" in compose
     assert "condition: service_healthy" in compose
     assert compose.count("condition: service_healthy") >= 3
-    assert "createConnection(\"/run/ambient-widget-runtime/runtime.sock\")" in compose
+    assert 'createConnection("/run/ambient-widget-runtime/runtime.sock")' in compose
     assert "network_mode: none" in compose
     assert "widget_runtime_socket:/run/ambient-widget-runtime" in compose
 

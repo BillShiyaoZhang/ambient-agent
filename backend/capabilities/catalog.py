@@ -251,17 +251,11 @@ class SystemCapabilityCatalog:
                 "manifest_version": self._payload["widget_runtime"]["manifest_version"],
                 "capability_categories": self._payload["widget_runtime"]["capability_categories"],
             }
-            payload["installed_capabilities"] = self._capability_summaries(
-                self._payload["installed_capabilities"]
-            )
+            payload["installed_capabilities"] = self._capability_summaries(self._payload["installed_capabilities"])
             payload["coding_agents"] = self._payload["coding_agents"]
         elif role == AgentRole.CONVERSE:
-            payload["model_tools"] = [
-                item for item in self._payload["model_tools"] if item.get("effect") == "read"
-            ]
-            payload["installed_capabilities"] = self._capability_summaries(
-                self._payload["installed_capabilities"]
-            )
+            payload["model_tools"] = [item for item in self._payload["model_tools"] if item.get("effect") == "read"]
+            payload["installed_capabilities"] = self._capability_summaries(self._payload["installed_capabilities"])
             payload["widget_runtime"] = {
                 "manifest_version": self._payload["widget_runtime"]["manifest_version"],
                 "capability_categories": self._payload["widget_runtime"]["capability_categories"],

@@ -1257,7 +1257,10 @@ class FastAPIACPClient(Client):
                     malformed = True
                 else:
                     request_item_id = params.get("itemId")
-                    if request_item_id != getattr(tool_call, "tool_call_id", None) or params.get("grantRoot") is not None:
+                    if (
+                        request_item_id != getattr(tool_call, "tool_call_id", None)
+                        or params.get("grantRoot") is not None
+                    ):
                         malformed = True
             paths = list(dict.fromkeys(change.path for change in changes))
             details = f"File {tool_kind}: {', '.join(paths) if paths else '<missing>'}"

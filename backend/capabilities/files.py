@@ -102,7 +102,9 @@ class AppFileGateway:
         self._reject_links(root, relative)
         temporary: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False) as file:
+            with tempfile.NamedTemporaryFile(
+                dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False
+            ) as file:
                 temporary = Path(file.name)
                 file.write(raw)
                 file.flush()

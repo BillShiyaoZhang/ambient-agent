@@ -34,9 +34,7 @@ class FakeAppManager:
                 "id": "notes-app",
                 "manifest_revision": "2:1.0.0",
                 "grants_digest": "sha256:notes",
-                "capabilities": [
-                    {"id": "file.read", "scope": {"paths": ["notes/**"]}}
-                ],
+                "capabilities": [{"id": "file.read", "scope": {"paths": ["notes/**"]}}],
                 "js": "export default function App() { return null; }",
             }
         }
@@ -63,14 +61,8 @@ def test_client_runtime_origin_policy_is_explicit_and_frame_url_isolated(
         "https://ui.example",
         "http://localhost:5173",
     }
-    assert (
-        client_runtime_origin({"origin": "HTTPS://UI.EXAMPLE:443"})
-        == "https://ui.example"
-    )
-    assert (
-        client_runtime_frame_url("https://ui.example")
-        == "https://ui.example:8001/frame.html"
-    )
+    assert client_runtime_origin({"origin": "HTTPS://UI.EXAMPLE:443"}) == "https://ui.example"
+    assert client_runtime_frame_url("https://ui.example") == "https://ui.example:8001/frame.html"
     with pytest.raises(ClientWidgetRuntimeTicketError):
         client_runtime_origin({"origin": "null"})
     with pytest.raises(ClientWidgetRuntimeTicketError):
@@ -80,10 +72,7 @@ def test_client_runtime_origin_policy_is_explicit_and_frame_url_isolated(
         "WIDGET_FRAME_URL",
         "https://widgets.example/frame.html",
     )
-    assert (
-        client_runtime_frame_url("https://ui.example")
-        == "https://widgets.example/frame.html"
-    )
+    assert client_runtime_frame_url("https://ui.example") == "https://widgets.example/frame.html"
 
 
 def test_ticket_is_256_bit_single_use_and_bound_to_origin_and_snapshot() -> None:
@@ -399,8 +388,7 @@ def test_client_runtime_graph_subscription_pushes_and_is_cleaned_up(
             bindings = [
                 target
                 for target in subscription_manager.active_subscriptions
-                if isinstance(target, ClientWidgetRuntimeBinding)
-                and target.app_id == "browser-tasks"
+                if isinstance(target, ClientWidgetRuntimeBinding) and target.app_id == "browser-tasks"
             ]
             assert len(bindings) == 1
             binding = bindings[0]
