@@ -435,10 +435,11 @@ export function PrivacyDataMapPanel({
           </article>
         </section>
 
-        <section
-          className="privacy-map-coverage"
-          aria-labelledby="privacy-map-blind-spots-title"
-        >
+        <section className="privacy-map-dashboard" role="group" aria-label={copy.title}>
+          <section
+            className="privacy-map-coverage"
+            aria-labelledby="privacy-map-blind-spots-title"
+          >
           <div className="privacy-map-section-heading">
             <span className="privacy-map-evidence is-unknown">
               <CircleHelp size={14} aria-hidden="true" />
@@ -458,29 +459,29 @@ export function PrivacyDataMapPanel({
               </li>
             ))}
           </ul>
-        </section>
-
-        {state.status === "loading" && (
-          <section className="privacy-map-state" role="status" aria-live="polite">
-            <RefreshCw className="is-spinning" size={22} aria-hidden="true" />
-            <p>{copy.loading}</p>
           </section>
-        )}
 
-        {state.status === "error" && (
-          <section className="privacy-map-state is-error" role="alert">
-            <AlertTriangle size={24} aria-hidden="true" />
-            <h3>{copy.errorTitle}</h3>
-            <p>{copy.errorBody}</p>
-            <button type="button" onClick={() => void refresh()}>
-              <RefreshCw size={16} aria-hidden="true" />
-              {copy.retry}
-            </button>
-          </section>
-        )}
+          {state.status === "loading" && (
+            <section className="privacy-map-state" role="status" aria-live="polite">
+              <RefreshCw className="is-spinning" size={22} aria-hidden="true" />
+              <p>{copy.loading}</p>
+            </section>
+          )}
 
-        {data && (
-          <>
+          {state.status === "error" && (
+            <section className="privacy-map-state is-error" role="alert">
+              <AlertTriangle size={24} aria-hidden="true" />
+              <h3>{copy.errorTitle}</h3>
+              <p>{copy.errorBody}</p>
+              <button type="button" onClick={() => void refresh()}>
+                <RefreshCw size={16} aria-hidden="true" />
+                {copy.retry}
+              </button>
+            </section>
+          )}
+
+          {data && (
+            <>
             <p className="privacy-map-live-status" role="status" aria-live="polite">
               {formatPrivacyDataMapUpdated(
                 data.nodes.length,
@@ -935,8 +936,9 @@ export function PrivacyDataMapPanel({
                 </section>
               </>
             )}
-          </>
-        )}
+            </>
+          )}
+        </section>
       </div>
     </SystemDrawer>
   );

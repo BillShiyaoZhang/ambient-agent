@@ -1,6 +1,11 @@
 .privacy-map-panel {
+  --privacy-map-card:
+    color-mix(in srgb, var(--surface-panel-solid), var(--workspace-bg-solid) 18%);
+  --privacy-map-card-muted:
+    color-mix(in srgb, var(--surface-panel-solid), var(--workspace-bg-solid) 32%);
+  --privacy-map-grid-line: color-mix(in srgb, var(--border-subtle), transparent 42%);
   display: flex;
-  width: min(680px, calc(100vw - 24px));
+  width: min(1180px, calc(100vw - 24px));
   flex-direction: column;
 }
 
@@ -9,7 +14,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 20px 20px 16px;
+  padding: 22px 24px 18px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -22,14 +27,19 @@
 
 .privacy-map-heading-icon {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--accent-border);
-  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 68%);
+  border-radius: 14px;
   color: var(--accent);
-  background: var(--accent-soft);
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--accent-soft), var(--surface-panel-solid) 24%),
+      color-mix(in srgb, var(--surface-panel-solid), transparent 8%)
+    );
 }
 
 .privacy-map-heading h2,
@@ -42,9 +52,9 @@
 }
 
 .privacy-map-heading h2 {
-  font-size: 17px;
+  font-size: 18px;
   line-height: 1.3;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.02em;
 }
 
 .privacy-map-heading p,
@@ -74,29 +84,31 @@
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   overflow-y: auto;
-  padding: 16px 18px max(20px, env(safe-area-inset-bottom));
+  padding: 18px 22px max(24px, env(safe-area-inset-bottom));
   overscroll-behavior: contain;
 }
 
 .privacy-map-overview {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .privacy-map-overview article {
   min-width: 0;
-  padding: 11px 12px;
+  min-height: 76px;
+  padding: 13px 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-panel-solid), transparent 42%);
-}
-
-.privacy-map-overview article:nth-child(2) {
-  grid-column: 1 / -1;
-  grid-row: 2;
+  border-radius: 14px;
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--privacy-map-card), transparent 2%),
+      color-mix(in srgb, var(--privacy-map-card-muted), transparent 10%)
+    );
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-primary), transparent 96%);
 }
 
 .privacy-map-overview span,
@@ -112,9 +124,9 @@
 }
 
 .privacy-map-overview strong {
-  margin-top: 5px;
+  margin-top: 7px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -122,12 +134,35 @@
   color: var(--warning);
 }
 
+.privacy-map-dashboard {
+  display: grid;
+  align-items: start;
+  gap: 14px;
+  grid-template-columns:
+    minmax(210px, 0.74fr)
+    minmax(480px, 1.9fr)
+    minmax(240px, 0.86fr);
+}
+
 .privacy-map-coverage,
 .privacy-map-warning {
-  padding: 14px;
+  padding: 15px;
   border: 1px solid color-mix(in srgb, var(--warning), transparent 72%);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--warning), transparent 94%);
+  border-radius: 16px;
+  background:
+    linear-gradient(
+      150deg,
+      color-mix(in srgb, var(--warning), transparent 94%),
+      color-mix(in srgb, var(--privacy-map-card), transparent 6%)
+    );
+}
+
+.privacy-map-coverage {
+  grid-column: 1;
+}
+
+.privacy-map-warning {
+  grid-column: 2 / -1;
 }
 
 .privacy-map-section-heading,
@@ -137,13 +172,18 @@
   gap: 10px;
 }
 
+.privacy-map-coverage .privacy-map-section-heading {
+  flex-direction: column;
+  gap: 8px;
+}
+
 .privacy-map-warning > svg {
   flex: 0 0 auto;
   color: var(--warning);
 }
 
 .privacy-map-section-heading h3 {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .privacy-map-section-heading strong {
@@ -174,10 +214,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px 9px;
-  border-radius: 9px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--warning), transparent 88%);
+  border-radius: 10px;
   color: var(--text-secondary);
-  background: color-mix(in srgb, var(--surface-panel-solid), transparent 38%);
+  background: color-mix(in srgb, var(--surface-panel-solid), transparent 34%);
   font-size: 12px;
 }
 
@@ -200,7 +241,9 @@
   border: 1px dashed var(--border-subtle);
   border-radius: 16px;
   color: var(--text-muted);
+  background: color-mix(in srgb, var(--privacy-map-card), transparent 12%);
   text-align: center;
+  grid-column: 2 / -1;
 }
 
 .privacy-map-state.is-error {
@@ -243,7 +286,7 @@
 }
 
 .privacy-map-warning h3 {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .privacy-map-warning ul {
@@ -264,10 +307,11 @@
 .privacy-map-selection-details,
 .privacy-map-semantic,
 .privacy-map-layer {
-  padding: 14px;
+  padding: 16px;
   border: 1px solid var(--border-subtle);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--surface-panel-solid), transparent 52%);
+  border-radius: 18px;
+  background: var(--privacy-map-card);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-primary), transparent 96%);
 }
 
 .privacy-map-visual,
@@ -277,9 +321,31 @@
   gap: 12px;
 }
 
+.privacy-map-visual {
+  min-width: 0;
+  grid-column: 2;
+}
+
+.privacy-map-selection-details {
+  min-width: 0;
+  grid-column: 3;
+}
+
+.privacy-map-semantic {
+  grid-column: 1 / -1;
+}
+
 .privacy-map-visual-canvas {
   display: grid;
-  gap: 10px;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle), transparent 10%);
+  border-radius: 15px;
+  background-color: color-mix(in srgb, var(--workspace-bg-solid), transparent 34%);
+  background-image:
+    linear-gradient(var(--privacy-map-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--privacy-map-grid-line) 1px, transparent 1px);
+  background-size: 28px 28px;
 }
 
 .privacy-map-overview-notice {
@@ -288,14 +354,14 @@
   border: 1px dashed var(--border-subtle);
   border-radius: 10px;
   color: var(--text-muted);
-  background: color-mix(in srgb, var(--surface-panel-solid), transparent 48%);
+  background: color-mix(in srgb, var(--privacy-map-card-muted), transparent 16%);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .privacy-map-visual-node-grid {
   display: grid;
-  gap: 8px;
+  gap: 9px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -303,21 +369,35 @@
   min-width: 0;
   border: 1px solid var(--border-subtle);
   color: inherit;
-  background: transparent;
+  background: color-mix(in srgb, var(--privacy-map-card), transparent 8%);
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
 }
 
 .privacy-map-selectable:hover {
   border-color: var(--border-strong);
-  background: color-mix(in srgb, var(--surface-panel-solid), transparent 28%);
+  background: color-mix(in srgb, var(--surface-panel-solid), transparent 16%);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--workspace-bg-solid), transparent 72%);
+  transform: translateY(-1px);
 }
 
 .privacy-map-selectable[aria-pressed="true"] {
   border-color: var(--accent-border);
-  background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent-soft), var(--surface-panel-solid) 20%),
+      color-mix(in srgb, var(--privacy-map-card), transparent 4%)
+    );
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    0 12px 28px color-mix(in srgb, var(--accent), transparent 88%);
 }
 
 .privacy-map-selectable:focus-visible {
@@ -327,21 +407,23 @@
 
 .privacy-map-visual-node {
   display: grid;
-  min-height: 72px;
+  min-height: 78px;
   align-content: center;
   gap: 4px;
-  padding: 10px 11px;
-  border-radius: 12px;
-  grid-template-columns: 28px minmax(0, 1fr);
+  padding: 11px 12px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface-panel-solid), transparent 10%);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--workspace-bg-solid), transparent 82%);
+  grid-template-columns: 30px minmax(0, 1fr);
 }
 
 .privacy-map-visual-node > span:first-child {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   align-self: center;
   place-items: center;
-  border-radius: 9px;
+  border-radius: 10px;
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-primary), transparent 94%);
   grid-row: 1 / span 2;
@@ -378,17 +460,26 @@
 
 .privacy-map-visual-relationships {
   display: grid;
-  gap: 8px;
+  gap: 9px;
 }
 
 .privacy-map-visual-edge {
   display: grid;
-  min-height: 64px;
+  min-height: 68px;
   align-items: center;
   gap: 6px 10px;
-  padding: 9px 11px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface-panel-solid), transparent 12%);
   grid-template-columns: auto minmax(0, 1fr);
+}
+
+.privacy-map-visual-edge.is-observed {
+  border-left-color: color-mix(in srgb, var(--success), transparent 46%);
+}
+
+.privacy-map-visual-edge.is-declared {
+  border-left-color: color-mix(in srgb, var(--accent), transparent 46%);
 }
 
 .privacy-map-visual-edge-evidence {
@@ -438,19 +529,25 @@
 
 .privacy-map-selection-details > p {
   margin: 0;
-  padding: 12px;
+  padding: 14px;
   border: 1px dashed var(--border-subtle);
   border-radius: 12px;
   color: var(--text-muted);
+  background: color-mix(in srgb, var(--privacy-map-card-muted), transparent 18%);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .privacy-map-selection-card {
-  padding: 12px;
+  padding: 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--workspace-bg-solid), transparent 22%);
+  border-radius: 14px;
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--privacy-map-card-muted), transparent 8%),
+      color-mix(in srgb, var(--workspace-bg-solid), transparent 24%)
+    );
 }
 
 .privacy-map-selection-card > strong {
@@ -474,6 +571,10 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.privacy-map-selection-details .privacy-map-selection-card dl {
+  grid-template-columns: 1fr;
+}
+
 .privacy-map-selection-card dl div {
   min-width: 0;
 }
@@ -495,6 +596,11 @@
 
 .privacy-map-semantic {
   gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.privacy-map-semantic > .privacy-map-layer-heading {
+  grid-column: 1 / -1;
 }
 
 .privacy-map-semantic > .privacy-map-layer {
@@ -509,7 +615,7 @@
 }
 
 .privacy-map-layer-heading h3 {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .privacy-map-evidence {
@@ -585,7 +691,7 @@
   min-height: 40px;
   padding: 11px;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--workspace-bg-solid), transparent 22%);
+  background: color-mix(in srgb, var(--privacy-map-card-muted), transparent 8%);
 }
 
 .privacy-map-relationship-label {
@@ -771,6 +877,32 @@
   }
 }
 
+@media (max-width: 1080px) {
+  .privacy-map-panel {
+    width: min(940px, calc(100vw - 24px));
+  }
+
+  .privacy-map-dashboard {
+    grid-template-columns: minmax(220px, 0.74fr) minmax(0, 1.8fr);
+  }
+
+  .privacy-map-warning,
+  .privacy-map-state,
+  .privacy-map-visual {
+    grid-column: 2;
+  }
+
+  .privacy-map-selection-details {
+    grid-column: 1;
+  }
+}
+
+@media (max-width: 900px) {
+  .privacy-map-semantic {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 719px) {
   .privacy-map-panel {
     width: 100%;
@@ -786,6 +918,19 @@
     padding-right: max(18px, env(safe-area-inset-right));
     padding-bottom: max(20px, env(safe-area-inset-bottom));
     padding-left: max(18px, env(safe-area-inset-left));
+  }
+
+  .privacy-map-dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .privacy-map-coverage,
+  .privacy-map-warning,
+  .privacy-map-state,
+  .privacy-map-visual,
+  .privacy-map-selection-details,
+  .privacy-map-semantic {
+    grid-column: 1;
   }
 
   .privacy-map-header-actions .system-icon-button,

@@ -311,6 +311,39 @@ describe("PrivacyDataMapPanel", () => {
     expectCoverageChannel(blindSpots, "Isolated Widget Runtime", "not instrumented");
   });
 
+  it("groups coverage, the visual map, and evidence details into one workspace", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response(validResponse)));
+
+    render(
+      <PrivacyDataMapPanel
+        open
+        language="en"
+        apiBase="http://localhost:8000"
+        onClose={() => {}}
+      />
+    );
+
+    const workspace = await screen.findByRole("group", { name: "Privacy Map" });
+    expect(within(workspace).getByRole("region", { name: "Blind spots" })).toBeDefined();
+    expect(within(workspace).getByRole("region", { name: "Visual map" })).toBeDefined();
+    expect(within(workspace).getByRole("region", { name: "Selection details" })).toBeDefined();
+  });
+
+  it("keeps the evidence workspace readable across desktop, compact, and mobile layouts", () => {
+    expect(privacyDataMapCss).toMatch(
+      /\.privacy-map-dashboard\s*\{[\s\S]*?grid-template-columns:\s*minmax\(210px,\s*0\.74fr\)\s*minmax\(480px,\s*1\.9fr\)\s*minmax\(240px,\s*0\.86fr\)/
+    );
+    expect(privacyDataMapCss).toMatch(
+      /@media\s*\(max-width:\s*1080px\)[\s\S]*?\.privacy-map-dashboard\s*\{[\s\S]*?grid-template-columns:\s*minmax\(220px,\s*0\.74fr\)\s*minmax\(0,\s*1\.8fr\)/
+    );
+    expect(privacyDataMapCss).toMatch(
+      /@media\s*\(max-width:\s*719px\)[\s\S]*?\.privacy-map-dashboard\s*\{[\s\S]*?grid-template-columns:\s*1fr/
+    );
+    expect(privacyDataMapCss).toMatch(
+      /\.privacy-map-coverage \.privacy-map-section-heading\s*\{[\s\S]*?flex-direction:\s*column/
+    );
+  });
+
   it("derives the visual and semantic maps from the same selectable contract items", async () => {
     vi.stubGlobal("fetch", vi.fn(() => response(validResponse)));
 
