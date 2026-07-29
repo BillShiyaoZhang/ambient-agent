@@ -125,7 +125,7 @@ describe("TaskDrawer", () => {
     };
     get.mockResolvedValue(workflowRun);
 
-    render(<TaskDrawer open language="en" onClose={() => {}} />);
+    const view = render(<TaskDrawer open language="en" onClose={() => {}} />);
     fireEvent.click(screen.getByText("Attention"));
     fireEvent.click(await screen.findByText("Send mail"));
     fireEvent.click(await screen.findByRole("button", { name: "Execution graph" }));
@@ -136,6 +136,12 @@ describe("TaskDrawer", () => {
       within(screen.getByRole("navigation", { name: "Run detail views" }))
         .getByRole("button", { name: "Overview" }),
     ).toBeDefined();
+
+    view.rerender(<TaskDrawer open language="zh" onClose={() => {}} />);
+    expect(screen.getByRole("searchbox", { name: "搜索图谱" })).toBeDefined();
+    expect(screen.getByText("路由意图")).toBeDefined();
+    expect(screen.getAllByText("Send mail").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "关闭任务中心" })).toBeDefined();
   });
 
   it("keeps the execution graph reachable for a migrated legacy durable Run", async () => {

@@ -357,6 +357,8 @@ describe("canonical RunEvent chat projection", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看 / 编辑" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Schema 与能力授权对齐" });
+    expect(await within(dialog).findByText("Schema 与能力提案")).toBeDefined();
+    expect(within(dialog).getAllByText("Release").length).toBeGreaterThan(0);
     const approve = within(dialog).getByRole("button", { name: "确认对齐并编码 (Approve)" });
     expect((approve as HTMLButtonElement).disabled).toBe(true);
     expect(within(dialog).getByText("Server validation rejected the previous Release description")).toBeDefined();

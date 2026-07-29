@@ -70,7 +70,7 @@ describe("GraphWorkbench", () => {
   });
 
   it("switches among ontology, knowledge, workflow, and privacy scenes", async () => {
-    render(<GraphWorkbench open language="en" onClose={() => {}} />);
+    const view = render(<GraphWorkbench open language="en" onClose={() => {}} />);
 
     expect(await screen.findByText("Canonical ontology")).toBeDefined();
     const ontologyTab = screen.getByRole("tab", { name: "Ontology" });
@@ -99,5 +99,87 @@ describe("GraphWorkbench", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Privacy map" }));
     expect(await screen.findByText("Unknown / uninstrumented")).toBeDefined();
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/data-map$/)));
+
+    view.rerender(<GraphWorkbench open language="zh" onClose={() => {}} />);
+    expect(screen.getByRole("tab", { name: "隐私数据图" })).toBeDefined();
+    expect(screen.getByRole("searchbox", { name: "搜索图谱" })).toBeDefined();
+    expect(screen.getByText("隐私数据地图")).toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("tab", { name: "本体" }));
+    expect(await screen.findByText("规范本体实体及其子类关系。")).toBeDefined();
+    fireEvent.click(screen.getByRole("tab", { name: "知识图谱" }));
+    expect(await screen.findByText("用户 ContextRecord 及其有向关系的有界快照。")).toBeDefined();
+    expect(screen.getByText("Prepare release")).toBeDefined();
+    fireEvent.click(screen.getByRole("tab", { name: "Agent 工作流" }));
+    expect(await screen.findByText("路由意图")).toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("localizes graph snapshot request errors without refetching on a language change", async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 503,
+    } as Response);
+
+    const view = render(<GraphWorkbench open language="en" onClose={() => {}} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Graph explorer request failed (503)",
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    view.rerender(<GraphWorkbench open language="zh" onClose={() => {}} />);
+    expect(screen.getByRole("alert").textContent).toContain("图谱探索请求失败 (503)");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("localizes privacy-map request errors after the active language changes", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/data-map")) {
+        return Promise.resolve({ ok: false, status: 502 } as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          version: 1,
+          generated_at: "2026-07-29T00:00:00Z",
+          ontology,
+          knowledge_graph: knowledgeGraph,
+        }),
+      } as Response);
+    });
+
+    const view = render(<GraphWorkbench open language="en" onClose={() => {}} />);
+    await screen.findByText("Canonical ontology");
+    fireEvent.click(screen.getByRole("tab", { name: "Privacy map" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Data map request failed (502)",
+    );
+    view.rerender(<GraphWorkbench open language="zh" onClose={() => {}} />);
+    expect(screen.getByRole("alert").textContent).toContain("数据地图请求失败 (502)");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("exits graph fullscreen with Escape without closing the workbench", async () => {
+    const onClose = vi.fn();
+    render(<GraphWorkbench open language="en" onClose={onClose} />);
+
+    await screen.findByText("Canonical ontology");
+    const explorer = screen.getByRole("region", { name: "Ontology" });
+    Object.defineProperty(explorer, "requestFullscreen", {
+      configurable: true,
+      value: undefined,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+    await waitFor(() => expect(explorer.getAttribute("data-fullscreen")).toBe("true"));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(explorer.getAttribute("data-fullscreen")).toBe("false"));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Graph Explorer" })).toBeDefined();
   });
 });

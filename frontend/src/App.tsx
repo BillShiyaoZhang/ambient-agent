@@ -330,7 +330,7 @@ function App() {
     ? schemaServerDiagnostics
     : [];
   const schemaVisualization = editedProposal
-    ? schemaProposalToGraph(editedProposal, schemaApprovalErrors)
+    ? schemaProposalToGraph(editedProposal, schemaApprovalErrors, language)
     : null;
 
   const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
@@ -1103,7 +1103,11 @@ function App() {
       />
 
       {/* Audit Log Panel Overlay */}
-      <AuditLogPanel isOpen={isAuditOpen} onClose={() => setIsAuditOpen(false)} />
+      <AuditLogPanel
+        isOpen={isAuditOpen}
+        language={language}
+        onClose={() => setIsAuditOpen(false)}
+      />
       <DeferredGraphWorkbench
         open={isGraphOpen}
         language={language}
@@ -1192,6 +1196,7 @@ function App() {
                   className="h-[360px] min-h-[360px] overflow-hidden rounded-xl border border-white/10"
                   compact
                   dataset={schemaVisualization}
+                  language={language}
                   loadingLabel={language === "zh" ? "正在加载 Schema 提案关系图" : "Schema proposal graph loading"}
                   loadingMessage={language === "zh" ? "正在加载交互式关系图…" : "Loading interactive relationship graph…"}
                 />

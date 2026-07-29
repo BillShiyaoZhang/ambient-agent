@@ -34,7 +34,7 @@ describe("AuditLogPanel Component", () => {
   });
 
   it("should fetch and render audit logs correctly", async () => {
-    render(<AuditLogPanel isOpen={true} onClose={() => {}} />);
+    render(<AuditLogPanel isOpen={true} language="en" onClose={() => {}} />);
     
     // Expect loading state or title
     expect(screen.getByText("Data Transmission Audit Log")).toBeDefined();
@@ -73,12 +73,82 @@ describe("AuditLogPanel Component", () => {
       });
     }));
 
-    render(<AuditLogPanel isOpen onClose={() => {}} />);
+    render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Data map" }));
 
     expect(await screen.findByText("Unknown / uninstrumented")).toBeDefined();
+    expect(screen.getByRole("searchbox", { name: "Search graph" })).toBeDefined();
     expect(screen.queryByText("Show me weather")).toBeNull();
     expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/data-map$/));
+  });
+
+  it("reprojects the retained privacy map in Chinese without refetching business data", async () => {
+    const dataMap = {
+      version: 1,
+      title: "Privacy data map",
+      nodes: [
+        {
+          id: "data-source:local-runtime-context",
+          label: "Local runtime context",
+          kind: "data_source",
+          status: "existing",
+          summary: "Local context category; raw values are intentionally omitted.",
+          badges: ["local"],
+        },
+        {
+          id: "provider:custom",
+          label: "业务 Provider 原文",
+          kind: "provider",
+          status: "observed",
+          summary: "Provider observed in retained Audit metadata.",
+          badges: ["observed"],
+        },
+      ],
+      edges: [],
+      metadata: {},
+    };
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(url.endsWith("/api/data-map") ? dataMap : mockLogs),
+      });
+    }));
+
+    const view = render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Data map" }));
+    expect(await screen.findByText("Local runtime context")).toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    view.rerender(<AuditLogPanel isOpen language="zh" onClose={() => {}} />);
+
+    expect(screen.getByRole("heading", { name: "数据传输审计日志" })).toBeDefined();
+    expect(await screen.findByText("本地运行时上下文")).toBeDefined();
+    expect(screen.getByText("业务 Provider 原文")).toBeDefined();
+    expect(screen.getByRole("searchbox", { name: "搜索图谱" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "刷新数据地图" })).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "关闭审计日志" })).toHaveLength(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("localizes a data-map request error when the language changes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      return Promise.resolve(url.endsWith("/api/data-map")
+        ? { ok: false, status: 429 }
+        : { ok: true, json: () => Promise.resolve(mockLogs) });
+    }));
+
+    const view = render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Data map" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Data map request failed (429)",
+    );
+
+    view.rerender(<AuditLogPanel isOpen language="zh" onClose={() => {}} />);
+    expect(screen.getByRole("alert").textContent).toContain("数据地图请求失败 (429)");
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("re-derives the map after reopen and ignores an older in-flight snapshot", async () => {
@@ -102,12 +172,12 @@ describe("AuditLogPanel Component", () => {
       metadata: {},
     });
 
-    const { rerender } = render(<AuditLogPanel isOpen onClose={() => {}} />);
+    const { rerender } = render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Data map" }));
     await waitFor(() => expect(mapCalls).toBe(1));
 
-    rerender(<AuditLogPanel isOpen={false} onClose={() => {}} />);
-    rerender(<AuditLogPanel isOpen onClose={() => {}} />);
+    rerender(<AuditLogPanel isOpen={false} language="en" onClose={() => {}} />);
+    rerender(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
     await waitFor(() => expect(mapCalls).toBe(2));
 
     await act(async () => {

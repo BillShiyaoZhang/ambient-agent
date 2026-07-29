@@ -501,136 +501,162 @@ function stableSourceComponentRoots(
 
 /**
  * A small deterministic layered layout. It deliberately has no DOM or storage
- * dependency, so API snapshots and tests produce stable coordinates. Ranks are
- * shortest-path distances from stable roots, which keeps cycles distributed
- * across useful layers without dropping their back edges.
+ * dependency, so API snapshots and tests produce stable coordinates. Weakly
+ * connected components are ranked and positioned independently, then packed
+ * into non-overlapping blocks. Within each component, ranks are shortest-path
+ * distances from stable roots; cycles keep useful layers without dropping back
+ * edges.
  */
 export function deterministicGraphLayout(
   dataset: GraphDataset,
   direction: GraphLayoutDirection = "LR",
 ): GraphDataset {
-  const ids = [...dataset.nodes.map((node) => node.id)].sort((left, right) => left.localeCompare(right));
+  const ids = [...new Set(dataset.nodes.map((node) => node.id))]
+    .sort((left, right) => left.localeCompare(right));
   const idSet = new Set(ids);
-  const linkedIds = new Set<string>();
   const outgoing = new Map(ids.map((id) => [id, [] as string[]]));
   const indegree = new Map(ids.map((id) => [id, 0]));
+  const neighbors = new Map(ids.map((id) => [id, [] as string[]]));
   for (const edge of [...dataset.edges].sort((left, right) => left.id.localeCompare(right.id))) {
-    if (!idSet.has(edge.source) || !idSet.has(edge.target) || edge.source === edge.target) continue;
-    linkedIds.add(edge.source);
-    linkedIds.add(edge.target);
+    if (!idSet.has(edge.source) || !idSet.has(edge.target)) continue;
+    if (edge.source === edge.target) continue;
     const targets = outgoing.get(edge.source);
     if (!targets?.includes(edge.target)) {
       targets?.push(edge.target);
       indegree.set(edge.target, (indegree.get(edge.target) ?? 0) + 1);
     }
+    const sourceNeighbors = neighbors.get(edge.source);
+    const targetNeighbors = neighbors.get(edge.target);
+    if (!sourceNeighbors?.includes(edge.target)) sourceNeighbors?.push(edge.target);
+    if (!targetNeighbors?.includes(edge.source)) targetNeighbors?.push(edge.source);
   }
   for (const targets of outgoing.values()) targets.sort((left, right) => left.localeCompare(right));
+  for (const adjacent of neighbors.values()) adjacent.sort((left, right) => left.localeCompare(right));
 
-  const ranks = new Map<string, number>();
-  const assignShortestRanks = (roots: string[]): void => {
-    const queue: string[] = [];
-    for (const root of roots.sort((left, right) => left.localeCompare(right))) {
-      if (ranks.has(root)) continue;
-      ranks.set(root, 0);
-      queue.push(root);
-    }
+  const components: string[][] = [];
+  const visited = new Set<string>();
+  for (const seed of ids) {
+    if (visited.has(seed)) continue;
+    const component: string[] = [];
+    const queue = [seed];
+    visited.add(seed);
     let cursor = 0;
     while (cursor < queue.length) {
       const id = queue[cursor];
       cursor += 1;
-      const nextRank = (ranks.get(id) ?? 0) + 1;
-      for (const target of outgoing.get(id) ?? []) {
-        if (ranks.has(target)) continue;
-        ranks.set(target, nextRank);
-        queue.push(target);
+      component.push(id);
+      for (const adjacent of neighbors.get(id) ?? []) {
+        if (visited.has(adjacent)) continue;
+        visited.add(adjacent);
+        queue.push(adjacent);
       }
     }
-  };
-
-  assignShortestRanks(ids.filter((id) => linkedIds.has(id) && indegree.get(id) === 0));
-
-  // A component made entirely of cycles has no zero-indegree node. Collapse
-  // the still-unreached subgraph conceptually into SCCs, choose the stable
-  // representative of every source SCC, then continue the same BFS. Downstream
-  // SCCs retain their distance from those roots instead of being flattened.
-  const unreachableIds = ids.filter((id) => linkedIds.has(id) && !ranks.has(id));
-  if (unreachableIds.length > 0) {
-    assignShortestRanks(stableSourceComponentRoots(unreachableIds, outgoing));
+    component.sort((left, right) => left.localeCompare(right));
+    components.push(component);
   }
 
-  const layers = new Map<number, string[]>();
-  for (const id of ids) {
-    if (!linkedIds.has(id)) continue;
-    const rank = ranks.get(id) ?? 0;
-    const layer = layers.get(rank) ?? [];
-    layer.push(id);
-    layers.set(rank, layer);
-  }
+  const primaryGap = direction === "LR" ? 286 : 176;
+  const crossGap = direction === "LR" ? 148 : 240;
+  const nodeWidth = 210;
+  const nodeHeight = 120;
+  const componentGap = 96;
+  const componentLayouts = components.map((component) => {
+    const ranks = new Map<string, number>();
+    const assignShortestRanks = (roots: string[]): void => {
+      const queue: string[] = [];
+      for (const root of [...roots].sort((left, right) => left.localeCompare(right))) {
+        if (ranks.has(root)) continue;
+        ranks.set(root, 0);
+        queue.push(root);
+      }
+      let cursor = 0;
+      while (cursor < queue.length) {
+        const id = queue[cursor];
+        cursor += 1;
+        const nextRank = (ranks.get(id) ?? 0) + 1;
+        for (const target of outgoing.get(id) ?? []) {
+          if (ranks.has(target)) continue;
+          ranks.set(target, nextRank);
+          queue.push(target);
+        }
+      }
+    };
+
+    assignShortestRanks(component.filter((id) => indegree.get(id) === 0));
+    const unreachableIds = component.filter((id) => !ranks.has(id));
+    if (unreachableIds.length > 0) {
+      assignShortestRanks(stableSourceComponentRoots(unreachableIds, outgoing));
+    }
+
+    const layers = new Map<number, string[]>();
+    for (const id of component) {
+      const rank = ranks.get(id) ?? 0;
+      const layer = layers.get(rank) ?? [];
+      layer.push(id);
+      layers.set(rank, layer);
+    }
+    const localPositions = new Map<string, GraphPosition>();
+    for (const [rank, layer] of [...layers.entries()].sort(([left], [right]) => left - right)) {
+      layer.sort((left, right) => left.localeCompare(right));
+      for (let index = 0; index < layer.length; index += 1) {
+        const crossPosition = (index - (layer.length - 1) / 2) * crossGap;
+        localPositions.set(
+          layer[index],
+          direction === "LR"
+            ? { x: rank * primaryGap, y: crossPosition }
+            : { x: crossPosition, y: rank * primaryGap },
+        );
+      }
+    }
+
+    const values = [...localPositions.values()];
+    const minX = Math.min(...values.map(({ x }) => x));
+    const maxX = Math.max(...values.map(({ x }) => x));
+    const minY = Math.min(...values.map(({ y }) => y));
+    const maxY = Math.max(...values.map(({ y }) => y));
+    for (const [id, position] of localPositions) {
+      localPositions.set(id, { x: position.x - minX, y: position.y - minY });
+    }
+    return {
+      positions: localPositions,
+      width: maxX - minX + nodeWidth,
+      height: maxY - minY + nodeHeight,
+    };
+  });
+
   const positions = new Map<string, GraphPosition>();
-  let nextPrimaryPosition = 0;
-  const maxCrossAxisNodes = 5;
-  for (const [, layer] of [...layers.entries()].sort(([left], [right]) => left - right)) {
-    layer.sort((left, right) => left.localeCompare(right));
-    const primaryGroups = Math.ceil(layer.length / maxCrossAxisNodes);
-    for (let index = 0; index < layer.length; index += 1) {
-      const primaryGroup = Math.floor(index / maxCrossAxisNodes);
-      const crossIndex = index % maxCrossAxisNodes;
-      const groupSize = Math.min(
-        maxCrossAxisNodes,
-        layer.length - primaryGroup * maxCrossAxisNodes,
-      );
-      const crossAxis = (crossIndex - (groupSize - 1) / 2) * 148;
-      positions.set(
-        layer[index],
-        direction === "LR"
-          ? { x: nextPrimaryPosition + primaryGroup * 286, y: crossAxis }
-          : { x: crossAxis * 1.35, y: nextPrimaryPosition + primaryGroup * 176 },
-      );
-    }
-    nextPrimaryPosition += primaryGroups * (direction === "LR" ? 286 : 176);
-  }
-
-  // Records without relationships are common in bounded knowledge-graph
-  // snapshots. Keeping all of them in rank zero creates a single unbounded
-  // strip, so place that deterministic subset in a compact orientation-aware
-  // grid after the connected topology.
-  const isolatedIds = ids.filter((id) => !linkedIds.has(id));
-  if (isolatedIds.length > 0) {
-    const connectedPositions = [...positions.values()];
-    if (direction === "LR") {
-      const rows = Math.ceil(Math.sqrt(isolatedIds.length));
-      const startX = connectedPositions.length > 0
-        ? Math.max(...connectedPositions.map(({ x }) => x)) + 286
-        : 0;
-      const centerY = connectedPositions.length > 0
-        ? (Math.min(...connectedPositions.map(({ y }) => y))
-          + Math.max(...connectedPositions.map(({ y }) => y))) / 2
-        : 0;
-      for (let index = 0; index < isolatedIds.length; index += 1) {
-        const column = Math.floor(index / rows);
-        const row = index % rows;
-        const columnSize = Math.min(rows, isolatedIds.length - column * rows);
-        positions.set(isolatedIds[index], {
-          x: startX + column * 286,
-          y: centerY + (row - (columnSize - 1) / 2) * 148,
-        });
+  if (componentLayouts.length > 0) {
+    const columnCount = Math.ceil(Math.sqrt(componentLayouts.length));
+    const rowCount = Math.ceil(componentLayouts.length / columnCount);
+    const cells = componentLayouts.map((layout, index) => {
+      if (direction === "LR") {
+        return { layout, column: index % columnCount, row: Math.floor(index / columnCount) };
       }
-    } else {
-      const columns = Math.ceil(Math.sqrt(isolatedIds.length));
-      const startY = connectedPositions.length > 0
-        ? Math.max(...connectedPositions.map(({ y }) => y)) + 176
-        : 0;
-      const centerX = connectedPositions.length > 0
-        ? (Math.min(...connectedPositions.map(({ x }) => x))
-          + Math.max(...connectedPositions.map(({ x }) => x))) / 2
-        : 0;
-      for (let index = 0; index < isolatedIds.length; index += 1) {
-        const row = Math.floor(index / columns);
-        const column = index % columns;
-        const rowSize = Math.min(columns, isolatedIds.length - row * columns);
-        positions.set(isolatedIds[index], {
-          x: centerX + (column - (rowSize - 1) / 2) * 200,
-          y: startY + row * 176,
+      return { layout, column: Math.floor(index / rowCount), row: index % rowCount };
+    });
+    const columnWidths = Array.from({ length: columnCount }, () => 0);
+    const rowHeights = Array.from({ length: rowCount }, () => 0);
+    for (const cell of cells) {
+      columnWidths[cell.column] = Math.max(columnWidths[cell.column], cell.layout.width);
+      rowHeights[cell.row] = Math.max(rowHeights[cell.row], cell.layout.height);
+    }
+    const columnOffsets: number[] = [];
+    const rowOffsets: number[] = [];
+    for (let column = 0; column < columnCount; column += 1) {
+      columnOffsets[column] = column === 0
+        ? 0
+        : columnOffsets[column - 1] + columnWidths[column - 1] + componentGap;
+    }
+    for (let row = 0; row < rowCount; row += 1) {
+      rowOffsets[row] = row === 0
+        ? 0
+        : rowOffsets[row - 1] + rowHeights[row - 1] + componentGap;
+    }
+    for (const cell of cells) {
+      for (const [id, position] of cell.layout.positions) {
+        positions.set(id, {
+          x: position.x + columnOffsets[cell.column],
+          y: position.y + rowOffsets[cell.row],
         });
       }
     }
@@ -667,6 +693,7 @@ export function graphStatusLabel(status: GraphStatus | undefined): string {
     observed: "Observed",
     declared: "Declared",
     unknown: "Unknown",
+    abstract: "Abstract",
   };
   return status ? labels[status] ?? status.replaceAll("_", " ") : "Default";
 }

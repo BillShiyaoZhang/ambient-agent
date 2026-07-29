@@ -22,6 +22,46 @@
   min-height: 460px;
 }
 
+.graph-explorer:fullscreen,
+.graph-explorer.is-fullscreen-fallback {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: var(--graph-panel);
+}
+
+.graph-explorer.is-fullscreen-fallback {
+  position: fixed;
+  z-index: 700;
+  inset: 0;
+}
+
+.system-dialog.has-graph-fullscreen-fallback,
+.system-drawer.has-graph-fullscreen-fallback {
+  overflow: visible !important;
+  animation: none !important;
+  transform: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+.graph-explorer-fullscreen-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .graph-explorer button,
 .graph-explorer input,
 .graph-explorer a {
@@ -225,6 +265,14 @@
 .graph-explorer-canvas .react-flow {
   position: absolute;
   inset: 0;
+}
+
+.graph-explorer .react-flow__pane.draggable {
+  cursor: grab;
+}
+
+.graph-explorer .react-flow__pane.dragging {
+  cursor: grabbing;
 }
 
 .graph-explorer .react-flow__attribution {
@@ -680,6 +728,17 @@
   .graph-explorer-edge-picker > span,
   .graph-explorer-legend h5 {
     font-size: 9px;
+  }
+
+  .graph-explorer:fullscreen,
+  .graph-explorer.is-fullscreen-fallback,
+  .graph-explorer.is-compact:fullscreen,
+  .graph-explorer.is-compact.is-fullscreen-fallback {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    max-height: none;
   }
 }
 

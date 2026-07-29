@@ -18,9 +18,16 @@ GraphDataset
 - search over node label, kind, summary, and details;
 - node-kind visibility controls and one-hop-neighbor focus after selection;
 - horizontal/vertical layout switching and one-click restoration of the complete topology;
+- dragging the canvas background outside nodes pans the entire viewport, while dragging a node still moves only that node;
+- an enter/exit-fullscreen control with an accessible name; fullscreen preserves every exploration capability, traps keyboard focus inside the graph, and can be exited with the control or `Escape`; `Escape` exits only graph fullscreen rather than also closing its containing dialog or drawer;
 - node and edge details, legend, empty and error states, and data-truncation notices;
 - status communicated with text/icons in addition to color, following Host light, dark, and reduced-motion settings;
-- a stacked canvas/details layout on narrow screens and accessible names for every control.
+- a stacked canvas/details layout on narrow screens and accessible names for every control;
+- Chinese and English for every shared-component title, control, status, notice, detail field, and accessible name, updating immediately with the Host language while preserving source business text and stable graph identity.
+
+Every scene adapter follows the same language boundary: adapter-authored titles, descriptions, fallback names, summaries, detail keys, badges, actions, known edge labels, coverage, blind spots, and limitations for Schema, Agent workflow, and privacy-data-map scenes are generated in the Host language. Known Ontology/KG snapshot titles and descriptions are localized by the Host as well. Entity IDs, App names, providers, record labels, Run summaries/errors, backend diagnostics, and all other business values remain verbatim. A Host-language change reprojects the retained raw response for the active scene without another backend request and without changing node or edge IDs.
+
+Automatic layout first partitions the graph into weakly connected components, then computes ranks and placement independently for each component. Unrelated components occupy non-overlapping regions with explicit spacing and must not be interleaved in one rank sequence. Within each component, nodes at the same logical depth share an exact rank coordinate whenever possible: the same column in left-to-right mode and the same row in top-to-bottom mode. Cycles and multi-parent nodes use deterministic component compression and shortest-rank rules so input order does not cause arbitrary row or column jumps. Fit-view and reset operations cover every component.
 
 Node position is browser-session presentation state only. It is not written to the KG, Run, or Manifest. No scene may infer permission or a business fact from display state.
 
@@ -82,7 +89,10 @@ The Schema and Capability alignment dialog adds a graph preview above the existi
 ## 6. Acceptance criteria
 
 - One shared `GraphExplorer` is reused by Ontology/KG, Agent orchestration, privacy-data-map, and Schema-approval adapters.
-- Users can zoom, pan, drag, search, filter, switch layout, focus neighbors, and inspect node/edge details.
+- Users can pan the entire viewport by dragging the canvas background, as well as zoom, drag nodes, search, filter, switch layout, focus neighbors, and inspect node/edge details.
+- Users can enter and leave fullscreen; fullscreen preserves all interactions and provides accessible naming and an `Escape` exit path.
+- Automatic layout aligns each rank to one row or column and places unrelated graph components in separate, non-overlapping regions.
+- The explorer and its shared UI in every integrated scene support Chinese and English, follow Host-language changes, and do not alter business data or graph identity.
 - Ontology and KG use a storage-independent bounded backend snapshot with explicit total counts and truncation state.
 - The Agent design graph shows connections, conditions, and implementation entry points; selecting a Run exposes runtime status, result, and errors.
 - The privacy map distinguishes `observed`, `declared`, and `unknown`, shows its window and blind spots, and contains no raw payload.

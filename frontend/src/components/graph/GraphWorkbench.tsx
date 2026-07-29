@@ -18,6 +18,7 @@ import { GraphExplorer } from "./GraphExplorer";
 import "./GraphWorkbench.css";
 
 type GraphScene = "ontology" | "knowledge" | "workflow" | "privacy";
+type GraphRequestError = { status?: number; detail?: string };
 
 interface GraphWorkbenchProps {
   open: boolean;
@@ -39,15 +40,37 @@ function revealSceneTab(tab: HTMLElement): void {
   }
 }
 
+function localizeExplorerSnapshot(
+  dataset: GraphDataset | undefined,
+  scene: "ontology" | "knowledge",
+  language: "zh" | "en",
+): GraphDataset | undefined {
+  if (!dataset || language === "en") return dataset;
+  const title = scene === "ontology" ? "本体" : "知识图谱";
+  const description = scene === "ontology"
+    ? "规范本体实体及其子类关系。"
+    : "用户 ContextRecord 及其有向关系的有界快照。";
+  return {
+    ...dataset,
+    title,
+    description,
+    metadata: {
+      ...dataset.metadata,
+      title,
+      description,
+    },
+  };
+}
+
 export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps) {
   const isZh = language === "zh";
   const [scene, setScene] = useState<GraphScene>("ontology");
   const [explorerPayload, setExplorerPayload] = useState<GraphExplorerPayload | null>(null);
-  const [privacyDataset, setPrivacyDataset] = useState<GraphDataset | null>(null);
+  const [privacyPayload, setPrivacyPayload] = useState<Record<string, unknown> | null>(null);
   const [explorerLoading, setExplorerLoading] = useState(false);
   const [privacyLoading, setPrivacyLoading] = useState(false);
-  const [explorerError, setExplorerError] = useState("");
-  const [privacyError, setPrivacyError] = useState("");
+  const [explorerError, setExplorerError] = useState<GraphRequestError | null>(null);
+  const [privacyError, setPrivacyError] = useState<GraphRequestError | null>(null);
   const [privacyRequested, setPrivacyRequested] = useState(false);
   const explorerGeneration = useRef(0);
   const privacyGeneration = useRef(0);
@@ -55,15 +78,20 @@ export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps)
   const loadExplorer = useCallback(async () => {
     const generation = ++explorerGeneration.current;
     setExplorerLoading(true);
-    setExplorerError("");
+    setExplorerError(null);
     try {
       const response = await fetch(`${API_BASE}/api/graph/explorer?record_limit=250`);
-      if (!response.ok) throw new Error(`Graph explorer request failed (${response.status})`);
+      if (!response.ok) {
+        if (generation === explorerGeneration.current) {
+          setExplorerError({ status: response.status });
+        }
+        return;
+      }
       const payload = normalizeGraphExplorerPayload(await response.json());
       if (generation === explorerGeneration.current) setExplorerPayload(payload);
     } catch (error) {
       if (generation === explorerGeneration.current) {
-        setExplorerError(error instanceof Error ? error.message : String(error));
+        setExplorerError({ detail: error instanceof Error ? error.message : String(error) });
       }
     } finally {
       if (generation === explorerGeneration.current) setExplorerLoading(false);
@@ -74,15 +102,20 @@ export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps)
     const generation = ++privacyGeneration.current;
     setPrivacyRequested(true);
     setPrivacyLoading(true);
-    setPrivacyError("");
+    setPrivacyError(null);
     try {
       const response = await fetch(`${API_BASE}/api/data-map`);
-      if (!response.ok) throw new Error(`Data map request failed (${response.status})`);
-      const dataset = dataMapToGraph(await response.json());
-      if (generation === privacyGeneration.current) setPrivacyDataset(dataset);
+      if (!response.ok) {
+        if (generation === privacyGeneration.current) {
+          setPrivacyError({ status: response.status });
+        }
+        return;
+      }
+      const payload = await response.json() as Record<string, unknown>;
+      if (generation === privacyGeneration.current) setPrivacyPayload(payload);
     } catch (error) {
       if (generation === privacyGeneration.current) {
-        setPrivacyError(error instanceof Error ? error.message : String(error));
+        setPrivacyError({ detail: error instanceof Error ? error.message : String(error) });
       }
     } finally {
       if (generation === privacyGeneration.current) setPrivacyLoading(false);
@@ -92,8 +125,8 @@ export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps)
   useEffect(() => {
     if (!open) return;
     setScene("ontology");
-    setPrivacyDataset(null);
-    setPrivacyError("");
+    setPrivacyPayload(null);
+    setPrivacyError(null);
     setPrivacyRequested(false);
     void loadExplorer();
   }, [loadExplorer, open]);
@@ -102,16 +135,38 @@ export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps)
     if (open && scene === "privacy" && !privacyRequested) void loadPrivacyMap();
   }, [loadPrivacyMap, open, privacyRequested, scene]);
 
-  const workflowDataset = useMemo(() => workflowToGraph(), []);
+  const ontologyDataset = useMemo(
+    () => localizeExplorerSnapshot(explorerPayload?.ontology, "ontology", language),
+    [explorerPayload, language],
+  );
+  const knowledgeDataset = useMemo(
+    () => localizeExplorerSnapshot(explorerPayload?.knowledgeGraph, "knowledge", language),
+    [explorerPayload, language],
+  );
+  const workflowDataset = useMemo(() => workflowToGraph(undefined, language), [language]);
+  const privacyDataset = useMemo(
+    () => privacyPayload ? dataMapToGraph(privacyPayload, language) : null,
+    [language, privacyPayload],
+  );
   const activeDataset = scene === "ontology"
-    ? explorerPayload?.ontology
+    ? ontologyDataset
     : scene === "knowledge"
-      ? explorerPayload?.knowledgeGraph
+      ? knowledgeDataset
       : scene === "workflow"
         ? workflowDataset
         : privacyDataset;
   const activeLoading = scene === "privacy" ? privacyLoading : scene === "workflow" ? false : explorerLoading;
-  const activeError = scene === "privacy" ? privacyError : scene === "workflow" ? "" : explorerError;
+  const activeError = scene === "privacy" ? privacyError : scene === "workflow" ? null : explorerError;
+  const activeErrorPrefix = scene === "privacy"
+    ? (isZh ? "数据地图请求失败" : "Data map request failed")
+    : (isZh ? "图谱探索请求失败" : "Graph explorer request failed");
+  const activeErrorMessage = activeError
+    ? `${activeErrorPrefix}${activeError.status !== undefined
+      ? ` (${activeError.status})`
+      : activeError.detail
+        ? `: ${activeError.detail}`
+        : ""}`
+    : "";
   const labels: Record<GraphScene, string> = isZh
     ? { ontology: "本体", knowledge: "知识图谱", workflow: "Agent 工作流", privacy: "隐私数据图" }
     : { ontology: "Ontology", knowledge: "Knowledge graph", workflow: "Agent workflow", privacy: "Privacy map" };
@@ -203,7 +258,7 @@ export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps)
             </div>
           ) : activeError ? (
             <div className="graph-workbench-message is-error" role="alert">
-              <p>{activeError}</p>
+              <p>{activeErrorMessage}</p>
               <button
                 className="system-button"
                 onClick={() => scene === "privacy" ? void loadPrivacyMap() : void loadExplorer()}
@@ -218,6 +273,7 @@ export function GraphWorkbench({ open, language, onClose }: GraphWorkbenchProps)
               className="graph-workbench-explorer"
               dataset={activeDataset}
               key={scene}
+              language={language}
             />
           ) : (
             <div className="graph-workbench-message" role="status">

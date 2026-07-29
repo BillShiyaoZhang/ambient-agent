@@ -218,7 +218,13 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   };
 
   return (
-    <SystemDrawer open={open} onClose={onClose} label={isZh ? "任务中心" : "Task Center"} className="task-drawer">
+    <SystemDrawer
+      open={open}
+      onClose={onClose}
+      label={isZh ? "任务中心" : "Task Center"}
+      closeLabel={isZh ? "关闭任务中心" : "Close Task Center"}
+      className="task-drawer"
+    >
         <header>
           <div><h2>{isZh ? "任务中心" : "Task Center"}</h2><p>{isZh ? "后台工作与运行环境" : "Background work and runtimes"}</p></div>
           <SystemIconButton onClick={onClose} label={isZh ? "关闭" : "Close"}><X size={18} /></SystemIconButton>
@@ -291,7 +297,8 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
             {detailView === "graph" && hasDurableWorkflow ? (
               <div className="task-run-graph">
                 <DeferredGraphExplorer
-                  dataset={workflowToGraph(selected)}
+                  dataset={workflowToGraph(selected, language)}
+                  language={language}
                   loadingLabel={isZh ? "正在加载执行图" : "Execution graph loading"}
                   loadingMessage={isZh ? "正在加载交互式执行图…" : "Loading interactive execution graph…"}
                 />
