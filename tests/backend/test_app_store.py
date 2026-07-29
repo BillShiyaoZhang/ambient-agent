@@ -121,7 +121,7 @@ def test_app_store_api_registration_and_revision_conflict(app_store, monkeypatch
     manifest = capability().model_dump(mode="json")
     catalog_id = service.catalog_id(capability())
 
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50_000)) as client:
         registered = client.put(f"/api/capabilities/{catalog_id}", json=manifest)
         initial = client.get("/api/app-store")
         first_save = client.put(

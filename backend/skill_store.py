@@ -22,6 +22,8 @@ from backend.skill_version import compare_semver, parse_semver
 _DIGEST_PATTERN = re.compile(r"^sha256:([0-9a-f]{64})$")
 _PACKAGE_FILES = frozenset({"SKILL.md", "market.json"})
 MAX_MARKET_FILE_BYTES = 128 * 1024
+SKILL_ACTIVATION_POLICIES = frozenset({"none", "explicit_only", "implicit"})
+SKILL_AUTHORIZATION_STATES = frozenset({"trusted", "quarantined", "authorized"})
 
 
 class SkillStoreError(RuntimeError):
@@ -73,6 +75,38 @@ class SkillDowngradeConflict(SkillStoreError):
         )
 
 
+class SkillAuthorizationRequiredError(SkillStoreError):
+    """A quarantined installation cannot be enabled or selected."""
+
+    def __init__(self, catalog_id: str):
+        self.catalog_id = catalog_id
+        super().__init__(f"Skill '{catalog_id}' requires authorization for its current digest")
+
+
+class SkillAuthorizationDigestMismatch(SkillStoreError):
+    """An authorization decision was made against stale package bytes."""
+
+    def __init__(self, catalog_id: str, expected_digest: str, actual_digest: str):
+        self.catalog_id = catalog_id
+        self.expected_digest = expected_digest
+        self.actual_digest = actual_digest
+        super().__init__(
+            f"Skill '{catalog_id}' digest changed: expected '{expected_digest}', "
+            f"found '{actual_digest}'"
+        )
+
+
+class SkillTrustedAuthorizationImmutableError(SkillStoreError):
+    """Bundled trust is loader-derived and cannot be rewritten as a user grant."""
+
+    def __init__(self, catalog_id: str):
+        self.catalog_id = catalog_id
+        super().__init__(
+            f"Skill '{catalog_id}' has loader-derived bundled trust; use enabled state "
+            "to disable it"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class InstalledSkill:
     catalog_id: str
@@ -82,6 +116,10 @@ class InstalledSkill:
     version: str
     digest: str
     enabled: bool
+    authorization_state: str
+    activation_policy: str
+    authorized_digest: str | None
+    registry_revision: int | None
     installed_at: str
     updated_at: str
     record: dict[str, Any]
@@ -96,6 +134,10 @@ class InstalledSkill:
             "version": self.version,
             "digest": self.digest,
             "enabled": self.enabled,
+            "authorization_state": self.authorization_state,
+            "activation_policy": self.activation_policy,
+            "authorized_digest": self.authorized_digest,
+            "registry_revision": self.registry_revision,
             "installed_at": self.installed_at,
             "updated_at": self.updated_at,
         }
@@ -177,15 +219,89 @@ class SkillStore:
                     version TEXT NOT NULL,
                     digest TEXT NOT NULL,
                     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    authorization_state TEXT NOT NULL DEFAULT 'quarantined',
+                    activation_policy TEXT NOT NULL DEFAULT 'none',
+                    authorized_digest TEXT,
                     record_json TEXT NOT NULL,
                     installed_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 """
             )
+            # Serialize additive DDL/backfill across concurrently starting Host
+            # processes. A second initializer re-reads the columns only after
+            # the first migration commits.
+            connection.execute("BEGIN IMMEDIATE")
+            self._migrate_authorization_columns(connection)
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _migrate_authorization_columns(connection: sqlite3.Connection) -> None:
+        """Add authorization state without trusting legacy external installations.
+
+        A pre-authorization registry had only an ``enabled`` bit. Bundled
+        records can safely inherit loader-derived trust. Every other legacy
+        record is disabled and quarantined, even if it used to be enabled.
+        """
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(skill_installations)").fetchall()
+        }
+        definitions = {
+            "authorization_state": "TEXT NOT NULL DEFAULT 'quarantined'",
+            "activation_policy": "TEXT NOT NULL DEFAULT 'none'",
+            "authorized_digest": "TEXT",
+        }
+        missing = [name for name in definitions if name not in columns]
+        for name in missing:
+            connection.execute(
+                f"ALTER TABLE skill_installations ADD COLUMN {name} {definitions[name]}"
+            )
+        if not missing:
+            return
+
+        rows = connection.execute(
+            "SELECT catalog_id, digest, record_json FROM skill_installations"
+        ).fetchall()
+        migrated_at = datetime.now(UTC).isoformat()
+        for row in rows:
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, json.JSONDecodeError):
+                record = None
+            if isinstance(record, dict) and _record_has_bundled_trust(record):
+                connection.execute(
+                    """
+                    UPDATE skill_installations
+                    SET authorization_state = 'trusted',
+                        activation_policy = 'implicit',
+                        authorized_digest = ?,
+                        updated_at = ?
+                    WHERE catalog_id = ?
+                    """,
+                    (row["digest"], migrated_at, row["catalog_id"]),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE skill_installations
+                    SET enabled = 0,
+                        authorization_state = 'quarantined',
+                        activation_policy = 'none',
+                        authorized_digest = NULL,
+                        updated_at = ?
+                    WHERE catalog_id = ?
+                    """,
+                    (migrated_at, row["catalog_id"]),
+                )
+        if rows:
+            SkillStore._increment_revision(connection)
 
     @contextmanager
     def _transaction(self, *, expected_revision: int | None = None) -> Iterator[sqlite3.Connection]:
@@ -262,7 +378,10 @@ class SkillStore:
                 )
 
             if existing_row is not None:
-                existing = self._row_to_installed(existing_row)
+                existing = self._row_to_installed(
+                    existing_row,
+                    registry_revision=self._revision(connection),
+                )
                 if existing.digest == digest and existing_row["record_json"] == canonical_record:
                     self._ensure_package(skill_content, market_content, digest)
                     return existing
@@ -283,11 +402,32 @@ class SkillStore:
                         existing.version,
                         normalized_record["version"],
                     )
-                enabled = int(existing.enabled)
                 installed_at = existing.installed_at
+                if _record_has_bundled_trust(normalized_record):
+                    enabled = int(existing.enabled)
+                    authorization_state = "trusted"
+                    activation_policy = "implicit"
+                    authorized_digest = digest
+                else:
+                    # A grant is bound to exact bytes. Updating any external
+                    # package atomically revokes the old grant and disables the
+                    # new, unreviewed content.
+                    enabled = 0
+                    authorization_state = "quarantined"
+                    activation_policy = "none"
+                    authorized_digest = None
             else:
-                enabled = 1
                 installed_at = now
+                if _record_has_bundled_trust(normalized_record):
+                    enabled = 1
+                    authorization_state = "trusted"
+                    activation_policy = "implicit"
+                    authorized_digest = digest
+                else:
+                    enabled = 0
+                    authorization_state = "quarantined"
+                    activation_policy = "none"
+                    authorized_digest = None
 
             self._ensure_package(skill_content, market_content, digest)
 
@@ -295,9 +435,10 @@ class SkillStore:
                 """
                 INSERT INTO skill_installations (
                     catalog_id, market_id, name, title, version, digest, enabled,
+                    authorization_state, activation_policy, authorized_digest,
                     record_json, installed_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(catalog_id) DO UPDATE SET
                     market_id = excluded.market_id,
                     name = excluded.name,
@@ -305,6 +446,9 @@ class SkillStore:
                     version = excluded.version,
                     digest = excluded.digest,
                     enabled = excluded.enabled,
+                    authorization_state = excluded.authorization_state,
+                    activation_policy = excluded.activation_policy,
+                    authorized_digest = excluded.authorized_digest,
                     record_json = excluded.record_json,
                     installed_at = excluded.installed_at,
                     updated_at = excluded.updated_at
@@ -317,19 +461,22 @@ class SkillStore:
                     normalized_record["version"],
                     digest,
                     enabled,
+                    authorization_state,
+                    activation_policy,
+                    authorized_digest,
                     canonical_record,
                     installed_at,
                     now,
                 ),
             )
-            self._increment_revision(connection)
+            revision = self._increment_revision(connection)
             row = connection.execute(
                 "SELECT * FROM skill_installations WHERE catalog_id = ?",
                 (normalized_record["catalog_id"],),
             ).fetchone()
             if row is None:
                 raise SkillStoreCorruptionError("Installed skill disappeared during its transaction")
-            return self._row_to_installed(row)
+            return self._row_to_installed(row, registry_revision=revision)
 
     def set_enabled(
         self,
@@ -348,10 +495,13 @@ class SkillStore:
             ).fetchone()
             if row is None:
                 raise SkillNotInstalledError(catalog_id)
-            current = self._row_to_installed(row)
+            revision = self._revision(connection)
+            current = self._row_to_installed(row, registry_revision=revision)
             # Recovery operations must remain available for a damaged package.
             # Enabling is fail-closed; disabling never loads package content.
             if enabled:
+                if current.authorization_state == "quarantined":
+                    raise SkillAuthorizationRequiredError(catalog_id)
                 self._verify_installed_package(current)
             if current.enabled == enabled:
                 return current
@@ -359,31 +509,149 @@ class SkillStore:
                 "UPDATE skill_installations SET enabled = ?, updated_at = ? WHERE catalog_id = ?",
                 (int(enabled), now, catalog_id),
             )
-            self._increment_revision(connection)
+            revision = self._increment_revision(connection)
             updated = connection.execute(
                 "SELECT * FROM skill_installations WHERE catalog_id = ?",
                 (catalog_id,),
             ).fetchone()
             if updated is None:
                 raise SkillStoreCorruptionError("Installed skill disappeared during its transaction")
-            return self._row_to_installed(updated)
+            return self._row_to_installed(updated, registry_revision=revision)
 
-    def uninstall(self, catalog_id: str, *, expected_revision: int | None = None) -> bool:
+    def set_authorization(
+        self,
+        catalog_id: str,
+        activation_policy: str,
+        *,
+        expected_digest: str,
+        expected_revision: int | None = None,
+    ) -> InstalledSkill:
+        """Authorize or revoke context injection for the exact installed bytes.
+
+        Authorization is a control-plane decision. It grants only
+        ``agent.context.inject`` and never interprets ``allowed-tools`` as a
+        capability grant.
+        """
+
+        if activation_policy not in SKILL_ACTIVATION_POLICIES:
+            raise ValueError(
+                "activation_policy must be one of: none, explicit_only, implicit"
+            )
+        if not isinstance(expected_digest, str) or _DIGEST_PATTERN.fullmatch(expected_digest) is None:
+            raise ValueError(
+                "expected_digest must use the form sha256:<64 lowercase hex characters>"
+            )
+        now = datetime.now(UTC).isoformat()
         with self._transaction(expected_revision=expected_revision) as connection:
             row = connection.execute(
                 "SELECT * FROM skill_installations WHERE catalog_id = ?",
                 (catalog_id,),
             ).fetchone()
             if row is None:
-                return False
+                raise SkillNotInstalledError(catalog_id)
+            revision = self._revision(connection)
+            current = self._row_to_installed(row, registry_revision=revision)
+            if current.digest != expected_digest:
+                raise SkillAuthorizationDigestMismatch(
+                    catalog_id,
+                    expected_digest,
+                    current.digest,
+                )
+
+            if current.authorization_state == "trusted":
+                if activation_policy != "implicit":
+                    raise SkillTrustedAuthorizationImmutableError(catalog_id)
+                if current.enabled:
+                    return current
+                self._verify_installed_package(current)
+                next_state = "trusted"
+                next_policy = "implicit"
+                next_authorized_digest: str | None = current.digest
+                next_enabled = 1
+            elif activation_policy == "none":
+                next_state = "quarantined"
+                next_policy = "none"
+                next_authorized_digest = None
+                next_enabled = 0
+                if (
+                    current.authorization_state == next_state
+                    and current.activation_policy == next_policy
+                    and current.authorized_digest is None
+                    and not current.enabled
+                ):
+                    return current
+            else:
+                self._verify_installed_package(current)
+                next_state = "authorized"
+                next_policy = activation_policy
+                next_authorized_digest = current.digest
+                next_enabled = 1
+                if (
+                    current.authorization_state == next_state
+                    and current.activation_policy == next_policy
+                    and current.authorized_digest == next_authorized_digest
+                    and current.enabled
+                ):
+                    return current
+
+            connection.execute(
+                """
+                UPDATE skill_installations
+                SET enabled = ?,
+                    authorization_state = ?,
+                    activation_policy = ?,
+                    authorized_digest = ?,
+                    updated_at = ?
+                WHERE catalog_id = ?
+                """,
+                (
+                    next_enabled,
+                    next_state,
+                    next_policy,
+                    next_authorized_digest,
+                    now,
+                    catalog_id,
+                ),
+            )
+            revision = self._increment_revision(connection)
+            updated = connection.execute(
+                "SELECT * FROM skill_installations WHERE catalog_id = ?",
+                (catalog_id,),
+            ).fetchone()
+            if updated is None:
+                raise SkillStoreCorruptionError("Installed skill disappeared during its transaction")
+            return self._row_to_installed(updated, registry_revision=revision)
+
+    def uninstall(self, catalog_id: str, *, expected_revision: int | None = None) -> bool:
+        return (
+            self.uninstall_with_revision(
+                catalog_id,
+                expected_revision=expected_revision,
+            )
+            is not None
+        )
+
+    def uninstall_with_revision(
+        self,
+        catalog_id: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> int | None:
+        with self._transaction(expected_revision=expected_revision) as connection:
+            row = connection.execute(
+                "SELECT * FROM skill_installations WHERE catalog_id = ?",
+                (catalog_id,),
+            ).fetchone()
+            if row is None:
+                return None
             self._row_to_installed(row)
             connection.execute("DELETE FROM skill_installations WHERE catalog_id = ?", (catalog_id,))
-            self._increment_revision(connection)
+            revision = self._increment_revision(connection)
 
         # Keep immutable content-addressed packages as a cache. Synchronous GC
         # here races a reinstall between the registry commit and filesystem
         # deletion. A future collector needs a lock/lease and a grace period.
-        return True
+        return revision
 
     def get(self, catalog_id: str, *, verify_package: bool = True) -> InstalledSkill | None:
         connection = self._connect()
@@ -418,23 +686,43 @@ class SkillStore:
         return installed
 
     def list(self, *, verify_packages: bool = True) -> list[InstalledSkill]:
+        _, installed = self.list_with_revision(verify_packages=verify_packages)
+        return installed
+
+    def list_with_revision(
+        self,
+        *,
+        verify_packages: bool = True,
+    ) -> tuple[int, list[InstalledSkill]]:
+        """Read one registry snapshot and its matching CAS revision."""
+
         connection = self._connect()
         try:
+            connection.execute("BEGIN")
+            revision = self._revision(connection)
             rows = connection.execute(
                 "SELECT * FROM skill_installations ORDER BY catalog_id"
             ).fetchall()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
-        installed = [self._row_to_installed(row) for row in rows]
+        installed = [
+            self._row_to_installed(row, registry_revision=revision)
+            for row in rows
+        ]
         if verify_packages:
             for item in installed:
                 self._verify_installed_package(item)
-        return installed
+        return revision, installed
 
     def state(self, *, verify_packages: bool = True) -> dict[str, Any]:
+        revision, items = self.list_with_revision(verify_packages=verify_packages)
         return {
-            "revision": self.revision(),
-            "items": [item.as_dict() for item in self.list(verify_packages=verify_packages)],
+            "revision": revision,
+            "items": [item.as_dict() for item in items],
         }
 
     def read_manifest(self, installed: InstalledSkill | str) -> SkillManifest:
@@ -497,7 +785,11 @@ class SkillStore:
         return normalized
 
     @staticmethod
-    def _row_to_installed(row: sqlite3.Row) -> InstalledSkill:
+    def _row_to_installed(
+        row: sqlite3.Row,
+        *,
+        registry_revision: int | None = None,
+    ) -> InstalledSkill:
         try:
             record = json.loads(row["record_json"])
         except (TypeError, json.JSONDecodeError) as exc:
@@ -525,6 +817,46 @@ class SkillStore:
             raise SkillStoreCorruptionError(
                 f"Installed skill '{row['catalog_id']}' has invalid enabled state"
             )
+        authorization_state = row["authorization_state"]
+        activation_policy = row["activation_policy"]
+        authorized_digest = row["authorized_digest"]
+        if authorization_state not in SKILL_AUTHORIZATION_STATES:
+            raise SkillStoreCorruptionError(
+                f"Installed skill '{row['catalog_id']}' has invalid authorization state"
+            )
+        if activation_policy not in SKILL_ACTIVATION_POLICIES:
+            raise SkillStoreCorruptionError(
+                f"Installed skill '{row['catalog_id']}' has invalid activation policy"
+            )
+        if authorized_digest is not None and (
+            not isinstance(authorized_digest, str)
+            or _DIGEST_PATTERN.fullmatch(authorized_digest) is None
+        ):
+            raise SkillStoreCorruptionError(
+                f"Installed skill '{row['catalog_id']}' has invalid authorized digest"
+            )
+        if authorization_state == "quarantined":
+            valid_authorization = (
+                activation_policy == "none"
+                and authorized_digest is None
+                and row["enabled"] == 0
+            )
+        elif authorization_state == "trusted":
+            valid_authorization = (
+                _record_has_bundled_trust(record)
+                and activation_policy == "implicit"
+                and authorized_digest == row["digest"]
+            )
+        else:
+            valid_authorization = (
+                not _record_has_bundled_trust(record)
+                and activation_policy in {"explicit_only", "implicit"}
+                and authorized_digest == row["digest"]
+            )
+        if not valid_authorization:
+            raise SkillStoreCorruptionError(
+                f"Installed skill '{row['catalog_id']}' has inconsistent authorization state"
+            )
         return InstalledSkill(
             catalog_id=row["catalog_id"],
             market_id=row["market_id"],
@@ -533,6 +865,10 @@ class SkillStore:
             version=row["version"],
             digest=row["digest"],
             enabled=bool(row["enabled"]),
+            authorization_state=authorization_state,
+            activation_policy=activation_policy,
+            authorized_digest=authorized_digest,
+            registry_revision=registry_revision,
             installed_at=row["installed_at"],
             updated_at=row["updated_at"],
             record=record,
@@ -600,6 +936,19 @@ def _canonical_json(value: dict[str, Any]) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("Skill installation record must be JSON serializable") from exc
+
+
+def _record_has_bundled_trust(record: dict[str, Any]) -> bool:
+    provenance = record.get("provenance")
+    name = record.get("name")
+    return (
+        isinstance(provenance, dict)
+        and isinstance(name, str)
+        and record.get("catalog_id") == f"agent-skill:ambient-agent:{name}"
+        and provenance.get("trust") == "bundled"
+        and provenance.get("verified") is True
+        and provenance.get("source") == f"bundled://ambient-agent/{name}"
+    )
 
 
 def _write_and_sync(path: Path, content: bytes) -> None:

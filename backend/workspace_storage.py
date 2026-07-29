@@ -338,6 +338,8 @@ class WorkspaceStorage:
                         role=m.get("role", "user"),
                         sender=m.get("sender", "user"),
                         content=m.get("content", ""),
+                        context_policy=m.get("context_policy", "reusable"),
+                        provenance=m.get("provenance"),
                         timestamp=t_val or datetime.now(UTC),
                     )
                 )
@@ -531,6 +533,8 @@ class WorkspaceStorage:
             "role": message.role,
             "sender": message.sender,
             "content": message.content,
+            "context_policy": message.context_policy,
+            "provenance": message.provenance,
             "timestamp": message.timestamp.isoformat()
             if isinstance(message.timestamp, datetime)
             else message.timestamp,

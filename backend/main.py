@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from ipaddress import ip_address, ip_network
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 
@@ -73,11 +73,14 @@ from backend.session_title import is_placeholder_title, sanitize_title
 from backend.skill_manager import SkillManager, SkillOntologyReferenceError
 from backend.skill_market import SkillMarketError
 from backend.skill_store import (
+    SkillAuthorizationDigestMismatch,
+    SkillAuthorizationRequiredError,
     SkillNotInstalledError,
     SkillPackageIntegrityError,
     SkillRevisionConflict,
     SkillStoreCorruptionError,
     SkillStoreError,
+    SkillTrustedAuthorizationImmutableError,
 )
 from backend.workspace_storage import WorkspaceStorage, migrate_old_data
 from backend.widget_runtime import (
@@ -529,6 +532,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_store_control_plane_responses(request: Request, call_next):
+    """Prevent caching even when request validation short-circuits an endpoint."""
+
+    response = await call_next(request)
+    path = request.url.path
+    if (
+        path == "/api/skill-market"
+        or path == "/api/skills"
+        or path.startswith("/api/skills/")
+        or path == "/api/app-store"
+        or path.startswith("/api/app-store/")
+    ):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/health")
@@ -1001,6 +1021,14 @@ class SkillEnabledUpdate(BaseModel):
     expected_revision: int | None = Field(default=None, ge=0)
 
 
+class SkillAuthorizationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activation_policy: Literal["none", "explicit_only", "implicit"]
+    expected_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_revision: int = Field(ge=0)
+
+
 class RunCreate(BaseModel):
     catalog_id: str
     action_id: str | None = None
@@ -1262,8 +1290,18 @@ async def websocket_run_live(websocket: WebSocket, session_id: str):
         run_live_broker.unsubscribe(session_id, queue)
 
 
+def _require_app_store_host(request: Request, response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="app_store_origin_denied",
+        denied_message="App Store control-plane state is only available to the trusted Host",
+    )
+
+
 @app.get("/api/app-store")
-async def get_app_store():
+async def get_app_store(request: Request, response: Response):
+    _require_app_store_host(request, response)
     return app_store.get_state()
 
 
@@ -1285,6 +1323,37 @@ def _raise_skill_api_error(exc: Exception) -> None:
                 "message": str(exc),
                 "expected_revision": exc.expected,
                 "actual_revision": exc.actual,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillAuthorizationDigestMismatch):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_authorization_digest_mismatch",
+                "message": str(exc),
+                "expected_digest": exc.expected_digest,
+                "actual_digest": exc.actual_digest,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillAuthorizationRequiredError):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_authorization_required",
+                "message": str(exc),
+                "catalog_id": exc.catalog_id,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillTrustedAuthorizationImmutableError):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_trusted_authorization_immutable",
+                "message": str(exc),
+                "catalog_id": exc.catalog_id,
             },
             headers={"Cache-Control": "no-store"},
         ) from exc
@@ -1362,6 +1431,25 @@ def set_skill_enabled(
         _raise_skill_api_error(exc)
 
 
+@app.patch("/api/skills/{catalog_id}/authorization")
+def set_skill_authorization(
+    catalog_id: str,
+    data: SkillAuthorizationUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.set_authorization(
+            catalog_id,
+            data.activation_policy,
+            expected_digest=data.expected_digest,
+            expected_revision=data.expected_revision,
+        )
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
 @app.delete("/api/skills/{catalog_id}")
 def uninstall_skill(
     catalog_id: str,
@@ -1371,24 +1459,38 @@ def uninstall_skill(
 ):
     _require_skill_market_host(request, response)
     try:
-        if not skill_manager.uninstall(catalog_id, expected_revision=expected_revision):
+        revision = skill_manager.uninstall_with_revision(
+            catalog_id,
+            expected_revision=expected_revision,
+        )
+        if revision is None:
             raise SkillNotInstalledError(catalog_id)
-        return {"status": "ok", "catalog_id": catalog_id, "revision": skill_manager.revision}
+        return {"status": "ok", "catalog_id": catalog_id, "revision": revision}
     except Exception as exc:
         _raise_skill_api_error(exc)
 
 
 @app.put("/api/app-store/layout")
-async def update_app_store_layout(data: AppStoreLayoutUpdate):
+async def update_app_store_layout(
+    data: AppStoreLayoutUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_app_store_host(request, response)
     try:
         return app_store.save_layout(data.revision, data.root, data.folders)
     except LayoutConflictError as exc:
         raise HTTPException(
             status_code=409,
             detail={"message": "App Store layout changed in another client", "state": exc.current},
+            headers={"Cache-Control": "no-store"},
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+            headers={"Cache-Control": "no-store"},
+        ) from exc
 
 
 @app.put("/api/capabilities/{catalog_id}")

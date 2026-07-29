@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 
 from backend.app_manager import AppManager
-from backend.models import ChatMessage
+from backend.models import ChatMessage, message_allows_prompt_reuse
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -34,6 +34,8 @@ class ContextManager:
 
         app_ids: set[str] = set()
         for msg in messages:
+            if not message_allows_prompt_reuse(msg):
+                continue
             reference = self._artifact_reference(msg.content)
             if reference is not None:
                 app_ids.add(reference["app_id"])
@@ -81,7 +83,11 @@ class ContextManager:
         """
 
         limits = budget or ContextBudget.defaults()
-        messages = self.db.get_messages(session_id)
+        messages = [
+            message
+            for message in self.db.get_messages(session_id)
+            if message_allows_prompt_reuse(message)
+        ]
         omitted = messages[: max(0, len(messages) - limits.max_messages)]
         if not omitted or max_summary_chars <= 0:
             return None
@@ -133,7 +139,11 @@ class ContextManager:
             raise ValueError("Context budget must be positive")
 
         # 1. Fetch messages for the session sorted by timestamp.
-        messages = self.db.get_messages(session_id)
+        messages = [
+            message
+            for message in self.db.get_messages(session_id)
+            if message_allows_prompt_reuse(message)
+        ]
 
         # 2. Select artifact references deterministically. Callers may narrow
         # this list for just-in-time retrieval; the fallback remains bounded.

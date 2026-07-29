@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -57,7 +58,16 @@ from backend.skill_manager import (
     SkillExplicitSelectionError,
     SkillManager,
 )
-from backend.skill_store import SkillPackageIntegrityError
+from backend.skill_sandbox import (
+    SkillPromptChannels,
+    SkillSandboxError,
+    build_skill_prompt_channels,
+)
+from backend.skill_store import (
+    SkillAuthorizationRequiredError,
+    SkillPackageIntegrityError,
+    SkillStoreCorruptionError,
+)
 from backend.workspace_storage import WorkspaceStorage
 
 logger = logging.getLogger("agent.durable_workflow")
@@ -312,21 +322,24 @@ class DurableAgentWorkflow:
             artifact_hashes=artifact_hashes,
         )
 
-    def _active_skill_context(self, state: AgentRunState) -> str | None:
+    def _active_skill_prompt_channels(self, state: AgentRunState) -> SkillPromptChannels:
         snapshots = state.data.get("active_skills")
         if snapshots is None:
-            return None
+            return SkillPromptChannels()
         if not isinstance(snapshots, list) or any(not isinstance(item, dict) for item in snapshots):
             raise WorkflowError("Durable Skill snapshot is malformed", code="invalid_skill_snapshot")
         if not snapshots:
-            return None
+            return SkillPromptChannels()
         if self.skill_manager is None:
             # Old deployments can resume checkpoints without silently loading
             # mutable package state, but cannot interpret an unknown snapshot.
             raise WorkflowError("Skill runtime is unavailable", code="skill_runtime_unavailable")
         try:
-            return self.skill_manager.render_context(snapshots)
-        except (SkillContextBudgetError, ValueError, TypeError) as exc:
+            return build_skill_prompt_channels(
+                snapshots,
+                render_context=self.skill_manager.render_context,
+            )
+        except (SkillContextBudgetError, SkillSandboxError, ValueError, TypeError) as exc:
             raise WorkflowError("Durable Skill snapshot is invalid", code="invalid_skill_snapshot") from exc
 
     def _select_active_skills(self, content: str, state: AgentRunState) -> None:
@@ -356,7 +369,7 @@ class DurableAgentWorkflow:
                     code="invalid_skill_snapshot",
                 )
             # Never re-resolve a recovered Run against a newer installation.
-            self._active_skill_context(state)
+            self._active_skill_prompt_channels(state)
             return
 
         if marker == "pinned_none":
@@ -400,7 +413,7 @@ class DurableAgentWorkflow:
         state.data["skill_selection_state"] = (
             "pinned" if state.data["active_skills"] else "pinned_none"
         )
-        self._active_skill_context(state)
+        self._active_skill_prompt_channels(state)
 
     async def _emit_live(
         self,
@@ -624,6 +637,8 @@ class DurableAgentWorkflow:
                 "sender": message.sender,
                 "role": message.role,
                 "content": message.content,
+                "context_policy": message.context_policy,
+                "provenance": message.provenance,
                 "timestamp": message.timestamp.isoformat() if message.timestamp else None,
             },
         }
@@ -1011,23 +1026,39 @@ class DurableAgentWorkflow:
                 message="Chat command content must not be empty",
             )
         self._select_active_skills(content, state)
-        context_summary = self._ensure_context_summary(state, storage)
-        orchestrator = AgentOrchestrator(
-            db_session=storage,
-            app_manager=self.app_manager,
-            graph_db=self.graph_db,
-            run_context=self._run_context(run, state),
-            context_summary=context_summary,
-            artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
-            tool_loop_budget=self._model_budget(state),
-            capability_catalog=self.capability_catalog_factory(),
-            skill_context=self._active_skill_context(state),
-        )
-        intent = await orchestrator._classify_intent(
-            content,
-            session_id=session_id,
-            language=session.language or "zh",
-        )
+        skill_prompt_channels = self._active_skill_prompt_channels(state)
+        if skill_prompt_channels.untrusted_user_guidance:
+            # External natural-language guidance never gets a chance to steer
+            # the LLM Router into Widget, Graph, or other effect workflows.
+            # Its only execution surface is the bounded read-only Converse
+            # phase, where it remains a lower-priority data message.
+            intent = IntentPlan(
+                kind=IntentKind.CONVERSE,
+                confidence=1.0,
+                rationale="external Skill semantic sandbox requires read-only Converse",
+                instruction=content,
+            )
+        else:
+            context_summary = self._ensure_context_summary(state, storage)
+            orchestrator = AgentOrchestrator(
+                db_session=storage,
+                app_manager=self.app_manager,
+                graph_db=self.graph_db,
+                run_context=self._run_context(run, state),
+                context_summary=context_summary,
+                artifact_ids=[
+                    str(ref.get("id"))
+                    for ref in state.artifact_refs
+                    if isinstance(ref, dict) and ref.get("id")
+                ],
+                tool_loop_budget=self._model_budget(state),
+                capability_catalog=self.capability_catalog_factory(),
+            )
+            intent = await orchestrator._classify_intent(
+                content,
+                session_id=session_id,
+                language=session.language or "zh",
+            )
         if intent.deprecated:
             return Failed(
                 summary="Deprecated intent",
@@ -1058,7 +1089,6 @@ class DurableAgentWorkflow:
 
     async def _phase_converse(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         storage = self._run_storage(state)
-        context_summary = self._ensure_context_summary(state, storage)
         existing = self._message_for_run(storage, state.session_id or "default-session", run["id"])
         if existing is not None and existing.role == "agent":
             cached_result = state.data.get("converse_result")
@@ -1073,20 +1103,79 @@ class DurableAgentWorkflow:
         intent = self._current_intent(state)
         language = str(state.data.get("language") or "zh")
         remaining_model_turns = state.budget.max_model_turns - state.budget.model_turns
+        skill_prompt_channels = self._active_skill_prompt_channels(state)
+        external_skill_sandbox = bool(
+            skill_prompt_channels.untrusted_user_guidance
+        )
+
+        def require_live_external_skill_grant() -> None:
+            if not external_skill_sandbox:
+                return
+            if self.skill_manager is None:
+                raise WorkflowError(
+                    "Skill runtime is unavailable",
+                    code="skill_runtime_unavailable",
+                )
+            try:
+                self.skill_manager.require_current_external_authorizations(
+                    state.data.get("active_skills", [])
+                )
+            except SkillAuthorizationRequiredError as exc:
+                raise WorkflowError(
+                    "External Skill authorization changed before context injection",
+                    code="skill_authorization_required",
+                ) from exc
+            except SkillPackageIntegrityError as exc:
+                raise WorkflowError(
+                    "The selected Skill package failed integrity verification",
+                    code="skill_package_integrity_error",
+                ) from exc
+            except (
+                SkillStoreCorruptionError,
+                OSError,
+                ValueError,
+                sqlite3.DatabaseError,
+            ) as exc:
+                raise WorkflowError(
+                    "The Skill authorization registry is unavailable",
+                    code="skill_registry_unavailable",
+                ) from exc
+        if external_skill_sandbox:
+            # Reject stale checkpoints early, then repeat this same check at
+            # the actual provider-admission boundary below.
+            require_live_external_skill_grant()
+        context_summary = (
+            None
+            if external_skill_sandbox
+            else self._ensure_context_summary(state, storage)
+        )
         orchestrator = AgentOrchestrator(
             db_session=storage,
             app_manager=self.app_manager,
             graph_db=self.graph_db,
             run_context=self._run_context(run, state),
             context_summary=context_summary,
-            artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
+            artifact_ids=(
+                []
+                if external_skill_sandbox
+                else [
+                    str(ref.get("id"))
+                    for ref in state.artifact_refs
+                    if isinstance(ref, dict) and ref.get("id")
+                ]
+            ),
             tool_loop_budget=self._model_budget(
                 state,
                 max_iterations=remaining_model_turns,
                 max_tool_calls=12,
             ),
             capability_catalog=self.capability_catalog_factory(),
-            skill_context=self._active_skill_context(state),
+            skill_prompt_channels=skill_prompt_channels,
+            pre_model_call_guard=(
+                require_live_external_skill_grant
+                if external_skill_sandbox
+                else None
+            ),
         )
 
         async def on_update(payload: Any) -> None:

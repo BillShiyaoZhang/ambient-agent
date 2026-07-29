@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { History, LoaderCircle, Maximize2, MessageCircle, Plus, Send, Trash2, X } from "lucide-react";
 import type { Message } from "./ChatPanel";
+import { externalSkillMessageLabel } from "./chatMessageProvenance";
 import type { Session } from "./SessionSidebar";
 import type { LLMProvider, ModelSelection } from "../services/llm";
 import type { AgentModelConfig, CodingAgentDefinition } from "../services/codingAgents";
@@ -257,7 +258,10 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
         <div ref={messagesRef} className="agent-chat-messages" onScroll={handleMessagesScroll}>
           {conversationItems.length === 0 ? <div className="agent-chat-empty"><span><MessageCircle size={22} /></span><strong>{isZh ? "需要我做什么？" : "What can I help with?"}</strong><p>{isZh ? "我可以创建 App、整理信息，或协助你操作当前工作区。" : "I can create apps, organize information, or help with your workspace."}</p></div> : conversationItems.map((item) => (
             item.kind === "message"
-              ? <div key={item.key} className={`agent-message ${item.message.sender === "user" ? "is-user" : "is-agent"}`}><div>{item.message.content}</div><span>{item.message.sender === "user" ? (isZh ? "你" : "You") : "Ambient"}</span></div>
+              ? (() => {
+                  const externalSkillLabel = externalSkillMessageLabel(item.message, isZh);
+                  return <div key={item.key} className={`agent-message ${item.message.sender === "user" ? "is-user" : "is-agent"} ${externalSkillLabel ? "is-external-skill" : ""}`}><div>{item.message.content}</div><span>{externalSkillLabel ?? (item.message.sender === "user" ? (isZh ? "你" : "You") : "Ambient")}</span></div>;
+                })()
               : <ChatRunCard
                   key={item.key}
                   run={item.run}

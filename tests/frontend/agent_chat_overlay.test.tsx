@@ -177,6 +177,25 @@ describe("AgentChatOverlay", () => {
     expect(container.querySelector(".chat-run-phase-rail")).toBeNull();
   });
 
+  it("labels replies produced inside an external Skill sandbox", () => {
+    const { container } = render(<AgentChatOverlay
+      {...commonProps}
+      messages={[{
+        id: 7,
+        sender: "agent",
+        content: "A suggestion influenced by third-party guidance.",
+        context_policy: "display_only",
+        provenance: {
+          kind: "external_skill_output",
+          skills: [{ catalog_id: "agent-skill:external:review-notes" }],
+        },
+      }]}
+    />);
+
+    expect(screen.getByText("External Skill sandbox · review-notes")).toBeDefined();
+    expect(container.querySelector(".agent-message.is-external-skill")).not.toBeNull();
+  });
+
   it("renders ordinary approval as an inline Run interaction", () => {
     const onResolveRunInteraction = vi.fn();
     const onInspectRunInteraction = vi.fn();

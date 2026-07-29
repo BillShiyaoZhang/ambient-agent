@@ -114,6 +114,10 @@
 .app-center-market-trust { display: inline-flex; flex: none; align-items: center; gap: 4px; padding: 4px 6px; border-radius: 7px; color: var(--warning); background: color-mix(in srgb, var(--warning), transparent 88%); font-size: 8px; font-weight: 650; }
 .app-center-market-trust.is-verified { color: var(--success); background: color-mix(in srgb, var(--success), transparent 88%); }
 .app-center-market-description { min-height: 44px; margin: 16px 0 12px; color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
+.app-center-market-risk { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 12px; padding: 10px; border: 1px solid color-mix(in srgb, var(--warning), transparent 65%); border-radius: 10px; color: var(--warning); background: color-mix(in srgb, var(--warning), transparent 91%); }
+.app-center-market-risk.is-authorized { color: var(--success); border-color: color-mix(in srgb, var(--success), transparent 68%); background: color-mix(in srgb, var(--success), transparent 92%); }
+.app-center-market-risk > svg { flex: none; margin-top: 1px; }
+.app-center-market-risk p { margin: 0; color: var(--text-secondary); font-size: 9px; line-height: 1.5; }
 .app-center-market-meta { display: flex; flex-wrap: wrap; gap: 6px; }
 .app-center-market-meta span { padding: 4px 6px; border-radius: 7px; color: var(--text-muted); background: var(--control-hover); font-size: 8px; }
 .app-center-market-meta span.is-update { color: var(--accent); background: var(--accent-soft); }
@@ -193,10 +197,27 @@
 .app-center-agent-context-note { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; padding: 12px; border: 1px solid var(--accent-border); border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
 .app-center-agent-context-note svg { flex: none; margin-top: 1px; }
 .app-center-agent-context-note p { margin: 0; color: var(--text-secondary); font-size: 10px; line-height: 1.55; }
+.app-center-agent-context-note.is-risk { color: var(--warning); border-color: color-mix(in srgb, var(--warning), transparent 62%); background: color-mix(in srgb, var(--warning), transparent 90%); }
+.app-center-agent-context-note.is-risk.is-authorized { color: var(--success); border-color: color-mix(in srgb, var(--success), transparent 65%); background: color-mix(in srgb, var(--success), transparent 92%); }
+.app-center-agent-context-note > div { min-width: 0; }
+.app-center-agent-context-note strong { display: block; margin-bottom: 3px; color: currentColor; font-size: 10px; }
 .app-center-ontology-refs { margin-top: 18px; }
 .app-center-ontology-refs h3 { margin: 0 0 8px; color: var(--text-muted); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
 .app-center-ontology-refs > div { display: flex; flex-wrap: wrap; gap: 6px; }
 .app-center-ontology-refs span { padding: 5px 7px; border: 1px solid var(--border-subtle); border-radius: 8px; color: var(--text-secondary); background: var(--control-hover); font-size: 9px; }
+.app-center-skill-authorization { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+.app-center-skill-authorization > h3 { margin: 0 0 6px; color: var(--text-primary); font-size: 12px; }
+.app-center-skill-authorization > p { margin: 0 0 12px; color: var(--text-muted); font-size: 9px; line-height: 1.55; }
+.app-center-authorization-option { display: flex; width: 100%; align-items: center; gap: 10px; margin-top: 8px; padding: 11px; border: 1px solid var(--border-subtle); border-radius: 11px; color: var(--text-secondary); background: var(--control-hover); cursor: pointer; text-align: left; }
+.app-center-authorization-option:hover:not(:disabled) { color: var(--text-primary); border-color: var(--accent-border); }
+.app-center-authorization-option > svg { flex: none; color: var(--accent); }
+.app-center-authorization-option > span { display: grid; gap: 2px; }
+.app-center-authorization-option strong { font-size: 10px; }
+.app-center-authorization-option small { color: var(--text-tertiary); font-size: 8px; line-height: 1.35; }
+.app-center-authorization-option.is-elevated > svg { color: var(--warning); }
+.app-center-authorization-option.is-active { color: var(--success); border-color: color-mix(in srgb, var(--success), transparent 58%); background: color-mix(in srgb, var(--success), transparent 90%); cursor: default; }
+.app-center-authorization-option.is-active > svg { color: var(--success); }
+.app-center-authorization-option:disabled:not(.is-active) { opacity: .55; cursor: wait; }
 .app-center-actions { margin-top: 22px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.08); }
 .app-center-actions h3 { margin: 0 0 5px; font-size: 14px; }
 .app-center-actions > p { margin: 0 0 12px; color: rgba(227,230,243,.52); font-size: 11px; }

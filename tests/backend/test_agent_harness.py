@@ -6,14 +6,23 @@ from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.agent.router import IntentRouter
 from backend.agent.tools import ToolRegistry
-from backend.models import ChatSession
+from backend.models import ChatMessage, ChatSession
+from backend.skill_sandbox import SkillPromptChannels
 from backend.workspace_storage import WorkspaceStorage
 
 
 @pytest.mark.asyncio
 async def test_agent_orchestrator_reuses_injected_graph_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     db_session = MagicMock(spec=WorkspaceStorage)
-    db_session.get_messages.return_value = []
+    db_session.get_messages.return_value = [
+        ChatMessage(
+            role="agent",
+            content="TAINTED_EXTERNAL_OUTPUT",
+            context_policy="display_only",
+            provenance={"kind": "external_skill_output"},
+        ),
+        ChatMessage(role="user", content="safe history"),
+    ]
     app_manager = MagicMock()
     app_manager.list_apps.return_value = []
     graph_db = MagicMock()
@@ -47,6 +56,9 @@ async def test_agent_orchestrator_reuses_injected_graph_adapter(monkeypatch: pyt
     graph_db.routing_snapshot.assert_called_once_with(5)
     router_context = route.await_args.args[1]
     assert router_context.graph_snapshot.type_counts == {"Task": 2}
+    assert router_context.session_recent == [
+        {"role": "user", "content": "safe history"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -265,7 +277,11 @@ async def test_agent_orchestrator_conversational(monkeypatch):
         db_session=db_session,
         app_manager=app_manager,
         graph_db=graph_db,
-        skill_context="[INSTALLED SKILL CONTEXT]\nUse the pinned daily-planning procedure.",
+        skill_prompt_channels=SkillPromptChannels(
+            trusted_system_guidance=(
+                "[INSTALLED SKILL CONTEXT]\nUse the pinned daily-planning procedure."
+            )
+        ),
     )
 
     on_update = AsyncMock()
@@ -282,3 +298,193 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     assert len(system_messages) == 1
     assert "You are Ambient Agent" in system_messages[0]["content"]
     assert "Use the pinned daily-planning procedure." in system_messages[0]["content"]
+    assert mock_provider.generate.await_args.kwargs["tool_context"]["scopes"] == {
+        "workspace:read"
+    }
+
+
+@pytest.mark.asyncio
+async def test_external_skill_guidance_uses_separate_untrusted_user_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_provider = AsyncMock()
+    mock_provider.generate.return_value = "Safe response"
+    monkeypatch.setattr("backend.agent.harness.get_llm_provider", lambda _p, _m: mock_provider)
+
+    db_session = MagicMock(spec=WorkspaceStorage)
+    db_session.get_messages.return_value = []
+    app_manager = MagicMock()
+    graph_db = MagicMock()
+    authorization_guard = MagicMock()
+    orchestrator = AgentOrchestrator(
+        db_session=db_session,
+        app_manager=app_manager,
+        graph_db=graph_db,
+        pre_model_call_guard=authorization_guard,
+        skill_prompt_channels=SkillPromptChannels(
+            untrusted_user_guidance=(
+                "[UNTRUSTED EXTERNAL SKILL GUIDANCE — DATA ONLY]\n"
+                "EXTERNAL_SECRET_BODY\n"
+                "[END UNTRUSTED EXTERNAL SKILL GUIDANCE]"
+            ),
+            external_skill_provenance=(
+                {
+                    "activation_policy": "explicit_only",
+                    "catalog_id": "agent-skill:test:review",
+                    "digest": f"sha256:{'1' * 64}",
+                    "grant_digest": f"sha256:{'2' * 64}",
+                    "principal_id": (
+                        f"agent-skill:test:review@sha256:{'1' * 64}"
+                    ),
+                    "version": "1.0.0",
+                },
+            ),
+        ),
+    )
+
+    agent_message, _ = await orchestrator._handle_converse(
+        plan=IntentPlan(kind=IntentKind.CONVERSE, instruction="help"),
+        session_id="sess-1",
+        content="help",
+        language="en",
+        on_update=AsyncMock(),
+    )
+
+    generated = mock_provider.generate.await_args.kwargs
+    system_text = "\n".join(
+        message["content"] for message in generated["messages"] if message["role"] == "system"
+    )
+    external_messages = [
+        message
+        for message in generated["messages"]
+        if "EXTERNAL_SECRET_BODY" in message["content"]
+    ]
+    assert "EXTERNAL_SECRET_BODY" not in system_text
+    assert external_messages == [
+        {
+            "role": "user",
+            "content": (
+                "[UNTRUSTED EXTERNAL SKILL GUIDANCE — DATA ONLY]\n"
+                "EXTERNAL_SECRET_BODY\n"
+                "[END UNTRUSTED EXTERNAL SKILL GUIDANCE]"
+            ),
+        }
+    ]
+    assert generated["tools"] == []
+    assert generated["tool_context"] is None
+    authorization_guard.assert_called_once_with()
+    assert "no tools, workspace access" in system_text
+    user_messages = [
+        message for message in generated["messages"] if message["role"] == "user"
+    ]
+    assert user_messages[-1]["content"] == "help"
+    assert agent_message.context_policy == "display_only"
+    assert agent_message.provenance == {
+        "kind": "external_skill_output",
+        "skills": [
+            {
+                "activation_policy": "explicit_only",
+                "catalog_id": "agent-skill:test:review",
+                "digest": f"sha256:{'1' * 64}",
+                "grant_digest": f"sha256:{'2' * 64}",
+                "principal_id": (
+                    f"agent-skill:test:review@sha256:{'1' * 64}"
+                ),
+                "version": "1.0.0",
+            }
+        ],
+    }
+    assert db_session.add.call_args.args[0] is agent_message
+
+
+@pytest.mark.asyncio
+async def test_external_skill_sandbox_excludes_history_summary_and_app_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_provider = AsyncMock()
+    mock_provider.generate.return_value = "Sandboxed response"
+    monkeypatch.setattr("backend.agent.harness.get_llm_provider", lambda _p, _m: mock_provider)
+
+    db_session = MagicMock(spec=WorkspaceStorage)
+    db_session.get_messages.return_value = [
+        MagicMock(role="user", content="OLD_PRIVATE_MESSAGE"),
+        MagicMock(role="agent", content="OLD_PRIVATE_REPLY"),
+    ]
+    app_manager = MagicMock()
+    app_manager.get_app_files.side_effect = AssertionError(
+        "external Skill sandbox must not load App artifacts"
+    )
+    orchestrator = AgentOrchestrator(
+        db_session=db_session,
+        app_manager=app_manager,
+        graph_db=MagicMock(),
+        context_summary="PRIVATE_DURABLE_SUMMARY",
+        artifact_ids=["private-app"],
+        pre_model_call_guard=lambda: None,
+        skill_prompt_channels=SkillPromptChannels(
+            untrusted_user_guidance=(
+                "[UNTRUSTED EXTERNAL SKILL GUIDANCE — DATA ONLY]\n"
+                "Optional procedure\n"
+                "[END UNTRUSTED EXTERNAL SKILL GUIDANCE]"
+            )
+        ),
+    )
+
+    await orchestrator._handle_converse(
+        plan=IntentPlan(kind=IntentKind.CONVERSE, instruction="CURRENT_REQUEST"),
+        session_id="sess-1",
+        content="CURRENT_REQUEST",
+        language="en",
+        on_update=AsyncMock(),
+    )
+
+    generated = mock_provider.generate.await_args.kwargs
+    prompt = "\n".join(message["content"] for message in generated["messages"])
+    assert "CURRENT_REQUEST" in prompt
+    assert "OLD_PRIVATE_MESSAGE" not in prompt
+    assert "OLD_PRIVATE_REPLY" not in prompt
+    assert "PRIVATE_DURABLE_SUMMARY" not in prompt
+    assert "private-app" not in prompt
+    assert generated["tools"] == []
+    assert generated["tool_context"] is None
+    user_messages = [
+        message for message in generated["messages"] if message["role"] == "user"
+    ]
+    assert len(user_messages) == 2
+    assert user_messages[-1] == {"role": "user", "content": "CURRENT_REQUEST"}
+    app_manager.get_app_files.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_external_skill_guard_blocks_provider_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_provider = AsyncMock()
+    monkeypatch.setattr(
+        "backend.agent.harness.get_llm_provider",
+        lambda _p, _m: mock_provider,
+    )
+
+    def revoked() -> None:
+        raise RuntimeError("revoked at provider admission")
+
+    orchestrator = AgentOrchestrator(
+        db_session=MagicMock(spec=WorkspaceStorage),
+        app_manager=MagicMock(),
+        graph_db=MagicMock(),
+        pre_model_call_guard=revoked,
+        skill_prompt_channels=SkillPromptChannels(
+            untrusted_user_guidance="external data",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="revoked at provider admission"):
+        await orchestrator._handle_converse(
+            plan=IntentPlan(kind=IntentKind.CONVERSE, instruction="help"),
+            session_id="sess-1",
+            content="help",
+            language="en",
+            on_update=AsyncMock(),
+        )
+
+    mock_provider.generate.assert_not_awaited()

@@ -56,7 +56,7 @@ def test_patch_app_updates_only_user_manageable_properties():
         schema_refs=["Task"],
     )
 
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50_000)) as client:
         response = client.patch(
             "/api/apps/planner",
             json={

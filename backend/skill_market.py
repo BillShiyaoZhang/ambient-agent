@@ -201,6 +201,10 @@ class SkillMarket:
             raise SkillMarketError(
                 "catalog_id must have form agent-skill:<namespace>:<SKILL.md name>"
             )
+        if not self._is_bundled_market and catalog_match.group(1) == "ambient-agent":
+            raise SkillMarketError(
+                "External Skill markets cannot publish into the reserved ambient-agent namespace"
+            )
         if "/" in market_id and catalog_match.group(1) != market_id.split("/", 1)[0]:
             raise SkillMarketError("market_id and catalog_id namespaces must match")
 

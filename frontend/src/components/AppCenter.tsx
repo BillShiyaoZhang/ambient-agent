@@ -54,9 +54,12 @@ import wsService from "../services/websocket";
 import {
   installSkill,
   loadSkillMarket,
+  setSkillAuthorization,
   setSkillEnabled,
   uninstallSkill,
   type MarketSkill,
+  type SkillActivationPolicy,
+  type SkillAuthorization,
   type SkillMarket,
   type SkillSurface,
 } from "../services/skills";
@@ -103,6 +106,8 @@ export interface CatalogItem {
     ontology_refs: string[];
     license?: string | null;
     compatibility?: string | null;
+    registry_revision?: number;
+    authorization?: SkillAuthorization;
   };
 }
 
@@ -170,6 +175,59 @@ function isInstructionSkill(
     && item.launch_mode === "details"
     && item.surfaces?.includes("agent_context"),
   );
+}
+
+interface SkillAuthorizationView {
+  trusted: boolean;
+  external: boolean;
+  authorized: boolean;
+  quarantined: boolean;
+  digestChanged: boolean;
+  activationPolicy: SkillActivationPolicy;
+}
+
+function skillAuthorizationView(skill: {
+  verified: boolean;
+  digest: string;
+  authorization?: SkillAuthorization;
+}): SkillAuthorizationView {
+  const authorization = skill.authorization;
+  // Legacy verified bundled skills predate authorization metadata. Keep them
+  // trusted while failing closed for every unverified legacy record.
+  const trusted = authorization?.state === "trusted"
+    || (!authorization && skill.verified);
+  const activationPolicy = authorization?.activation_policy ?? "none";
+  const digestChanged = Boolean(
+    authorization?.authorized_digest
+    && authorization.authorized_digest !== skill.digest,
+  ) || (
+    authorization?.state === "authorized"
+    && authorization.authorized_digest !== skill.digest
+  );
+  const authorizationRequired = !trusted && Boolean(
+    authorization?.requires_reauthorization || digestChanged,
+  );
+  const authorized = !trusted
+    && authorization?.state === "authorized"
+    && !authorizationRequired
+    && (activationPolicy === "explicit_only" || activationPolicy === "implicit");
+
+  return {
+    trusted,
+    external: !trusted,
+    authorized,
+    quarantined: !trusted && !authorized,
+    digestChanged,
+    activationPolicy,
+  };
+}
+
+function marketSkillAuthorizationView(skill: MarketSkill): SkillAuthorizationView {
+  return skillAuthorizationView({
+    verified: skill.provenance.verified,
+    digest: skill.provenance.digest,
+    authorization: skill.authorization,
+  });
 }
 
 function skillAsCatalogItem(skill: MarketSkill): CatalogItem {
@@ -294,6 +352,9 @@ function AppTileView({
   };
   const title = item?.title ?? folder?.name ?? "";
   const detailsOnly = isInstructionSkill(item);
+  const authorization = detailsOnly && item.skill
+    ? skillAuthorizationView(item.skill)
+    : null;
   return (
     <button
       ref={setNodeRef as React.Ref<HTMLButtonElement>}
@@ -341,11 +402,19 @@ function AppTileView({
       )}
       {detailsOnly && (
         <span className="app-center-tile-status">
-          {item.skill?.enabled === false
-            ? (isZh ? "已停用" : "Disabled")
-            : item.status === "unavailable"
-              ? (isZh ? "不可用" : "Unavailable")
-              : (isZh ? "Agent 技能" : "Agent skill")}
+          {authorization?.digestChanged
+            ? (isZh ? "需要重新授权" : "Reauthorization required")
+            : authorization?.quarantined
+              ? (isZh ? "已隔离" : "Quarantined")
+              : authorization?.authorized
+                ? authorization.activationPolicy === "explicit_only"
+                  ? (isZh ? "仅 /skill" : "/skill only")
+                  : (isZh ? "自动匹配" : "Auto matching")
+                : item.skill?.enabled === false
+                  ? (isZh ? "已停用" : "Disabled")
+                  : item.status === "unavailable"
+                    ? (isZh ? "不可用" : "Unavailable")
+                    : (isZh ? "Agent 技能" : "Agent skill")}
         </span>
       )}
     </button>
@@ -390,6 +459,7 @@ function MarketSkillCard({
   onInstall: () => void;
 }) {
   const item = skillAsCatalogItem(skill);
+  const authorization = marketSkillAuthorizationView(skill);
   const installed = skill.install_state === "installed";
   const updateAvailable = skill.install_state === "update_available";
   const marketOlder = skill.install_state === "market_older";
@@ -420,6 +490,31 @@ function MarketSkillCard({
         </span>
       </header>
       <p className="app-center-market-description">{skill.description}</p>
+      {authorization.external && (
+        <div
+          className={`app-center-market-risk ${authorization.authorized ? "is-authorized" : ""}`}
+          role="note"
+        >
+          {authorization.digestChanged || updateAvailable
+            ? <RotateCw size={15} />
+            : authorization.authorized
+              ? <ShieldCheck size={15} />
+              : <ShieldAlert size={15} />}
+          <p>
+            {authorization.digestChanged || updateAvailable
+              ? (isZh
+                ? "此版本的内容摘要已变化。更新后会停用并隔离，必须针对新摘要重新授权。"
+                : "This version changes the content digest. Updating disables and quarantines it until the new digest is authorized.")
+              : authorization.authorized
+                ? (authorization.activationPolicy === "explicit_only"
+                  ? (isZh ? "外部技能已授权，但只能通过 /skill 明确使用。" : "External skill authorized for explicit /skill use only.")
+                  : (isZh ? "外部技能已获自动匹配授权。" : "External skill authorized for automatic matching."))
+                : (isZh
+                  ? "外部技能安装后会保持停用并进入隔离区；审查详情并授权前，不会注入 Agent 上下文。"
+                  : "External skills install disabled and quarantined. They cannot enter agent context until you review and authorize them.")}
+          </p>
+        </div>
+      )}
       <div className="app-center-market-meta">
         <span>{isZh ? "按需 Agent 上下文" : "On-demand agent context"}</span>
         {updateAvailable && (
@@ -816,14 +911,24 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     setSkillBusyId(`market:${skill.market_id}`);
     setNotice("");
     try {
-      await installSkill(API_BASE, skill.market_id);
+      await installSkill(API_BASE, skill.market_id, market?.revision);
       await Promise.all([fetchMarket(), fetchStore()]);
+      const external = marketSkillAuthorizationView(skill).external;
       setNotice(
         skill.install_state === "update_available"
-          ? (isZh ? `“${skill.title}”已更新。` : `${skill.title} was updated.`)
-          : (isZh ? `“${skill.title}”已安装到当前工作区。` : `${skill.title} was installed in this workspace.`),
+          ? external
+            ? (isZh
+              ? `“${skill.title}”已更新并重新隔离；请审查新版本后重新授权。`
+              : `${skill.title} was updated and quarantined again. Review the new version before reauthorizing it.`)
+            : (isZh ? `“${skill.title}”已更新。` : `${skill.title} was updated.`)
+          : external
+            ? (isZh
+              ? `“${skill.title}”已安装但仍处于隔离状态。请从详情页审查并授权。`
+              : `${skill.title} was installed in quarantine. Review and authorize it from its details.`)
+            : (isZh ? `“${skill.title}”已安装到当前工作区。` : `${skill.title} was installed in this workspace.`),
       );
     } catch (installError) {
+      await Promise.allSettled([fetchMarket(), fetchStore()]);
       setNotice(installError instanceof Error ? installError.message : String(installError));
     } finally {
       setSkillBusyId(null);
@@ -836,7 +941,12 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     setSkillBusyId(`installed:${item.catalog_id}`);
     setNotice("");
     try {
-      await setSkillEnabled(API_BASE, item.catalog_id, enabled);
+      await setSkillEnabled(
+        API_BASE,
+        item.catalog_id,
+        enabled,
+        item.skill.registry_revision,
+      );
       await fetchStore();
       setNotice(
         enabled
@@ -845,7 +955,71 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       );
       setMenu(null);
     } catch (updateError) {
+      await Promise.allSettled([
+        fetchStore(),
+        market ? fetchMarket() : Promise.resolve(),
+      ]);
       setNotice(updateError instanceof Error ? updateError.message : String(updateError));
+    } finally {
+      setSkillBusyId(null);
+    }
+  };
+
+  const changeInstructionSkillAuthorization = async (
+    item: CatalogItem,
+    activationPolicy: SkillActivationPolicy,
+  ) => {
+    if (!isInstructionSkill(item) || !item.skill) return;
+    const confirmation = activationPolicy === "none"
+      ? (isZh
+        ? `撤销“${item.title}”的 agent.context.inject 授权？该技能会立即停用并回到隔离状态；已经开始的回复无法撤回。`
+        : `Revoke the agent.context.inject grant for “${item.title}”? It will be disabled immediately and returned to quarantine; an already-started response cannot be recalled.`)
+      : activationPolicy === "explicit_only"
+        ? (isZh
+          ? `授予“${item.title}”agent.context.inject 权限，仅在你明确输入 /skill 时影响 Agent？这不会授予工具、数据、网络或文件权限。`
+          : `Grant agent.context.inject to “${item.title}” only when you explicitly use /skill? This grants no tool, data, network, or file access.`)
+        : (isZh
+          ? `授予“${item.title}”自动匹配的 agent.context.inject 权限？外部文本可能影响 Agent 的建议；这不会授予工具、数据、网络或文件权限。`
+          : `Grant automatic agent.context.inject access to “${item.title}”? External text may influence agent suggestions; this grants no tool, data, network, or file access.`);
+    if (!window.confirm(confirmation)) return;
+
+    setSkillBusyId(`installed:${item.catalog_id}`);
+    setNotice("");
+    try {
+      await setSkillAuthorization(
+        API_BASE,
+        item.catalog_id,
+        activationPolicy,
+        item.skill.digest,
+        item.skill.registry_revision,
+      );
+      await Promise.all([
+        fetchStore(),
+        market ? fetchMarket() : Promise.resolve(),
+      ]);
+      setNotice(
+        activationPolicy === "none"
+          ? (isZh
+            ? `“${item.title}”的授权已撤销，技能已停用并隔离。`
+            : `${item.title}'s authorization was revoked. The skill is disabled and quarantined.`)
+          : activationPolicy === "explicit_only"
+            ? (isZh
+              ? `“${item.title}”已授权，仅可通过 /skill 明确使用。`
+              : `${item.title} is authorized for explicit /skill use only.`)
+            : (isZh
+              ? `“${item.title}”已获自动匹配授权。`
+              : `${item.title} is authorized for automatic matching.`),
+      );
+    } catch (authorizationError) {
+      await Promise.allSettled([
+        fetchStore(),
+        market ? fetchMarket() : Promise.resolve(),
+      ]);
+      setNotice(
+        authorizationError instanceof Error
+          ? authorizationError.message
+          : String(authorizationError),
+      );
     } finally {
       setSkillBusyId(null);
     }
@@ -862,7 +1036,11 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     setSkillBusyId(`installed:${item.catalog_id}`);
     setNotice("");
     try {
-      await uninstallSkill(API_BASE, item.catalog_id);
+      await uninstallSkill(
+        API_BASE,
+        item.catalog_id,
+        item.skill?.registry_revision,
+      );
       setDetailsId(null);
       setMenu(null);
       await Promise.all([
@@ -871,6 +1049,10 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       ]);
       setNotice(isZh ? `“${item.title}”已卸载。` : `${item.title} was uninstalled.`);
     } catch (uninstallError) {
+      await Promise.allSettled([
+        fetchStore(),
+        market ? fetchMarket() : Promise.resolve(),
+      ]);
       setNotice(uninstallError instanceof Error ? uninstallError.message : String(uninstallError));
     } finally {
       setSkillBusyId(null);
@@ -1012,8 +1194,14 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   const openFolder = openFolderId ? foldersById.get(openFolderId) : undefined;
   const detailsItem = detailsId ? itemsById.get(detailsId) : undefined;
   const detailsIsInstructionSkill = isInstructionSkill(detailsItem);
+  const detailsSkillAuthorization = detailsIsInstructionSkill && detailsItem.skill
+    ? skillAuthorizationView(detailsItem.skill)
+    : null;
   const selectedAction = detailsItem?.actions?.find((action) => action.id === selectedActionId) ?? detailsItem?.actions?.[0];
   const menuItem = menu ? itemsById.get(menu.itemId) : undefined;
+  const menuSkillAuthorization = isInstructionSkill(menuItem) && menuItem.skill
+    ? skillAuthorizationView(menuItem.skill)
+    : null;
   const activeItem = activeId ? itemsById.get(activeId) : undefined;
   const activeFolder = activeId?.startsWith("folder:") ? foldersById.get(activeId.slice(7)) : undefined;
   const filters: Array<{ id: FilterKind; zh: string; en: string }> = [
@@ -1223,11 +1411,21 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                 <dt>{isZh ? "状态" : "Status"}</dt>
                 <dd>
                   {detailsIsInstructionSkill
-                    ? detailsItem.skill?.enabled === false
-                      ? (isZh ? "已停用" : "Disabled")
-                      : detailsItem.status === "ready"
-                        ? (isZh ? "可供 Agent 使用" : "Available to agent")
-                        : (isZh ? "不可用" : "Unavailable")
+                    ? detailsSkillAuthorization?.digestChanged
+                      ? (isZh ? "内容已变化，需要重新授权" : "Content changed; reauthorization required")
+                      : detailsSkillAuthorization?.quarantined
+                        ? (isZh ? "已停用并隔离" : "Disabled and quarantined")
+                        : detailsSkillAuthorization?.authorized
+                          ? detailsItem.skill?.enabled === false
+                            ? (isZh ? "已授权但当前停用" : "Authorized but disabled")
+                            : detailsSkillAuthorization.activationPolicy === "explicit_only"
+                              ? (isZh ? "已授权：仅 /skill 明确使用" : "Authorized: explicit /skill only")
+                              : (isZh ? "已授权：允许自动匹配" : "Authorized: automatic matching")
+                          : detailsItem.skill?.enabled === false
+                            ? (isZh ? "已停用" : "Disabled")
+                            : detailsItem.status === "ready"
+                              ? (isZh ? "可供 Agent 使用" : "Available to agent")
+                              : (isZh ? "不可用" : "Unavailable")
                     : detailsItem.status === "ready"
                       ? (isZh ? "可使用" : "Ready")
                       : detailsItem.status === "generating"
@@ -1242,6 +1440,28 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                   <div><dt>{isZh ? "技能来源" : "Source"}</dt><dd className="app-center-detail-value" title={detailsItem.skill.source}>{detailsItem.skill.source}</dd></div>
                   <div><dt>Digest</dt><dd className="app-center-detail-value" title={detailsItem.skill.digest}>{detailsItem.skill.digest}</dd></div>
                   <div><dt>{isZh ? "来源验证" : "Provenance"}</dt><dd>{detailsItem.skill.verified ? (isZh ? "已验证" : "Verified") : (isZh ? "未验证" : "Not verified")}</dd></div>
+                  {detailsItem.skill.authorization?.principal_id && (
+                    <div>
+                      <dt>{isZh ? "授权主体" : "Grant principal"}</dt>
+                      <dd
+                        className="app-center-detail-value"
+                        title={detailsItem.skill.authorization.principal_id}
+                      >
+                        {detailsItem.skill.authorization.principal_id}
+                      </dd>
+                    </div>
+                  )}
+                  {detailsItem.skill.authorization?.grant_digest && (
+                    <div>
+                      <dt>{isZh ? "授权摘要" : "Grant digest"}</dt>
+                      <dd
+                        className="app-center-detail-value"
+                        title={detailsItem.skill.authorization.grant_digest}
+                      >
+                        {detailsItem.skill.authorization.grant_digest}
+                      </dd>
+                    </div>
+                  )}
                   {detailsItem.skill.license && <div><dt>{isZh ? "许可证" : "License"}</dt><dd>{detailsItem.skill.license}</dd></div>}
                   {detailsItem.skill.compatibility && <div><dt>{isZh ? "兼容性" : "Compatibility"}</dt><dd>{detailsItem.skill.compatibility}</dd></div>}
                 </>
@@ -1250,36 +1470,150 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             {detailsItem.tags.length > 0 && <div className="app-center-tags">{detailsItem.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
             {detailsIsInstructionSkill ? (
               <div className="app-center-installed-skill">
-                <div className="app-center-agent-context-note">
-                  <WandSparkles size={17} />
-                  <p>
-                    {isZh
-                      ? "此技能安装在当前工作区。启用后，Agent 会在相关任务中按需加载它，而不是把它作为可执行工具运行。"
-                      : "This skill is installed in the current workspace. When enabled, the agent loads it on demand for relevant tasks; it is not an executable tool."}
-                  </p>
-                </div>
+                {detailsSkillAuthorization?.external ? (
+                  <div
+                    className={`app-center-agent-context-note is-risk ${detailsSkillAuthorization.authorized ? "is-authorized" : ""}`}
+                    role={detailsSkillAuthorization.authorized ? "note" : "alert"}
+                  >
+                    {detailsSkillAuthorization.authorized
+                      ? <ShieldCheck size={17} />
+                      : <ShieldAlert size={17} />}
+                    <div>
+                      <strong>
+                        {detailsSkillAuthorization.digestChanged
+                          ? (isZh ? "内容摘要已变化" : "Content digest changed")
+                          : detailsSkillAuthorization.authorized
+                            ? (isZh ? "外部技能已获授权" : "External skill authorized")
+                            : (isZh ? "外部技能已隔离" : "External skill quarantined")}
+                      </strong>
+                      <p>
+                        {detailsSkillAuthorization.digestChanged
+                          ? (isZh
+                            ? "旧授权不会延续到新版本。请重新审查当前摘要并选择新的上下文注入策略。"
+                            : "The prior grant does not carry over to this version. Review the current digest and choose a new context-injection policy.")
+                          : detailsSkillAuthorization.authorized
+                            ? (isZh
+                              ? "授权只允许指令文本进入 Agent 上下文，不包含工具、网络、文件或数据访问。"
+                              : "This grant only permits instruction text to enter agent context. It includes no tool, network, file, or data access.")
+                            : (isZh
+                              ? "该技能已停用，其文本不会进入 Agent 上下文，直到你针对当前摘要明确授权。"
+                              : "The skill is disabled and its text cannot enter agent context until you explicitly authorize this digest.")}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="app-center-agent-context-note">
+                    <WandSparkles size={17} />
+                    <p>
+                      {isZh
+                        ? "此技能来自受信任来源。启用后，Agent 会在相关任务中按需加载它，而不是把它作为可执行工具运行。"
+                        : "This skill comes from a trusted source. When enabled, the agent loads it on demand for relevant tasks; it is not an executable tool."}
+                    </p>
+                  </div>
+                )}
                 {(detailsItem.skill?.ontology_refs.length || 0) > 0 && (
                   <section className="app-center-ontology-refs" aria-label={isZh ? "本体引用" : "Ontology references"}>
                     <h3>{isZh ? "本体引用" : "Ontology references"}</h3>
                     <div>{detailsItem.skill?.ontology_refs.map((reference) => <span key={reference}>{reference}</span>)}</div>
                   </section>
                 )}
-                <button
-                  type="button"
-                  className="app-center-primary"
-                  aria-label={detailsItem.skill?.enabled === false ? (isZh ? "启用技能" : "Enable skill") : (isZh ? "停用技能" : "Disable skill")}
-                  disabled={!detailsItem.skill || skillBusyId === `installed:${detailsItem.catalog_id}`}
-                  onClick={() => void toggleInstructionSkill(detailsItem)}
-                >
-                  {skillBusyId === `installed:${detailsItem.catalog_id}`
-                    ? <LoaderCircle className="animate-spin" size={17} />
-                    : detailsItem.skill?.enabled === false
-                      ? <Power size={17} />
-                      : <PowerOff size={17} />}
-                  {detailsItem.skill?.enabled === false
-                    ? (isZh ? "启用技能" : "Enable skill")
-                    : (isZh ? "停用技能" : "Disable skill")}
-                </button>
+                {detailsSkillAuthorization?.external ? (
+                  <section
+                    className="app-center-skill-authorization"
+                    aria-label={isZh ? "Agent 上下文授权" : "Agent context authorization"}
+                  >
+                    <h3>{isZh ? "agent.context.inject 授权" : "agent.context.inject grant"}</h3>
+                    <p>
+                      {isZh
+                        ? "选择此 Skill 何时可以影响模型提示。命中的 turn 会进入无工具、无历史、无工作区 artifact 的语义沙盒；建议优先选择仅 /skill 明确使用。每次授权都绑定当前版本与摘要。"
+                        : "Choose when this skill may influence the model prompt. A matching turn enters a semantic sandbox with no tools, history, or workspace artifacts; explicit /skill use is recommended. Every grant is bound to this version and digest."}
+                    </p>
+                    <button
+                      type="button"
+                      aria-label={isZh ? "授权仅 /skill 明确使用" : "Authorize explicit /skill use"}
+                      className={`app-center-authorization-option ${
+                        detailsSkillAuthorization.authorized
+                        && detailsSkillAuthorization.activationPolicy === "explicit_only"
+                          ? "is-active"
+                          : ""
+                      }`}
+                      disabled={
+                        !detailsItem.skill
+                        || skillBusyId === `installed:${detailsItem.catalog_id}`
+                        || (
+                          detailsSkillAuthorization.authorized
+                          && detailsSkillAuthorization.activationPolicy === "explicit_only"
+                          && detailsItem.skill.enabled !== false
+                        )
+                      }
+                      onClick={() => void changeInstructionSkillAuthorization(detailsItem, "explicit_only")}
+                    >
+                      <ShieldCheck size={17} />
+                      <span>
+                        <strong>{isZh ? "授权仅 /skill 明确使用（推荐）" : "Authorize explicit /skill use (recommended)"}</strong>
+                        <small>{isZh ? "只有你的明确命令才能进入隔离 turn" : "Only your explicit command can enter a sandboxed turn"}</small>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={isZh ? "允许自动匹配" : "Allow automatic matching"}
+                      className={`app-center-authorization-option is-elevated ${
+                        detailsSkillAuthorization.authorized
+                        && detailsSkillAuthorization.activationPolicy === "implicit"
+                          ? "is-active"
+                          : ""
+                      }`}
+                      disabled={
+                        !detailsItem.skill
+                        || skillBusyId === `installed:${detailsItem.catalog_id}`
+                        || (
+                          detailsSkillAuthorization.authorized
+                          && detailsSkillAuthorization.activationPolicy === "implicit"
+                          && detailsItem.skill.enabled !== false
+                        )
+                      }
+                      onClick={() => void changeInstructionSkillAuthorization(detailsItem, "implicit")}
+                    >
+                      <Sparkles size={17} />
+                      <span>
+                        <strong>{isZh ? "允许自动匹配" : "Allow automatic matching"}</strong>
+                        <small>{isZh ? "相关任务可能自动切换到无工具、无历史沙盒" : "Relevant tasks may automatically switch to the no-tool, no-history sandbox"}</small>
+                      </span>
+                    </button>
+                    {(
+                      detailsSkillAuthorization.authorized
+                      || detailsItem.skill?.authorization?.authorized_digest
+                    ) && (
+                      <button
+                        type="button"
+                        className="app-center-secondary is-danger"
+                        aria-label={isZh ? "撤销技能授权" : "Revoke skill authorization"}
+                        disabled={skillBusyId === `installed:${detailsItem.catalog_id}`}
+                        onClick={() => void changeInstructionSkillAuthorization(detailsItem, "none")}
+                      >
+                        <PowerOff size={16} />
+                        {isZh ? "撤销授权并隔离" : "Revoke authorization and quarantine"}
+                      </button>
+                    )}
+                  </section>
+                ) : (
+                  <button
+                    type="button"
+                    className="app-center-primary"
+                    aria-label={detailsItem.skill?.enabled === false ? (isZh ? "启用技能" : "Enable skill") : (isZh ? "停用技能" : "Disable skill")}
+                    disabled={!detailsItem.skill || skillBusyId === `installed:${detailsItem.catalog_id}`}
+                    onClick={() => void toggleInstructionSkill(detailsItem)}
+                  >
+                    {skillBusyId === `installed:${detailsItem.catalog_id}`
+                      ? <LoaderCircle className="animate-spin" size={17} />
+                      : detailsItem.skill?.enabled === false
+                        ? <Power size={17} />
+                        : <PowerOff size={17} />}
+                    {detailsItem.skill?.enabled === false
+                      ? (isZh ? "启用技能" : "Enable skill")
+                      : (isZh ? "停用技能" : "Disable skill")}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="app-center-secondary is-danger"
@@ -1339,7 +1673,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             {menuItem.ui_app_id && <button role="menuitem" onClick={() => activateItem(menuItem)}><Play size={16} />{isZh ? "打开" : "Open"}</button>}
             {menuItem.ui_app_id && (pinnedWidgetIds.includes(menuItem.ui_app_id) ? <button role="menuitem" onClick={() => { onUnpinWidget(menuItem.ui_app_id!); setMenu(null); }}><PinOff size={16} />{isZh ? "从画布取消固定" : "Unpin from Canvas"}</button> : <button role="menuitem" onClick={() => { onPinWidget(menuItem.ui_app_id!); setMenu(null); }}><Pin size={16} />{isZh ? "固定到画布" : "Pin to Canvas"}</button>)}
             <button role="menuitem" onClick={() => { setDetailsId(menuItem.catalog_id); setMenu(null); }}><Info size={16} />{isZh ? "查看详情" : "View details"}</button>
-            {isInstructionSkill(menuItem) && <button role="menuitem" disabled={!menuItem.skill || skillBusyId === `installed:${menuItem.catalog_id}`} onClick={() => void toggleInstructionSkill(menuItem)}>{menuItem.skill?.enabled === false ? <Power size={16} /> : <PowerOff size={16} />}{menuItem.skill?.enabled === false ? (isZh ? "启用技能" : "Enable skill") : (isZh ? "停用技能" : "Disable skill")}</button>}
+            {isInstructionSkill(menuItem) && menuSkillAuthorization?.trusted && <button role="menuitem" disabled={!menuItem.skill || skillBusyId === `installed:${menuItem.catalog_id}`} onClick={() => void toggleInstructionSkill(menuItem)}>{menuItem.skill?.enabled === false ? <Power size={16} /> : <PowerOff size={16} />}{menuItem.skill?.enabled === false ? (isZh ? "启用技能" : "Enable skill") : (isZh ? "停用技能" : "Disable skill")}</button>}
             {menuItem.kind === "generated_app" && <button role="menuitem" onClick={() => openAppEditor(menuItem, "configure")}><Settings2 size={16} />{isZh ? "配置属性" : "Configure properties"}</button>}
             {menuItem.kind === "generated_app" && <button role="menuitem" onClick={() => openAppEditor(menuItem, "rename")}><Pencil size={16} />{isZh ? "重命名" : "Rename"}</button>}
             {menuItem.kind !== "generated_app" && !isInstructionSkill(menuItem) && <button role="menuitem" onClick={() => requestGeneration(menuItem)}><RotateCw size={16} />{menuItem.ui_app_id ? (isZh ? "重新生成界面" : "Regenerate UI") : (isZh ? "生成界面" : "Generate UI")}</button>}

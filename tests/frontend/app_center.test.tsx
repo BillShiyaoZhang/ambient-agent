@@ -60,6 +60,13 @@ const instructionSkill = {
     ontology_refs: ["Document", "Note"],
     license: "MIT",
     compatibility: "ambient-agent >= 0.1",
+    registry_revision: 7,
+    authorization: {
+      state: "trusted",
+      activation_policy: "implicit",
+      authorized_digest: null,
+      requires_reauthorization: false,
+    },
   },
 };
 
@@ -73,6 +80,7 @@ const skillState = {
 
 const marketState = {
   version: 1,
+  revision: 7,
   items: [
     {
       market_id: "ambient/research-notes",
@@ -95,6 +103,12 @@ const marketState = {
       install_state: "update_available",
       installed_version: "1.2.0",
       enabled: true,
+      authorization: {
+        state: "trusted",
+        activation_policy: "implicit",
+        authorized_digest: null,
+        requires_reauthorization: false,
+      },
     },
     {
       market_id: "acme/meeting-brief",
@@ -113,8 +127,45 @@ const marketState = {
         verified: false,
       },
       install_state: "not_installed",
+      authorization: {
+        state: "quarantined",
+        activation_policy: "none",
+        authorized_digest: null,
+        requires_reauthorization: false,
+      },
     },
   ],
+};
+
+const externalInstructionSkill = {
+  catalog_id: "agent-skill:acme:meeting-brief",
+  kind: "skill",
+  title: "Meeting Brief",
+  description: "Prepare concise meeting briefs.",
+  version: "1.0.0",
+  provider: "Acme",
+  tags: ["meetings"],
+  ui_app_id: null,
+  launch_mode: "details",
+  surfaces: ["agent_context"],
+  status: "ready",
+  skill: {
+    enabled: false,
+    digest: "sha256:external-meeting",
+    source: "registry://acme/meeting-brief",
+    verified: false,
+    installed_at: "2026-07-29T11:00:00Z",
+    ontology_refs: ["Event"],
+    registry_revision: 11,
+    authorization: {
+      state: "quarantined",
+      activation_policy: "none",
+      authorized_digest: null,
+      requires_reauthorization: false,
+      principal_id: "agent-skill:acme:meeting-brief",
+      grant_digest: null,
+    },
+  },
 };
 
 describe("App Center", () => {
@@ -365,13 +416,17 @@ describe("App Center", () => {
     expect(await screen.findByText("Meeting Brief")).toBeDefined();
     expect(screen.getByText("Update available")).toBeDefined();
     expect(screen.getByText("Not verified")).toBeDefined();
+    expect(screen.getByText(/External skills install disabled and quarantined/i)).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Install Meeting Brief" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/skills\/install$/),
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ market_id: "acme/meeting-brief" }),
+        body: JSON.stringify({
+          market_id: "acme/meeting-brief",
+          expected_revision: 7,
+        }),
       })
     ));
 
@@ -383,10 +438,188 @@ describe("App Center", () => {
       expect(installCalls).toHaveLength(2);
       expect(JSON.parse(String(installCalls[1][1]?.body))).toEqual({
         market_id: "ambient/research-notes",
+        expected_revision: 7,
       });
     });
 
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+  });
+
+  it("quarantines external skills and confirms digest-bound authorization or revocation", async () => {
+    let enabled = false;
+    let registryRevision = 11;
+    let authorization = structuredClone(externalInstructionSkill.skill.authorization);
+    const confirm = vi.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        url.endsWith(
+          `/api/skills/${encodeURIComponent(externalInstructionSkill.catalog_id)}/authorization`,
+        )
+        && init?.method === "PATCH"
+      ) {
+        const update = JSON.parse(String(init.body));
+        registryRevision += 1;
+        enabled = update.activation_policy !== "none";
+        authorization = update.activation_policy === "none"
+          ? {
+              ...authorization,
+              state: "quarantined",
+              activation_policy: "none",
+              authorized_digest: null,
+              requires_reauthorization: false,
+              grant_digest: null,
+            }
+          : {
+              ...authorization,
+              state: "authorized",
+              activation_policy: update.activation_policy,
+              authorized_digest: externalInstructionSkill.skill.digest,
+              requires_reauthorization: false,
+              grant_digest: `sha256:grant-${update.activation_policy}`,
+            };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ enabled, registry_revision: registryRevision, authorization }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          version: 1,
+          revision: 4,
+          items: [{
+            ...externalInstructionSkill,
+            skill: {
+              ...externalInstructionSkill.skill,
+              enabled,
+              registry_revision: registryRevision,
+              authorization,
+            },
+          }],
+          root: [externalInstructionSkill.catalog_id],
+          folders: [],
+        }),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      render(
+        <AppCenter
+          isOpen
+          onClose={vi.fn()}
+          pinnedWidgetIds={[]}
+          onPinWidget={vi.fn()}
+          onUnpinWidget={vi.fn()}
+          onRunFullscreen={vi.fn()}
+          language="en"
+        />
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "View skill Meeting Brief" }));
+      expect(screen.getByText("Disabled and quarantined")).toBeDefined();
+      expect(screen.getByText("External skill quarantined")).toBeDefined();
+      expect(screen.getByRole("button", { name: "Authorize explicit /skill use" })).toBeDefined();
+      expect(screen.getByRole("button", { name: "Allow automatic matching" })).toBeDefined();
+      expect(screen.queryByRole("button", { name: "Enable skill" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /Run in background/i })).toBeNull();
+      expect(screen.queryByRole("button", { name: /Generate/i })).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Authorize explicit /skill use" }));
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Authorize explicit /skill use" }));
+      await screen.findByText("Authorized: explicit /skill only");
+      expect(screen.getByText("agent-skill:acme:meeting-brief")).toBeDefined();
+      expect(screen.getByText("sha256:grant-explicit_only")).toBeDefined();
+
+      fireEvent.click(screen.getByRole("button", { name: "Allow automatic matching" }));
+      await screen.findByText("Authorized: automatic matching");
+
+      fireEvent.click(screen.getByRole("button", { name: "Revoke skill authorization" }));
+      await screen.findByText("Disabled and quarantined");
+
+      const authorizationCalls = fetchMock.mock.calls.filter(([url, init]) =>
+        String(url).endsWith("/authorization") && init?.method === "PATCH"
+      );
+      expect(authorizationCalls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+        {
+          activation_policy: "explicit_only",
+          expected_digest: "sha256:external-meeting",
+          expected_revision: 11,
+        },
+        {
+          activation_policy: "implicit",
+          expected_digest: "sha256:external-meeting",
+          expected_revision: 12,
+        },
+        {
+          activation_policy: "none",
+          expected_digest: "sha256:external-meeting",
+          expected_revision: 13,
+        },
+      ]);
+      expect(confirm).toHaveBeenCalledTimes(4);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it("shows that a changed external skill digest must be authorized again", async () => {
+    const changedSkill = {
+      ...externalInstructionSkill,
+      version: "1.1.0",
+      skill: {
+        ...externalInstructionSkill.skill,
+        digest: "sha256:external-meeting-v2",
+        registry_revision: 12,
+        authorization: {
+          ...externalInstructionSkill.skill.authorization,
+          authorized_digest: "sha256:external-meeting",
+          requires_reauthorization: true,
+        },
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          version: 1,
+          revision: 4,
+          items: [changedSkill],
+          root: [changedSkill.catalog_id],
+          folders: [],
+        }),
+      }),
+    );
+
+    render(
+      <AppCenter
+        isOpen
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="en"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "View skill Meeting Brief" }));
+    expect(screen.getByText("Content changed; reauthorization required")).toBeDefined();
+    expect(screen.getByText("Content digest changed")).toBeDefined();
+    expect(screen.getByText(/prior grant does not carry over/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: "Authorize explicit /skill use" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Allow automatic matching" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Revoke skill authorization" })).toBeDefined();
   });
 
   it("manages an installed instruction-only skill without offering actions or generated UI", async () => {
@@ -399,7 +632,7 @@ describe("App Center", () => {
         enabled = JSON.parse(String(init.body)).enabled;
         return { ok: true, status: 200, json: async () => ({ enabled }) } as Response;
       }
-      if (url.endsWith(`/api/skills/${encodeURIComponent(instructionSkill.catalog_id)}`) && init?.method === "DELETE") {
+      if (url.includes(`/api/skills/${encodeURIComponent(instructionSkill.catalog_id)}?`) && init?.method === "DELETE") {
         installed = false;
         return { ok: true, status: 200, json: async () => ({ status: "ok" }) } as Response;
       }
@@ -444,14 +677,16 @@ describe("App Center", () => {
       expect.stringContaining(encodeURIComponent(instructionSkill.catalog_id)),
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ enabled: false }),
+        body: JSON.stringify({ enabled: false, expected_revision: 7 }),
       })
     ));
     expect(await screen.findByRole("button", { name: "Enable skill" })).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Uninstall skill" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining(encodeURIComponent(instructionSkill.catalog_id)),
+      expect.stringContaining(
+        `${encodeURIComponent(instructionSkill.catalog_id)}?expected_revision=7`,
+      ),
       expect.objectContaining({ method: "DELETE" })
     ));
     expect(confirm).toHaveBeenCalled();

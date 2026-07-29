@@ -1,5 +1,24 @@
 export type SkillSurface = "agent_context";
 
+export type SkillAuthorizationState =
+  | "trusted"
+  | "quarantined"
+  | "authorized";
+
+export type SkillActivationPolicy =
+  | "none"
+  | "explicit_only"
+  | "implicit";
+
+export interface SkillAuthorization {
+  state: SkillAuthorizationState;
+  activation_policy: SkillActivationPolicy;
+  authorized_digest?: string | null;
+  requires_reauthorization?: boolean;
+  principal_id?: string | null;
+  grant_digest?: string | null;
+}
+
 export type SkillInstallState =
   | "not_installed"
   | "installed"
@@ -33,10 +52,12 @@ export interface MarketSkill {
   install_state: SkillInstallState;
   installed_version?: string | null;
   enabled?: boolean;
+  authorization?: SkillAuthorization;
 }
 
 export interface SkillMarket {
   version: 1;
+  revision?: number;
   items: MarketSkill[];
 }
 
@@ -62,11 +83,20 @@ export async function loadSkillMarket(apiBase: string): Promise<SkillMarket> {
   return result;
 }
 
-export function installSkill(apiBase: string, marketId: string) {
+export function installSkill(
+  apiBase: string,
+  marketId: string,
+  expectedRevision?: number,
+) {
   return jsonRequest<Record<string, unknown>>(`${apiBase}/api/skills/install`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ market_id: marketId }),
+    body: JSON.stringify({
+      market_id: marketId,
+      ...(expectedRevision === undefined
+        ? {}
+        : { expected_revision: expectedRevision }),
+    }),
   });
 }
 
@@ -74,20 +104,56 @@ export function setSkillEnabled(
   apiBase: string,
   catalogId: string,
   enabled: boolean,
+  expectedRevision?: number,
 ) {
   return jsonRequest<Record<string, unknown>>(
     `${apiBase}/api/skills/${encodeURIComponent(catalogId)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({
+        enabled,
+        ...(expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
     },
   );
 }
 
-export function uninstallSkill(apiBase: string, catalogId: string) {
+export function setSkillAuthorization(
+  apiBase: string,
+  catalogId: string,
+  activationPolicy: SkillActivationPolicy,
+  expectedDigest: string,
+  expectedRevision?: number,
+) {
   return jsonRequest<Record<string, unknown>>(
-    `${apiBase}/api/skills/${encodeURIComponent(catalogId)}`,
+    `${apiBase}/api/skills/${encodeURIComponent(catalogId)}/authorization`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        activation_policy: activationPolicy,
+        expected_digest: expectedDigest,
+        ...(expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
+    },
+  );
+}
+
+export function uninstallSkill(
+  apiBase: string,
+  catalogId: string,
+  expectedRevision?: number,
+) {
+  const query = expectedRevision === undefined
+    ? ""
+    : `?expected_revision=${encodeURIComponent(String(expectedRevision))}`;
+  return jsonRequest<Record<string, unknown>>(
+    `${apiBase}/api/skills/${encodeURIComponent(catalogId)}${query}`,
     { method: "DELETE" },
   );
 }

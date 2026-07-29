@@ -6,8 +6,14 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from backend.skill_authorization import compute_skill_grant_digest, skill_principal_id
 from backend.skill_market import BUNDLED_SKILL_MARKET_DIR, SkillMarket, SkillMarketEntry
-from backend.skill_store import InstalledSkill, SkillPackageIntegrityError, SkillStore
+from backend.skill_store import (
+    InstalledSkill,
+    SkillAuthorizationRequiredError,
+    SkillPackageIntegrityError,
+    SkillStore,
+)
 from backend.skill_version import compare_semver
 
 
@@ -96,8 +102,11 @@ class SkillManager:
         return self.store.revision()
 
     def list_market(self) -> dict[str, Any]:
+        revision, installed_skills = self.store.list_with_revision(
+            verify_packages=False
+        )
         installed_by_market = {
-            item.market_id: item for item in self.store.list(verify_packages=False)
+            item.market_id: item for item in installed_skills
         }
         items: list[dict[str, Any]] = []
         for entry in self.market.list_entries():
@@ -118,17 +127,23 @@ class SkillManager:
                     item["install_state"] = "integrity_conflict"
             if installed is not None:
                 available = _package_is_available(self.store, installed)
+                authorization = _authorization_metadata(installed)
                 item.update(
                     {
                         "installed_version": installed.version,
                         "installed_digest": installed.digest,
                         "enabled": installed.enabled,
-                        "available": available and installed.enabled,
+                        "available": (
+                            available
+                            and installed.enabled
+                            and installed.authorization_state in {"trusted", "authorized"}
+                        ),
                         "integrity_status": "valid" if available else "invalid",
+                        "authorization": authorization,
                     }
                 )
             items.append(item)
-        return {"version": 1, "revision": self.store.revision(), "items": items}
+        return {"version": 1, "revision": revision, "items": items}
 
     def list_market_items(self) -> list[dict[str, Any]]:
         return self.list_market()["items"]
@@ -165,6 +180,25 @@ class SkillManager:
             package_available=_package_is_available(self.store, installed),
         )
 
+    def set_authorization(
+        self,
+        catalog_id: str,
+        activation_policy: str,
+        *,
+        expected_digest: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        installed = self.store.set_authorization(
+            catalog_id,
+            activation_policy,
+            expected_digest=expected_digest,
+            expected_revision=expected_revision,
+        )
+        return self._catalog_item(
+            installed,
+            package_available=_package_is_available(self.store, installed),
+        )
+
     def enable(self, catalog_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         return self.set_enabled(catalog_id, True, expected_revision=expected_revision)
 
@@ -174,18 +208,43 @@ class SkillManager:
     def uninstall(self, catalog_id: str, *, expected_revision: int | None = None) -> bool:
         return self.store.uninstall(catalog_id, expected_revision=expected_revision)
 
+    def uninstall_with_revision(
+        self,
+        catalog_id: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> int | None:
+        return self.store.uninstall_with_revision(
+            catalog_id,
+            expected_revision=expected_revision,
+        )
+
     def list_catalog_items(self) -> list[dict[str, Any]]:
         """CapabilityProvider contract: only installed records, never market-only entries."""
         result: list[dict[str, Any]] = []
-        for installed in self.store.list(verify_packages=False):
+        revision, installed_skills = self.store.list_with_revision(
+            verify_packages=False
+        )
+        for installed in installed_skills:
             available = _package_is_available(self.store, installed)
-            result.append(self._catalog_item(installed, package_available=available))
+            result.append(
+                self._catalog_item(
+                    installed,
+                    package_available=available,
+                    registry_revision=revision,
+                )
+            )
         return result
 
     def discovery_metadata(self) -> list[dict[str, Any]]:
         """Bounded metadata for the system capability catalog; no instructions are included."""
         result: list[dict[str, Any]] = []
         for installed in self.store.list(verify_packages=False):
+            # External metadata is itself untrusted natural language. Keeping
+            # it out of the Router projection prevents a quarantined or merely
+            # user-authorized package from becoming a prompt-injection vector.
+            if installed.authorization_state != "trusted":
+                continue
             record = installed.record
             package_available = _package_is_available(self.store, installed)
             result.append(
@@ -205,9 +264,57 @@ class SkillManager:
                     "digest": installed.digest,
                     "trust": _trust_label(record.get("provenance")),
                     "surfaces": ["agent_context"],
+                    "authorization": _authorization_metadata(installed),
                 }
             )
         return result
+
+    def require_current_external_authorizations(
+        self,
+        snapshots: Iterable[Mapping[str, Any]],
+    ) -> None:
+        """Revalidate every external context grant immediately before model use.
+
+        Snapshot bytes stay pinned for deterministic recovery, while the
+        security decision remains live. Revocation, disablement, uninstall,
+        policy changes, digest changes, or package damage therefore stop a
+        not-yet-started model call, including a resumed or retried Run.
+        """
+
+        if isinstance(snapshots, (str, bytes, Mapping)):
+            raise TypeError("snapshots must be an iterable of snapshot objects")
+        for snapshot in snapshots:
+            if not isinstance(snapshot, Mapping):
+                raise TypeError("Each skill snapshot must be an object")
+            if snapshot.get("trust") != "local":
+                continue
+            catalog_id = snapshot.get("catalog_id")
+            digest = snapshot.get("digest")
+            authorization = snapshot.get("authorization")
+            if (
+                not isinstance(catalog_id, str)
+                or not isinstance(digest, str)
+                or not isinstance(authorization, Mapping)
+            ):
+                raise SkillAuthorizationRequiredError(str(catalog_id or "unknown"))
+            # Verify the bytes first, then reread the live registry decision.
+            # The second read is the admission linearization point: a revoke,
+            # update, disable, or uninstall that commits during package
+            # verification cannot be admitted through the stale first row.
+            verified = self.store.get(catalog_id, verify_package=True)
+            installed = self.store.get(catalog_id, verify_package=False)
+            if (
+                verified is None
+                or verified.digest != digest
+                or installed is None
+                or not installed.enabled
+                or installed.authorization_state != "authorized"
+                or installed.digest != digest
+                or installed.authorized_digest != digest
+                or installed.activation_policy
+                != authorization.get("activation_policy")
+            ):
+                raise SkillAuthorizationRequiredError(catalog_id)
 
     def select_for_context(
         self,
@@ -286,8 +393,12 @@ class SkillManager:
                 raise SkillExplicitSelectionError(explicit_name, "not_installed")
             if len(matches) > 1:
                 raise SkillExplicitSelectionError(explicit_name, "ambiguous")
+            if matches[0].authorization_state == "quarantined":
+                raise SkillExplicitSelectionError(explicit_name, "authorization_required")
             if not matches[0].enabled:
                 raise SkillExplicitSelectionError(explicit_name, "disabled")
+            if matches[0].activation_policy not in {"explicit_only", "implicit"}:
+                raise SkillExplicitSelectionError(explicit_name, "authorization_required")
             # Explicit activation verifies before scoring and reports integrity
             # failure instead of silently falling back to another skill.
             self.store.read_manifest(matches[0])
@@ -298,6 +409,10 @@ class SkillManager:
             if not installed.enabled:
                 continue
             if explicit_rank and installed.catalog_id not in explicit_catalog_ids:
+                continue
+            if not explicit_rank and installed.activation_policy != "implicit":
+                continue
+            if installed.authorization_state not in {"trusted", "authorized"}:
                 continue
             score = self._selection_score(
                 installed,
@@ -336,6 +451,11 @@ class SkillManager:
                     )
                 continue
             record = installed.record
+            grant_digest = compute_skill_grant_digest(
+                installed.catalog_id,
+                installed.digest,
+                installed.activation_policy,
+            )
             candidate = {
                 "catalog_id": installed.catalog_id,
                 "name": installed.name,
@@ -346,6 +466,17 @@ class SkillManager:
                 "instructions": manifest.instructions,
                 "ontology_refs": list(record.get("ontology_refs") or []),
                 "source": str((record.get("provenance") or {}).get("source") or ""),
+                "trust": _trust_label(record.get("provenance")),
+                "authorization": {
+                    "state": installed.authorization_state,
+                    "activation_policy": installed.activation_policy,
+                    "digest": installed.digest,
+                    "grant_digest": grant_digest,
+                    "principal_id": skill_principal_id(
+                        installed.catalog_id,
+                        installed.digest,
+                    ),
+                },
                 # Declarative evidence, not an authorization decision.
                 "allowed_tools": manifest.allowed_tools,
             }
@@ -520,11 +651,12 @@ class SkillManager:
                 f"Skill '{entry.catalog_id}' refers to unknown ontology id '{unknown[0]}'"
             )
 
-    @staticmethod
     def _catalog_item(
+        self,
         installed: InstalledSkill,
         *,
         package_available: bool = True,
+        registry_revision: int | None = None,
     ) -> dict[str, Any]:
         record = installed.record
         provenance = record.get("provenance")
@@ -532,7 +664,18 @@ class SkillManager:
             provenance = {}
         ontology_refs = list(record.get("ontology_refs") or [])
         enabled = installed.enabled
-        available = enabled and package_available
+        authorization = _authorization_metadata(installed)
+        available = (
+            enabled
+            and package_available
+            and installed.authorization_state in {"trusted", "authorized"}
+        )
+        if registry_revision is None:
+            registry_revision = (
+                installed.registry_revision
+                if installed.registry_revision is not None
+                else self.store.revision()
+            )
         return {
             "catalog_id": installed.catalog_id,
             "kind": "skill",
@@ -557,6 +700,7 @@ class SkillManager:
             "digest": installed.digest,
             "trust": _trust_label(provenance),
             "integrity_status": "valid" if package_available else "invalid",
+            "authorization": authorization,
             "skill": {
                 "name": installed.name,
                 "market_id": installed.market_id,
@@ -568,13 +712,35 @@ class SkillManager:
                 "verified": _provenance_is_verified(provenance),
                 "installed_at": installed.installed_at,
                 "updated_at": installed.updated_at,
+                "registry_revision": registry_revision,
                 "ontology_refs": ontology_refs,
                 "license": record.get("license"),
                 "compatibility": record.get("compatibility"),
+                "authorization": authorization,
                 # It is intentionally labelled as declared, never "granted".
                 "allowed_tools_declared": record.get("allowed_tools"),
             },
         }
+
+
+def _authorization_metadata(installed: InstalledSkill) -> dict[str, Any]:
+    granted = installed.authorization_state in {"trusted", "authorized"}
+    if granted:
+        grant_digest = compute_skill_grant_digest(
+            installed.catalog_id,
+            installed.digest,
+            installed.activation_policy,
+        )
+    else:
+        grant_digest = None
+    return {
+        "state": installed.authorization_state,
+        "activation_policy": installed.activation_policy,
+        "authorized_digest": installed.authorized_digest,
+        "requires_reauthorization": installed.authorization_state == "quarantined",
+        "grant_digest": grant_digest,
+        "principal_id": skill_principal_id(installed.catalog_id, installed.digest),
+    }
 
 
 def _default_ontology_ids() -> Iterable[str]:

@@ -22,7 +22,19 @@ class ChatMessage(BaseModel):
     role: str = "user"  # 'user', 'agent', 'code', 'system', 'tool_call'
     sender: str = "user"  # 'user' or 'agent', kept for compatibility
     content: str
+    # ``display_only`` preserves a visible/auditable reply while preventing
+    # third-party-derived text from silently becoming Router, summary, or
+    # ordinary conversation context on a later turn. Unknown values also fail
+    # closed through ``message_allows_prompt_reuse``.
+    context_policy: str = "reusable"
+    provenance: dict[str, Any] | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+def message_allows_prompt_reuse(message: ChatMessage) -> bool:
+    """Return whether a persisted message may enter a later model prompt."""
+
+    return message.context_policy == "reusable"
 
 
 class LLMAuditLog(BaseModel):
