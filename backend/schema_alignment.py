@@ -3,12 +3,109 @@ import logging
 import re
 from typing import Any
 
-from backend.agent.providers import get_llm_provider
+from backend.agent.providers import ToolLoopBudget, get_llm_provider
+from backend.agent.errors import BudgetExhaustedError, WorkflowError
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
+from backend.capabilities.models import normalize_grants
 from backend.graph_db import GraphDatabase
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 
 logger = logging.getLogger("schema_alignment")
+
+
+def validate_schema_capability_proposal(
+    raw_proposal: dict[str, Any],
+    catalog: SystemCapabilityCatalog,
+) -> dict[str, Any]:
+    """Canonicalize and validate an editable schema + capability proposal.
+
+    Model output and user-edited approval payloads must pass through the same
+    validator.  In particular, Graph grants may reference only entities that
+    remain in the proposal after an edit.
+    """
+
+    if not isinstance(raw_proposal, dict):
+        raise ValueError("Schema proposal must be a JSON object")
+    proposal = json.loads(json.dumps(raw_proposal))
+    proposal.setdefault("reused_schemas", [])
+    proposal.setdefault("new_schemas", [])
+    if not isinstance(proposal["reused_schemas"], list) or not isinstance(proposal["new_schemas"], list):
+        raise ValueError("Schema proposal reused_schemas and new_schemas must be arrays")
+
+    schema_entries = [*proposal["reused_schemas"], *proposal["new_schemas"]]
+    if any(not isinstance(item, dict) for item in schema_entries):
+        raise ValueError("Schema proposal entries must be objects")
+    schema_ids = [str(item.get("id") or "").strip() for item in schema_entries]
+    if any(not schema_id for schema_id in schema_ids):
+        raise ValueError("Every schema proposal entry must have a non-empty id")
+    duplicate_ids = sorted({schema_id for schema_id in schema_ids if schema_ids.count(schema_id) > 1})
+    if duplicate_ids:
+        raise ValueError(f"Duplicate schema proposal entities: {', '.join(duplicate_ids)}")
+
+    normalized_grants = normalize_grants(proposal.get("capabilities", []))
+    catalog.validate_grants(normalized_grants, graph_entity_ids=set(schema_ids))
+    proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
+    return proposal
+
+
+def _parse_and_validate_proposal(
+    raw_response: str,
+    catalog: SystemCapabilityCatalog,
+) -> dict[str, Any]:
+    cleaned = raw_response.strip()
+    code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
+    if code_block_match:
+        cleaned = code_block_match.group(1).strip()
+    else:
+        code_block_match = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
+        if code_block_match:
+            cleaned = code_block_match.group(1).strip()
+    start_idx = cleaned.find("{")
+    end_idx = cleaned.rfind("}")
+    if start_idx != -1 and end_idx != -1:
+        cleaned = cleaned[start_idx : end_idx + 1]
+
+    proposal = json.loads(cleaned)
+    return validate_schema_capability_proposal(proposal, catalog)
+
+
+async def _generate_validated_proposal(
+    provider: Any,
+    messages: list[dict[str, str]],
+    *,
+    catalog: SystemCapabilityCatalog,
+    db_session: Any,
+    budget: ToolLoopBudget | None,
+    audit_context: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    raw_response = await provider.generate(
+        messages,
+        db_session=db_session,
+        budget=budget,
+        audit_context=audit_context,
+    )
+    try:
+        return _parse_and_validate_proposal(raw_response, catalog), raw_response
+    except Exception as validation_error:
+        repair_prompt = (
+            "Your previous JSON violated the supplied Capability Ontology scope contract.\n"
+            f"Validation error: {str(validation_error)[:1_000]}\n"
+            "Return the complete corrected JSON object only. Preserve the requested schemas and least-privilege intent. "
+            "Do not broaden the requested capabilities, invent placeholders, or omit required nested fields."
+        )
+        repair_messages = [
+            *messages,
+            {"role": "assistant", "content": raw_response[-12_000:]},
+            {"role": "user", "content": repair_prompt},
+        ]
+        repaired_response = await provider.generate(
+            repair_messages,
+            db_session=db_session,
+            budget=budget,
+            audit_context={**audit_context, "stage": f"{audit_context.get('stage', 'schema_alignment')}_repair"},
+        )
+        return _parse_and_validate_proposal(repaired_response, catalog), repaired_response
 
 
 class SchemaAlignmentService:
@@ -20,6 +117,9 @@ class SchemaAlignmentService:
         db_session: Any = None,
         approved_plan: str = "",
         language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
@@ -37,14 +137,21 @@ class SchemaAlignmentService:
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
         is_zh = language == "zh"
-        system_prompt = f"""You are a Graph Database Schema Alignment Architect.
-Your task is to analyze a request to build a widget application and match its data storage requirements against our existing Graph Database Schemas.
+        catalog = capability_catalog or SystemCapabilityCatalog.build()
+        rendered_capability_catalog = catalog.render(AgentRole.SCHEMA_ALIGNMENT)
+        system_prompt = f"""You are a Canonical Ontology Alignment Architect.
+Your task is to analyze a widget request and match only its user-context facts against the single `ambient-context` ontology.
 
 ### Guidelines:
-1. **Reusability First**: If the application needs to store standard concepts like tasks, to-do lists, calendar events, notes, contacts, or documents, you MUST reuse the existing core schemas (e.g. 'Task', 'Event', 'Note') rather than creating duplicate concepts (e.g., do NOT create 'TodoItem' if 'Task' is suitable, do NOT create 'WorkoutSession' if it can be represented as an 'Event' with extended properties).
-2. **Property Extensions**: If you reuse an existing schema, you can propose extra custom fields under 'extended_properties'.
-3. **New Schemas**: Propose new schemas only if the concept is entirely new and does not overlap with any existing schemas.
-4. **Supported Data Types**: Property fields must use one of these types: "string", "integer", "number", "boolean".
+1. **One Ontology**: Every proposed entity belongs to `ambient-context`; never create an App-owned or disconnected ontology.
+2. **Context Data Only**: Do not propose entities or properties for caches, sync cursors, UI state, credentials, job checkpoints, or raw provider payloads. Those belong in the App directory. A URI/summary reference may be modeled only when it improves understanding of the user's context.
+3. **Reusability First**: If the application needs standard concepts like tasks, to-do lists, calendar events, notes, people, organizations, projects, places, messages, documents, or App data references, you MUST reuse the corresponding core entity (including `SoftwareApplication` for App references) rather than creating a duplicate.
+4. **Property Extensions**: If you reuse an existing entity, propose extra context fields under `extended_properties`.
+5. **New Entities**: Propose a new entity only if the concept is genuinely new. Attach it to an existing `subclass_of` parent (normally `Thing`) and provide established external `equivalent_to` IRIs when available.
+6. **Supported Data Types**: Property fields must use one of: "string", "integer", "number", "boolean".
+7. **Capability Ontology**: Propose the smallest required Widget grants from the supplied Capability Ontology and follow each category's complete `scope_contract`. Do not invent category ids, scope fields, entity types, installed catalog ids, or installed actions. For `network.request`, propose full public HTTPS source definitions rather than placeholder names. An empty capabilities array is valid.
+
+{rendered_capability_catalog}
 
 IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
 
@@ -57,7 +164,8 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "reason": "To represent individual items on the checklist",
       "extended_properties": {{
         "difficulty_level": "string"
-      }}
+      }},
+      "data_scope": "user_context"
     }}
   ],
   "new_schemas": [
@@ -68,8 +176,15 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "properties": {{
         "duration_minutes": "integer",
         "completed": "boolean"
-      }}
+      }},
+      "subclass_of": "Thing",
+      "ontology_iri": "https://example.org/PomodoroSession",
+      "equivalent_to": ["https://schema.org/Action"],
+      "data_scope": "user_context"
     }}
+  ],
+  "capabilities": [
+    {{"id": "graph.query", "scope": {{"entities": ["Task"]}}}}
   ]
 }}
 """
@@ -95,42 +210,25 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
         raw_response = ""
         try:
-            raw_response = await provider.generate(messages, db_session=db_session)
-
-            # Clean response and parse JSON
-            cleaned = raw_response.strip()
-            # If wrapped in codeblock, extract it
-            code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
-            if code_block_match:
-                cleaned = code_block_match.group(1).strip()
-            else:
-                # If wrapped in simple code block
-                code_block_match2 = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
-                if code_block_match2:
-                    cleaned = code_block_match2.group(1).strip()
-
-            # Find the first '{' and last '}'
-            start_idx = cleaned.find("{")
-            end_idx = cleaned.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                cleaned = cleaned[start_idx : end_idx + 1]
-
-            proposal = json.loads(cleaned)
-
-            # Validate format integrity
-            if "reused_schemas" not in proposal:
-                proposal["reused_schemas"] = []
-            if "new_schemas" not in proposal:
-                proposal["new_schemas"] = []
-
+            proposal, raw_response = await _generate_validated_proposal(
+                provider,
+                messages,
+                catalog=catalog,
+                db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "schema_alignment"},
+            )
             return proposal
 
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to generate or parse schema alignment: {e}. Raw response: {raw_response}")
-            # Safe fallback: assume no schemas to reuse or create, just let it proceed
-            return {"reused_schemas": [], "new_schemas": []}
+            raise WorkflowError(
+                "Schema capability alignment generation or parsing failed",
+                code="schema_alignment_failed",
+                retryable=True,
+            ) from e
 
     @staticmethod
     async def refine_proposal(
@@ -142,6 +240,9 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         db_session: Any = None,
         approved_plan: str = "",
         language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
@@ -153,13 +254,20 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
             schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
 
         is_zh = language == "zh"
-        system_prompt = f"""You are a Graph Database Schema Alignment Architect.
-Your task is to refine an existing database schema proposal based on direct natural language feedback from the user.
+        catalog = capability_catalog or SystemCapabilityCatalog.build()
+        rendered_capability_catalog = catalog.render(AgentRole.SCHEMA_ALIGNMENT)
+        system_prompt = f"""You are a Canonical Ontology Alignment Architect.
+Your task is to refine an `ambient-context` ontology proposal based on direct natural language feedback from the user.
 
 ### Guidelines:
 1. Maintain existing schema selections unless the user's feedback specifically requests modifications to them.
 2. Property fields must use one of these types: "string", "integer", "number", "boolean".
 3. Implement exactly what the user requests in their feedback.
+4. Keep all entities in the single canonical ontology and preserve `subclass_of`/`equivalent_to` alignments.
+5. Never model App-only runtime data; caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay in the App directory.
+6. Refine capability grants from the supplied Capability Ontology with least privilege and follow every complete `scope_contract`. Do not invent category ids, scope fields, installed catalog ids, or installed actions. Declare full public HTTPS source objects for `network.request`.
+
+{rendered_capability_catalog}
 
 IMPORTANT: You MUST write all natural-language explanations, names, and descriptions (e.g. 'reason', 'name', 'description') in {"Chinese (中文)" if is_zh else "English"}.
 
@@ -172,7 +280,8 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "reason": "To represent individual items on the checklist",
       "extended_properties": {{
         "difficulty_level": "string"
-      }}
+      }},
+      "data_scope": "user_context"
     }}
   ],
   "new_schemas": [
@@ -183,8 +292,15 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
       "properties": {{
         "duration_minutes": "integer",
         "completed": "boolean"
-      }}
+      }},
+      "subclass_of": "Thing",
+      "ontology_iri": "https://example.org/PomodoroSession",
+      "equivalent_to": ["https://schema.org/Action"],
+      "data_scope": "user_context"
     }}
+  ],
+  "capabilities": [
+    {{"id": "graph.query", "scope": {{"entities": ["Task"]}}}}
   ]
 }}
 """
@@ -215,28 +331,21 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
 
         raw_response = ""
         try:
-            raw_response = await provider.generate(messages, db_session=db_session)
-            cleaned = raw_response.strip()
-            code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
-            if code_block_match:
-                cleaned = code_block_match.group(1).strip()
-            else:
-                code_block_match2 = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
-                if code_block_match2:
-                    cleaned = code_block_match2.group(1).strip()
-            start_idx = cleaned.find("{")
-            end_idx = cleaned.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                cleaned = cleaned[start_idx : end_idx + 1]
-
-            proposal = json.loads(cleaned)
-            if "reused_schemas" not in proposal:
-                proposal["reused_schemas"] = []
-            if "new_schemas" not in proposal:
-                proposal["new_schemas"] = []
+            proposal, raw_response = await _generate_validated_proposal(
+                provider,
+                messages,
+                catalog=catalog,
+                db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "schema_alignment_refine"},
+            )
             return proposal
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to refine schema alignment: {e}. Raw response: {raw_response}")
-            return current_proposal
+            raise WorkflowError(
+                "Schema capability alignment refinement failed",
+                code="schema_alignment_refinement_failed",
+                retryable=True,
+            ) from e

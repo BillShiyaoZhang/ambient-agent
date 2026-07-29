@@ -1,0 +1,20 @@
+{
+  "policy_mode": "strict",
+  "files": {
+    "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
+  },
+  "commands": {
+    "allowed_commands": [
+      "npm test",
+      "npm run build"
+    ],
+    "allowed_prefixes": [],
+    "blocklist": [
+      "rm -rf",
+      "curl",
+      "wget",
+      "sudo",
+      "mv"
+    ]
+  }
+}

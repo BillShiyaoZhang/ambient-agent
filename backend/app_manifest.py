@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-APP_MANIFEST_VERSION = 1
+from backend.capabilities.models import CapabilityGrant, grants_digest, normalize_grants
+
+APP_MANIFEST_VERSION = 2
 MAX_APP_ID_LENGTH = 64
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 2000
@@ -49,6 +51,7 @@ _REQUIRED_FIELDS = {
     "app_version",
     "intents",
     "schema_refs",
+    "capabilities",
 }
 _OPTIONAL_FIELDS = {
     "backend_type",
@@ -59,7 +62,7 @@ _FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
 
 
 class ManifestValidationError(ValueError):
-    """Raised when an App Manifest does not satisfy the V1 contract."""
+    """Raised when an App Manifest does not satisfy the V2 contract."""
 
 
 def validate_app_id(app_id: Any) -> str:
@@ -147,6 +150,7 @@ class AppManifest:
     app_version: str
     intents: tuple[str, ...]
     schema_refs: tuple[str, ...]
+    capabilities: tuple[CapabilityGrant, ...]
     backend_type: str = "code"
     mcp_server: dict[str, Any] | None = None
     agent_url: str | None = None
@@ -174,6 +178,11 @@ class AppManifest:
         if agent_url is not None:
             agent_url = _validate_text("agent_url", agent_url, allow_empty=False, max_length=1000)
 
+        try:
+            capabilities = normalize_grants(data["capabilities"])
+        except ValueError as exc:
+            raise ManifestValidationError(f"capabilities: {exc!s}") from exc
+
         return cls(
             manifest_version=APP_MANIFEST_VERSION,
             id=app_id,
@@ -186,6 +195,7 @@ class AppManifest:
             ),
             intents=_validate_string_list("intents", data["intents"]),
             schema_refs=_validate_string_list("schema_refs", data["schema_refs"]),
+            capabilities=capabilities,
             backend_type=backend_type,
             mcp_server=mcp_server,
             agent_url=agent_url,
@@ -213,6 +223,7 @@ class AppManifest:
             "app_version": self.app_version,
             "intents": list(self.intents),
             "schema_refs": list(self.schema_refs),
+            "capabilities": [grant.to_dict() for grant in self.capabilities],
         }
         if self.backend_type != "code":
             result["backend_type"] = self.backend_type
@@ -221,6 +232,14 @@ class AppManifest:
         if self.agent_url is not None:
             result["agent_url"] = self.agent_url
         return result
+
+    @property
+    def revision(self) -> str:
+        return f"{self.manifest_version}:{self.app_version}"
+
+    @property
+    def grants_digest(self) -> str:
+        return grants_digest(self.capabilities)
 
     def write_atomic(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

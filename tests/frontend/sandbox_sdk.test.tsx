@@ -1,209 +1,147 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
-import { SandboxWidget } from "../../frontend/src/components/SandboxWidget";
-import { Widget } from "../../frontend/src/components/DashboardCanvas";
-import wsService from "../../frontend/src/services/websocket";
 import React from "react";
+import { act, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-describe("SandboxWidget with ambient SDK Injection (Graph DB APIs)", () => {
+import { PixelSandboxWidget as SandboxWidget } from "../../frontend/src/components/SandboxWidget";
+import type { Widget } from "../../frontend/src/components/DashboardCanvas";
+import wsService from "../../frontend/src/services/websocket";
+import { runService } from "../../frontend/src/services/runs";
+
+
+class RuntimeSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
+  static instances: RuntimeSocket[] = [];
+  readyState = RuntimeSocket.CONNECTING;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  sent: string[] = [];
+
+  constructor(readonly url: string) {
+    RuntimeSocket.instances.push(this);
+  }
+
+  send(message: string) {
+    this.sent.push(message);
+  }
+
+  close() {
+    this.readyState = RuntimeSocket.CLOSED;
+    this.onclose?.();
+  }
+
+  open() {
+    this.readyState = RuntimeSocket.OPEN;
+    this.onopen?.();
+  }
+
+  emit(message: unknown) {
+    this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
+  }
+}
+
+
+const privilegedWidget: Widget = {
+  id: "privileged-widget",
+  title: "Privileged Widget",
+  js: `
+    fetch("/api/apps/other-app/files/read");
+    ambient.graph.subscribe({ type: "Task" }, () => {});
+    ambient.capabilities.invoke("mcp:calendar:calendar", {}, "list-events");
+  `,
+  manifest_revision: "2:1.0.0",
+  grants_digest: "sha256:privileged",
+  capabilities: [
+    { id: "graph.query", scope: { entities: ["Task"] } },
+    { id: "graph.mutate", scope: { entities: ["Task"], operations: ["create"] } },
+    { id: "network.request", scope: { sources: {} } },
+    { id: "file.read", scope: { paths: ["notes/**"] } },
+    { id: "file.write", scope: { paths: ["notes/**"], max_bytes: 4096 } },
+    {
+      id: "capability.invoke",
+      scope: { catalog_ids: ["mcp:calendar:calendar"], actions: ["list-events"] },
+    },
+  ],
+};
+
+
+describe("SandboxWidget SDK boundary", () => {
   beforeEach(() => {
+    RuntimeSocket.instances = [];
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", RuntimeSocket);
     vi.stubGlobal("fetch", vi.fn());
+    vi.spyOn(wsService, "registerPersistentMessage");
     vi.spyOn(wsService, "sendMessage").mockImplementation(() => {});
+    vi.spyOn(runService, "start");
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("should inject ambient.graph.subscribe and trigger callback when update event is fired", async () => {
-    let subIdCaptured = "";
-    
-    const register = vi.spyOn(wsService, "registerPersistentMessage").mockImplementation((_key: string, msg: any) => {
-      if (msg.type === "graph_subscribe") {
-        subIdCaptured = msg.subscription_id;
-      }
-    });
+  it("does not construct Graph, Network, Files, or Run SDKs in the host realm", () => {
+    render(<SandboxWidget widget={privilegedWidget} />);
+    act(() => vi.runOnlyPendingTimers());
+    const socket = RuntimeSocket.instances[0];
+    act(() => socket.open());
 
-    const callbackData = { nodes: [{ id: "n1", type: "Task", properties: { content: "Learn Vitest" } }] };
-
-    const mockWidget: Widget = {
-      id: "graph-widget-test",
-      title: "Graph Widget Test",
-      html: "",
-      css: "",
-      js: `
-        const { useState, useEffect } = ambient.react;
-        export default function App() {
-          const [text, setText] = useState("No Data");
-          useEffect(() => {
-            return ambient.graph.subscribe({ type: "Task" }, (data) => {
-              setText(data.nodes[0].properties.content);
-            });
-          }, []);
-          return ambient.html\`<div data-testid="output">\${text}</div>\`;
-        }
-      `,
-    };
-
-    render(<SandboxWidget widget={mockWidget} />);
-
-    expect(register).toHaveBeenCalledWith(
-      expect.stringMatching(/^graph:sub-/),
-      expect.objectContaining({
-        type: "graph_subscribe",
-        query: { type: "Task" },
-      })
-    );
-    expect(subIdCaptured).not.toBe("");
-
-    const eventName = `graph_query_update:${subIdCaptured}`;
-    window.dispatchEvent(
-      new CustomEvent(eventName, {
-        detail: callbackData,
-      })
-    );
-
-    await waitFor(() => {
-      const output = screen.getByTestId("output");
-      expect(output.textContent).toBe("Learn Vitest");
-    });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(wsService.registerPersistentMessage).not.toHaveBeenCalled();
+    expect(runService.start).not.toHaveBeenCalled();
+    expect(socket.sent.join("\n")).not.toContain("graph.query");
+    expect(socket.sent.join("\n")).not.toContain("mcp:calendar:calendar");
+    expect(socket.sent.join("\n")).not.toContain("other-app");
   });
 
-  it("should unsubscribe correctly and send graph_unsubscribe message", async () => {
-    let subIdCaptured = "";
-    vi.spyOn(wsService, "registerPersistentMessage").mockImplementation((_key: string, msg: any) => {
-      if (msg.type === "graph_subscribe") {
-        subIdCaptured = msg.subscription_id;
-      }
-    });
-    const unregister = vi.spyOn(wsService, "unregisterPersistentMessage").mockImplementation(() => {});
-
-    const mockWidget: Widget = {
-      id: "graph-widget-test",
-      title: "Graph Widget Test",
-      html: "",
-      css: "",
-      js: `
-        const { useEffect } = ambient.react;
-        const { Button } = ambient.components;
-        export default function App() {
-          let unsub;
-          useEffect(() => {
-            unsub = ambient.graph.subscribe({ type: "Task" }, (data) => {});
-            return unsub;
-          }, []);
-          return ambient.html\`<\${Button} data-testid="unsub-btn" label="Unsubscribe" onClick=\${() => unsub && unsub()} />\`;
-        }
-      `,
-    };
-
-    render(<SandboxWidget widget={mockWidget} />);
-    expect(subIdCaptured).not.toBe("");
-
-    const btn = screen.getByTestId("unsub-btn");
-    btn.click();
-
-    expect(unregister).toHaveBeenCalledWith(
-      `graph:${subIdCaptured}`,
-      expect.objectContaining({
-        type: "graph_unsubscribe",
-        subscription_id: subIdCaptured,
-      })
+  it("accepts only bounded host events from the server-owned runtime session", () => {
+    const onFullscreen = vi.fn();
+    const onMinimize = vi.fn();
+    render(
+      <SandboxWidget
+        widget={privilegedWidget}
+        onFullscreen={onFullscreen}
+        onMinimize={onMinimize}
+      />,
     );
+    act(() => vi.runOnlyPendingTimers());
+    const socket = RuntimeSocket.instances[0];
+
+    act(() => {
+      socket.emit({ type: "host_event", event: "fullscreen" });
+      socket.emit({ type: "host_event", event: "minimize" });
+      socket.emit({ type: "host_event", event: "send_message", text: "open tasks" });
+      socket.emit({
+        type: "host_event",
+        event: "capability.invoke",
+        catalog_id: "mcp:calendar:calendar",
+      });
+    });
+
+    expect(onFullscreen).toHaveBeenCalledWith("privileged-widget");
+    expect(onMinimize).toHaveBeenCalledWith("privileged-widget");
+    expect(wsService.sendMessage).toHaveBeenCalledWith({
+      sender: "user",
+      content: "open tasks",
+    });
+    expect(runService.start).not.toHaveBeenCalled();
   });
 
-  it("should allow mutating graph data via ambient.graph.mutate", async () => {
-    const mockMutateResult = { success: true };
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => mockMutateResult,
-    });
+  it("never sends manifest revision, grant digest, capability scopes, or source", () => {
+    render(<SandboxWidget widget={privilegedWidget} />);
+    act(() => vi.runOnlyPendingTimers());
+    const socket = RuntimeSocket.instances[0];
+    act(() => socket.open());
+    const outbound = socket.sent.join("\n");
 
-    const actions = [
-      { action: "create_node", type: "Task", properties: { content: "Do chores" } }
-    ];
-
-    const mockWidget: Widget = {
-      id: "graph-widget-test",
-      title: "Graph Widget Test",
-      html: "",
-      css: "",
-      js: `
-        const { Button } = ambient.components;
-        export default function App() {
-          const handleMutate = () => {
-            ambient.graph.mutate([
-              { action: "create_node", type: "Task", properties: { content: "Do chores" } }
-            ]);
-          };
-          return ambient.html\`<\${Button} data-testid="mutate-btn" label="Mutate" onClick=\${handleMutate} />\`;
-        }
-      `,
-    };
-
-    render(<SandboxWidget widget={mockWidget} />);
-
-    const btn = screen.getByTestId("mutate-btn");
-    btn.click();
-
-    await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8000/api/graph/mutate",
-        expect.objectContaining({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ actions }),
-        })
-      );
-    });
-  });
-
-  it("should support ambient.mcp.callTool and resolve promise on WebSocket response", async () => {
-    const mockWidget: Widget = {
-      id: "mcp-widget-test",
-      title: "MCP Widget Test",
-      html: "",
-      css: "",
-      js: `
-        const { useState, useEffect } = ambient.react;
-        export default function App() {
-          const [val, setVal] = useState("No Data");
-          useEffect(() => {
-            ambient.mcp.callTool("calc", { x: 5, y: 10 }).then((res) => {
-              setVal(JSON.stringify(res));
-            });
-          }, []);
-          return ambient.html\`<div data-testid="output">\${val}</div>\`;
-        }
-      `,
-    };
-
-    render(<SandboxWidget widget={mockWidget} />);
-
-    expect(wsService.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "mcp_call_tool",
-        name: "calc",
-        arguments: { x: 5, y: 10 },
-      })
-    );
-
-    const calls = (wsService.sendMessage as any).mock.calls;
-    const mcpCall = calls.find((c: any) => c[0].type === "mcp_call_tool");
-    expect(mcpCall).toBeDefined();
-    const callIdCaptured = mcpCall[0].call_id;
-
-    const eventName = `mcp_call_response:mcp-widget-test:${callIdCaptured}`;
-    window.dispatchEvent(
-      new CustomEvent(eventName, {
-        detail: { result: { sum: 15 } },
-      })
-    );
-
-    await waitFor(() => {
-      const output = screen.getByTestId("output");
-      expect(output.textContent).toBe(JSON.stringify({ sum: 15 }));
-    });
+    expect(outbound).not.toContain(privilegedWidget.js);
+    expect(outbound).not.toContain(privilegedWidget.manifest_revision);
+    expect(outbound).not.toContain(privilegedWidget.grants_digest);
+    expect(outbound).not.toContain("file.write");
   });
 });

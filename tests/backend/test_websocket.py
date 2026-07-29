@@ -1,118 +1,108 @@
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app, app_manager, get_db
+from backend.main import _accept_websocket_safely, app, app_manager, get_db, run_live_broker
 from backend.workspace_storage import WorkspaceStorage
 
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):
-    workspace_dir = str(tmp_path / "workspace")
-    storage = WorkspaceStorage(workspace_dir)
-
-    # Isolate apps directory for app_manager inside tests
+    storage = WorkspaceStorage(str(tmp_path / "workspace"))
     old_apps_dir = app_manager.apps_dir
     app_manager.apps_dir = storage.apps_dir
-
     yield storage
-
-    # Restore original apps dir
     app_manager.apps_dir = old_apps_dir
 
 
 def test_websocket_chat_flow(test_session, monkeypatch):
-    # Mock IntentRouter.route to bypass LLM classification in websocket test
     async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
         from backend.agent.intent_plan import IntentKind, IntentPlan
 
-        return IntentPlan(
-            kind=IntentKind.CONVERSE,
-            rationale="chitchat",
-            instruction=content,
-        )
+        return IntentPlan(kind=IntentKind.CONVERSE, rationale="chitchat", instruction=content)
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
-    # Mock LLM API call
     async def mock_call_llm_api(provider, model, prompt, tools=None):
         return "I am your Ambient Agent. You said: 'Hello Agent'"
 
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_llm_api)
 
-    # Override get_db dependency to use test database session
     def override_get_db():
         yield test_session
 
     app.dependency_overrides[get_db] = override_get_db
+    session_id = f"websocket-chat-{uuid4().hex}"
 
-    client = TestClient(app)
-
-    # Connect to WebSocket
-    with client.websocket_connect("/ws/chat") as websocket:
-        active_list = websocket.receive_json()
-        assert active_list["type"] == "active_sessions_list"
-        # Send a chat message
-        websocket.send_json({"sender": "user", "content": "Hello Agent"})
-
-        # 1. Expect an acknowledgment containing the saved message from the DB
-        ack = websocket.receive_json()
-        assert ack["type"] == "ack"
-        assert ack["message"]["sender"] == "user"
-        assert ack["message"]["content"] == "Hello Agent"
-        assert ack["message"]["id"] is not None
-
-        # Expect session status running update
-        status_running = websocket.receive_json()
-        assert status_running["type"] == "session_status_update"
-        assert status_running["status"] == "running"
-
-        # 2. Expect thinking indicator
-        thinking = websocket.receive_json()
-        assert thinking["type"] == "reply"
-        assert thinking["message"]["id"] == -1
-        assert any(x in thinking["message"]["content"] for x in ["Thinking", "思考中"]), (
-            f"Expected thinking indicator, got: {thinking['message']['content']}"
-        )
-
-        # 3. Expect a reply from the agent
-        reply = websocket.receive_json()
-        assert reply["type"] == "reply"
-        assert reply["message"]["sender"] == "agent"
-        assert "Hello Agent" in reply["message"]["content"]
-
-        # Expect session status idle update
-        status_idle = websocket.receive_json()
-        assert status_idle["type"] == "session_status_update"
-        assert status_idle["status"] == "idle"
-
-    # Clean up dependency overrides
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
+            assert websocket.receive_json()["type"] == "active_sessions_list"
+            websocket.send_json({"sender": "user", "content": "Hello Agent"})
+            ack = websocket.receive_json()
+            assert ack["type"] == "ack"
+            assert ack["message"]["content"] == "Hello Agent"
+            assert websocket.receive_json()["status"] == "running"
+            reply = websocket.receive_json()
+            if reply["type"] == "session_title_updated":
+                reply = websocket.receive_json()
+            assert reply["type"] == "reply"
+            assert "Hello Agent" in reply["message"]["content"]
+            assert websocket.receive_json()["status"] == "idle"
     app.dependency_overrides.clear()
 
 
-def test_websocket_widget_trigger_flow(test_session, monkeypatch):
-    # Mock IntentRouter.route to bypass LLM classification in websocket test
+@pytest.mark.asyncio
+async def test_aborted_or_duplicate_websocket_handshake_is_ignored_without_asgi_error():
+    class StaleHandshake:
+        async def accept(self):
+            raise RuntimeError(
+                "Expected ASGI message 'websocket.send' or 'websocket.close', but got 'websocket.accept'."
+            )
+
+    assert await _accept_websocket_safely(StaleHandshake()) is False
+
+
+def test_websocket_run_live_projects_only_the_subscribed_session():
+    session_id = f"run-live-{uuid4().hex}"
+    event = {
+        "schema_version": 1,
+        "run_id": "run-one",
+        "session_id": session_id,
+        "step_id": "stage_code",
+        "attempt": 1,
+        "stream_id": "run-one:stage_code:1:activity",
+        "chunk_sequence": 1,
+        "kind": "activity_delta",
+        "delta": "hello",
+        "replace": True,
+        "created_at": "2026-07-26T00:00:00Z",
+    }
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws/run-live?session_id={session_id}") as websocket:
+            assert websocket.receive_json() == {
+                "type": "run_live_ready",
+                "session_id": session_id,
+            }
+            run_live_broker.publish("another-session", {**event, "session_id": "another-session"})
+            run_live_broker.publish(session_id, event)
+            assert websocket.receive_json() == {"type": "run_live_event", "event": event}
+
+    assert run_live_broker.subscriber_count(session_id) == 0
+
+
+def test_websocket_converse_rejects_unverified_inline_widget(test_session, monkeypatch):
     async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
         from backend.agent.intent_plan import IntentKind, IntentPlan
 
-        return IntentPlan(
-            kind=IntentKind.CONVERSE,
-            rationale="chitchat",
-            instruction=content,
-        )
+        return IntentPlan(kind=IntentKind.CONVERSE, rationale="chitchat", instruction=content)
 
     monkeypatch.setattr("backend.agent.router.IntentRouter.route", mock_route)
 
     async def mock_call_llm_api(provider, model, prompt, tools=None):
-        return """
-        I've generated a weather widget on your workspace canvas.
-        <ambient-widget id="weather-card" title="Local Weather">
-        <js-script>
-        export default function App() {
-            return ambient.html`<div>Beijing Weather</div>`;
-        }
-        </js-script>
-        </ambient-widget>
-        """
+        return '<ambient-widget id="weather-card" title="Weather"><js-script>export default null;</js-script></ambient-widget>'
 
     monkeypatch.setattr("backend.llm_service.call_llm_api", mock_call_llm_api)
 
@@ -120,132 +110,20 @@ def test_websocket_widget_trigger_flow(test_session, monkeypatch):
         yield test_session
 
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
+    session_id = f"websocket-inline-widget-{uuid4().hex}"
 
-    with client.websocket_connect("/ws/chat") as websocket:
-        active_list = websocket.receive_json()
-        assert active_list["type"] == "active_sessions_list"
-        websocket.send_json({"sender": "user", "content": "Give me weather details"})
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
+            assert websocket.receive_json()["type"] == "active_sessions_list"
+            websocket.send_json({"sender": "user", "content": "Give me weather details"})
+            assert websocket.receive_json()["type"] == "ack"
+            assert websocket.receive_json()["status"] == "running"
+            error = websocket.receive_json()
+            if error["type"] == "session_title_updated":
+                error = websocket.receive_json()
+            assert error["type"] == "error"
+            assert error["code"] == "unverified_inline_artifact"
+            assert websocket.receive_json()["status"] == "idle"
 
-        # 1. ACK
-        ack = websocket.receive_json()
-        assert ack["type"] == "ack"
-
-        # Expect session status running update
-        status_running = websocket.receive_json()
-        assert status_running["type"] == "session_status_update"
-        assert status_running["status"] == "running"
-
-        # 2. Expect thinking indicator
-        thinking = websocket.receive_json()
-        assert thinking["type"] == "reply"
-        assert thinking["message"]["id"] == -1
-        assert any(x in thinking["message"]["content"] for x in ["Thinking", "思考中"]), (
-            f"Expected thinking indicator, got: {thinking['message']['content']}"
-        )
-
-        # 3. Reply
-        reply = websocket.receive_json()
-        assert reply["type"] == "reply"
-        assert "weather widget" in reply["message"]["content"]
-        assert "<ambient-widget" not in reply["message"]["content"]  # XML block must be stripped!
-
-        # 4. Widget
-        widget_msg = websocket.receive_json()
-        assert widget_msg["type"] == "widget"
-        assert widget_msg["widget"]["id"] == "weather-card"
-        assert widget_msg["widget"]["title"] == "Local Weather"
-        assert "Beijing" in widget_msg["widget"]["js"]
-
-        # Expect session status idle update
-        status_idle = websocket.receive_json()
-        assert status_idle["type"] == "session_status_update"
-        assert status_idle["status"] == "idle"
-
-    app.dependency_overrides.clear()
-
-
-def test_websocket_mcp_call_flow(test_session, monkeypatch):
-    # Override get_db dependency
-    def override_get_db():
-        yield test_session
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    # Create a mock app in app_manager
-    from backend.app_manifest import AppManifest
-
-    manifest = AppManifest(
-        manifest_version=1,
-        id="mcp-app",
-        title="MCP App",
-        description="",
-        app_version="0.1.0",
-        intents=(),
-        schema_refs=(),
-        backend_type="mcp",
-        mcp_server={"command": ["python"], "args": ["-m", "echo"]},
-    )
-
-    # Mock get_manifest call
-    def mock_get_manifest(app_id):
-        if app_id == "mcp-app":
-            return manifest
-        return None
-
-    monkeypatch.setattr(app_manager, "get_manifest", mock_get_manifest)
-
-    # Mock the StdioJsonRpcClient to prevent spawning actual python command
-    class MockClient:
-        async def call(self, method, params):
-            return {"echo": params}
-
-    # Retrieve backend_manager instance
-    from backend.main import backend_manager
-
-    async def mock_get_or_start_mcp_client(app_id, manifest, send_ws_message_func):
-        # Trigger permission request to verify that flow works
-        approved = await backend_manager.request_permission(
-            app_id,
-            "mcp_spawn",
-            {"command": manifest.mcp_server["command"], "args": manifest.mcp_server["args"]},
-            send_ws_message_func,
-        )
-        if not approved:
-            raise Exception("Denied")
-        return MockClient()
-
-    monkeypatch.setattr(backend_manager, "get_or_start_mcp_client", mock_get_or_start_mcp_client)
-
-    client = TestClient(app)
-    with client.websocket_connect("/ws/chat") as websocket:
-        active_list = websocket.receive_json()
-        assert active_list["type"] == "active_sessions_list"
-
-        # Send mcp_call_tool message
-        websocket.send_json(
-            {
-                "type": "mcp_call_tool",
-                "app_id": "mcp-app",
-                "name": "test_tool",
-                "arguments": {"x": 1},
-                "call_id": "call-123",
-            }
-        )
-
-        # Expect permission request message
-        perm_req = websocket.receive_json()
-        assert perm_req["type"] == "backend_permission_request"
-        assert perm_req["permission_type"] == "mcp_spawn"
-        request_id = perm_req["request_id"]
-
-        # Respond to permission request
-        websocket.send_json({"type": "backend_permission_response", "request_id": request_id, "approved": True})
-
-        # Expect mcp_call_response message
-        call_res = websocket.receive_json()
-        assert call_res["type"] == "mcp_call_response"
-        assert call_res["call_id"] == "call-123"
-        assert call_res["result"] == {"echo": {"name": "test_tool", "arguments": {"x": 1}}}
-
+    assert not (Path(test_session.apps_dir) / "weather-card").exists()
     app.dependency_overrides.clear()

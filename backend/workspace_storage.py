@@ -2,7 +2,7 @@ import json
 import os
 import shutil
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel
@@ -11,6 +11,8 @@ from backend.models import ChatMessage, ChatSession, LLMAuditLog
 
 
 CANVAS_VERSION = 3
+AUDIT_TEXT_MAX_BYTES = 32 * 1024
+AUDIT_METADATA_MAX_BYTES = 8 * 1024
 DEFAULT_WINDOW_BOUNDS = {"x": 0.16, "y": 0.12, "width": 0.68, "height": 0.72}
 WINDOW_MODES = {"maximized", "floating", "snapped"}
 SNAP_ZONES = {"left", "right", "top-left", "top-right", "bottom-left", "bottom-right"}
@@ -20,6 +22,32 @@ def _number(value: Any, fallback: float) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return fallback
+
+
+def _bounded_text(value: Any, max_bytes: int = AUDIT_TEXT_MAX_BYTES) -> str:
+    """Keep audit previews useful without allowing an entry to grow without bound."""
+    text = value if isinstance(value, str) else str(value or "")
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    marker = f"\n...[truncated; original_bytes={len(encoded)}]"
+    prefix_limit = max(0, max_bytes - len(marker.encode("utf-8")))
+    prefix = encoded[:prefix_limit].decode("utf-8", errors="ignore")
+    return prefix + marker
+
+
+def _bounded_metadata(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        value = {"value": str(value)}
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+    except Exception:
+        return {"value": "[unserializable]"}
+    if len(encoded) <= AUDIT_METADATA_MAX_BYTES:
+        return value
+    return {"truncated": True, "original_bytes": len(encoded)}
 
 
 def _normalize_bounds(value: Any) -> dict[str, float]:
@@ -306,6 +334,7 @@ class WorkspaceStorage:
                     ChatMessage(
                         id=m.get("id"),
                         session_id=session_id,
+                        run_id=m.get("run_id"),
                         role=m.get("role", "user"),
                         sender=m.get("sender", "user"),
                         content=m.get("content", ""),
@@ -324,11 +353,15 @@ class WorkspaceStorage:
                 with open(audit_file, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
-                        if line:
+                        if not line:
+                            continue
+                        try:
                             data = json.loads(line)
                             t_val = data.get("timestamp")
                             if isinstance(t_val, str):
                                 t_val = datetime.fromisoformat(t_val)
+                            if isinstance(t_val, datetime) and t_val.tzinfo is None:
+                                t_val = t_val.replace(tzinfo=UTC)
                             logs.append(
                                 LLMAuditLog(
                                     id=data.get("id"),
@@ -338,13 +371,73 @@ class WorkspaceStorage:
                                     prompt=data.get("prompt"),
                                     response=data.get("response"),
                                     stage=data.get("stage", "chat"),
+                                    run_id=data.get("run_id"),
+                                    session_id=data.get("session_id"),
+                                    step_id=data.get("step_id"),
+                                    attempt=data.get("attempt"),
+                                    trace_id=data.get("trace_id"),
+                                    latency_ms=data.get("latency_ms"),
+                                    usage=data.get("usage"),
+                                    finish_reason=data.get("finish_reason"),
+                                    error=data.get("error"),
+                                    prompt_hash=data.get("prompt_hash"),
+                                    tool_schema_hash=data.get("tool_schema_hash"),
+                                    artifact_hashes=data.get("artifact_hashes") or {},
                                 )
                             )
+                        except Exception:
+                            # Preserve readable entries around a corrupt or
+                            # partially-written JSONL line.
+                            continue
             except Exception:
                 pass
         # Sort by timestamp desc
         logs.sort(key=lambda l: l.timestamp or datetime.min, reverse=True)
         return logs
+
+    def cleanup_audit_logs(self, days: int | None = None) -> int:
+        """Apply the configured retention period to the workspace JSONL audit."""
+
+        if days is None:
+            try:
+                days = int(os.getenv("AGENT_AUDIT_RETENTION_DAYS", "30"))
+            except ValueError:
+                days = 30
+        days = max(1, days)
+        audit_file = os.path.join(self.workspace_dir, "audit_logs.jsonl")
+        if not os.path.isfile(audit_file):
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        retained: list[str] = []
+        removed = 0
+        try:
+            with open(audit_file, encoding="utf-8") as source:
+                for raw_line in source:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        timestamp = datetime.fromisoformat(str(data["timestamp"]))
+                        if timestamp.tzinfo is None:
+                            timestamp = timestamp.replace(tzinfo=UTC)
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        # Corrupt entries cannot be assigned a safe retention
+                        # age and are discarded instead of being kept forever.
+                        removed += 1
+                        continue
+                    if timestamp < cutoff:
+                        removed += 1
+                    else:
+                        retained.append(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+            temporary = f"{audit_file}.compact-{os.getpid()}"
+            with open(temporary, "w", encoding="utf-8") as destination:
+                for line in retained:
+                    destination.write(line + "\n")
+            os.replace(temporary, audit_file)
+        except OSError:
+            return 0
+        return removed
 
     def delete_session(self, session_id: str) -> bool:
         session_file = os.path.join(self.sessions_dir, f"{session_id}.json")
@@ -418,11 +511,23 @@ class WorkspaceStorage:
             except Exception:
                 pass
 
+        # Durable runs can replay a chat projection after a crash. Reuse the
+        # role-specific projection for that run instead of appending a duplicate.
+        if message.id is None and message.run_id:
+            for existing in data.get("messages", []):
+                if (
+                    existing.get("run_id") == message.run_id
+                    and existing.get("role", "user") == message.role
+                    and existing.get("sender", "user") == message.sender
+                ):
+                    message.id = existing.get("id")
+                    break
         if message.id is None:
             self.refresh(message)
 
         msg_dict = {
             "id": message.id,
+            "run_id": message.run_id,
             "role": message.role,
             "sender": message.sender,
             "content": message.content,
@@ -453,9 +558,21 @@ class WorkspaceStorage:
             "timestamp": log.timestamp.isoformat() if isinstance(log.timestamp, datetime) else log.timestamp,
             "provider": log.provider,
             "model": log.model,
-            "prompt": log.prompt,
-            "response": log.response,
+            "prompt": _bounded_text(log.prompt),
+            "response": _bounded_text(log.response),
             "stage": getattr(log, "stage", "chat"),
+            "run_id": log.run_id,
+            "session_id": log.session_id,
+            "step_id": log.step_id,
+            "attempt": log.attempt,
+            "trace_id": log.trace_id,
+            "latency_ms": log.latency_ms,
+            "usage": _bounded_metadata(log.usage),
+            "finish_reason": log.finish_reason,
+            "error": _bounded_text(log.error, AUDIT_METADATA_MAX_BYTES) if log.error is not None else None,
+            "prompt_hash": log.prompt_hash,
+            "tool_schema_hash": log.tool_schema_hash,
+            "artifact_hashes": _bounded_metadata(log.artifact_hashes) or {},
         }
         with open(audit_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_dict, ensure_ascii=False) + "\n")

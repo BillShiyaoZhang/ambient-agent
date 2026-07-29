@@ -1,0 +1,29 @@
+services:
+  backend:
+    command:
+      - uvicorn
+      - backend.main:app
+      - --reload
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./scripts:/app/scripts
+      - ./tests:/app/tests
+
+  frontend:
+    build:
+      target: development
+    user: root
+    read_only: false
+    pids_limit: 128
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 1.0
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - /app/node_modules

@@ -29,7 +29,7 @@ For each sub_intent in the plan, fill in any fields the previous pass left blank
   ``string | integer | number | boolean``. Only include properties that are
   NOT already declared in the schema for that type.
 - For ``widget_fix_code``: ``feedback`` = a precise instruction to the
-  OpenCode agent describing the JS change required.
+  coding agent describing the JS change required.
 - For ``widget_rewrite``: ``feedback`` = a high-level redesign instruction.
 
 # Output format

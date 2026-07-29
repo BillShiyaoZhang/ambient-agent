@@ -1,170 +1,85 @@
-# 系统架构概述
+# 系统与请求链路
 
-Ambient Agent 围绕动态的 **GUI 卡片工作区 (Canvas Workspace)** 架构进行设计。系统中的“Apps”是指大模型动态生成的、兼容 React 的**微型交互卡片（Widgets）**。本页面概述了这些卡片小程序的总体架构、前后端连接方式以及所涉及的技术框架。
-
-## 1. 架构模块图
-
-为了更清晰地展示系统各模块的权责，我们将整体架构图拆分为系统宏观总览与各个子系统的细节视图。
-
-### 1.1 系统宏观架构总览
-
-展示了前端工作区、后端编排器、存储层与外部集成服务之间的宏观通信链路：
+## 1. 运行时组成与分层
 
 ```mermaid
-graph TB
-    Frontend["前端"] <-->|WebSocket| Backend["后端"]
-    Frontend -->|HTTP| Backend
-    Backend <-->|SQLModel ORM| Data["数据与存储层"]
-    Backend <-->|JSON-RPC / HTTPS| External["外部集成 (MCP / LLM)"]
+flowchart LR
+    Browser[表现层：React 工作区] -->|REST / WebSocket| API[组合根：FastAPI]
+    Browser -->|固定静态资产| Frame["widget-frame：opaque-origin iframe"]
+    API --> Workflow[应用层：Use Case / Durable Workflow]
+    Workflow --> Domain[领域层：Run / Ontology / Capability Policy]
+    Workflow --> Infra[基础设施层：Graph / Files / HTTP / MCP / LLM]
+    Infra --> Workspace[workspace 持久状态]
+    API <-.->|仅 pixel 回滚：Unix socket| Runtime["按需 widget-runtime + Chromium"]
 ```
 
-### 1.2 前端工作区与沙箱架构
+`backend/main.py` 是组合根，只创建并连接 `WorkspaceStorage`、graph adapter、App/Capability 服务、`RunCoordinator` 和 Workflow。业务规则属于领域/应用对象，route 不直接决定授权或操作存储。完整依赖规则见 [Widget 能力安全架构](/architecture/capability-security.md)。
 
-展示前端主控制、画布网格以及隔离沙箱在渲染卡片时的层级与通信关系：
+## 2. 用户请求如何执行
 
-```mermaid
-graph TB
-    subgraph Frontend["前端"]
-        App["主控协调"] --> Canvas["画布工作区"]
-        Canvas --> Sandbox["安全沙箱容器"]
-        App <--> WSClient["WebSocket 客户端"]
-    end
-    WSClient <-->|/ws/chat| BE["后端接口"]
-    Sandbox -->|/api/graph/mutate| BE
-    Sandbox -->|"/api/apps/{id}"| BE
-```
+1. 前端通过 `/ws/chat` 发送消息。
+2. 后端先保存 `ChatMessage`，解析当前会话语言、模型与 Coding Agent 快照，再向 `RunCoordinator` 提交 `internal_agent` Run。
+3. Coordinator 持久化 Run，并为同一 session 管理执行 lane。
+4. `DurableAgentWorkflow` 调用 `IntentRouter` 生成 `IntentPlan`，然后按 phase 推进状态。
+5. 只读对话或查询可以直接完成；Graph mutation、复合任务和 Widget 创建/修改经过计划、schema + capability 对齐审批、预检、执行与校验。
+6. 每个 step 使用 claim、lease epoch 和 run version 防止过期 worker 提交。可见事件写入 `run_events` 后经 `/ws/runs` 推送。
+7. 前端将 Run 状态投影到聊天、任务抽屉、应用中心和工作区。
 
-### 1.3 后端核心编排与执行流
+旧的内存 Agent 循环和 Widget DAG 不再是生产执行路径。`AgentOrchestrator` 只提供路由和有界只读 Converse helper，执行所有权属于 Run 控制平面。
 
-展示后端 WebSocket 连接分发、生命周期编排器以及动态解析编译的层级关系：
+## 3. Widget 创建与加载
 
-```mermaid
-graph TB
-    subgraph Backend["后端"]
-        Main["Web & WS 入口"] <--> Orchestrator["编排调度"]
-        Orchestrator --> Parser["XML 动态代码解析"]
-        Orchestrator --> AppMgr["卡片磁盘读写"]
-        Main <--> BackendMgr["MCP 守护进程与授权"]
-    end
-    FE["前端 WebSocket"] <-->|/ws/chat| Main
-    Orchestrator <-->|HTTPS| LLM["外部 LLM 服务"]
-    BackendMgr <-->|stdio| MCP["MCP 服务端"]
-```
+Widget 只有一条发布路径：durable workflow 先确认计划，再让用户批准 schema 与 capability proposal；随后用户选择的 OpenCode 或 Codex 在 staging 目录生成 manifest V2 与 controller。只有当代码使用是批准 grants 的子集、manifest grants 与批准值完全相等，并通过语法/安全/schema 校验后，产物才会原子提升。对话内联 XML Widget 与未验证直写路径已退出新版本。
 
-### 1.4 数据存储与外部集成
+前端从 `/api/apps/{id}` 获取应用元数据，但可信 React host 不执行 Controller。
+默认 `SandboxWidget` 获取一次性 ticket，通过
+`/ws/widgets/{id}/client-runtime` 连接 Backend，并把 Controller 交给
+`sandbox="allow-scripts"` 的 opaque-origin iframe；Babel、renderer 和
+Controller 都在该 frame 内运行。Workspace 稳态只保留当前 Active Widget 与
+至多一个 Warm Widget；其余 Widget 在有界 `before_suspend` 刷盘后卸载，过渡期
+最多额外保留一个 Suspending Widget。Graph、Network、Files 和 capability RPC
+回到 Backend，由 server-side session 绑定 App 身份并逐次授权。
 
-展示后端服务如何读写磁盘/数据库，以及如何集成外部大语言模型与 MCP 工具服务：
+`VITE_WIDGET_UI_TRANSPORT=pixels` 才启用旧的 `/ws/widgets/{id}/runtime` 像素流。
+该回滚链路在零网络 `widget-runtime` 中按需启动一个共享 Chromium，每个会话使用
+独立 BrowserContext；最后一个会话关闭 60 秒后回收浏览器。
 
-```mermaid
-graph TB
-    subgraph Backend["后端核心服务"]
-        AppMgr["AppManager"]
-        Main["main.py / WS"]
-        BackendMgr["BackendManager"]
-        Orchestrator["AgentOrchestrator"]
-    end
-    subgraph Data["数据与存储层"]
-        SQLiteDB[("图数据库存储")]
-        DiskApps[("本地磁盘目录")]
-    end
-    subgraph External["外部集成服务"]
-        LLM["大模型 API 服务"]
-        MCPServer["MCP 服务端"]
-    end
-    AppMgr <-->|读写卡片源码| DiskApps
-    Main <-->|SQLModel ORM 映射| SQLiteDB
-    BackendMgr <-->|JSON-RPC 2.0 stdio| MCPServer
-    Orchestrator <-->|HTTPS 客户端 httpx| LLM
-```
+## 4. 数据与通信职责
 
-## 2. 动态卡片生命周期序列
+| 通道/存储 | 用途 |
+| --- | --- |
+| REST `/api/sessions`, `/api/canvas` | 会话和 Canvas CRUD |
+| REST `/api/runs`, `/api/run-interactions` | Run 查询、取消、重试、协调和用户决策 |
+| REST `/api/apps`, `/api/app-store` | 应用产物和统一能力目录 |
+| REST `/api/coding-agents` | Coding Agent 可用性与默认选择 |
+| REST `/api/apps/{id}/graph/*` | App-scoped、grant 授权并预检后的 Graph 查询与 mutation |
+| REST `/api/apps/{id}/files/*` | `app://data/` 内经过 path grant 授权的文件操作 |
+| REST `/api/apps/{id}/data-sources/*` | `network.request` grant 中声明的公共 HTTPS JSON source |
+| `/ws/chat` | 聊天命令与 App-scoped Graph 订阅 |
+| `/ws/widgets/{id}/client-runtime` | 默认 iframe Widget 的 ticket 认证 bootstrap、RPC 与生命周期 |
+| `/ws/widgets/{id}/runtime` | 仅 pixel 回滚的帧、输入和生命周期 |
+| Unix socket `widget-runtime.sock` | 仅 pixel 回滚/生成 smoke test 使用的 Runtime 协议 |
+| `/ws/runs` | 带 sequence、event ID 和 stream epoch 的可恢复事件流 |
+| `workspace/sessions/*.json` | 会话与消息 |
+| `workspace/.ambient/runs.db` | Run、step、interaction 和 canonical event |
+| Neo4j | 规范本体实体、上下文 record、graph edge、effect 和 mutation history |
+| `workspace/graph.db` | 仅用于显式 SQLite 测试适配器和按需迁移源 |
 
-本序列图描绘了 Widget 卡片的完整生命周期，包括用户输入、后端解析落盘、WebSocket 广播、前端沙箱挂载及后续的数据交互：
+## 5. 安全与一致性原则
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as 用户
-    participant FE as 前端
-    participant BE as 后端
-    participant LLM as 大语言模型
-    participant DB as SQLite 数据库 / 磁盘
+- Provider 密钥不返回给前端，凭据文件位于 Git 忽略的工作区。
+- Coding Agent Runtime 使用可信内置 Adapter，将 CLI 按需安装到专用持久卷，并统一管理安装、认证、动态模型发现、模型绑定与运行状态。代码生成只经过一个 ACP orchestration：OpenCode 提供原生 ACP server；Codex 由固定版本的 ACP Registry bridge 映射到官方 app-server。两者共用 Ambient 的 session、权限、staging、验证和同 session repair 状态机。Codex 通过容器内设备码登录使用自己的 ChatGPT 订阅，并通过 app-server `model/list` 返回当前账号可选模型；后端不会把 Ambient Provider 密钥或模型绑定传给 native 模式的 Codex。
+- Docker Compose 放开默认 seccomp 对非特权 user namespace 的拦截，使 Codex 能在容器边界内继续使用自己的 bubblewrap `workspace-write` 沙箱；不授予 `SYS_ADMIN`，也不切换到 `danger-full-access`。
+- Backend 镜像内置与前端锁文件一致的 Node.js 与 `@babel/standalone` verifier runtime。所有 Coding Agent 生成的 `controller.js` 只有通过语法、禁用 host/network global 与受限 VM 执行检查后才会从 staging 提升为 live App；校验器缺失时必须失败关闭，不能发布未验证代码。
+- Coding Agent 只接收从 [Agent 系统能力目录](/agent/system-capabilities.md) 生成的角色投影和不可变 Runtime Contract。生成契约禁止 `fetch`、浏览器 host global、直接 MCP 和未批准访问；staging 校验失败时只返回有界诊断进行修复。
+- Graph mutation 必须通过规范本体预检，并在一个 Neo4j transaction 中原子提交。
+- Widget 外部访问由 Capability Ontology、批准 grant、静态 verifier、SDK membrane 与后端 authorizer 共同约束；MCP、工具和 Coding Agent 仍叠加各自的 adapter policy。
+- 默认路径的不可信 Widget 代码只在 opaque-origin iframe 内执行，可信 React host
+  与 Backend 都不求值 Controller。pixel 回滚路径改在独立 `widget-runtime`
+  容器中执行；该容器无网络、无宿主/工作区/Docker socket/凭据挂载，使用只读
+  rootfs、tmpfs、非 root 用户和资源上限。
+- Runtime session 在 Backend 绑定 `app_id + manifest revision + grants digest + artifact digest`。Controller payload 中的身份字段一律忽略；撤权或 revision/digest 改变会终止旧 session。
+- 有副作用的 durable step 使用 effect/idempotency 记录、interaction 和 fencing，避免恢复或并发造成重复提交。
+- Run event 是版本化契约；前端保留未知事件以兼容未来版本。
 
-    %% 阶段 1：卡片生成
-    User->>FE: 输入：“创建一个待办列表卡片”
-    FE->>BE: 通过 WebSocket 发送对话消息
-    BE->>LLM: 组装上下文并调用 Chat Completion 接口
-    LLM-->>BE: 返回携带 <ambient-widget> XML 语法的流
-    BE->>BE: AgentParser 自动解析 HTML、CSS 和 JS 代码段
-    BE->>DB: AppManager 将源码文件写入本地磁盘目录
-    BE-->>FE: 通过 WebSocket 广播新卡片元数据并更新画布布局
-
-    %% 阶段 2：卡片挂载渲染
-    FE->>FE: DashboardCanvas 挂载 SandboxWidget(id)
-    FE->>BE: 发起 GET /api/apps/{app_id} 获取源码文件
-    BE-->>FE: 返回文件源码内容
-    FE->>FE: 执行 CSS Scoping 隔离样式
-    FE->>FE: 将 HTML 挂载入独立的卡片 DOM 节点
-    FE->>FE: 通过 'new Function("root", "ambient", ...)' 安全沙箱执行 JS
-
-    %% 阶段 3：数据交互与查询订阅
-    FE->>BE: WS: graph_subscribe (订阅 Task 类别数据)
-    BE->>DB: SQLite: 注册实时图查询订阅句柄
-    DB-->>BE: 返回首屏查询数据
-    BE-->>FE: 通过 WebSocket 推送查询数据
-    FE->>FE: 渲染卡片界面并展示待办数据
-
-    %% 阶段 4：数据变更
-    User->>FE: 点击“完成待办”按钮
-    FE->>BE: 发送 POST /api/graph/mutate 变更请求
-    BE->>DB: SQLite: 事务修改节点属性 (completed=true)
-    BE->>BE: 检测到变更，触发关联订阅重跑与广播
-    BE-->>FE: 推送最新的查询结果数据
-    FE->>FE: 重新渲染局部视图，任务显示已完成
-```
-
-## 3. 通信链路划分
-
-前后端在处理 Widget 卡片时使用两种通信协议协同：
-
-### A. 双向长连接 WebSockets (接口: `/ws/chat`)
-
-负责高实时、双向的数据流同步：
-
-- **对话与布局同步**：广播用户的聊天消息、卡片在 Canvas 上被拖拽/缩放/固定后的网格布局设置。
-- **响应式查询订阅**：卡片 JS 通过 `ambient.graph.subscribe()` 订阅的数据流均走此通道推送。
-- **MCP 命令行回调**：当 Widget 通过 SDK 触发 MCP 调用时，后台在执行完子进程后通过 WS 发回响应。
-
-图查询订阅由 WebSocket 客户端按连接生命周期管理：Widget 可以在连接进入 `OPEN` 前注册；若组件在此期间卸载，注册会被取消且不会发送无效的订阅或退订消息。连接建立或会话切换导致重连时，客户端只重放当前仍有效的订阅。普通对话、审批和工具调用命令不进入该重放集合，避免断线期间的操作在稍后被意外执行。
-
-### B. 事务型 REST HTTP APIs
-
-处理结构化文件读取或非实时突发请求：
-
-- `GET /api/apps` 与 `GET /api/apps/{app_id}`：拉取卡片列表或用于前端沙箱挂载读取的代码文件。
-- `DELETE /api/apps/{app_id}`：卸载特定卡片并清理磁盘空间。
-- `POST /api/graph/mutate`：原子事务型修改图数据库中的节点或关系边。
-
-## 4. 沙箱与 `ambient` 开发包
-
-为保障系统安全与组件样式绝对隔离，所有 Widget 的交互逻辑均在前端 `SandboxWidget` 内部的容器沙箱中执行。有关 Widget (Apps) 的 UI/Controller/Data 架构设计，请参见[Widget 应用架构设计](/architecture/apps.md)。有关沙箱编译机制与 `ambient` 提供的多维度数据交互 API，请参阅[沙箱隔离机制](/widgets/sandbox)及[ambient SDK 参考手册](/widgets/sdk)。
-
-## 5. 技术栈与所用框架
-
-本系统基于以下现代开源技术栈构建：
-
-### 前端技术栈
-
-1.  **React 19**：现代核心前端框架，支持并发渲染与灵活的 Hooks 挂载。
-2.  **TypeScript**：强类型保障静态接口安全与逻辑推导。
-3.  **Vite**：闪电般快速的模块打包器与本地热重载开发服务器。
-4.  **Tailwind CSS v4**：样式实用类，通过 `@tailwindcss/vite` 在构建时自动编译出 scoped 卡片样式。
-5.  **原生 WebSockets API**：浏览器标准双向通信接口，避免了 socket.io 的冗余开销。
-
-### 后端技术栈
-
-1.  **FastAPI**：超高性能的 Python 异步 Web/WebSocket 框架。
-2.  **Uvicorn**：轻量级 ASGI 服务器。
-3.  **SQLModel (SQLAlchemy + Pydantic)**：用于 SQLite 的 ORM 框架，完美兼容 Pydantic 的类型验证与对象关系映射。
-4.  **HTTPX**：用于与云端大模型或 Ollama 之间执行高效的异步 HTTP 请求通信。
-5.  **Agent Client Protocol (ACP)**：规范智能体协作与工具委派的数据契约。
+下一步可阅读 [Widget 隔离运行时](/widgets/sandbox.md)、[Widget 能力安全架构](/architecture/capability-security.md)、[Agent 系统能力目录](/agent/system-capabilities.md)、[持久 Run](/architecture/runs.md)或[图数据库](/architecture/graph-db.md)。

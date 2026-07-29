@@ -64,10 +64,10 @@ def test_intent_plan_from_dict_roundtrip():
     assert len(p.actions) == 1
 
 
-def test_intent_plan_from_dict_invalid_kind_falls_back_to_converse():
+def test_intent_plan_from_dict_invalid_kind_fails_closed_to_clarify():
     src = {"kind": "not_a_real_kind", "rationale": "x"}
     p = IntentPlan.from_dict(src)
-    assert p.kind == IntentKind.CONVERSE
+    assert p.kind == IntentKind.CLARIFY
 
 
 def test_intent_plan_from_tool_call_args():
@@ -76,11 +76,11 @@ def test_intent_plan_from_tool_call_args():
         "kind": "graph_query",
         "confidence": 0.81,
         "rationale": "user asked what's on calendar",
-        "query": {"type": "CalendarEvent"},
+        "query": {"type": "Event"},
     }
     p = IntentPlan.from_tool_call_args(args)
     assert p.kind == IntentKind.GRAPH_QUERY
-    assert p.query == {"type": "CalendarEvent"}
+    assert p.query == {"type": "Event"}
 
 
 def test_intent_plan_clarify_payload():

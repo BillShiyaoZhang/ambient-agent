@@ -15,9 +15,12 @@ Falls back to a regex-based triage when the LLM is unreachable or returns no
 tool call.
 """
 
+import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from sqlmodel import Session
@@ -26,7 +29,10 @@ from backend.agent.intent_plan import (
     IntentKind,
     IntentPlan,
 )
+from backend.agent.errors import BudgetExhaustedError
+from backend.agent.providers import ToolLoopBudget
 from backend.agent.prompts.manager import PromptManager
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.llm_service import call_llm_api
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import fast_selection, primary_selection, selection_ids
@@ -48,7 +54,7 @@ class IntentRouter:
     async def route(
         cls,
         content: str,
-        context: RouterContext | list[dict[str, Any]] | None = None,
+        context: RouterContext | None = None,
         db_session: Session | None = None,
         provider_name: str | None = None,
         model_name: str | None = None,
@@ -58,6 +64,9 @@ class IntentRouter:
         context_sections: list[str] | None = None,
         include_widget_keyword_hint: bool = False,
         fallback_keywords: list[str] | None = None,
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> IntentPlan:
         """Classify a user message.
 
@@ -81,15 +90,8 @@ class IntentRouter:
                 instruction=instruction,
             )
 
-        # 2. Normalize legacy context (list-of-apps, or anything else) into a RouterContext.
-        if isinstance(context, RouterContext):
-            ctx = context
-        elif isinstance(context, list):
-            ctx = RouterContext(app_manifests=list(context))
-        elif context is None:
-            ctx = RouterContext()
-        else:
-            ctx = context
+        # 2. Normalize the optional structured context.
+        ctx = context or RouterContext()
 
         sections = context_sections if context_sections is not None else _default_context_sections()
 
@@ -106,10 +108,13 @@ class IntentRouter:
                 context_sections=sections,
                 include_widget_keyword_hint=include_widget_keyword_hint,
                 language=language,
+                audit_context=audit_context,
+                budget=budget,
+                capability_catalog=capability_catalog,
             )
             if plan is not None:
                 return plan
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.warning(f"LLM routing failed: {e}")
@@ -132,12 +137,15 @@ class IntentRouter:
     async def refine_sub_intents(
         cls,
         plan: IntentPlan,
-        context: RouterContext | list[dict[str, Any]] | None = None,
+        context: RouterContext | None = None,
         db_session: Session | None = None,
         provider_name: str | None = None,
         model_name: str | None = None,
         extra_context: dict[str, Any] | None = None,
         language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> IntentPlan:
         """Layer 2 of the router: specialise sub-intents.
 
@@ -151,12 +159,7 @@ class IntentRouter:
         if not plan.sub_intents:
             return plan
 
-        if isinstance(context, RouterContext):
-            ctx = context
-        elif isinstance(context, list):
-            ctx = RouterContext(app_manifests=list(context))
-        else:
-            ctx = RouterContext()
+        ctx = context or RouterContext()
 
         runtime_provider, runtime_model = selection_ids(primary_selection())
         provider_name = provider_name or runtime_provider
@@ -177,6 +180,9 @@ class IntentRouter:
         except Exception as e:
             logger.warning(f"Could not load refine_sub_intent.md prompt: {e}")
             return plan
+        system_prompt += "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(
+            AgentRole.INTENT_ROUTER
+        )
 
         plan_json = plan.to_dict()
         user_prompt = (
@@ -196,13 +202,43 @@ class IntentRouter:
         ]
         tools = [IntentPlan.tool_schema()]
 
+        started = time.monotonic()
         try:
-            response = await call_llm_api(provider_name, model_name, messages, tools)
-        except LLMConfigError:
+            response = await cls._call_llm_with_budget(
+                provider_name,
+                model_name,
+                messages,
+                tools,
+                budget,
+            )
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
+            cls._record_audit(
+                db_session,
+                provider_name,
+                model_name,
+                messages,
+                tools,
+                None,
+                time.monotonic() - started,
+                audit_context,
+                stage="route_refine",
+                error=f"{type(e).__name__}: {e}",
+            )
             logger.warning(f"LLM #2 refine_sub_intents failed: {e}")
             return plan
+        cls._record_audit(
+            db_session,
+            provider_name,
+            model_name,
+            messages,
+            tools,
+            response,
+            time.monotonic() - started,
+            audit_context,
+            stage="route_refine",
+        )
 
         if not isinstance(response, dict):
             return plan
@@ -223,18 +259,26 @@ class IntentRouter:
             return plan
         return plan
 
-    @classmethod
-    async def route_legacy(
-        cls,
-        content: str,
-        existing_apps: list[dict[str, Any]] | None = None,
-        db_session: Session | None = None,
-    ) -> IntentPlan:
-        return await cls.route(
-            content=content,
-            context=existing_apps or [],
-            db_session=db_session,
+    @staticmethod
+    async def _call_llm_with_budget(
+        provider_name: str,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        budget: ToolLoopBudget | None,
+    ) -> Any:
+        if budget is not None and budget.on_model_call is not None:
+            budget.on_model_call()
+        invocation = call_llm_api(provider_name, model_name, messages, tools)
+        response = (
+            await asyncio.wait_for(invocation, timeout=budget.llm_call_timeout_s)
+            if budget is not None
+            else await invocation
         )
+        if budget is not None and budget.on_usage is not None and isinstance(response, dict):
+            usage = response.get("usage")
+            budget.on_usage(usage if isinstance(usage, dict) else {})
+        return response
 
     @classmethod
     async def _route_with_llm(
@@ -249,6 +293,9 @@ class IntentRouter:
         override_system_prompt: str | None = None,
         context_sections: list[str] | None = None,
         include_widget_keyword_hint: bool = False,
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> IntentPlan | None:
         if override_system_prompt is not None:
             rendered_ctx = context.render_for_prompt(
@@ -270,6 +317,9 @@ class IntentRouter:
             except Exception as e:
                 logger.warning(f"Could not load router_v2.md prompt: {e}")
                 system_prompt = "You are Ambient Agent's intent router. Reply by calling the classify_intent function."
+        system_prompt += "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(
+            AgentRole.INTENT_ROUTER
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -277,27 +327,41 @@ class IntentRouter:
         ]
         tools = [IntentPlan.tool_schema()]
 
-        response = await call_llm_api(provider_name, model_name, messages, tools)
-
+        started = time.monotonic()
         try:
-            if db_session is not None and isinstance(response, dict):
-                from backend.models import LLMAuditLog
+            response = await cls._call_llm_with_budget(
+                provider_name,
+                model_name,
+                messages,
+                tools,
+                budget,
+            )
+        except BaseException as exc:
+            cls._record_audit(
+                db_session,
+                provider_name,
+                model_name,
+                messages,
+                tools,
+                None,
+                time.monotonic() - started,
+                audit_context,
+                stage="route",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
 
-                audit_log = LLMAuditLog(
-                    provider=provider_name,
-                    model=model_name,
-                    prompt=json.dumps(messages, ensure_ascii=False),
-                    response=str(response.get("content") or ""),
-                    stage="route",
-                )
-                if hasattr(db_session, "add") and hasattr(db_session, "commit"):
-                    try:
-                        db_session.add(audit_log)
-                        db_session.commit()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        cls._record_audit(
+            db_session,
+            provider_name,
+            model_name,
+            messages,
+            tools,
+            response,
+            time.monotonic() - started,
+            audit_context,
+            stage="route",
+        )
 
         if not isinstance(response, dict):
             return None
@@ -327,6 +391,50 @@ class IntentRouter:
                 plan = cls._resolve_widget_modify_ambiguity(plan, context)
             return plan
         return None
+
+    @staticmethod
+    def _record_audit(
+        db_session: Any,
+        provider_name: str,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        response: Any,
+        elapsed_seconds: float,
+        audit_context: dict[str, Any] | None,
+        *,
+        stage: str,
+        error: str | None = None,
+    ) -> None:
+        if db_session is None or not hasattr(db_session, "add") or not hasattr(db_session, "commit"):
+            return
+        try:
+            from backend.models import LLMAuditLog
+
+            prompt = json.dumps(messages, ensure_ascii=False, default=str)
+            tool_payload = json.dumps(tools, ensure_ascii=False, sort_keys=True, default=str)
+            context = audit_context or {}
+            audit_log = LLMAuditLog(
+                provider=provider_name,
+                model=model_name,
+                prompt=prompt,
+                response=json.dumps(response, ensure_ascii=False, default=str) if response is not None else "",
+                stage=stage,
+                run_id=context.get("run_id"),
+                session_id=context.get("session_id"),
+                step_id=context.get("step_id"),
+                attempt=context.get("attempt"),
+                trace_id=context.get("trace_id"),
+                latency_ms=elapsed_seconds * 1000,
+                error=error,
+                prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                tool_schema_hash=hashlib.sha256(tool_payload.encode("utf-8")).hexdigest(),
+                artifact_hashes=dict(context.get("artifact_hashes") or {}),
+            )
+            db_session.add(audit_log)
+            db_session.commit()
+        except Exception:
+            logger.warning("Unable to persist router audit trace", exc_info=True)
 
     @staticmethod
     def _fallback_with_keywords(

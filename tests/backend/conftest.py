@@ -27,14 +27,6 @@ def isolated_main_llm_configuration(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(main, "llm_config_store", store)
 
-    class StubTitleService:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        async def generate(self, *_args, **_kwargs):
-            return None
-
-    monkeypatch.setattr(main, "SessionTitleService", StubTitleService)
     set_default_llm_store(store)
     yield store
     set_default_llm_store(previous)

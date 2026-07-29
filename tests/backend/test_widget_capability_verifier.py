@@ -1,0 +1,245 @@
+import json
+import subprocess
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VERIFIER = REPO_ROOT / "scripts" / "verify_widget_controller.mjs"
+
+
+def verify(tmp_path, source, capabilities):
+    app_dir = tmp_path / "test-app"
+    app_dir.mkdir()
+    controller = app_dir / "controller.js"
+    controller.write_text(source, encoding="utf-8")
+    (app_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 2,
+                "id": "test-app",
+                "title": "Test App",
+                "description": "",
+                "app_version": "1.0.0",
+                "intents": [],
+                "schema_refs": [],
+                "capabilities": capabilities,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["node", str(VERIFIER), str(controller)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_verifier_rejects_graph_use_without_a_grant(tmp_path):
+    completed = verify(
+        tmp_path,
+        "export default function App() { ambient.graph.subscribe({ type: 'Task' }, () => {}); return null; }",
+        [],
+    )
+    assert completed.returncode != 0
+    assert json.loads(completed.stderr)["code"] == "capability_contract_error"
+
+
+def test_verifier_accepts_scoped_graph_use_and_rejects_another_entity(tmp_path):
+    grant = [{"id": "graph.query", "scope": {"entities": ["Task"]}}]
+    allowed = verify(
+        tmp_path,
+        "export default function App() { ambient.graph.subscribe({ type: 'Task' }, () => {}); return null; }",
+        grant,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    denied_dir = tmp_path / "denied"
+    denied_dir.mkdir()
+    denied = verify(
+        denied_dir,
+        "export default function App() { ambient.graph.subscribe({ type: 'Document' }, () => {}); return null; }",
+        grant,
+    )
+    assert denied.returncode != 0
+    assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+
+
+def test_verifier_requires_literal_approved_capability_action(tmp_path):
+    grant = [
+        {
+            "id": "capability.invoke",
+            "scope": {"catalog_ids": ["mcp:calendar:calendar"], "actions": ["list-events"]},
+        }
+    ]
+    allowed = verify(
+        tmp_path,
+        "export default function App() { ambient.capabilities.invoke('mcp:calendar:calendar', {}, 'list-events'); return null; }",
+        grant,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    denied_dir = tmp_path / "denied"
+    denied_dir.mkdir()
+    denied = verify(
+        denied_dir,
+        "export default function App() { const action = 'list-events'; ambient.capabilities.invoke('mcp:calendar:calendar', {}, action); return null; }",
+        grant,
+    )
+    assert denied.returncode != 0
+    assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+
+
+def test_verifier_checks_graph_network_and_file_scope_literals(tmp_path):
+    capabilities = [
+        {
+            "id": "graph.mutate",
+            "scope": {"entities": ["Task"], "operations": ["create"]},
+        },
+        {
+            "id": "network.request",
+            "scope": {
+                "sources": {
+                    "forecast": {
+                        "base_url": "https://api.example.com",
+                        "paths": ["/v1/forecast"],
+                        "methods": ["GET"],
+                        "response_limit": 4096,
+                    }
+                }
+            },
+        },
+        {"id": "file.read", "scope": {"paths": ["drafts/**"]}},
+    ]
+    allowed = verify(
+        tmp_path,
+        """
+        export default function App() {
+          ambient.graph.mutate([{ action: 'create_node', type: 'Task', properties: {} }]);
+          ambient.net.request('forecast', { path: '/v1/forecast', method: 'GET' });
+          ambient.files.read('drafts/today.md');
+          return null;
+        }
+        """,
+        capabilities,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    denied_dir = tmp_path / "denied-scope"
+    denied_dir.mkdir()
+    denied = verify(
+        denied_dir,
+        """
+        export default function App() {
+          ambient.net.request('forecast', { path: '/admin', method: 'POST' });
+          return null;
+        }
+        """,
+        capabilities,
+    )
+    assert denied.returncode != 0
+    assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+
+
+def test_verifier_explains_graph_action_dsl_instead_of_misreporting_grant_scope(tmp_path):
+    completed = verify(
+        tmp_path,
+        """
+        export default function App() {
+          ambient.graph.mutate([{ action: 'create', type: 'Task', properties: {} }]);
+          return null;
+        }
+        """,
+        [{"id": "graph.mutate", "scope": {"entities": ["Task"], "operations": ["create"]}}],
+    )
+
+    assert completed.returncode != 0
+    diagnostic = json.loads(completed.stderr)
+    assert diagnostic["code"] == "capability_contract_error"
+    assert "action 'create' is invalid" in diagnostic["message"]
+    assert "create_node" in diagnostic["message"]
+    assert "authorization values" in diagnostic["hint"]
+
+
+def test_verifier_allows_only_the_declared_local_storage_surface(tmp_path):
+    accepted_path = tmp_path / "accepted"
+    accepted_path.mkdir()
+    accepted = verify(
+        accepted_path,
+        """
+        export default function App() {
+          ambient.storage.set("draft", { text: "hello" });
+          ambient.storage.get("draft");
+          ambient.storage.list();
+          return null;
+        }
+        """,
+        [],
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    rejected_path = tmp_path / "rejected"
+    rejected_path.mkdir()
+    rejected = verify(
+        rejected_path,
+        """
+        export default function App() {
+          ambient.storage.openDatabase("other-widget");
+          return null;
+        }
+        """,
+        [],
+    )
+    assert rejected.returncode != 0
+    assert "Unknown ambient.storage method" in rejected.stderr
+
+
+def test_verifier_allows_only_the_declared_lifecycle_surface(tmp_path):
+    accepted_path = tmp_path / "accepted-lifecycle"
+    accepted_path.mkdir()
+    accepted = verify(
+        accepted_path,
+        """
+        export default function App() {
+          const unsubscribe = ambient.lifecycle.onBeforeSuspend(async () => {
+            await ambient.storage.set("draft", { text: "hello" });
+          });
+          unsubscribe();
+          return null;
+        }
+        """,
+        [],
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    rejected_path = tmp_path / "rejected-lifecycle"
+    rejected_path.mkdir()
+    rejected = verify(
+        rejected_path,
+        """
+        export default function App() {
+          ambient.lifecycle.preventSuspendForever();
+          return null;
+        }
+        """,
+        [],
+    )
+    assert rejected.returncode != 0
+    assert "Unknown ambient.lifecycle method" in rejected.stderr
+
+
+def test_verifier_rejects_navigation_and_peer_network_globals(tmp_path):
+    for index, source in enumerate(
+        (
+            "export default function App() { location.href = 'https://example.com'; return null; }",
+            "export default function App() { new RTCPeerConnection(); return null; }",
+            "export default function App() { new WebTransport('https://example.com'); return null; }",
+            "export default function App() { getComputedStyle({}); return null; }",
+        )
+    ):
+        case_path = tmp_path / f"case-{index}"
+        case_path.mkdir()
+        completed = verify(case_path, source, [])
+        assert completed.returncode != 0
+        assert "Forbidden" in json.loads(completed.stderr)["message"]

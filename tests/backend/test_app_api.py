@@ -39,7 +39,7 @@ def test_app_api_preserves_existing_shape_and_adds_manifest_fields():
 
     assert detail_response.status_code == 200
     detail = detail_response.json()
-    assert detail["js"] == "console.log('plan')"
+    assert "js" not in detail
     assert detail["description"] == "Plans a day."
     assert detail["intents"] == ["plan my day"]
     assert detail["schema_refs"] == ["Task"]

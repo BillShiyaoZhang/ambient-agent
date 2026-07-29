@@ -1,56 +1,146 @@
-# ambient SDK Reference
+# ambient SDK
 
-The `ambient` object injected in the widget's JS environment exposes API namespaces to communicate with the host application.
+`SandboxWidget` always injects pure UI host features and injects external-access methods only for the current App's approved grants. This page documents the Manifest V2 SDK. Callers handle both an absent method and backend denial.
 
-## 1. Chat & Window Control
+## 1. Always-available Host Features
 
-- `ambient.sendMessage(text: string)`: Sends a message query pretending to be the user.
-- `ambient.fullscreen()`: Stretches the card layout to cover the full canvas.
-- `ambient.minimize()`: Restores the card to grid layout.
+| API | Behavior |
+| --- | --- |
+| `ambient.sendMessage(text)` | Submit a user message to the current chat |
+| `ambient.fullscreen()` / `ambient.minimize()` | Ask the host to change the current App window state |
+| `ambient.theme.preference` / `effective` | Compatibility accessors that always read the current preference and effective theme |
+| `ambient.theme.getSnapshot()` / `subscribe(listener)` | Read a theme snapshot and subscribe to in-session theme changes |
+| `ambient.presentation.getSnapshot()` / `subscribe(listener)` | Read and subscribe to the `{ theme, locale, reducedMotion }` presentation context |
+| `ambient.storage.get/set/delete/clear/list` | Persist non-secret JSON state for the current browser and App |
+| `ambient.lifecycle.onBeforeSuspend(handler)` | Register the single async pre-suspend flush handler and return its unsubscribe function |
+| `ambient.html` | HTM tag bound to React createElement |
+| `ambient.react` | `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, `useReducer`; pre-publication verification rejects any other non-injected hook |
+| `ambient.components` | `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, `Table`; pre-publication verification rejects any other non-injected component |
 
-## 2. Database Operations (`ambient.graph`)
+`TextField` delivers the current string value to `onChange(value)` and `onEnter(value)`; `Checkbox` delivers a boolean to `onChange(checked)`. Component callbacks do not expose DOM event objects.
 
-- `ambient.graph.subscribe(query: object, callback: Function)`: Subscribes to real-time database queries. Fires updates over WS when mutations occur.
-- `ambient.graph.mutate(actions: array)`: Submits Graph Database mutations (`POST /api/graph/mutate`).
-  ```javascript
-  await ambient.graph.mutate([
-    {
-      action: "create_node",
-      type: "Task",
-      properties: { title: "Buy milk", status: "pending" },
-    },
-  ]);
-  ```
+These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, Cookies, browser storage globals, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
 
-## 3. MCP Tools (`ambient.mcp`)
+Presentation context updates without restarting the Widget. A Controller that reacts to theme, language, or reduced-motion changes subscribes instead of reading only once during module load:
 
-- `ambient.mcp.callTool(name: string, args: object)`: Resolves an asynchronous MCP tool call.
-  ```javascript
-  const weather = await ambient.mcp.callTool("fetch_weather", { location: "Beijing" });
-  ```
+```javascript
+const [presentation, setPresentation] = useState(
+  ambient.presentation.getSnapshot()
+);
 
-## 4. Background Runs (`ambient.runs`)
+useEffect(
+  () => ambient.presentation.subscribe(setPresentation),
+  []
+);
+```
 
-- `ambient.runs.start(catalogId, actionId, input)`: Starts a durable background Run and returns its snapshot.
-- `ambient.runs.get(runId)`: Reads current status, progress, and structured result.
-- `ambient.runs.cancel(runId)`: Requests cooperative cancellation.
-- `ambient.runs.subscribe(runId, callback)`: Subscribes to durable events and returns an unsubscribe function.
-- `ambient.capabilities.invoke(catalogId, input, actionId?)`: Convenience wrapper that starts a Run and waits for its terminal result.
+The Runtime automatically synchronizes the `--widget-*` CSS variables used by built-in components, page `color-scheme`, and prefers-reduced-motion media emulation. Use `presentation.locale` for dynamic language changes.
 
-Closing a Widget removes its local listeners but does not cancel the Run.
+## 2. Local Widget Storage
 
-## 5. Built-in React & UI Support
+`ambient.storage` requires no capability grant. The trusted host persists it in IndexedDB and scopes it to the current App ID; a Controller cannot select another App's namespace.
 
-The `ambient` object exposes the React environment itself as well as a pre-built styled component library powered by Tailwind CSS:
+```javascript
+const settings = await ambient.storage.get("settings");
+await ambient.storage.set("settings", { compact: true });
+const keys = await ambient.storage.list();
+await ambient.storage.delete("settings");
+await ambient.storage.clear();
+```
 
-- **`ambient.react`**: Exposes standard React Hooks (`useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`).
-- **`ambient.components`**: Exposes pre-designed React components. Includes:
-  - `Card` (card container)
-  - `Button` (interactive button)
-  - `TextField` (input field)
-  - `Checkbox` (checkbox control)
-  - `List` (list wrapper)
-  - `Table` (data table)
-  - `Column` / `Row` (flex layout containers)
-  - `Text` (typography text wrapper)
-- **`ambient.html`**: A declarative template markup rendering utility using `htm`.
+Keys contain 1–256 characters. Values must be acyclic JSON and no larger than 64 KiB each; each App is limited to 128 keys and 1 MiB total. A missing key returns `null`. Data exists only in the current browser profile and may be cleared by the user or reclaimed by the browser. Never store credentials, tokens, cross-device state, or the sole copy of user data. The legacy `VITE_WIDGET_UI_TRANSPORT=pixels` rollback does not provide this API.
+
+Write user input through after meaningful changes. If writes use a debounce, keep the latest value in a ref and register a bounded flush:
+
+```javascript
+useEffect(
+  () => ambient.lifecycle.onBeforeSuspend(async () => {
+    await ambient.storage.set("draft", latestDraftRef.current);
+  }),
+  []
+);
+```
+
+A later handler replaces the previous one; a stale effect-cleanup unsubscribe cannot remove a newer registration. The host waits at most one second for acknowledgement before it still unmounts the Runtime, so the handler must remain bounded and cannot replace normal write-through persistence.
+
+## 3. Graph Grants
+
+`graph.query` injects `ambient.graph.subscribe(query, callback)`. A query names its `type`; every include names `target_type`; all entities are within grant scope. It returns an unsubscribe function:
+
+```javascript
+useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
+```
+
+`graph.mutate` injects `ambient.graph.mutate(actions)`. Actions map to `create`, `update`, and `delete`; entities and edge types must be approved:
+
+```javascript
+await ambient.graph.mutate([{
+  action: "create_node",
+  type: "Task",
+  properties: { title: "Prepare weekly report", status: "open" }
+}]);
+
+await ambient.graph.mutate([{
+  action: "update_node_property",
+  id: taskId,
+  properties: { status: "done" }
+}]);
+```
+
+`action` uses one of the complete DSL names: `create_node`, `update_node_property`, `delete_node`, `create_edge`, or `delete_edge`. The Manifest grant values `create`, `update`, and `delete` are authorization operations, not action payloads; never write `action: "create"` or add an `operation` field. Static verification requires an array literal passed directly to `ambient.graph.mutate`, object-literal entries, and literal action/entity/edge-type identifiers.
+
+The SDK binds current App identity and an idempotency key. The backend resolves actual node types and authorizes before entering the durable Graph effect/interaction flow.
+
+## 4. Network Grant
+
+`network.request` injects `ambient.net.request(sourceId, request)`. Source origin, paths, methods, and response limit come from the grant:
+
+```javascript
+const forecast = await ambient.net.request("forecast", {
+  path: "/v1/forecast",
+  method: "GET",
+  query: { latitude: 31.23, longitude: 121.47 }
+});
+```
+
+The Controller cannot supply a full URL, replace the host, follow redirects, or attach a secret. Authenticated access requests `capability.invoke` for an App Center action.
+
+## 5. File Grants
+
+File paths are POSIX paths relative to `app://data/`:
+
+| Grant | API |
+| --- | --- |
+| `file.read` | `ambient.files.read(path)`, `ambient.files.list(path)` |
+| `file.write` | `ambient.files.write(path, text)` |
+| `file.delete` | `ambient.files.delete(path)` |
+
+```javascript
+const draft = await ambient.files.read("drafts/today.md");
+await ambient.files.write("drafts/today.md", `${draft}\nDone`);
+```
+
+Every operation checks path globs, size, escape, and symlinks. The file SDK never accesses the Manifest, Controller, README, or another workspace directory.
+
+## 6. Installed Capability Grant
+
+`capability.invoke` injects `ambient.capabilities.invoke(catalogId, input, actionId)`. Both IDs are approved string literals:
+
+```javascript
+const result = await ambient.capabilities.invoke(
+  "mcp:calendar:calendar",
+  { title: "Review", start: "2026-07-22T09:00:00+08:00" },
+  "create-event"
+);
+```
+
+The call creates a durable Run and waits for its terminal result. Progress, approval, and `needs_attention` are handled in the Task Drawer. The new version does not inject `ambient.mcp` or arbitrary `runs.start(catalogId, ...)`, preventing bypass of an exact action grant.
+
+## 7. SDK Membrane and errors
+
+- Without a matching grant, the namespace or method is absent. A Controller uses only APIs listed in its Runtime Contract.
+- Even when a method exists, the backend may deny a revoked grant, out-of-scope resource, changed Manifest revision, or adapter-policy violation.
+- A denial Error includes `code`, `capability`, `operation`, `hint`, and safe `details`.
+- Clean up subscriptions and timers in `useEffect`; every async method provides loading, error, and retry UI.
+
+See [Widget Capability Security](/en/architecture/capability-security.md) for authorization and [Runtime Boundary](/en/widgets/sandbox.md) for isolation limits.

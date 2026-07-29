@@ -16,8 +16,8 @@ def test_execute_graph_query(tmp_path):
     # Setup graph data
     db.create_node(node_id="t1", node_type="Task", properties={"title": "Task 1", "status": "pending"})
     db.create_node(node_id="t2", node_type="Task", properties={"title": "Task 2", "status": "completed"})
-    db.create_node(node_id="e1", node_type="CalendarEvent", properties={"summary": "Meeting 1"})
-    db.create_node(node_id="e2", node_type="CalendarEvent", properties={"summary": "Meeting 2"})
+    db.create_node(node_id="e1", node_type="Event", properties={"title": "Meeting 1"})
+    db.create_node(node_id="e2", node_type="Event", properties={"title": "Meeting 2"})
 
     db.create_edge(from_id="t1", to_id="e1", edge_type="ASSOCIATED_WITH", properties={"p1": "v1"})
     db.create_edge(from_id="t2", to_id="e2", edge_type="ASSOCIATED_WITH")
@@ -39,7 +39,7 @@ def test_execute_graph_query(tmp_path):
     q3 = {
         "type": "Task",
         "properties": {"status": "pending"},
-        "include": [{"relation": "ASSOCIATED_WITH", "target_type": "CalendarEvent"}],
+        "include": [{"relation": "ASSOCIATED_WITH", "target_type": "Event"}],
     }
     res3 = execute_graph_query(q3, db)
     assert len(res3) == 1
@@ -50,7 +50,58 @@ def test_execute_graph_query(tmp_path):
     assert rel["edge_type"] == "ASSOCIATED_WITH"
     assert rel["properties"]["p1"] == "v1"
     assert rel["target"]["id"] == "e1"
-    assert rel["target"]["properties"]["summary"] == "Meeting 1"
+    assert rel["target"]["properties"]["title"] == "Meeting 1"
+
+
+def test_execute_graph_query_uses_the_adapter_contract() -> None:
+    class NonSqliteGraph:
+        nodes = {
+            "t1": {"id": "t1", "type": "Task", "properties": {"status": "pending"}},
+            "e1": {"id": "e1", "type": "Event", "properties": {"title": "Meeting"}},
+        }
+
+        def list_nodes(self, node_type=None):
+            return [node for node in self.nodes.values() if node_type is None or node["type"] == node_type]
+
+        def get_edges(self, node_id):
+            return [
+                {
+                    "from_id": "t1",
+                    "to_id": "e1",
+                    "type": "ASSOCIATED_WITH",
+                    "properties": {"source": "adapter"},
+                }
+            ]
+
+        def get_node(self, node_id):
+            return self.nodes.get(node_id)
+
+        def get_conn(self):
+            raise AssertionError("query engine must not open a SQLite connection")
+
+    result = execute_graph_query(
+        {
+            "type": "Task",
+            "properties": {"status": "pending"},
+            "include": [{"relation": "ASSOCIATED_WITH", "target_type": "Event"}],
+        },
+        NonSqliteGraph(),
+    )
+
+    assert result == [
+        {
+            "id": "t1",
+            "type": "Task",
+            "properties": {"status": "pending"},
+            "relations": [
+                {
+                    "edge_type": "ASSOCIATED_WITH",
+                    "properties": {"source": "adapter"},
+                    "target": {"id": "e1", "type": "Event", "properties": {"title": "Meeting"}},
+                }
+            ],
+        }
+    ]
 
 
 def test_graph_mutation_endpoint(tmp_path, monkeypatch):
@@ -67,6 +118,7 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
 
     # Create nodes first
     payload = {
+        "idempotency_key": f"graph-endpoint-create-v1:{tmp_path}",
         "actions": [
             {
                 "action": "create_node",
@@ -77,8 +129,8 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
             {
                 "action": "create_node",
                 "id": "e-mut-1",
-                "type": "CalendarEvent",
-                "properties": {"summary": "Event Mut 1"},
+                "type": "Event",
+                "properties": {"title": "Event Mut 1"},
             },
             {
                 "action": "create_edge",
@@ -87,13 +139,23 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
                 "type": "ASSOCIATED_WITH",
                 "properties": {"note": "mutation check"},
             },
-        ]
+        ],
     }
 
     response = client.post("/api/graph/mutate", json=payload)
     assert response.status_code == 200
     res_data = response.json()
     assert res_data["status"] == "success"
+    durable_run = main.run_store.get_run(res_data["run_id"], include_events=True)
+    assert durable_run["status"] == "succeeded"
+    assert durable_run["state"]["phase"] == "done"
+    assert any(event["type"] == "interaction_requested" for event in durable_run["events"])
+    assert any(event["type"] == "interaction_resolved" for event in durable_run["events"])
+
+    duplicate = client.post("/api/graph/mutate", json=payload).json()
+    assert duplicate["status"] == "success"
+    assert duplicate["run_id"] == res_data["run_id"]
+    assert duplicate["ticket_id"] == res_data["ticket_id"]
 
     # Query database to check if nodes and edge exist
     db = main.graph_db

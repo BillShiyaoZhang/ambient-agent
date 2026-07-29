@@ -1,63 +1,43 @@
-# Permissions & Auditing
+# Permissions, Execution Boundaries, and Audit
 
-Ambient Agent isolates card execution security and provides visual auditing of prompt contents.
+Ambient Agent uses composable policy layers rather than one global “approved” boolean. Widget grants, local model tools, Capability actions, MCP/remote-Agent runtimes, and Coding Agents answer different questions. Approval in an outer layer never weakens an inner constraint.
 
-## 1. Permission File `backend_permissions.json`
+## 1. Widget Capability Grants
 
-Stored under `workspace/backend_permissions.json`, it defines white-listed system calls per `app_id`:
+Widget authority is approved together with data schemas in the schema-alignment interaction and persisted as exact Manifest V2 grants. `CapabilityAuthorizer` defaults to deny and checks App, category, operation, and resource for every Graph, network, file, and installed-capability adapter operation.
 
-```json
-{
-  "weather-app": {
-    "mcp_servers": [
-      {
-        "command": ["python", "-m", "mcp_weather"],
-        "args": ["--port", "9000"]
-      }
-    ],
-    "agents": ["http://localhost:5000/agent/v1"]
-  }
-}
-```
+When Manifest revision or grants digest changes, an old SDK snapshot cannot continue calling. Hiding a frontend method is not authorization; the backend trusts only the current persistent Manifest. See [Widget Capability Security](/en/architecture/capability-security.md) for the full model.
 
-## 2. In-flight Interception (`AppPermissionModal`)
+## 2. Local model tools: Tool Gateway
 
-When a widget requests an unlisted command:
+`ToolGateway` executes model-requested Python tools. Every `ToolSpec` defines typed input/output schemas, effect, required scopes, approval policy, timeout, output limit, idempotency requirement, and sensitive fields.
 
-1.  Backend creates an async future and suspends the execution thread.
-2.  Frontend displays `AppPermissionModal` asking for manual approval.
-3.  If approved, the backend appends the permission configuration to the JSON file and resumes execution.
+The Gateway rejects unregistered tools, unknown arguments, insufficient scope, missing approval, and missing idempotency keys, and redacts tool events. Converse receives only read tools projected from the [Agent System Capability Catalog](/en/agent/system-capabilities.md). Effectful workflows use a durable effect ledger rather than an in-process result cache.
 
-## 3. LLM Audit Logs
+## 3. Installed Capabilities, MCP, and remote Agents
 
-Every model request payload and response is recorded in the SQLite database to prevent leakage. You can view raw prompt texts in the **Audit Log** sidebar panel.
+A Widget uses only exact `catalog_id + action_id` pairs in its `capability.invoke` grant. The Capability Manifest then fixes the invocation adapter, input/result schemas, and recovery policy. An MCP runtime identity still includes command, arguments, explicit-environment digest, and Manifest revision; changes require a new durable Run interaction.
 
-## 4. OpenCode Agent Security Policies `opencode_permissions.json`
+A Widget grant is neither MCP spawn approval nor arbitrary-tool approval. A call passes, in order: Widget grant → Capability action schema → adapter runtime identity permission → protocol capability/tool policy → Run effect/recovery policy. The new version does not accept direct Widget `mcp_call_tool` submissions.
 
-Beyond widget runtime API permissions, the platform integrates the OpenCode developer agent to automatically compile and generate widget code. To guarantee host security, file access and command execution permissions are governed by the policy file `backend/opencode_permissions.json`.
+## 4. Coding Agents
 
-### Configuration Structure
+A Coding Agent works only in a per-Run staging App:
 
-```json
-{
-  "policy_mode": "interactive",
-  "files": {
-    "allowed_extensions": [".js", ".json", ".md"],
-    "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
-  },
-  "commands": {
-    "allowed_commands": ["npm test", "npm run build", "npm install"],
-    "allowed_prefixes": ["npm install ", "echo "],
-    "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"]
-  }
-}
-```
+1. Paths are safe direct children of the Apps root; escapes and symlinks are rejected.
+2. Only `controller.js`, `manifest.json`, and `README.md` are allowed.
+3. Terminals use fixed argv with `create_subprocess_exec()`, never a shell.
+4. Cwd is fixed to staging and the environment uses a small allowlist.
+5. stdout/stderr, wall time, and process groups are bounded.
+6. The prompt receives only the approved Runtime Contract.
+7. Verification requires equal Manifest grants and subset code use before atomic promotion.
 
-### Policy Properties
+Path/argv/environment/staging policy reduces risk but is not full OS network/filesystem isolation. It never replaces the Widget runtime authorizer.
 
-- `policy_mode`: Configuration mode (e.g. `"interactive"`). In interactive mode, when the agent attempts an unlisted command or file write, the execution suspends and a permission request is broadcast to the frontend for human approval.
-- `files`: Restricts file read/write access to specified `allowed_extensions` and `allowed_filenames`. Strict workspace directory traversal checks (Jail Checks) are enforced at the API level.
-- `commands`:
-  - `allowed_commands`: List of terminal commands allowed for exact matching execution.
-  - `allowed_prefixes`: List of allowed command prefixes.
-  - `blocklist`: List of blacklisted command substrings (e.g., destructive actions or unauthorized downloads) that are strictly blocked.
+## 5. Audit and sensitive data
+
+- Every capability allow/deny records App, Manifest revision, category, operation, resource summary, and stable code, never file content, secrets, or a full upstream body.
+- Run events use a versioned envelope with Run/session/step/attempt/trace correlation.
+- Tool and adapter events redact sensitive arguments and bound size. LLM audit stores bounded previews, hashes, usage, and latency.
+- Terminal Run events and LLM audit follow retention policy but remain sensitive workspace data.
+- User approval never replaces least scope, schema validation, idempotency, fencing, compensation, or `needs_attention` reconciliation.

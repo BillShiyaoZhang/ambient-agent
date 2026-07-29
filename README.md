@@ -1,206 +1,92 @@
 # Ambient Agent
 
-Ambient Agent 是一个开源、可自托管、支持多端同步的个人 AI 助理框架。与传统的纯文本聊天机器人（Chatbot）不同，Ambient Agent **优先使用富图形交互界面（Widget GUI）** 来展现 AI 的输出，并提供极致的数据隐私保护。
+[English](#english)
 
-## 🌟 核心特性
+![](./ambient-agent.jpg)
 
-1.  **动态 GUI 工作区 (Canvas Workspace)**
-    *   AI 能够根据您的指令，在您的屏幕 Canvas 上**动态生成并渲染全新的交互式 Mini App 卡片**（例如天气卡、任务管理器、倒计时、系统状态仪表盘等）。
-    *   工作区支持 Widget 的固定（Pin）、拖拽与关闭，并自动将布局持久化在本地。
-2.  **安全隔离沙箱与极致体验 (Sandbox & Seamless UX)**
-    *   **样式与脚本隔离**：前端内置沙箱渲染组件，将 CSS 样式作用域限制在 Widget 内，利用闭包安全执行 JS，防全局污染。
-    *   **无感全屏切换 (Seamless Fullscreen)**：网格视图与全屏视图共用同一个 React DOM 节点和内存上下文。全屏切换时**组件零卸载重装 (Zero Remount)**，状态和已加载数据 100% 完整保留。
-    *   **全局 API 缓存拦截 (Sandbox Fetch Cache)**：底层沙箱自动拦截并接管 JS 的 `fetch` 接口。对外部第三方域名的 GET 请求开启 5 分钟的内存缓存，**彻底消除跨生命周期的重复请求**，无需对 Widget 源码做任何改动。
-3.  **隐私至上与数据透明 (Privacy First & Audit Log)**
-    *   **双模驱动**：支持完全离线的本地模型（通过 **Ollama**）或自主可控的云端 API（支持 MiniMax 等 OpenAI 兼容的云端 API）。
-    *   **传输审计**：内置可视化的 **数据传输审计面板（Audit Log）**，清晰记录每一次发送至大模型服务器的 Prompt 完整 Payload 和返回的原始数据，真正做到数据去向可追踪、可审计。
-4.  **实时多端同步**
-    *   基于单服务多客户端的 FastAPI WebSocket 长连接设计，您在任何设备（手机、平板、PC）上都能同步与同一个 Agent 对话，操作同一个 Canvas 空间。
-5.  **坚实的测试防线 (TDD-first)**
-    *   项目完全遵循**测试先行**原则开发。在 `/tests` 目录下提供针对后端 API、WebSocket、XML 动态代码解析以及前端沙箱隔离、全局变量污染、状态分发的完整自动化测试集。
+Ambient Agent 是一个开源、自托管、以应用工作区为核心的个人 AI 助理。它把对话、持久后台 Run、图数据和 React/HTM Widget 组织在同一个桌面式界面中。
 
----
+## 核心能力
 
-## 🛠️ 技术栈 (Tech Stack)
+- 持久 Run：支持 checkpoint、用户确认、取消、重试、恢复和版本化事件流。
+- App-first 工作区：应用中心、浮动/最大化/贴靠窗口、任务抽屉和浮层聊天。
+- 动态 Widget：Manifest V2 + `controller.js`，先批准 schema 与 capability proposal，再 staging、校验并原子发布。
+- Schema-first Graph：Widget 与 Agent 通过后端校验的 Graph API 共享 Task、Event、Note 及扩展数据。
+- Provider Registry：在 UI 中配置本地或云端模型、默认/快速模型和会话覆盖。
+- 可选 Coding Agent：可在前端按需安装、登录和选择 OpenCode（ACP）或 Codex，每个 Run 固定 Agent 与模型绑定并在隔离 staging 中生成代码。
+- 最小能力授权：Widget 只获得 schema 对齐阶段批准的 Graph、Network、File 或 installed-capability grants，后端逐次执行默认拒绝 policy。
+- 结构化 Agent 能力目录：按 Router、Converse、Schema、Coding、Verification 角色投影真实可用能力，避免 prompt 漂移。
+- 后端权限与审计：Tool Gateway、MCP、Coding Agent、mutation interaction 和 LLM audit。
 
-*   **后端**: Python 3.11+ / FastAPI / SQLModel (SQLAlchemy) / SQLite / Pytest / httpx
-*   **前端**: React 19 / TypeScript / Vite / Tailwind CSS v4 / Vitest / Testing Library
+`SandboxWidget` 默认把 Controller 放进独立 `widget-frame` 服务提供的 opaque-origin sandbox iframe，通过一次性 ticket、MessageChannel 和后端逐次授权访问能力。Widget 的非秘密本地状态由宿主按 App 隔离保存在 IndexedDB；旧的服务端 Chromium 像素流暂时保留为显式回滚路径。浏览器 sandbox 不是 VM，Controller 仍按不可信代码处理。
 
----
+## 快速开始
 
-## 🚀 快速开始 (Containerized Quick Start)
-
-为了保障开发环境完全一致并防范本地包冲突，本项目**全量采用容器化开发和运行**。本地只需要安装 Docker 即可开始。
-
-### 1. 克隆项目与初始化
-
-首先克隆本项目至本地：
-```bash
-git clone <repository-url>
-cd ambient-agent
-```
-
-### 2. 配置运行环境
-
-将根目录下的 `.env.example` 复制为 `.env`：
 ```bash
 cp .env.example .env
+docker compose up --build
 ```
-`.env` 仅用于 OpenCode 等进程级运行参数。启动 Ambient Agent 后，请从“模型与 Provider”设置页添加
-OpenAI、Anthropic、MiniMax、Ollama 或其他 LLM 连接并选择默认模型；密钥不会写入 `.env`。
 
----
+打开 `http://localhost:5173`，然后在“模型与 Provider”中添加连接、选择默认模型与 Coding Agent。`.env` 只保存 Coding Agent 等进程级参数；Provider 密钥保存在 Git 忽略的 `workspace/llm/secrets.json`。
 
-### 3. 开发环境配置：使用 VS Code Dev Containers (推荐)
+如需使用 Codex，直接在“模型与 Provider”的 Coding Agent 卡片中点击“安装”，再通过设备码使用 ChatGPT 登录。CLI 与原生登录保存在专用 Docker volume 中，不需要宿主机 Bridge。
 
-这是最推荐的**代码开发与调试方式**。IDE 会直接连接容器内部，提供免安装的编译器、代码补全、格式化和调试体验。
+开发模式：
 
-1. 确保本地已安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/) 并启动，且 VS Code 安装了 `Dev Containers` 插件。
-2. 用 VS Code 打开项目根目录。
-3. 按下 `Cmd+Shift+P` (Windows/Linux 上是 `Ctrl+Shift+P`)，选择 **`Dev Containers: Reopen in Container`**。
-4. 容器会自动在本地启动并安装 Node.js 22、Python 3.11、`uv` 依赖，以及通过官方安装脚本拉取的最新 `opencode` CLI（默认放置于 `/usr/local/bin/opencode`，**宿主机无需预装**）。
-5. **在容器内启动服务**：
-   - 打开终端 1，启动后端：
-     ```bash
-     uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-     ```
-   - 打开终端 2，启动前端：
-     ```bash
-     cd frontend
-     npm run dev
-     ```
-6. **手动端口转发（重要）**：
-   如果 IDE 没有自动转发 8000 端口，请点击 IDE 的 **Ports（端口）** 标签页，点击 **Add Port**，手动添加 **`8000`** 端口转发。
-7. 在本地 Mac 浏览器中访问 **[http://localhost:5173/](http://localhost:5173/)** 开始开发。
+```bash
+uv sync
+npm --prefix frontend install
+uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+npm --prefix frontend run dev
+```
 
----
+完整说明见[中文文档](docs/guide/introduction.md)或 [English documentation](docs/en/guide/introduction.md)。
 
-### 4. 运行环境配置：使用 Docker Compose 一键启动
-
-如果您不需要修改代码，仅想在本地一键拉起整个应用进行运行、演示或集成测试：
-
-1. 在项目根目录下直接运行：
-   ```bash
-   docker compose up --build
-   ```
-2. 服务启动后：
-   - 后端服务运行在：`http://localhost:8000`
-   - 前端服务运行在：`http://localhost:5173`
-   - 本地代码修改会自动挂载并同步热重载至容器内。
-   - 构建过程中会自动通过官方安装脚本拉取最新 `opencode` 并放入 `/usr/local/bin`，**宿主机无需预装 opencode**。如需校验：
-     ```bash
-     docker compose run --rm backend opencode --version
-     ```
-
----
-
-## 🧪 单元测试与代码校验
-
-开发过程中，所有代码的规范和功能校验必须在**容器内部终端**运行并通过：
-
-*   **后端代码校验与测试**：
-    ```bash
-    # 运行风格检查与自动修复 (Ruff)
-    uv run ruff check . --fix
-    uv run ruff format .
-    
-    # 运行后端 pytest 单元测试
-    PYTHONPATH=. uv run pytest
-    
-    # 运行 UML 架构与代码一致性校验
-    uv run python scripts/verify_uml.py
-    ```
-*   **前端代码校验与测试**：
-    ```bash
-    cd frontend
-    # 运行代码风格检查
-    npm run lint
-    
-    # 运行前端单元测试
-    npm run test
-    ```
-
----
-
-## 📦 项目结构目录
+## 项目结构
 
 ```text
-ambient-agent/
-├── backend/            # Python FastAPI 源码
-│   ├── main.py         # 接口与 WebSocket 服务入口
-│   ├── models.py       # SQLModel 数据库模型定义
-│   ├── agent_parser.py # 动态 Widget 代码 XML 解析器
-│   └── llm_service.py  # LLM 请求适配与数据审计层
-├── frontend/           # React 前端源码
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── ChatPanel.tsx       # 侧边栏聊天面板
-│   │   │   ├── DashboardCanvas.tsx # 仪表盘工作区 Canvas
-│   │   │   ├── SandboxWidget.tsx   # 毛玻璃沙箱渲染组件
-│   │   │   └── AuditLogPanel.tsx   # 可视化数据传输审计日志
-│   │   ├── services/
-│   │   │   └── websocket.ts        # 客户端 WebSocket 通信
-│   │   └── App.tsx                 # 根状态机逻辑与集成
-│   └── vite.config.ts  # Vite 与 Vitest 配置文件
-├── tests/              # 统一测试集
-│   ├── backend/        # 后端单元和集成测试
-│   └── frontend/       # 前端渲染和隔离沙箱测试
-└── README.md
+backend/          FastAPI、Agent durable workflow、Run、Graph、应用与集成
+frontend/src/     React 工作区、应用中心、Widget 宿主和客户端服务
+widget-runtime/   浏览器 iframe Shell 与旧 Chromium 像素流 Runtime
+docs/             严格对应的中文与 docs/en/ 英文文档
+scripts/          契约生成与 UML、文档、Widget 校验
+tests/            Pytest 与 Vitest 测试
+workspace/        本地运行数据（Git 忽略）
 ```
 
----
+## 验证
 
-## 🤝 团队协作与开发规范 (Collaboration Guidelines)
-
-为了保证多人高效、规范地共同开发，项目制定了以下协作流程：
-
-### 1. Git 分支与合并规范 (GitHub Flow)
-*   **保护分支**：`main` 为主分支，代表随时可部署的生产环境，禁止直接向 `main` 推送代码。
-*   **开发分支**：所有新功能开发或 Bug 修复均应基于 `main` 分支出新的分支，命名规范为：
-    *   新功能：`feature/xxx`
-    *   修复：`bugfix/xxx`
-*   **代码合并**：
-    *   开发完毕后，向 `main` 分支发起 Pull Request (PR)。
-    *   合并 PR 前，必须通过 GitHub Actions 的自动化 CI 检查（运行所有单元测试、代码风格和 UML 契约检查）。
-    *   必须获得至少 **1 名其他团队成员** 的 Review 审核批准 (Approve) 方可合并。
-    *   **合并方式**：统一选择 **Create a Merge Commit**，保留开发分支的完整提交轨迹。
-
-
-
----
-
-## 🧩 AI 动态 Widget 协议说明
-
-当大模型需要为用户生成 Widget 时，其回复的文本流中需要包含如下 XML 格式的代码块（已被自动嵌入 `SYSTEM_PROMPT`）：
-
-```xml
-<ambient-widget id="WIDGET_ID" title="WIDGET_TITLE">
-<html-content>
-  <!-- 符合 HTML5 规范的结构。支持使用常规 Tailwind/CSS 样式类 -->
-  <button id="alert-btn" class="bg-purple-600 px-3 py-1 text-xs text-white rounded">
-    点击我
-  </button>
-</html-content>
-<css-styles>
-  /* 可选：特定的局部样式扩展 */
-  .glow-btn { box-shadow: 0 0 8px rgba(170, 59, 255, 0.4); }
-</css-styles>
-<js-script>
-  // 可选：JavaScript 逻辑。
-  // 执行时会传入参数 root，指向该 Widget 渲染的 HTML 根 DOM 节点。
-  // 必须使用 root.querySelector 来控制元素以保障实例隔离。
-  const btn = root.querySelector("#alert-btn");
-  btn.addEventListener("click", () => {
-    alert("来自 Widget 的隔离运行提示！");
-  });
-</js-script>
-</ambient-widget>
+```bash
+uv run ruff check .
+PYTHONPATH=. uv run pytest
+uv run python scripts/verify_uml.py
+uv run python scripts/verify_docs.py
+npm --prefix frontend run lint
+npm --prefix frontend run test
+npm --prefix frontend run build
 ```
 
-后端将会截获该代码块，将其解析并从文本气泡中擦除，把富卡片分发给前端的 `SandboxWidget` 完美展现。
+## English
 
----
+![](./ambient-agent-en.jpg)
 
-## 📄 开源协议
+Ambient Agent is an open-source, self-hosted personal AI assistant built around an app-first workspace. It combines chat, durable background Runs, graph data, and React/HTM Widgets in one desktop-style interface.
 
-本项目采用 [MIT](LICENSE) 协议开源。
+Key capabilities include durable Runs with confirmation and recovery, a windowed App Center workspace, staged Manifest V2 Widget publication, schema-first Graph data, user-approved least-authority Widget grants, a structured Agent capability catalog, UI-configured local or cloud LLM providers, selectable OpenCode/Codex coding backends, and backend enforcement for tools, MCP, mutations, and audit records.
+
+By default, `SandboxWidget` runs a Controller in an opaque-origin sandbox iframe served by the separate `widget-frame` service. A one-time ticket, transferred MessageChannel, and per-operation Backend authorization mediate capabilities. Non-secret local Widget state is host-owned IndexedDB scoped by App; the former server-Chromium pixel stream remains as an explicit temporary rollback. The browser sandbox is not a VM, so Controllers are still treated as untrusted code.
+
+Start with:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open `http://localhost:5173`, add a connection in “Models & Providers,” and select a default model. See the [English documentation](docs/en/guide/introduction.md) for architecture, development, and security details.
+
+OpenCode and Codex are available as Widget coding backends. Coding-agent CLIs are installed on demand into a managed Docker volume. Codex uses its own device-code ChatGPT login/subscription and never receives the Ambient Agent provider key or model binding; OpenCode can inherit the Ambient primary model or use a dedicated binding from the shared Provider Registry.
+
+## License
+
+[MIT](LICENSE)

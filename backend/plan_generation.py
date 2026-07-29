@@ -1,7 +1,8 @@
 import logging
 from typing import Any
 
-from backend.agent.providers import get_llm_provider
+from backend.agent.providers import ToolLoopBudget, get_llm_provider
+from backend.agent.errors import BudgetExhaustedError, WorkflowError
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 
@@ -11,7 +12,13 @@ logger = logging.getLogger("plan_generation")
 class PlanGenerationService:
     @staticmethod
     async def generate_plan(
-        instruction: str, app_id: str, schemas_context: str, db_session: Any = None, language: str = "zh"
+        instruction: str,
+        app_id: str,
+        schemas_context: str,
+        db_session: Any = None,
+        language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
     ) -> str:
         """
         Generates a high-level summary implementation plan describing the widget and its UI elements.
@@ -40,17 +47,22 @@ Please write a brief implementation plan for this widget."""
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         try:
-            raw_response = await provider.generate(messages, db_session=db_session)
+            raw_response = await provider.generate(
+                messages,
+                db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "plan"},
+            )
             return raw_response.strip()
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to generate implementation plan: {e}")
-            return (
-                f"Implementation Plan for '{app_id}': Build widget UI conforming to the instruction: '{instruction}'."
-                if not is_zh
-                else f"应用 '{app_id}' 的开发计划：根据指令 '{instruction}' 构建组件界面。"
-            )
+            raise WorkflowError(
+                "Implementation plan generation failed",
+                code="plan_generation_failed",
+                retryable=True,
+            ) from e
 
     @staticmethod
     async def refine_plan(
@@ -61,6 +73,8 @@ Please write a brief implementation plan for this widget."""
         feedback: str,
         db_session: Any = None,
         language: str = "zh",
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
     ) -> str:
         """
         Refines the current plan using direct natural language feedback from the user.
@@ -91,10 +105,19 @@ Update and output the refined implementation plan."""
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
         try:
-            raw_response = await provider.generate(messages, db_session=db_session)
+            raw_response = await provider.generate(
+                messages,
+                db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "plan_refine"},
+            )
             return raw_response.strip()
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"Failed to refine implementation plan: {e}")
-            return current_plan
+            raise WorkflowError(
+                "Implementation plan refinement failed",
+                code="plan_refinement_failed",
+                retryable=True,
+            ) from e

@@ -18,6 +18,7 @@ def valid_manifest(**overrides):
         "app_version": "0.1.0",
         "intents": ["plan my morning"],
         "schema_refs": ["Task", "Event"],
+        "capabilities": [],
     }
     data.update(overrides)
     return data
@@ -29,7 +30,115 @@ def test_valid_manifest_round_trips():
     assert manifest.to_dict() == valid_manifest()
 
 
-@pytest.mark.parametrize("version", [0, 2, "1", None])
+def test_app_scoped_network_grant_round_trip():
+    capabilities = [
+        {
+            "id": "network.request",
+            "scope": {
+                "sources": {
+                    "forecast": {
+                        "base_url": "https://api.open-meteo.com",
+                        "paths": ["/v1/forecast"],
+                        "methods": ["GET"],
+                        "response_limit": 1_048_576,
+                    }
+                }
+            },
+        }
+    ]
+
+    manifest = AppManifest.from_dict(
+        valid_manifest(capabilities=capabilities),
+        expected_app_id="morning-planner",
+    )
+
+    assert [grant.to_dict() for grant in manifest.capabilities] == capabilities
+    assert manifest.to_dict()["capabilities"] == capabilities
+    assert manifest.grants_digest.startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {"base_url": "http://api.example.com", "paths": ["/v1"], "methods": ["GET"]}
+                    }
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {"forecast": {"base_url": "https://127.0.0.1", "paths": ["/v1"], "methods": ["GET"]}}
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {"forecast": {"base_url": "https://localhost", "paths": ["/v1"], "methods": ["GET"]}}
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {"base_url": "https://api.example.com/path", "paths": ["/v1"], "methods": ["GET"]}
+                    }
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {
+                            "base_url": "https://api.example.com",
+                            "paths": ["https://evil.test/"],
+                            "methods": ["GET"],
+                        }
+                    }
+                },
+            }
+        ],
+        [
+            {
+                "id": "network.request",
+                "scope": {
+                    "sources": {
+                        "forecast": {"base_url": "https://api.example.com", "paths": ["/v1"], "methods": ["DELETE"]}
+                    }
+                },
+            }
+        ],
+    ],
+)
+def test_network_grants_reject_unsafe_or_unsupported_declarations(capabilities):
+    with pytest.raises(ManifestValidationError, match=r"capabilit|network|HTTPS|source"):
+        AppManifest.from_dict(
+            valid_manifest(capabilities=capabilities),
+            expected_app_id="morning-planner",
+        )
+
+
+def test_manifest_v2_rejects_removed_top_level_data_sources():
+    with pytest.raises(ManifestValidationError, match="unknown"):
+        AppManifest.from_dict(
+            valid_manifest(data_sources={}),
+            expected_app_id="morning-planner",
+        )
+
+
+@pytest.mark.parametrize("version", [0, 1, 3, "2", None])
 def test_manifest_version_must_be_supported_integer(version):
     with pytest.raises(ManifestValidationError, match="manifest_version"):
         AppManifest.from_dict(valid_manifest(manifest_version=version), expected_app_id="morning-planner")
@@ -69,7 +178,7 @@ def test_list_fields_reject_wrong_types_empty_items_and_duplicates(field, value)
 
 def test_unknown_fields_are_rejected():
     with pytest.raises(ManifestValidationError, match="unknown"):
-        AppManifest.from_dict(valid_manifest(capabilities=[]), expected_app_id="morning-planner")
+        AppManifest.from_dict(valid_manifest(legacy_field=True), expected_app_id="morning-planner")
 
 
 @pytest.mark.parametrize("missing_field", valid_manifest())

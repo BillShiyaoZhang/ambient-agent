@@ -1,0 +1,119 @@
+services:
+  workspace:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: sleep infinity
+    init: true
+    working_dir: /workspaces/ambient-agent
+    volumes:
+      - ..:/workspaces/ambient-agent:cached
+      - coding_agent_data:/var/lib/ambient/coding-agents
+      - python_env:/var/lib/ambient/python-env
+      - widget_runtime_socket:/run/ambient-widget-runtime
+    environment:
+      CODING_AGENT_RUNTIME_DIR: /var/lib/ambient/coding-agents
+      UV_PROJECT_ENVIRONMENT: /var/lib/ambient/python-env
+      GRAPH_DATABASE_BACKEND: neo4j
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: ambient-agent-dev
+      NEO4J_DATABASE: neo4j
+      GRAPH_MIGRATE_SQLITE: "0"
+      WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
+      WIDGET_RUNTIME_SMOKE_ENABLED: "1"
+    security_opt:
+      - seccomp=unconfined
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      widget-runtime:
+        condition: service_healthy
+      widget-frame:
+        condition: service_healthy
+
+  widget-runtime:
+    build:
+      context: ..
+      dockerfile: widget-runtime/Dockerfile
+    init: true
+    user: "10001:10001"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      # Keep Chromium's browser sandbox enabled; Docker's default seccomp
+      # profile blocks the unprivileged user-namespace setup it requires.
+      - seccomp=unconfined
+    pids_limit: 192
+    mem_limit: 1g
+    cpus: 2.0
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/widget:size=64m,uid=10001,gid=10001,mode=0700
+    environment:
+      WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
+      WIDGET_RUNTIME_MAX_CONTEXTS: "16"
+    volumes:
+      - widget_runtime_socket:/run/ambient-widget-runtime
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - require("node:net").createConnection("/run/ambient-widget-runtime/runtime.sock").on("connect",function(){process.exit(0)}).on("error",function(){process.exit(1)})
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+
+  widget-frame:
+    build:
+      context: ..
+      dockerfile: widget-runtime/frame.Dockerfile
+    init: true
+    user: "node"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      WIDGET_FRAME_HOST: 0.0.0.0
+      WIDGET_FRAME_PORT: 8001
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch("http://127.0.0.1:8001/health").then(function(response){process.exit(response.ok?0:1)}).catch(function(){process.exit(1)})
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 2s
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/ambient-agent-dev
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  coding_agent_data:
+  python_env:
+  neo4j_data:
+  widget_runtime_socket:

@@ -1,8 +1,14 @@
+import json
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app, get_db
+from backend.main import app, app_manager, coding_agent_config_store, get_db
 from backend.models import ChatSession
+from backend.coding_agent_acp import OpenCodeStagedResult
+from backend.schema_diff import UnknownProperty, VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -10,11 +16,24 @@ from backend.workspace_storage import WorkspaceStorage
 def test_session_fixture(tmp_path):
     workspace_dir = str(tmp_path / "workspace")
     storage = WorkspaceStorage(workspace_dir)
+
+    old_apps_dir = app_manager.apps_dir
+    app_manager.apps_dir = storage.apps_dir
+
     yield storage
+    app_manager.apps_dir = old_apps_dir
 
 
-def test_websocket_rework_loops_flow(test_session, monkeypatch):
+@pytest.fixture(name="client")
+def client_fixture():
+    with TestClient(app) as client:
+        yield client
+
+
+def test_websocket_rework_loops_flow(test_session, monkeypatch, client):
     monkeypatch.setenv("FORCE_INTERACTIVE", "true")
+    coding_settings = {**coding_agent_config_store.get_settings(), "default_agent": "opencode"}
+    monkeypatch.setattr("backend.main.coding_agent_config_store.get_settings", lambda: coding_settings)
 
     # 1. Mock routing
     async def mock_route(content, existing_apps=None, db_session=None, **_kwargs):
@@ -31,10 +50,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
 
     # 2. Mock Plan Generation
     plan_counter = 0
+    plan_inputs = []
 
     async def mock_generate_plan(*args, **kwargs):
         nonlocal plan_counter
         plan_counter += 1
+        plan_inputs.append(kwargs)
         return f"Plan Version {plan_counter}"
 
     monkeypatch.setattr("backend.plan_generation.PlanGenerationService.generate_plan", mock_generate_plan)
@@ -52,33 +73,66 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
     # 4. Mock ACP OpenCode agent call
     opencode_counter = 0
 
-    async def mock_run_opencode(app_id, instruction, language="zh", on_update=None):
+    async def mock_run_opencode(
+        app_id,
+        instruction,
+        language="zh",
+        on_update=None,
+        promote=True,
+        **_kwargs,
+    ):
         nonlocal opencode_counter
         opencode_counter += 1
-        # Retrieve app_manager from main to write test files
-        from backend.main import app_manager
-
-        app_manager.create_or_update_app(
-            app_id=app_id, title="Rework App", html="<div>Reworked app</div>", css="", js="// code content"
+        assert instruction
+        assert on_update is not None
+        assert promote is False
+        apps_dir = Path(app_manager.apps_dir)
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = apps_dir / f".{app_id}.staging-{uuid4().hex}"
+        staging_dir.mkdir()
+        (staging_dir / "controller.js").write_text(
+            f"export default function App() {{ return ambient.html`<div>rework {opencode_counter}</div>`; }}",
+            encoding="utf-8",
         )
-        return f"OpenCode ran {opencode_counter} times"
+        (staging_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "manifest_version": 2,
+                    "id": app_id,
+                    "title": "Rework App",
+                    "description": "",
+                    "app_version": "0.1.0",
+                    "intents": [],
+                    "schema_refs": [],
+                    "capabilities": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return OpenCodeStagedResult(
+            output=f"OpenCode ran {opencode_counter} times",
+            app_id=app_id,
+            staging_dir=staging_dir,
+            live_dir=apps_dir / app_id,
+        )
 
-    monkeypatch.setattr("backend.main.run_opencode_agent_acp", mock_run_opencode)
+    monkeypatch.setattr("backend.main.run_coding_agent", mock_run_opencode)
 
     # 5. Mock Schema Verification (now uses diff())
-    from backend.schema_diff import VerificationDiff
-
     verify_counter = 0
 
-    async def mock_diff(app_id, widget_code, registered_schemas, db_session=None):
+    async def mock_diff(app_id, widget_code, registered_schemas, db_session=None, **_kwargs):
         nonlocal verify_counter
         verify_counter += 1
         if verify_counter == 1:
             diff = VerificationDiff()
             diff.unknown_props.append(
-                type(
-                    "U", (), {"node_type": "Task", "property_name": "bogus", "sample_value_repr": "x", "occurrences": 1}
-                )()
+                UnknownProperty(
+                    node_type="Task",
+                    property_name="bogus",
+                    sample_value_repr="x",
+                    occurrences=1,
+                )
             )
             # Manually recompute is_clean since the test mutated the list
             # after dataclass __post_init__.
@@ -95,13 +149,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
     app.dependency_overrides[get_db] = override_get_db
 
     # Save a chat session to the DB
-    session_obj = ChatSession(id="session-rework", title="Rework Loops Chat")
+    session_id = f"session-rework-{uuid4().hex}"
+    session_obj = ChatSession(id=session_id, title="Rework Loops Chat")
     test_session.add(session_obj)
     test_session.commit()
 
-    client = TestClient(app)
-
-    with client.websocket_connect("/ws/chat?session_id=session-rework") as websocket:
+    with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
         websocket.send_json({"sender": "user", "content": "Create complex app"})
 
         # Expect active list
@@ -111,15 +164,11 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
         # Expect running status update
         assert websocket.receive_json()["type"] == "session_status_update"
 
-        # Plan thinking & plan request 1
-        assert "正在为您制定开发计划" in websocket.receive_json()["message"]["content"]
+        # Plan request 1; progress is projected through the canonical Run stream.
         plan_req = websocket.receive_json()
         assert plan_req["type"] == "plan_approval_request"
         assert plan_req["plan"] == "Plan Version 1"
         plan_request_id = plan_req["request_id"]
-
-        # Expect waiting message
-        assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 1
         websocket.send_json(
@@ -132,14 +181,10 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             }
         )
 
-        # Schema alignment thinking & request 1
-        assert "正在对齐数据库 Schema" in websocket.receive_json()["message"]["content"]
+        # Schema request 1
         schema_req = websocket.receive_json()
         assert schema_req["type"] == "schema_approval_request"
         schema_request_id = schema_req["request_id"]
-
-        # Expect waiting message
-        assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Send rework_plan response back to request Plan Rework!
         websocket.send_json(
@@ -152,17 +197,13 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             }
         )
 
-        # Expect returning message
-        assert "正在返回开发计划制定阶段" in websocket.receive_json()["message"]["content"]
-
-        # Plan thinking & plan request 2 (reworked plan!)
-        assert "正在为您制定开发计划" in websocket.receive_json()["message"]["content"]
+        # Rework resumes directly from the durable plan checkpoint.
         plan_req_2 = websocket.receive_json()
         assert plan_req_2["type"] == "plan_approval_request"
         assert plan_req_2["plan"] == "Plan Version 2"
+        assert "Please rework plan to be simpler" in plan_inputs[1]["instruction"]
+        assert '"reused_schemas"' in plan_inputs[1]["schemas_context"]
         plan_request_id_2 = plan_req_2["request_id"]
-
-        assert "等待开发计划" in websocket.receive_json()["message"]["content"]
 
         # Approve Plan 2
         websocket.send_json(
@@ -175,13 +216,10 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             }
         )
 
-        # Schema alignment thinking & request 2
-        assert "正在对齐数据库 Schema" in websocket.receive_json()["message"]["content"]
+        # Schema request 2
         schema_req_2 = websocket.receive_json()
         assert schema_req_2["type"] == "schema_approval_request"
         schema_request_id_2 = schema_req_2["request_id"]
-
-        assert "等待数据库 Schema" in websocket.receive_json()["message"]["content"]
 
         # Approve Schema 2
         websocket.send_json(
@@ -194,25 +232,11 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             }
         )
 
-        # OpenCode starts execution
-        assert "正在启动 OpenCode 开发者智能体" in websocket.receive_json()["message"]["content"]
-
-        # Verification starts execution
-        assert "正在校验代码与 Database Schema" in websocket.receive_json()["message"]["content"]
-
-        # Expect Verification Report showing discrepancies (fails verification 1)
-        verify_report_msg = websocket.receive_json()
-        assert "Database Schema Verification Report" in verify_report_msg["message"]["content"]
-        assert "WARNING" in verify_report_msg["message"]["content"]
-
         # Expect Verification Approval request payload
         verify_req = websocket.receive_json()
         assert verify_req["type"] == "verification_approval_request"
         verify_request_id = verify_req["request_id"]
         assert "WARNING" in verify_req["report"]
-
-        # Expect waiting message
-        assert "等待 Schema 校验警告处理指令" in websocket.receive_json()["message"]["content"]
 
         # Send Rework Code response to request Auto-Fix!
         websocket.send_json(
@@ -224,24 +248,12 @@ def test_websocket_rework_loops_flow(test_session, monkeypatch):
             }
         )
 
-        # Expect returning message
-        assert "正在请求 OpenCode 自动修复代码对齐问题" in websocket.receive_json()["message"]["content"]
-
-        # OpenCode starts execution again (run 2)
-        assert "正在启动 OpenCode 开发者智能体" in websocket.receive_json()["message"]["content"]
-
-        # Verification starts execution again (run 2)
-        assert "正在校验代码与 Database Schema" in websocket.receive_json()["message"]["content"]
-
-        # Expect Verification Report showing PASS
-        verify_report_msg_2 = websocket.receive_json()
-        assert "✅ Schema Verification PASSED" in verify_report_msg_2["message"]["content"]
-
-        # Expect final reply and execution logs
+        # Process details remain in Run activity/debug; chat gets one concise answer.
         reply_msg = websocket.receive_json()
         assert reply_msg["type"] == "reply"
-        assert "OpenCode ran 2 times" in reply_msg["message"]["content"]
-        assert "✅ Schema Verification PASSED" in reply_msg["message"]["content"]
+        assert "已生成、验证并发布" in reply_msg["message"]["content"]
+        assert "OpenCode ran" not in reply_msg["message"]["content"]
+        assert "Schema Verification" not in reply_msg["message"]["content"]
 
         # Expect widget delivery message
         widget_msg = websocket.receive_json()

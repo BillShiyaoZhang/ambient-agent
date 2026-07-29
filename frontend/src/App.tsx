@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import wsService from "./services/websocket";
 import type { Message } from "./components/ChatPanel";
 import type { Widget } from "./components/DashboardCanvas";
@@ -11,14 +11,48 @@ import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
 import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
+import type { RunInteractionAction } from "./components/ChatRunCard";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { LLMSettingsDialog } from "./components/LLMSettings";
 import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
 import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
 import { mergeIncomingMessage } from "./lib/messages";
+import {
+  EMPTY_CONVERSATION_PROJECTION,
+  clearLiveStreams,
+  markRunCancelling,
+  orderedRunCards,
+  projectLiveRunEvents,
+  projectRunEvent,
+  projectRunSnapshot,
+  type ConversationProjection,
+  type RunInteractionState,
+} from "./lib/chatProjection";
+import { RunLiveEventBatcher, runLiveService } from "./services/runLive";
+import {
+  createCustomOntologyEntity,
+  parseEquivalentOntologyIris,
+} from "./lib/ontology";
+import {
+  reconcileProposalGraphEntity,
+  schemaProposalDependencyErrors,
+  type WidgetSchemaProposal,
+} from "./lib/widgetDesign";
 import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
-import type { AmbientRun } from "./services/runs";
+import { runService, type AmbientRun } from "./services/runs";
+import {
+  clearCodingAgentAuth,
+  getCodingAgentAuth,
+  installCodingAgent,
+  listCodingAgentModels,
+  loadCodingAgentConfiguration,
+  startCodingAgentAuth,
+  updateCodingAgentSettings,
+  updateCodingAgentModel,
+  type CodingAgentDefinition,
+  type CodingAgentSettings,
+} from "./services/codingAgents";
 import {
   createProvider,
   deleteProvider,
@@ -35,6 +69,31 @@ import {
 } from "./services/llm";
 
 const API_BASE = `http://${window.location.hostname}:8000`;
+
+function mergeBootstrapWidgets(current: Widget[], snapshots: Widget[]): Widget[] {
+  if (snapshots.length === 0) return current;
+  const next = [...current];
+  const currentIds = new Set(current.map((widget) => widget.id));
+  const currentRevisions = new Set(
+    current.map((widget) => `${widget.id}\0${widget.manifest_revision ?? ""}`),
+  );
+  let changed = false;
+
+  for (const snapshot of snapshots) {
+    if (!snapshot?.id) continue;
+    const revisionKey = `${snapshot.id}\0${snapshot.manifest_revision ?? ""}`;
+    if (currentRevisions.has(revisionKey)) continue;
+    // A different revision already in current state may be a WebSocket update
+    // delivered while this bootstrap request was pending, so current wins.
+    if (currentIds.has(snapshot.id)) continue;
+    currentIds.add(snapshot.id);
+    currentRevisions.add(revisionKey);
+    next.push(snapshot);
+    changed = true;
+  }
+
+  return changed ? next : current;
+}
 
 function localizedLLMError(code: string, language: "zh" | "en"): string {
   const messages: Record<string, [string, string]> = {
@@ -53,26 +112,57 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [chatProjection, setChatProjection] = useState<ConversationProjection>(EMPTY_CONVERSATION_PROJECTION);
   const [widgets, setWidgets] = useState<Widget[]>([]);
   const [canvasConfig, setCanvasConfig] = useState<CanvasConfigV3>(() => ({ ...EMPTY_CANVAS, windows: {} }));
   const [llmCatalog, setLLMCatalog] = useState<ProviderPreset[]>([]);
   const [llmProviders, setLLMProviders] = useState<LLMProvider[]>([]);
   const [llmSettings, setLLMSettings] = useState<LLMSettings>({ default_model: null, fast_model: null });
+  const [codingAgents, setCodingAgents] = useState<CodingAgentDefinition[]>([]);
+  const [codingAgentSettings, setCodingAgentSettings] = useState<CodingAgentSettings>({
+    default_agent: "opencode",
+    agent_models: {
+      opencode: { mode: "shared_binding", inherit: "ambient.primary" },
+      codex: { mode: "native" },
+    },
+  });
   const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [isChatOpen, setIsChatOpen] = useState(false);
   const chatOpenRef = useRef(false);
+  const creatingSessionRef = useRef(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const themeControllerRef = useRef<ReturnType<typeof createThemeController> | null>(null);
   if (!themeControllerRef.current) themeControllerRef.current = createThemeController();
   const [theme, setTheme] = useState<ThemeSnapshot>(() => themeControllerRef.current!.snapshot());
+  const [reducedMotion, setReducedMotion] = useState(
+    () => typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
 
   useEffect(() => {
     const controller = themeControllerRef.current!;
     const unsubscribe = controller.subscribe(setTheme);
     return () => { unsubscribe(); controller.destroy(); };
   }, []);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = (event: MediaQueryListEvent) => setReducedMotion(event.matches);
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, []);
+
+  const widgetPresentationContext = useMemo(
+    () => ({
+      theme,
+      locale: language === "zh" ? "zh-CN" : "en-US",
+      reduced_motion: reducedMotion,
+    }),
+    [language, reducedMotion, theme],
+  );
 
   const handleChatOpenChange = (open: boolean) => {
     chatOpenRef.current = open;
@@ -112,10 +202,15 @@ function App() {
 
   const refreshLLMConfiguration = useCallback(async () => {
     try {
-      const configuration = await loadLLMConfiguration(API_BASE);
-      setLLMCatalog(configuration.catalog);
-      setLLMProviders(configuration.providers);
-      setLLMSettings(configuration.settings);
+      const [llmConfiguration, codingAgentConfiguration] = await Promise.all([
+        loadLLMConfiguration(API_BASE),
+        loadCodingAgentConfiguration(API_BASE),
+      ]);
+      setLLMCatalog(llmConfiguration.catalog);
+      setLLMProviders(llmConfiguration.providers);
+      setLLMSettings(llmConfiguration.settings);
+      setCodingAgents(codingAgentConfiguration.agents);
+      setCodingAgentSettings(codingAgentConfiguration.settings);
     } catch (error) {
       console.error("Error loading LLM configuration:", error);
     }
@@ -153,23 +248,13 @@ function App() {
     setPendingBackendPermission(null);
   };
 
-  interface SchemaProposal {
-    reused_schemas: Array<{
-      id: string;
-      reason: string;
-      extended_properties: Record<string, string>;
-    }>;
-    new_schemas: Array<{
-      id: string;
-      name: string;
-      description: string;
-      properties: Record<string, string>;
-    }>;
-  }
+  type SchemaProposal = WidgetSchemaProposal;
   interface SchemaApprovalRequest {
     request_id: string;
     app_id: string;
+    plan?: string;
     proposal: SchemaProposal;
+    validation_errors?: string[];
   }
 
   interface PlanApprovalRequest {
@@ -184,6 +269,8 @@ function App() {
     request_id: string;
     app_id: string;
     report: string;
+    validation_errors?: string[];
+    allowed_actions?: Array<"rework_code" | "rework_schema" | "rework_plan">;
     options?: Array<{
       node_type: string;
       property_name: string;
@@ -204,7 +291,9 @@ function App() {
 
   useEffect(() => {
     if (pendingSchemaRequest) {
-      setEditedProposal(JSON.parse(JSON.stringify(pendingSchemaRequest.proposal)));
+      const proposal = JSON.parse(JSON.stringify(pendingSchemaRequest.proposal));
+      proposal.capabilities = Array.isArray(proposal.capabilities) ? proposal.capabilities : [];
+      setEditedProposal(proposal);
       setSchemaFeedback("");
     } else {
       setEditedProposal(null);
@@ -217,6 +306,10 @@ function App() {
       setVerificationFeedback("");
     }
   }, [pendingVerificationRequest]);
+
+  const schemaDependencyErrors = editedProposal
+    ? schemaProposalDependencyErrors(editedProposal)
+    : [];
 
   const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
     if (!pendingSchemaRequest) return;
@@ -262,6 +355,57 @@ function App() {
       feedback: feedbackText || ""
     });
     setPendingPlanRequest(null);
+  };
+
+  const handleResolveRunInteraction = (
+    interaction: RunInteractionState,
+    action: RunInteractionAction,
+  ) => {
+    const payload = interaction.payload;
+    if (interaction.kind === "plan_approval") {
+      wsService.sendMessage({
+        type: "plan_approval_response",
+        request_id: interaction.id,
+        approved: action === "approve",
+        plan: String(payload.plan || ""),
+        feedback: "",
+      });
+      return;
+    }
+    if (interaction.kind === "schema_approval") {
+      wsService.sendMessage({
+        type: "schema_approval_response",
+        request_id: interaction.id,
+        approved: action === "approve",
+        proposal: payload.proposal,
+        feedback: "",
+      });
+      return;
+    }
+    if (
+      interaction.kind === "verification_approval"
+      && ["rework_code", "rework_schema", "rework_plan"].includes(action)
+    ) {
+      wsService.sendMessage({
+        type: "verification_approval_response",
+        request_id: interaction.id,
+        approved: action,
+        feedback: "",
+        approved_options: [],
+      });
+    }
+  };
+
+  const handleInspectRunInteraction = (interaction: RunInteractionState) => {
+    if (interaction.status !== "pending") return;
+    const payload = interaction.payload;
+    if (interaction.kind === "plan_approval") {
+      setPendingPlanRequest(payload as unknown as PlanApprovalRequest);
+    } else if (interaction.kind === "schema_approval") {
+      setPendingSchemaRequest(payload as unknown as SchemaApprovalRequest);
+    } else if (interaction.kind === "verification_approval") {
+      setPendingVerificationRequest(payload as unknown as VerificationApprovalRequest);
+    }
   };
 
   // Helper functions for editing Reused Schema extensions
@@ -346,38 +490,48 @@ function App() {
     setEditedProposal(updated);
   };
 
-  const handleUpdateNewSchemaMeta = (schemaIndex: number, field: "name" | "description" | "id", val: string) => {
+  const handleUpdateNewSchemaMeta = (
+    schemaIndex: number,
+    field: "name" | "description" | "id" | "subclass_of" | "ontology_iri",
+    val: string,
+  ) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
+    const schema = updated.new_schemas[schemaIndex];
+    const previousId = schema.id;
     updated.new_schemas[schemaIndex][field] = val;
     if (field === "id") {
-      updated.new_schemas[schemaIndex].name = val.replace(/([A-Z])/g, ' $1').trim();
+      schema.name = val.replace(/([A-Z])/g, ' $1').trim();
+      if (schema.ontology_iri === `urn:ambient:ontology:${previousId}`) {
+        schema.ontology_iri = `urn:ambient:ontology:${val}`;
+      }
+      setEditedProposal(reconcileProposalGraphEntity(updated, previousId, val));
+      return;
     }
+    setEditedProposal(updated);
+  };
+
+  const handleUpdateEquivalentOntologyIris = (schemaIndex: number, value: string) => {
+    if (!editedProposal) return;
+    const updated = { ...editedProposal };
+    updated.new_schemas[schemaIndex].equivalent_to = parseEquivalentOntologyIris(value);
     setEditedProposal(updated);
   };
 
   const handleRemoveNewSchema = (schemaIndex: number) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
+    const removedId = updated.new_schemas[schemaIndex]?.id;
     updated.new_schemas.splice(schemaIndex, 1);
-    setEditedProposal(updated);
+    setEditedProposal(
+      removedId ? reconcileProposalGraphEntity(updated, removedId, null) : updated,
+    );
   };
 
   const handleAddNewSchema = () => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
-    let counter = 1;
-    let newId = `CustomEntity${counter}`;
-    while (updated.new_schemas.some(s => s.id === newId)) {
-      counter++;
-      newId = `CustomEntity${counter}`;
-    }
-    updated.new_schemas.push({
-      id: newId,
-      name: `Custom Entity ${counter}`,
-      description: "Custom entity registered by user",
-      properties: { "title": "string" }
-    });
+    updated.new_schemas.push(createCustomOntologyEntity(updated.new_schemas.map((schema) => schema.id)));
     setEditedProposal(updated);
   };
 
@@ -455,7 +609,8 @@ function App() {
             return null;
           }
         }));
-        setWidgets(loaded.filter((widget): widget is Widget => Boolean(widget)));
+        const snapshots = loaded.filter((widget): widget is Widget => Boolean(widget));
+        setWidgets((current) => mergeBootstrapWidgets(current, snapshots));
         if (raw.version !== 3) saveCanvasConfig(config);
       } catch (err) {
         console.error("Error loading canvas configuration:", err);
@@ -467,6 +622,8 @@ function App() {
   // 2. Fetch messages and connect the selected chat session.
   useEffect(() => {
     if (!activeSessionId) return;
+    let disposed = false;
+    setChatProjection(EMPTY_CONVERSATION_PROJECTION);
 
     // Load message history from DB
     const loadSessionHistory = async () => {
@@ -484,11 +641,24 @@ function App() {
     };
 
     loadSessionHistory();
+    void runService.list({
+      source_type: "chat",
+      source_id: activeSessionId,
+      limit: 100,
+      include_details: true,
+    }).then((runs) => {
+      if (disposed) return;
+      const sessionRuns = runs
+        .filter((run) => run.source_type === "chat" && run.source_id === activeSessionId)
+        .sort((left, right) => left.created_at.localeCompare(right.created_at));
+      setChatProjection((current) => sessionRuns.reduce(projectRunSnapshot, current));
+    }).catch((error) => {
+      console.error("Error loading chat runs:", error);
+    });
 
-    // Connect WebSocket
-    const wsUrl = `ws://${window.location.hostname}:8000/ws/chat`;
-    wsService.connect(wsUrl, activeSessionId, (data) => {
+    const handleProjection = (data: any) => {
       if (data.type === "ack" || data.type === "reply") {
+        if (!Number.isSafeInteger(data.message?.id) || data.message.id < 1) return;
         if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
           setUnreadCount((count) => count + 1);
         }
@@ -534,18 +704,6 @@ function App() {
             detail: data.event,
           })
         );
-      } else if (data.type === "mcp_call_response") {
-        window.dispatchEvent(
-          new CustomEvent(`mcp_call_response:${data.app_id}:${data.call_id}`, {
-            detail: data,
-          })
-        );
-      } else if (data.type === "mcp_read_response") {
-        window.dispatchEvent(
-          new CustomEvent(`mcp_read_response:${data.app_id}:${data.call_id}`, {
-            detail: data,
-          })
-        );
       } else if (data.type === "capability_call_response") {
         window.dispatchEvent(
           new CustomEvent(`capability_call_response:${data.catalog_id}:${data.call_id}`, {
@@ -558,12 +716,6 @@ function App() {
         setPendingPermission(data);
       } else if (data.type === "backend_permission_request") {
         setPendingBackendPermission(data);
-      } else if (data.type === "schema_approval_request") {
-        setPendingSchemaRequest(data);
-      } else if (data.type === "plan_approval_request") {
-        setPendingPlanRequest(data);
-      } else if (data.type === "verification_approval_request") {
-        setPendingVerificationRequest(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
       } else if (data.type === "session_title_updated") {
@@ -602,14 +754,54 @@ function App() {
           }
         });
       }
+    };
+
+    // /ws/chat is now the command/control socket. Durable reducer output is
+    // projected from the canonical replayable /ws/runs stream below.
+    const wsUrl = `ws://${window.location.hostname}:8000/ws/chat?projection=commands_only`;
+    wsService.connect(wsUrl, activeSessionId, handleProjection);
+    const projectedTypes = new Set([
+      "reply",
+      "widget",
+      "permission_request",
+      "mutation_preview",
+      "mutation_committed",
+    ]);
+    const liveBatcher = new RunLiveEventBatcher((events) => {
+      setChatProjection((current) => projectLiveRunEvents(current, events));
+    });
+    const unsubscribeLiveEvents = runLiveService.subscribe(
+      activeSessionId,
+      (event) => liveBatcher.push(event),
+      () => {
+        liveBatcher.clear();
+        setChatProjection((current) => clearLiveStreams(current));
+      },
+    );
+    const unsubscribeRunEvents = runService.subscribe((event) => {
+      if (event.session_id !== activeSessionId) return;
+      liveBatcher.flushNow();
+      setChatProjection((current) => projectRunEvent(current, event));
+      const payload = event.payload;
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
+      const type = (payload as Record<string, unknown>).type;
+      if (typeof type === "string" && projectedTypes.has(type)) {
+        handleProjection(payload);
+      }
     });
 
     return () => {
+      disposed = true;
+      liveBatcher.clear();
+      unsubscribeLiveEvents();
+      unsubscribeRunEvents();
       wsService.disconnect();
     };
   }, [activeSessionId, language, refreshLLMConfiguration, saveCanvasConfig]);
 
   const handleCreateSession = async () => {
+    if (creatingSessionRef.current) return;
+    creatingSessionRef.current = true;
     const newId = Math.random().toString(36).substring(2, 15);
     const newTitle = language === "zh" ? "新对话" : "New conversation";
     try {
@@ -624,6 +816,8 @@ function App() {
       }
     } catch (err) {
       console.error("Error creating session:", err);
+    } finally {
+      creatingSessionRef.current = false;
     }
   };
 
@@ -650,6 +844,22 @@ function App() {
       content: text,
     });
   };
+
+  const handleCancelRun = useCallback(async (runId: string) => {
+    setChatProjection((current) => markRunCancelling(current, runId));
+    try {
+      const run = await runService.cancel(runId);
+      setChatProjection((current) => projectRunSnapshot(current, run));
+    } catch (error) {
+      console.error("Error cancelling run:", error);
+      try {
+        const run = await runService.get(runId);
+        setChatProjection((current) => projectRunSnapshot(current, run));
+      } catch (refreshError) {
+        console.error("Error refreshing run after cancellation failed:", refreshError);
+      }
+    }
+  }, []);
 
   const handleRemoveWidget = (id: string) => {
     setCanvasConfig((previous) => {
@@ -782,10 +992,15 @@ function App() {
             widgets={uniqueWidgets}
             canvas={canvasConfig}
             onCanvasChange={handleCanvasChange}
-            renderWidgetContent={(widget) => (
-              <ErrorBoundary key={widget.id}>
+            renderWidgetContent={(widget, lifecycle, onActivate, onSuspendReady) => (
+              <ErrorBoundary key={`${widget.id}:${widget.manifest_revision ?? widget.grants_digest ?? "runtime"}`}>
                 <SandboxWidget
                   widget={widget}
+                  presentationContext={widgetPresentationContext}
+                  runtimeVisible={lifecycle === "active"}
+                  suspendRequested={lifecycle === "suspending"}
+                  onActivate={onActivate}
+                  onSuspendReady={onSuspendReady}
                   onFullscreen={(id) => setAppWindowMode(id, "maximized")}
                   onMinimize={(id) => setAppWindowMode(id, "floating")}
                 />
@@ -809,6 +1024,9 @@ function App() {
         open={isChatOpen}
         unreadCount={unreadCount}
         messages={messages}
+        runCards={orderedRunCards(chatProjection)}
+        liveStreams={chatProjection.liveStreams}
+        interactions={chatProjection.interactions}
         sessions={sessions}
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
@@ -819,10 +1037,15 @@ function App() {
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
+        onCancelRun={handleCancelRun}
+        onResolveRunInteraction={handleResolveRunInteraction}
+        onInspectRunInteraction={handleInspectRunInteraction}
         providers={llmProviders}
         modelSelection={sessions.find((session) => session.id === activeSessionId)?.model_selection ?? llmSettings.default_model}
         onModelChange={handleSessionModelChange}
         onManageModels={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
+        codingAgent={codingAgents?.find((agent) => agent.id === codingAgentSettings?.default_agent)}
+        codingAgentModel={codingAgentSettings?.agent_models?.[codingAgentSettings.default_agent]}
       />
 
       <LLMSettingsDialog
@@ -831,6 +1054,8 @@ function App() {
         catalog={llmCatalog}
         providers={llmProviders}
         settings={llmSettings}
+        codingAgents={codingAgents}
+        codingAgentSettings={codingAgentSettings}
         onClose={() => setIsLLMSettingsOpen(false)}
         onRefresh={refreshLLMConfiguration}
         onCreateProvider={(profile, credentials) => createProvider(API_BASE, profile, credentials)}
@@ -839,6 +1064,13 @@ function App() {
         onDiscoverModels={(providerId) => discoverProviderModels(API_BASE, providerId)}
         onTestProvider={(providerId, modelId, mode) => testProviderConnection(API_BASE, providerId, modelId, mode)}
         onUpdateSettings={(patch) => updateLLMSettings(API_BASE, patch)}
+        onUpdateCodingAgent={(patch) => updateCodingAgentSettings(API_BASE, patch)}
+        onInstallCodingAgent={(agentId) => installCodingAgent(API_BASE, agentId)}
+        onStartCodingAgentAuth={(agentId) => startCodingAgentAuth(API_BASE, agentId)}
+        onGetCodingAgentAuth={(agentId) => getCodingAgentAuth(API_BASE, agentId)}
+        onListCodingAgentModels={(agentId) => listCodingAgentModels(API_BASE, agentId)}
+        onClearCodingAgentAuth={(agentId) => clearCodingAgentAuth(API_BASE, agentId)}
+        onUpdateCodingAgentModel={(agentId, config) => updateCodingAgentModel(API_BASE, agentId, config)}
       />
 
       {/* Audit Log Panel Overlay */}
@@ -904,16 +1136,46 @@ function App() {
       />
 
 
-      {/* 🧠 App 数据 Schema 智能对齐 Modal */}
+      {/* 🧠 Canonical ontology alignment modal */}
       {pendingSchemaRequest && editedProposal && (
-        <SystemDialog open blocking size="large" title={language === "zh" ? "App 数据 Schema 对齐" : "App Schema Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 规划全局关联与数据结构。` : `Plan global relationships and data structures for app ${pendingSchemaRequest.app_id}.`}>
+        <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
           <div className="system-dialog-body flex flex-col gap-4">
+
+            {pendingSchemaRequest.plan && (
+              <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                  {language === "zh" ? "当前已批准 Plan（用于核对设计覆盖）" : "Current approved Plan (for coverage review)"}
+                </h4>
+                <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed text-slate-300">
+                  {pendingSchemaRequest.plan}
+                </div>
+              </div>
+            )}
+
+            {((pendingSchemaRequest.validation_errors?.length || 0) > 0 || schemaDependencyErrors.length > 0) && (
+              <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4">
+                <h4 className="text-xs font-semibold text-red-300">
+                  {language === "zh" ? "设计依赖尚未对齐" : "Design dependencies are not aligned"}
+                </h4>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  {language === "zh"
+                    ? "Schema 修改会同步影响 Graph grant。请修复下列问题，或使用自然语言让 Agent 重新对齐后再批准。"
+                    : "Schema edits affect Graph grants. Fix the issues below, or ask the agent to realign the proposal before approval."}
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-red-200">
+                  {[...new Set([
+                    ...(pendingSchemaRequest.validation_errors || []),
+                    ...schemaDependencyErrors,
+                  ])].map((error) => <li key={error}>{error}</li>)}
+                </ul>
+              </div>
+            )}
 
             {/* Reused Schemas list */}
             {editedProposal.reused_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
                 <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
-                  🔄 {language === "zh" ? "复用全局核心 Schema (推荐公共共享)" : "Reuse Global Core Schema (Recommended for Shared Data)"}
+                  🔄 {language === "zh" ? "复用规范本体实体（推荐）" : "Reuse Canonical Ontology Entity (Recommended)"}
                 </h4>
                 {editedProposal.reused_schemas.map((rs, sIdx) => (
                   <div key={rs.id} className="border border-cyan-500/20 bg-cyan-950/10 rounded-xl p-4 flex flex-col gap-3">
@@ -979,11 +1241,11 @@ function App() {
               </div>
             )}
 
-            {/* New Schemas list */}
+            {/* New canonical ontology entities */}
             {editedProposal.new_schemas.length > 0 && (
               <div className="flex flex-col gap-3">
                 <h4 className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
-                  ✨ {language === "zh" ? "注册全新 Schema (本应用特有概念)" : "Register New Schema (App-specific Concept)"}
+                  ✨ {language === "zh" ? "增长规范本体（全新概念）" : "Grow Canonical Ontology (New Concept)"}
                 </h4>
                 {editedProposal.new_schemas.map((ns, sIdx) => (
                   <div key={sIdx} className="border border-indigo-500/20 bg-indigo-950/10 rounded-xl p-4 flex flex-col gap-3">
@@ -993,13 +1255,13 @@ function App() {
                         value={ns.id}
                         onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "id", e.target.value)}
                         className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-white placeholder-slate-500 w-1/2 focus:outline-none focus:border-indigo-500 font-mono font-bold"
-                        placeholder="Schema ID (例: Pomodoro)"
+                        placeholder={language === "zh" ? "实体 ID（例如 Habit）" : "Entity ID (for example Habit)"}
                       />
                       <button
                         onClick={() => handleRemoveNewSchema(sIdx)}
                         className="text-red-400 hover:text-red-300 text-xs ml-auto"
                       >
-                        {language === "zh" ? "删除此实体" : "Delete Schema"}
+                        {language === "zh" ? "删除此实体" : "Delete Entity"}
                       </button>
                     </div>
 
@@ -1008,8 +1270,44 @@ function App() {
                       value={ns.description}
                       onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "description", e.target.value)}
                       className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs text-slate-300 placeholder-slate-500 w-full focus:outline-none focus:border-indigo-500"
-                      placeholder={language === "zh" ? "实体说明" : "Schema Description"}
+                      placeholder={language === "zh" ? "实体说明" : "Entity Description"}
                     />
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <label className="flex flex-col gap-1 text-[10px] text-slate-500 uppercase tracking-wide">
+                        {language === "zh" ? "父实体" : "Parent Entity"}
+                        <input
+                          type="text"
+                          value={ns.subclass_of || "Thing"}
+                          onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "subclass_of", e.target.value)}
+                          className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs normal-case text-slate-300 focus:outline-none focus:border-indigo-500"
+                          placeholder="Thing"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-[10px] text-slate-500 uppercase tracking-wide">
+                        {language === "zh" ? "规范 IRI" : "Canonical IRI"}
+                        <input
+                          type="text"
+                          value={ns.ontology_iri || `urn:ambient:ontology:${ns.id}`}
+                          onChange={(e) => handleUpdateNewSchemaMeta(sIdx, "ontology_iri", e.target.value)}
+                          className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs normal-case text-slate-300 focus:outline-none focus:border-indigo-500"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="flex flex-col gap-1 text-[10px] text-slate-500 uppercase tracking-wide">
+                      {language === "zh" ? "等价外部 IRI（逗号分隔，可选）" : "Equivalent External IRIs (comma-separated, optional)"}
+                      <input
+                        type="text"
+                        value={(ns.equivalent_to || []).join(", ")}
+                        onChange={(e) => handleUpdateEquivalentOntologyIris(sIdx, e.target.value)}
+                        className="bg-black/30 border border-white/10 px-2.5 py-1 rounded text-xs normal-case text-slate-300 focus:outline-none focus:border-indigo-500"
+                        placeholder="https://schema.org/Action"
+                      />
+                    </label>
+                    <span className="self-start rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
+                      data_scope: user_context
+                    </span>
 
                     {/* Properties List */}
                     <div className="flex flex-col gap-2">
@@ -1064,10 +1362,39 @@ function App() {
               </div>
             )}
 
+            <div className="flex flex-col gap-3 border border-amber-500/20 bg-amber-950/10 rounded-xl p-4">
+              <div>
+                <h4 className="text-xs font-semibold text-amber-300 uppercase tracking-wider">
+                  🛡️ {language === "zh" ? "申请的 Widget 能力" : "Requested Widget Capabilities"}
+                </h4>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  {language === "zh"
+                    ? "未列出的能力不会注入 Widget；所有调用还会在后端按下列 scope 再次授权。"
+                    : "Capabilities not listed here are absent from the Widget SDK; every operation is re-authorized against these scopes on the backend."}
+                </p>
+              </div>
+              {(editedProposal.capabilities || []).length === 0 ? (
+                <p className="text-[11px] text-slate-500 italic">
+                  {language === "zh" ? "不申请外部数据或写入能力（默认拒绝）" : "No external-data or write capability requested (default deny)"}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(editedProposal.capabilities || []).map((grant) => (
+                    <div key={grant.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                      <span className="font-mono text-[11px] font-semibold text-amber-300">{grant.id}</span>
+                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-slate-300">
+                        {JSON.stringify(grant.scope, null, 2)}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* 💬 自然语言微调反馈输入 */}
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
-                💬 {language === "zh" ? "使用自然语言调整 Schema 定义 (可选):" : "Adjust Schema via Natural Language (Optional):"}
+                💬 {language === "zh" ? "使用自然语言调整本体定义（可选）：" : "Adjust Ontology via Natural Language (Optional):"}
               </span>
               <textarea
                 value={schemaFeedback}
@@ -1087,7 +1414,7 @@ function App() {
                 onClick={handleAddNewSchema}
                 className="px-3 py-1.5 rounded-lg border border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10 transition-colors text-xs"
               >
-                + {language === "zh" ? "添加全新自定义 Schema" : "Add New Custom Schema"}
+                  + {language === "zh" ? "添加新的本体实体" : "Add Ontology Entity"}
               </button>
               
               <div className="flex items-center gap-3 ml-auto">
@@ -1108,12 +1435,16 @@ function App() {
                     onClick={() => handleResolveSchemaRequest("refine", schemaFeedback)}
                     className="px-4 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-500/30 text-indigo-300 text-xs transition-colors"
                   >
-                    {language === "zh" ? "调整 Schema (Refine)" : "Refine"}
+                    {language === "zh" ? "调整本体 (Refine)" : "Refine"}
                   </button>
                 )}
                 <button
                   onClick={() => handleResolveSchemaRequest(true)}
-                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
+                  disabled={schemaDependencyErrors.length > 0}
+                  title={schemaDependencyErrors.length > 0
+                    ? (language === "zh" ? "请先修复 Schema 与 Graph grant 的依赖" : "Fix Schema and Graph grant dependencies first")
+                    : undefined}
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-40 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
                 >
                   {language === "zh" ? "确认对齐并编码 (Approve)" : "Approve"}
                 </button>
@@ -1188,6 +1519,14 @@ function App() {
         <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 校验未完全对齐" : "Schema Alignment Warning"} description={language === "zh" ? `应用 ${pendingVerificationRequest.app_id} 的代码在 Graph DB 校验中发现不一致，请选择处理方式。` : `Discrepancies found in Graph DB validation for app ${pendingVerificationRequest.app_id}. Choose an action.`}>
           <div className="system-dialog-body flex flex-col gap-4">
 
+            {(pendingVerificationRequest.validation_errors?.length || 0) > 0 && (
+              <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4 text-[11px] text-red-200">
+                {(pendingVerificationRequest.validation_errors || []).map((error) => (
+                  <p key={error}>{error}</p>
+                ))}
+              </div>
+            )}
+
             {/* Verification Report content */}
             <div className="border border-red-500/20 bg-red-950/5 rounded-xl p-4 flex flex-col gap-3 font-sans text-xs">
               <h4 className="text-xs font-semibold text-red-400 uppercase tracking-wider font-sans">
@@ -1250,13 +1589,6 @@ function App() {
 
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
-              <button
-                onClick={() => handleResolveVerificationRequest("approve", verificationFeedback, [])}
-                className="px-3.5 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-white/5 transition-colors text-xs font-sans"
-              >
-                {language === "zh" ? "直接忽略并保存 (Bypass & Save)" : "Bypass & Save"}
-              </button>
-
               <div className="flex items-center gap-2.5 ml-auto">
                 <button
                   onClick={() => {

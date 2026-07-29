@@ -1,31 +1,197 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
+  neo4j:
+    image: neo4j:5.26-community
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-ambient-agent-dev}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+      NEO4J_dbms_memory_transaction_total_max: 256m
+    volumes:
+      - neo4j_data:/data
+    pids_limit: 256
+    mem_limit: 1250m
+    memswap_limit: 1250m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+      start_interval: 2s
+    logging: *default-logging
+    restart: unless-stopped
+
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    init: true
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
+    environment:
+      CODING_AGENT_RUNTIME_DIR: /var/lib/ambient/coding-agents
+      GRAPH_DATABASE_BACKEND: neo4j
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-ambient-agent-dev}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      GRAPH_MIGRATE_SQLITE: ${GRAPH_MIGRATE_SQLITE:-0}
+      RUNNER_MAX_CONCURRENCY: ${RUNNER_MAX_CONCURRENCY:-1}
+      WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
+      WIDGET_RUNTIME_SMOKE_ENABLED: ${WIDGET_RUNTIME_SMOKE_ENABLED:-1}
+    security_opt:
+      - seccomp=unconfined
+    pids_limit: 256
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.5
     volumes:
-      - ./backend:/app/backend
-      - ./forward:/app/forward
-      - ./scripts:/app/scripts
       - ./workspace:/app/workspace
-      - ./tests:/app/tests
+      - coding_agent_data:/var/lib/ambient/coding-agents
+      - widget_runtime_socket:/run/ambient-widget-runtime
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      widget-runtime:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      start_interval: 2s
+    logging: *default-logging
+    restart: unless-stopped
+
+  widget-runtime:
+    build:
+      context: .
+      dockerfile: widget-runtime/Dockerfile
+    init: true
+    user: "10001:10001"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      # Chromium uses its own user-namespace + seccomp renderer sandbox.
+      # Docker's default seccomp profile blocks the namespace setup.
+      - seccomp=unconfined
+    pids_limit: 192
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/widget:size=64m,uid=10001,gid=10001,mode=0700
+    environment:
+      WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
+      WIDGET_RUNTIME_MAX_CONTEXTS: ${WIDGET_RUNTIME_MAX_CONTEXTS:-4}
+      WIDGET_RUNTIME_IDLE_TIMEOUT_MS: ${WIDGET_RUNTIME_IDLE_TIMEOUT_MS:-60000}
+    volumes:
+      - widget_runtime_socket:/run/ambient-widget-runtime
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - require("node:net").createConnection("/run/ambient-widget-runtime/runtime.sock").on("connect",function(){process.exit(0)}).on("error",function(){process.exit(1)})
+      interval: 30s
+      timeout: 1s
+      retries: 15
+      start_period: 5s
+      start_interval: 2s
+    logging: *default-logging
+    restart: unless-stopped
+
+  widget-frame:
+    build:
+      context: .
+      dockerfile: widget-runtime/frame.Dockerfile
+    init: true
+    user: "node"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.25
+    environment:
+      WIDGET_FRAME_HOST: 0.0.0.0
+      WIDGET_FRAME_PORT: 8001
+    ports:
+      - "127.0.0.1:8001:8001"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch("http://127.0.0.1:8001/health").then(function(response){process.exit(response.ok?0:1)}).catch(function(){process.exit(1)})
+      interval: 30s
+      timeout: 1s
+      retries: 15
+      start_period: 2s
+      start_interval: 2s
+    logging: *default-logging
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: production
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_WIDGET_UI_TRANSPORT: ${VITE_WIDGET_UI_TRANSPORT:-iframe}
+    init: true
+    user: "101:101"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/index.html:/app/index.html
-      - ./frontend/vite.config.ts:/app/vite.config.ts
-      - /app/node_modules
+      - "127.0.0.1:5173:5173"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+      widget-frame:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:5173/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+      start_interval: 2s
+    logging: *default-logging
     restart: unless-stopped
+
+volumes:
+  coding_agent_data:
+  neo4j_data:
+  widget_runtime_socket:

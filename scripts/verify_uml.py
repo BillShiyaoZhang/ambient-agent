@@ -11,7 +11,6 @@ CLASS_TO_FILE = {
     "AppManager": "backend/app_manager.py",
     "AppRecordStore": "backend/app_records.py",
     "ContextManager": "backend/context_manager.py",
-    "AgentParser": "backend/agent_parser.py",
     "LLMService": "backend/llm_service.py",
     "LLMResult": "backend/llm_service.py",
     "LLMConfigStore": "backend/llm_config.py",
@@ -33,6 +32,9 @@ CLASS_TO_FILE = {
     "RouterContext": "backend/router_context.py",
     "GraphSnapshot": "backend/router_context.py",
     "MutationTicketManager": "backend/mutation_tickets.py",
+    "GraphDatabase": "backend/graph_db.py",
+    "Neo4jGraphDatabase": "backend/neo4j_graph_db.py",
+    "OntologyEntity": "backend/ontology.py",
     "PlanExecutor": "backend/agent/plan_executor.py",
     "CodingPlanExecutor": "backend/agent/plan_executor.py",
     "MutationPlanExecutor": "backend/agent/plan_executor.py",
@@ -48,6 +50,7 @@ CLASS_TO_FILE = {
     "TaskResult": "backend/agent/dag.py",
     "BackendManager": "backend/backend_manager.py",
     "StdioJsonRpcClient": "backend/backend_manager.py",
+    "WidgetRuntimeGateway": "backend/widget_runtime.py",
 }
 
 

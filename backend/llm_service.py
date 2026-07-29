@@ -14,8 +14,8 @@ from backend.models import LLMAuditLog
 
 
 SYSTEM_PROMPT = """You are Ambient Agent, an agentic personal coding and productivity assistant.
-Respond helpfully and use the supplied tools when needed. When creating an interactive app, emit the
-documented <ambient-widget> payload expected by Ambient Agent."""
+Respond helpfully and use only the supplied tools when needed. Interactive Apps are produced only by
+the isolated Widget workflow; never emit executable App source or inline UI artifacts in conversation."""
 
 
 class LLMResult(BaseModel):

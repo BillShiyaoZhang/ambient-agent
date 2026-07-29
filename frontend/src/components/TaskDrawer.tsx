@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -10,7 +10,13 @@ import {
   Server,
   X,
 } from "lucide-react";
-import { runService, type AmbientRun, type RuntimeSnapshot } from "../services/runs";
+import {
+  runService,
+  type AmbientRun,
+  type AmbientRunSummary,
+  type RunEvent,
+  type RuntimeSnapshot,
+} from "../services/runs";
 import { SystemDrawer, SystemIconButton } from "./system/SystemUI";
 import "./TaskDrawer.css";
 
@@ -25,8 +31,11 @@ interface TaskDrawerProps {
 type Tab = "active" | "attention" | "history" | "runtimes";
 const ACTIVE = new Set(["queued", "running", "cancel_requested"]);
 const ATTENTION = new Set(["waiting_user", "needs_attention"]);
+const EVENT_REFRESH_DEBOUNCE_MS = 100;
+const EVENT_REFRESH_MAX_WAIT_MS = 500;
+const OPEN_RUN_STATUSES = [...ACTIVE, ...ATTENTION].join(",");
 
-function formatDuration(run: AmbientRun): string {
+function formatDuration(run: AmbientRunSummary): string {
   const start = new Date(run.started_at || run.created_at).getTime();
   const end = new Date(run.finished_at || Date.now()).getTime();
   const seconds = Math.max(0, Math.round((end - start) / 1000));
@@ -37,29 +46,123 @@ function formatDuration(run: AmbientRun): string {
 
 export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSource }: TaskDrawerProps) {
   const isZh = language === "zh";
-  const [runs, setRuns] = useState<AmbientRun[]>([]);
+  const [runs, setRuns] = useState<AmbientRunSummary[]>([]);
   const [runtimes, setRuntimes] = useState<RuntimeSnapshot[]>([]);
   const [tab, setTab] = useState<Tab>("active");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<AmbientRun | null>(null);
   const [error, setError] = useState("");
+  const runsRefreshGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refreshRuns = useCallback(async () => {
+    const generation = ++runsRefreshGeneration.current;
     try {
-      const [nextRuns, nextRuntimes] = await Promise.all([runService.list({ limit: 200 }), runService.runtimes()]);
-      setRuns(nextRuns);
-      setRuntimes(nextRuntimes);
+      const [recentRuns, openRuns] = await Promise.all([
+        runService.list({ limit: 200, summary_only: true }),
+        runService.list({
+          status: OPEN_RUN_STATUSES,
+          limit: 500,
+          summary_only: true,
+        }),
+      ]);
+      if (generation !== runsRefreshGeneration.current) return;
+      const recentIds = new Set(recentRuns.map((run) => run.id));
+      setRuns([
+        ...recentRuns,
+        ...openRuns.filter((run) => !recentIds.has(run.id)),
+      ]);
       setError("");
-      if (selectedId) setSelected(await runService.get(selectedId));
+    } catch (refreshError) {
+      if (generation !== runsRefreshGeneration.current) return;
+      setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRuns();
+  }, [refreshRuns]);
+
+  const refreshRuntimes = useCallback(async () => {
+    try {
+      setRuntimes(await runService.runtimes());
+      setError("");
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
     }
-  }, [selectedId]);
+  }, []);
 
   useEffect(() => {
-    void refresh();
-    return runService.subscribe(() => void refresh());
-  }, [refresh]);
+    let disposed = false;
+    let timer: number | null = null;
+    let maxWaitTimer: number | null = null;
+    let inFlight = false;
+    let dirty = false;
+    let selectedDirty = false;
+
+    const trigger = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      if (maxWaitTimer !== null) window.clearTimeout(maxWaitTimer);
+      timer = null;
+      maxWaitTimer = null;
+      void flush();
+    };
+    const schedule = () => {
+      if (disposed) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        trigger();
+      }, EVENT_REFRESH_DEBOUNCE_MS);
+      if (maxWaitTimer === null) {
+        maxWaitTimer = window.setTimeout(() => {
+          trigger();
+        }, EVENT_REFRESH_MAX_WAIT_MS);
+      }
+    };
+    const flush = async () => {
+      if (disposed) return;
+      if (inFlight) {
+        dirty = true;
+        return;
+      }
+      inFlight = true;
+      const loadSelected = selectedDirty && selectedId;
+      dirty = false;
+      selectedDirty = false;
+      try {
+        await Promise.all([
+          refreshRuns(),
+          loadSelected
+            ? runService.get(loadSelected).then((nextSelected) => {
+                if (!disposed) setSelected(nextSelected);
+              })
+            : Promise.resolve(),
+          open && tab === "runtimes" ? refreshRuntimes() : Promise.resolve(),
+        ]);
+      } catch (refreshError) {
+        if (!disposed) {
+          setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+        }
+      } finally {
+        inFlight = false;
+        if (!disposed && (dirty || selectedDirty)) schedule();
+      }
+    };
+    const unsubscribe = runService.subscribe((event: RunEvent) => {
+      dirty = true;
+      if (event.run_id === selectedId) selectedDirty = true;
+      schedule();
+    });
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+      if (maxWaitTimer !== null) window.clearTimeout(maxWaitTimer);
+      unsubscribe();
+    };
+  }, [open, refreshRuns, refreshRuntimes, selectedId, tab]);
+
+  useEffect(() => {
+    if (open && tab === "runtimes") void refreshRuntimes();
+  }, [open, refreshRuntimes, tab]);
 
   const counts = useMemo(() => ({
     active: runs.filter((run) => ACTIVE.has(run.status)).length,
@@ -76,7 +179,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   });
 
   const grouped = useMemo(() => {
-    const groups = new Map<string, AmbientRun[]>();
+    const groups = new Map<string, AmbientRunSummary[]>();
     for (const run of visible) groups.set(run.owner_id, [...(groups.get(run.owner_id) || []), run]);
     return [...groups.entries()];
   }, [visible]);
@@ -84,13 +187,17 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   const perform = async (operation: () => Promise<unknown>) => {
     try {
       await operation();
-      await refresh();
+      await Promise.all([
+        refreshRuns(),
+        selectedId ? runService.get(selectedId).then(setSelected) : Promise.resolve(),
+        tab === "runtimes" ? refreshRuntimes() : Promise.resolve(),
+      ]);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : String(actionError));
     }
   };
 
-  const openDetail = async (run: AmbientRun) => {
+  const openDetail = async (run: AmbientRunSummary) => {
     setSelectedId(run.id);
     setSelected(await runService.get(run.id));
   };
@@ -157,7 +264,12 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
             <h4>{isZh ? "输入" : "Input"}</h4><pre>{JSON.stringify(selected.input, null, 2)}</pre>
             <footer>
               {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button onClick={() => perform(() => runService.cancel(selected.id))}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
-              {["failed", "cancelled", "needs_attention"].includes(selected.status) ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button> : null}
+              {["failed", "cancelled"].includes(selected.status) && !["unknown", "committed"].includes(selected.error?.effect_state || "") ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button> : null}
+              {selected.status === "needs_attention" ? <>
+                <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"))}>{isZh ? "确认未执行" : "Not committed"}</button>
+                <button onClick={() => perform(() => runService.reconcile(selected.id, "compensated"))}>{isZh ? "确认已补偿" : "Compensated"}</button>
+                <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_committed"))}>{isZh ? "确认已执行" : "Committed"}</button>
+              </> : null}
             </footer>
           </section>
         )}

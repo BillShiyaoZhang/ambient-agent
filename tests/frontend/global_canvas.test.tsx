@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import App from "../../frontend/src/App";
+import wsService from "../../frontend/src/services/websocket";
 import React from "react";
 
 // Stub scrollIntoView for JSDOM compatibility
@@ -26,6 +27,7 @@ vi.mock("../../frontend/src/services/websocket", () => {
 describe("Frontend Global Canvas & Message Merging TDD", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.clearAllMocks();
     localStorage.clear();
     
     // Mock global fetch
@@ -56,8 +58,6 @@ describe("Frontend Global Canvas & Message Merging TDD", () => {
               Promise.resolve({
                 id: app_id,
                 title: `App ${app_id}`,
-                html: "<div>mocked</div>",
-                css: "",
                 js: "",
               }),
           });
@@ -96,5 +96,79 @@ describe("Frontend Global Canvas & Message Merging TDD", () => {
 
     // Verify localStorage.getItem was called for global key
     expect(localStorage.getItem("pinned_widgets_global")).toContain("global-app-1");
+  });
+
+  it("does not let a late bootstrap snapshot overwrite a newer WebSocket widget revision", async () => {
+    let resolveBootstrapApp!: (response: Response) => void;
+    const bootstrapApp = new Promise<Response>((resolve) => {
+      resolveBootstrapApp = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/sessions")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => [{ id: "session-1", title: "Session 1" }],
+          });
+        }
+        if (url.includes("/messages")) {
+          return Promise.resolve({ ok: true, json: async () => [] });
+        }
+        if (url.endsWith("/api/apps/race-app")) return bootstrapApp;
+        if (url.endsWith("/api/canvas") && init?.method !== "POST") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              version: 3,
+              open_app_ids: ["race-app"],
+              active_app_id: "race-app",
+              windows: {
+                "race-app": {
+                  mode: "maximized",
+                  bounds: { x: 0.16, y: 0.12, width: 0.68, height: 0.72 },
+                },
+              },
+            }),
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      }),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(wsService.connect).toHaveBeenCalled());
+
+    act(() => {
+      (wsService as typeof wsService & { triggerMessage(data: unknown): void }).triggerMessage({
+        type: "widget",
+        widget: {
+          id: "race-app",
+          title: "Live Revision",
+          js: "",
+          manifest_revision: "2:1.0.1",
+        },
+      });
+    });
+    expect(await screen.findByText("Live Revision")).toBeDefined();
+
+    await act(async () => {
+      resolveBootstrapApp({
+        ok: true,
+        json: async () => ({
+          id: "race-app",
+          title: "Stale Bootstrap Revision",
+          js: "",
+          manifest_revision: "2:1.0.0",
+        }),
+      } as Response);
+      await bootstrapApp;
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Stale Bootstrap Revision")).toBeNull();
+      expect(screen.getByText("Live Revision")).toBeDefined();
+    });
   });
 });

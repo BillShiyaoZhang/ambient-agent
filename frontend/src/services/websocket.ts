@@ -18,7 +18,8 @@ class WebSocketService {
       this.onMessageCallback = sessionIdOrOnMessage;
     } else {
       this.onMessageCallback = onMessage || null;
-      wsUrl = `${url}?session_id=${sessionIdOrOnMessage}`;
+      const separator = url.includes("?") ? "&" : "?";
+      wsUrl = `${url}${separator}session_id=${encodeURIComponent(sessionIdOrOnMessage)}`;
     }
 
     const socket = new WebSocket(wsUrl);

@@ -2,7 +2,9 @@ import json
 import logging
 from typing import Any
 
-from backend.agent.providers import get_llm_provider
+from backend.agent.providers import ToolLoopBudget, get_llm_provider
+from backend.agent.errors import BudgetExhaustedError, VerificationError
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 from backend.schema_diff import (
@@ -15,12 +17,7 @@ logger = logging.getLogger("schema_verification")
 
 
 class SchemaVerificationService:
-    """Verifies whether widget JavaScript conforms to registered graph schemas.
-
-    The new entry point is :meth:`diff`, which returns a structured
-    ``VerificationDiff``. The legacy :meth:`verify` returns the same diff
-    rendered to Markdown for back-compat with the audit panel UI.
-    """
+    """Return a structured diff between Widget code and approved Graph schemas."""
 
     @staticmethod
     async def diff(
@@ -28,12 +25,19 @@ class SchemaVerificationService:
         widget_code: dict[str, str],
         registered_schemas: list[dict[str, Any]],
         db_session: Any = None,
+        audit_context: dict[str, Any] | None = None,
+        budget: ToolLoopBudget | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> VerificationDiff:
         """Compute a deterministic diff between widget JS and registered schemas.
 
         Falls back to an LLM call only when regex parsing fails completely.
         """
+        if not isinstance(widget_code, dict):
+            raise VerificationError("Widget artifact is missing or malformed")
         js_source = widget_code.get("js", "")
+        if not isinstance(js_source, str) or not js_source.strip():
+            raise VerificationError("Widget artifact has no controller JavaScript to verify")
         try:
             return diff_controller_js(js_source, registered_schemas)
         except Exception as e:
@@ -56,6 +60,7 @@ class SchemaVerificationService:
             '"schema_type": str, "observed_value_repr": str}], '
             '"unknown_types": [{"type_name": str, "occurrences": int}]}\n'
             "No other text. No markdown fences."
+            "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(AgentRole.VERIFICATION)
         )
         user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source[:8000]}\n```"
 
@@ -68,6 +73,8 @@ class SchemaVerificationService:
                     {"role": "user", "content": user_prompt},
                 ],
                 db_session=db_session,
+                budget=budget,
+                audit_context={**(audit_context or {}), "stage": "schema_verification"},
             )
             cleaned = raw.strip()
             start = cleaned.find("{")
@@ -108,33 +115,11 @@ class SchemaVerificationService:
                     )
                 )
             return diff
-        except LLMConfigError:
+        except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:
             logger.error(f"LLM fallback for diff also failed: {e}")
-            return VerificationDiff()
-
-    @staticmethod
-    async def verify(
-        app_id: str,
-        widget_code: dict[str, str],
-        registered_schemas: list[dict[str, Any]],
-        db_session: Any = None,
-    ) -> str:
-        """Legacy text-report entry point. Returns Markdown."""
-        try:
-            diff = await SchemaVerificationService.diff(
-                app_id=app_id,
-                widget_code=widget_code,
-                registered_schemas=registered_schemas,
-                db_session=db_session,
-            )
-            return diff.to_markdown()
-        except LLMConfigError:
-            raise
-        except Exception as e:
-            logger.error(f"verify() failed: {e}")
-            return "⚠️ Schema Verification Failed: Could not contact verification model service."
+            raise VerificationError("Both deterministic and model schema verification failed", retryable=True) from e
 
     @staticmethod
     def extract_actions_sync(js_source: str) -> list[dict[str, Any]]:

@@ -1,90 +1,43 @@
-# 权限与审计
+# 权限、执行边界与审计
 
-为了保障宿主机的文件系统、终端环境安全，以及让用户随时清晰知晓数据的去向，Ambient Agent 引入了一套**显式授权审批与多维度数据审计系统**。
+Ambient Agent 使用可组合的多层 policy，而不是一个全局“已授权”布尔值。Widget grants、模型本地 tool、Capability action、MCP/remote Agent runtime 和 Coding Agent 各自回答不同问题，外层批准不能放宽内层约束。
 
-## 1. 权限配置文件 `backend_permissions.json`
+## 1. Widget Capability Grants
 
-系统的权限记录以静态 JSON 的形式持久化保存在工作区根目录下的 `workspace/backend_permissions.json` 文件中。
+Widget 权限在 schema 对齐 interaction 中与数据 schema 一起批准，并以 Manifest V2 精确 grants 固化。`CapabilityAuthorizer` 默认拒绝，按 App、类目、operation 与 resource 逐次检查 Graph、Network、File 和 installed-capability adapter。
 
-### 结构示例
+Manifest revision 或 grants digest 改变后，旧 SDK snapshot 不能继续调用。隐藏前端方法不是授权；后端只信任当前持久 Manifest。完整模型见 [Widget 能力安全架构](/architecture/capability-security.md)。
 
-```json
-{
-  "weather-app": {
-    "mcp_servers": [
-      {
-        "command": ["python", "-m", "mcp_weather"],
-        "args": ["--port", "9000"]
-      }
-    ],
-    "agents": ["http://localhost:5000/agent/v1"]
-  }
-}
-```
+## 2. 模型本地工具：Tool Gateway
 
-### 属性说明
+模型请求的 Python tool 由 `ToolGateway` 执行。每个 `ToolSpec` 声明强类型 input/output schema、effect、required scopes、approval policy、timeout、输出上限、幂等要求和敏感字段。
 
-- **Key (如 `weather-app`)**: 对应 Widget 的 `app_id`。所有权限以应用卡片为单位进行网状授权和强隔离。
-- `mcp_servers`: 允许拉起运行的 MCP 命令列表（command 和 args 的数组前缀必须精确匹配）。
-- `agents`: 允许该 Widget 连接和委托的外部智能体 SSE/Webhook URL 白名单。
+Gateway 拒绝未注册 tool、未知参数、scope 不足、缺少审批和缺少幂等键，并脱敏 tool events。Converse 只获得从 [Agent 系统能力目录](/agent/system-capabilities.md) 投影的 read tools；有副作用的 workflow 使用持久 effect ledger，而不是进程内 result cache。
 
-## 2. 运行时弹窗求权
+## 3. Installed Capability、MCP 与远端 Agent
 
-当 Widget 触发了上述未被白名单授权的高危动作时，后端的 `BackendManager` 会实施拦截：
+Widget 只使用 `capability.invoke` grant 中精确的 `catalog_id + action_id`。Capability Manifest 再固定 invocation adapter、input/result schema 和 recovery policy。MCP runtime identity 仍包括 command、args、显式 env digest 与 manifest revision；变化需要持久 Run interaction 重新批准。
 
-1.  **挂起等待**：后端生成包含 `request_id` 的 Promise 异步锁，并挂起该调用线程。
-2.  **前端广播**：通过 WebSocket 发送 `type: "backend_permission_request"` 消息至前端。
-3.  **UI 弹窗**：React 前端的 `AppPermissionModal` 组件被唤起，以醒目的警示框提示用户：_“卡片 [AppID] 正在请求执行命令行权限，是否允许？”_
-4.  **保存并释放**：用户如果点击“拒绝”，后端抛出异常拒绝运行；如果点击“同意”，后端将配置追加到 `backend_permissions.json` 之中保存，并释放 Promise 锁恢复执行。
+Widget grant 不等于 MCP spawn approval，也不等于任意 tool approval。调用必须依次通过：Widget grant → Capability action schema → adapter runtime identity permission → protocol capability/tool policy → Run effect/recovery policy。新版本不接受 Widget 直接提交 `mcp_call_tool`。
 
-## 3. 大模型传输审计面板
+## 4. Coding Agent
 
-大模型的数据泄漏与安全同样是一个焦点。为了让大模型每一次调用都绝对透明，系统实现了一个**明细审计链条**：
+Coding Agent 只在 per-Run staging App 中工作：
 
-### 审计数据流向
+1. 路径必须是 Apps 根的安全直接子项，拒绝 escape 与 symlink；
+2. 只允许 `controller.js`、`manifest.json` 和 `README.md`；
+3. terminal 使用固定 argv 与 `create_subprocess_exec()`，不使用 shell；
+4. cwd 固定在 staging，环境使用小型 allowlist；
+5. stdout/stderr、wall time 和 process group 有上限；
+6. Prompt 只获得批准 Runtime Contract；
+7. verifier 确认 Manifest grants 完全相等、代码使用为子集，再允许原子 promote。
 
-```mermaid
-graph LR
-    Harness[Orchestrator / IntentRouter] -->|Call generate| LLMSvc[LLMService]
-    LLMSvc -->|Record RAW Payload| AuditTable[(LLMAuditLog Table)]
-    LLMSvc -->|Request HTTPS| LLM[LLM Server]
+路径/argv/env/staging policy 降低风险，但不是完整 OS 网络/文件系统隔离。它不能替代 Widget runtime authorizer。
 
-    FE[AuditLogPanel.tsx] -->|GET /api/audit-logs| API[FastAPI Endpoint]
-    API -->|Query| AuditTable
-```
+## 5. 审计与敏感数据
 
-### 核心审计内容：
-
-- **原始 PromptPayload**：记录发送给 LLM 接口的完整系统指令（System Prompt）、聊天上下文历史和注入的 Widget 源码。您可以清晰查看有无敏感隐私数据泄漏。
-- **LLM 返回流 (RAW Response)**：大模型吐出的原始文本或结构化意图，包括未被正则清洗掉的完整 XML 代码块。
-- **审计界面**：用户随时可以在主页侧边栏点击 **Audit Log** 按钮唤起审计面板，它会按时间倒序展示出全部的审计单。
-
-## 4. OpenCode 开发者智能体安全执行策略 `opencode_permissions.json`
-
-除了 Widget 运行时的 API 权限，系统还集成了 OpenCode 开发者智能体，用于在后台自动编译、生成与修改 Widget 的代码。为了确保终端命令以及本地文件操作的安全性，系统在 `backend/opencode_permissions.json` 中定义了静态访问规则配置。
-
-### 结构示例
-
-```json
-{
-  "policy_mode": "interactive",
-  "files": {
-    "allowed_extensions": [".js", ".json", ".md"],
-    "allowed_filenames": ["controller.js", "manifest.json", "README.md"]
-  },
-  "commands": {
-    "allowed_commands": ["npm test", "npm run build", "npm install"],
-    "allowed_prefixes": ["npm install ", "echo "],
-    "blocklist": ["rm -rf", "curl", "wget", "sudo", "mv"]
-  }
-}
-```
-
-### 规则说明
-
-- `policy_mode`: 策略模式（如 `"interactive"`）。当检测到未白名单授权的文件写入或终端命令时，后端会通过 WebSocket 挂起并向前端广播审批请求，待用户手动授权后方可执行。
-- `files`: 限制智能体仅能操作符合 `allowed_extensions` 后缀或 `allowed_filenames` 白名单的文件名，同时系统强制执行根目录防穿越越权（Jail Check）检测。
-- `commands`:
-  - `allowed_commands`: 允许精确执行的命令列表。
-  - `allowed_prefixes`: 允许匹配的前缀列表。
-  - `blocklist`: 绝对禁止执行的高危关键字（如 `rm -rf`, `sudo` 等）。
+- 每次 capability allow/deny 记录 App、Manifest revision、类目、operation、resource 摘要和稳定 code，不记录文件内容、secret 或完整上游 body。
+- Run events 使用版本化 envelope，并带 Run/session/step/attempt/trace 关联。
+- Tool/adapter events 对敏感参数脱敏并限制大小；LLM audit 保存有界 preview、hash、usage 与 latency。
+- 终态 Run events 与 LLM audit 按 retention policy 清理，但仍是敏感 workspace 数据。
+- 用户批准不能代替最小 scope、schema 校验、幂等、fencing、补偿和 `needs_attention` reconciliation。

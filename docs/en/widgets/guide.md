@@ -1,100 +1,78 @@
-# Widget XML Protocol
+# Widget Format and Lifecycle
 
-When the LLM intends to output an interactive widget card, it embeds special `<ambient-widget>` XML containers in the streaming response. The backend parser extracts and compiles these blocks, removing the raw XML text from chat bubbles, and delivers them to the frontend canvas.
+Current Widgets use Manifest V2 plus a single React/HTM Controller. By default, the Controller executes and renders natively inside an opaque-origin sandbox iframe in the user's browser; the Docker Chromium pixel stream is only a temporary rollback path. Do not generate inline XML Widgets, `index.html`, `style.css`, or removed legacy SDK APIs.
 
-To combine high development efficiency, fast cold-start rendering, design consistency, and layout flexibility, the system utilizes the unified **React + HTM** declarative rendering mode.
+## 1. One carrier form
 
----
-
-## 1. Unified Declarative Rendering Protocol (Highly Recommended)
-
-The LLM outputs a single `<js-script>` block, defining a declarative React component via `ambient.html` (powered by `htm`). This mode eliminates compile overhead, supports reactive Hooks, and provides system-styled components out of the box.
-
-### A. Protocol Schema Example
-
-```xml
-<ambient-widget id="todo-manager" title="Task Board">
-<js-script>
-  // 1. Destructure React Hooks from ambient.react
-  const { useState, useEffect } = ambient.react;
-
-  // 2. Destructure pre-defined components (offline-ready, pre-styled)
-  const { Card, Button, TextField, List } = ambient.components;
-
-  export default function TodoWidget() {
-    const [tasks, setTasks] = useState([]);
-    const [input, setInput] = useState("");
-
-    useEffect(() => {
-      // Subscribe to backend graph DB updates
-      const unsub = ambient.graph.subscribe({ type: "Task" }, (data) => {
-        setTasks(data.nodes || []);
-      });
-      return unsub;
-    }, []);
-
-    const handleAdd = async () => {
-      if (!input.trim()) return;
-      await ambient.graph.mutate([
-        {
-          action: "create_node",
-          type: "Task",
-          properties: { content: input, completed: false }
-        }
-      ]);
-      setInput("");
-    };
-
-    // Render using ambient.html (use \$ to avoid template literal conflict in raw text)
-    return ambient.html`
-      <\${Card} title="My Tasks">
-        <div class="flex gap-2 mb-3">
-          <\${TextField} 
-            placeholder="Add a new task..." 
-            value=\${input} 
-            onChange=\${e => setInput(e.target.value)} 
-            onEnter=\${handleAdd}
-          />
-          <\${Button} label="Add" onClick=\${handleAdd} />
-        </div>
-        
-        <!-- Standard HTML and Tailwind CSS classes can be freely combined -->
-        <div class="border-t border-white/5 pt-3">
-          <\${List} 
-            items=\${tasks.map(t => t.properties.content)} 
-            itemStyle=\${{ backgroundColor: 'rgba(255,255,255,0.01)' }}
-          />
-        </div>
-      <//>
-    `;
-  }
-</js-script>
-</ambient-widget>
+```text
+workspace/apps/<app-id>/
+├── manifest.json
+├── controller.js
+├── README.md
+└── data/
 ```
 
-### B. Pre-defined Components (`ambient.components`)
+Every create and modify operation uses the durable Widget workflow, writes staging only after schema + capability approval, then verifies and atomically publishes. A chat model cannot directly return or persist an executable Widget.
 
-Pre-defined components inherit the host app's Design System, adapt automatically to dark/transparent themes, and are **fully offline-compatible**.
+## 2. Controller contract
 
-1. **Layout & Containers**:
-   - `<\${Card} title="Title" onClick=\${...}>Children<//>`: Rounded container card.
-   - `<\${Column} gap="8px" padding="10px">Children<//>`: Vertical flex column.
-   - `<\${Row} gap="8px" align="center">Children<//>`: Horizontal flex row.
-2. **Basic Inputs & Controls**:
-   - `<\${Text} text="Content" style=\${...} />`: Text label.
-   - `<\${Button} label="Label" variant="primary|secondary|danger" onClick=\${...} />`: Flat interactive button.
-   - `<\${TextField} label="Label" placeholder="..." value=\${value} onChange=\${...} onEnter=\${...} />`: Input text field.
-   - `<\${Checkbox} label="Label" checked=\${checked} onChange=\${...} />`: Inline checkbox.
-3. **Data Visualizations**:
-   - `<\${List} items=\${itemsArray} onItemClick=\${...} itemStyle=\${...} />`: Standard spacing vertical list.
-   - `<\${Table} columns=\${columnsArray} rows=\${rowsArray} onRowClick=\${...} />`: Self-adjusting responsive data table.
+- Default-export a renderable React component that receives `{ ambient }`.
+- Use `ambient.html` or JSX accepted by the Babel React preset.
+- Use `ambient.react` hooks for state and effects.
+- Use only the SDK listed by the Runtime Contract. Graph, network, files, and installed capabilities require matching grants.
+- Capability/source/catalog/action IDs are string literals and are never assembled at runtime.
+- Clean up subscriptions and timers. Do not use direct browser events, DOM, Cookies, browser storage globals, network, or dynamic-code APIs. Use only `ambient.storage` for local non-secret state. User drafts, form values, and editor content must hydrate during initialization and write through after meaningful changes; they must not live only in React hook memory because workspace suspension unmounts the Controller. A bounded debounce must register an async flush through `ambient.lifecycle.onBeforeSuspend(handler)`, write the latest ref-backed value to `ambient.storage`, await completion, and unsubscribe the handler during effect cleanup.
 
----
+```javascript
+export default function TaskList({ ambient }) {
+  const { useEffect, useState } = ambient.react;
+  const { Button, Card, Column, Text } = ambient.components;
+  const [tasks, setTasks] = useState([]);
 
-## 2. Field Specifications
+  useEffect(() => ambient.graph.subscribe({ type: "Task" }, setTasks), []);
 
-- `id`: Unique identifier for the widget. Alphanumeric and hyphens only (e.g., `weather-card`).
-- `title`: Widget title displayed on the Canvas drag-and-drop bar.
-- `<js-script>`: Core rendering and logic script. In the unified mode, it must `export default` a standard React component utilizing the injected hooks, components, and template parser from the `ambient` property.
+  async function addTask() {
+    await ambient.graph.mutate([{
+      action: "create_node",
+      type: "Task",
+      properties: { title: "New task", description: "", status: "todo", due_date: "" }
+    }]);
+  }
 
----
+  return ambient.html`
+    <${Card} title="Tasks">
+      <${Column} gap=${12}>
+        <${Text} text=${`${tasks.length} items`} />
+        <${Button} label="Add" onClick=${addTask} />
+      <//>
+    <//>`;
+}
+```
+
+## 3. Standard components
+
+`ambient.components` includes `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`. They provide host-themed appearance without granting external authority.
+
+## 4. Generation and publication checks
+
+The Runtime Contract is an approval envelope used by the publication coordinator, not the `manifest.json` file format. The Coding Agent maps only its `app_id`, schema ID list, and normalized capabilities to Manifest V2 `id`, `schema_refs`, and `capabilities`; it must not write `contract_version`, `catalog_version`, `schemas`, `grants_digest`, or `allowed_files` into the Manifest. Generation prompts must include a complete Manifest V2 template, and repair prompts must preserve this mapping so the approval envelope is never copied as an App artifact. `intents` must be an array of unique, non-empty strings, never objects.
+
+Publication checks, in order:
+
+1. safe paths, allowed files, size, UTF-8, and default export;
+2. module syntax and forbidden host-global/import/dynamic-code rules;
+3. Controller capability use is a subset of approved grants;
+4. staging Manifest grants exactly equal the approved Runtime Contract;
+5. Graph use matches effective schemas;
+6. artifact hash, grants digest, Run version, and effect/idempotency records.
+
+Only then is staging atomically promoted. Failure, cancellation, or denial preserves the existing App. When deterministic policy classifies a validation error as code-only with no approved-contract change, the Coding Agent keeps running repair and independent verification in the same staging directory and ACP session without a fixed three-turn ceiling. The loop stops immediately when the exact same finding repeats consecutively or the validated artifact hash does not change; infrastructure failures and errors requiring broader authority or Schema changes are also not blindly sent to the Coding Agent. Finding history is persisted with the failed draft, so a new Run attempt cannot restart the same failure loop from empty history. Any unresolved internal validation failure, timeout, or system error before promotion retains the failed draft together with its error in non-executable hidden staging; retry repairs that directory in place or continues verification instead of deleting and regenerating it. When the Controller and Manifest grants disagree, the repair turn receives the approved Runtime Contract again and may only edit the existing `controller.js`/`manifest.json` to match it; it cannot request or broaden authority. Only explicit cancellation, rework, or expiry of the draft-retention period may clean that staging.
+
+## 5. Debugging
+
+- The isolated iframe Runtime returns compilation/render failures as structured `runtime_error` events displayed in the Widget; Controller console output never enters the host-page realm.
+- Generation failures appear in chat with the App ID, failed phase, error code, and cause. Reply with `/repair <app-id> [feedback]` to continue from the retained draft.
+- For `capability_denied`, first check Manifest entity/operation/source/path/action scope.
+- Handle interactions and `needs_attention` in the Task Drawer.
+- Run `node scripts/verify_widget_controller.mjs <controller.js>` for static verification.
+- See [ambient SDK](/en/widgets/sdk.md) for APIs, [Widget Isolation Runtime](/en/widgets/sandbox.md) for execution isolation, and [Widget Capability Security](/en/architecture/capability-security.md) for authorization.

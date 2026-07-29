@@ -361,6 +361,11 @@ class AppStoreService:
         apps = [item for item in self.generated_provider.list_catalog_items() if item["ui_app_id"] not in bound_app_ids]
         return apps + capabilities
 
+    def list_capabilities(self) -> list[dict[str, Any]]:
+        """Return only installed executable capability descriptors."""
+
+        return self._capability_items()
+
     def get_catalog_item(self, catalog_id: str) -> dict[str, Any] | None:
         return next((item for item in self.list_catalog_items() if item["catalog_id"] == catalog_id), None)
 

@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, LoaderCircle, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, X } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Code2, Copy, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, X } from "lucide-react";
 import type { LLMModel, LLMProvider, LLMSettings, ModelSelection, ProviderPreset } from "../services/llm";
+import type { AgentModelConfig, CodingAgentAuthSession, CodingAgentDefinition, CodingAgentId, CodingAgentModelCatalog, CodingAgentSettings } from "../services/codingAgents";
 import { SystemDialog, SystemIconButton } from "./system/SystemUI";
 import "./LLMSettings.css";
 
@@ -61,6 +62,8 @@ interface LLMSettingsDialogProps {
   catalog: ProviderPreset[];
   providers: LLMProvider[];
   settings: LLMSettings;
+  codingAgents?: CodingAgentDefinition[];
+  codingAgentSettings?: CodingAgentSettings;
   onClose: () => void;
   onRefresh: () => void | Promise<void>;
   onCreateProvider?: (profile: Record<string, unknown>, credentials: Record<string, unknown>) => Promise<unknown>;
@@ -69,12 +72,31 @@ interface LLMSettingsDialogProps {
   onDiscoverModels?: (providerId: string) => Promise<unknown>;
   onTestProvider?: (providerId: string, modelId?: string, mode?: "connection" | "tools") => Promise<unknown>;
   onUpdateSettings?: (patch: Partial<LLMSettings>) => Promise<unknown>;
+  onUpdateCodingAgent?: (patch: Partial<CodingAgentSettings>) => Promise<unknown>;
+  onInstallCodingAgent?: (agentId: CodingAgentId) => Promise<unknown>;
+  onStartCodingAgentAuth?: (agentId: CodingAgentId) => Promise<CodingAgentAuthSession>;
+  onGetCodingAgentAuth?: (agentId: CodingAgentId) => Promise<CodingAgentAuthSession>;
+  onListCodingAgentModels?: (agentId: CodingAgentId) => Promise<CodingAgentModelCatalog>;
+  onClearCodingAgentAuth?: (agentId: CodingAgentId) => Promise<unknown>;
+  onUpdateCodingAgentModel?: (agentId: CodingAgentId, config: AgentModelConfig) => Promise<unknown>;
 }
 
 type Notice = { tone: "success" | "error"; text: string } | null;
 
 export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
-  const { open, language, catalog, providers, settings, onClose, onRefresh } = props;
+  const {
+    open,
+    language,
+    catalog,
+    providers,
+    settings,
+    codingAgents = [],
+    codingAgentSettings = { default_agent: "opencode", agent_models: { opencode: { mode: "shared_binding", inherit: "ambient.primary" }, codex: { mode: "native" } } },
+    onClose,
+    onRefresh,
+    onGetCodingAgentAuth,
+    onListCodingAgentModels,
+  } = props;
   const isZh = language === "zh";
   const [adding, setAdding] = useState(false);
   const [presetId, setPresetId] = useState(catalog[0]?.id ?? "openai");
@@ -91,6 +113,10 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
   const [clearCredentials, setClearCredentials] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [agentAuth, setAgentAuth] = useState<Record<string, CodingAgentAuthSession>>({});
+  const [agentModelCatalogs, setAgentModelCatalogs] = useState<Record<string, CodingAgentModelCatalog>>({});
+  const [agentModelLoading, setAgentModelLoading] = useState<Record<string, boolean>>({});
+  const [agentModelAttempted, setAgentModelAttempted] = useState<Record<string, boolean>>({});
   const preset = catalog.find((item) => item.id === presetId) ?? catalog[0];
   const presetFields = preset ? [...preset.fields, ...(preset.advanced_fields ?? [])] : [];
 
@@ -99,6 +125,71 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
     try { await action(); await onRefresh(); setNotice({ tone: "success", text: success }); }
     catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(null); }
+  };
+
+  useEffect(() => {
+    if (!open || !codingAgents.some((agent) => agent.install_state === "installing")) return;
+    const timer = window.setInterval(() => void onRefresh(), 1500);
+    return () => window.clearInterval(timer);
+  }, [codingAgents, onRefresh, open]);
+
+  useEffect(() => {
+    if (!open || !onGetCodingAgentAuth) return;
+    const active = Object.values(agentAuth).filter((session) => session.status === "starting" || session.status === "waiting");
+    if (!active.length) return;
+    const timer = window.setInterval(() => {
+      for (const session of active) {
+        void onGetCodingAgentAuth(session.agent_id).then((next) => {
+          setAgentAuth((current) => ({ ...current, [session.agent_id]: next }));
+          if (next.status === "signed_in") void onRefresh();
+        }).catch((error) => setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
+      }
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [agentAuth, onGetCodingAgentAuth, onRefresh, open]);
+
+  useEffect(() => {
+    if (!open || !onListCodingAgentModels) return;
+    for (const agent of codingAgents) {
+      const canList = agent.installed && agent.authenticated === true && agent.model_capability.catalog_source === "agent";
+      if (!canList || agentModelCatalogs[agent.id] || agentModelLoading[agent.id] || agentModelAttempted[agent.id]) continue;
+      setAgentModelAttempted((current) => ({ ...current, [agent.id]: true }));
+      setAgentModelLoading((current) => ({ ...current, [agent.id]: true }));
+      void onListCodingAgentModels(agent.id).then((catalog) => {
+        setAgentModelCatalogs((current) => ({ ...current, [agent.id]: catalog }));
+      }).catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      }).finally(() => {
+        setAgentModelLoading((current) => ({ ...current, [agent.id]: false }));
+      });
+    }
+  }, [agentModelAttempted, agentModelCatalogs, agentModelLoading, codingAgents, onListCodingAgentModels, open]);
+
+  const refreshAgentModels = async (agentId: CodingAgentId) => {
+    if (!onListCodingAgentModels) return;
+    setAgentModelLoading((current) => ({ ...current, [agentId]: true }));
+    setNotice(null);
+    try {
+      const catalog = await onListCodingAgentModels(agentId);
+      setAgentModelCatalogs((current) => ({ ...current, [agentId]: catalog }));
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setAgentModelLoading((current) => ({ ...current, [agentId]: false }));
+    }
+  };
+
+  const beginAgentAuth = async (agentId: CodingAgentId) => {
+    if (!props.onStartCodingAgentAuth) return;
+    setBusy(`auth-${agentId}`); setNotice(null);
+    try {
+      const session = await props.onStartCodingAgentAuth(agentId);
+      setAgentAuth((current) => ({ ...current, [agentId]: session }));
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
   };
 
   const submitProvider = async (event: React.FormEvent) => {
@@ -208,6 +299,84 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
         </div>
         <p>{isZh ? "快速模型未配置时使用当前会话主模型。运行中切换只影响下一次请求。" : "When unset, the fast model follows the session model. Changes during a run apply to the next request."}</p>
       </section>
+
+      {codingAgents.length ? <section className="coding-agent-settings" aria-labelledby="coding-agent-settings-title">
+        <div className="coding-agent-heading">
+          <span className="coding-agent-icon"><Code2 size={17} /></span>
+          <div><strong id="coding-agent-settings-title">{isZh ? "Coding Agent" : "Coding agent"}</strong><p>{isZh ? "选择负责生成和修改 Widget 代码的后端。设置会在新 Run 启动时固定。" : "Choose the backend that generates and edits Widget code. The choice is snapshotted when a new run starts."}</p></div>
+        </div>
+        <div className="coding-agent-options" role="radiogroup" aria-label={isZh ? "选择 Coding Agent" : "Select coding agent"}>
+          {codingAgents.map((agent) => {
+            const selected = codingAgentSettings.default_agent === agent.id;
+            const authSession = agentAuth[agent.id];
+            const authState = authSession?.status ?? agent.auth_state;
+            const ready = agent.installed && (agent.authenticated !== false || agent.auth_methods.length === 0 || authState === "signed_in");
+            const status = agent.install_state === "installing"
+              ? (isZh ? "安装中" : "Installing")
+              : !agent.installed
+                ? agent.install_state === "failed" ? (isZh ? "安装失败" : "Install failed") : (isZh ? "未安装" : "Not installed")
+                : authState === "starting" || authState === "waiting"
+                  ? (isZh ? "等待登录" : "Waiting for sign-in")
+                  : agent.auth_methods.length && !ready
+                    ? (isZh ? "需要登录" : "Sign-in required")
+                    : (isZh ? "已就绪" : "Ready");
+            const currentBinding = agent.model_config.inherit
+              ? "__inherit__"
+              : agent.model_config.provider_id && agent.model_config.model_id
+                ? `${agent.model_config.provider_id}:${agent.model_config.model_id}`
+                : "__inherit__";
+            const nativeCatalog = agentModelCatalogs[agent.id];
+            const nativeDefault = nativeCatalog?.models.find((model) => model.id === nativeCatalog.default_model)
+              ?? nativeCatalog?.models.find((model) => model.is_default);
+            const selectedNativeModel = agent.model_config.native_model ?? "";
+            return <article className={`coding-agent-option ${selected ? "is-selected" : ""}`} key={agent.id}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className="coding-agent-select"
+                disabled={!ready || !props.onUpdateCodingAgent || busy === "coding-agent"}
+                onClick={() => void run("coding-agent", () => props.onUpdateCodingAgent!({ default_agent: agent.id }), isZh ? `已切换到 ${agent.name}` : `Switched to ${agent.name}`)}
+              >
+                <span className="coding-agent-radio" aria-hidden="true" />
+                <span className="coding-agent-copy"><strong>{agent.name}</strong><small>{agent.id === "codex" ? (isZh ? "容器内按需安装 · 独立登录/订阅" : "On-demand container install · independent login/subscription") : (isZh ? "ACP · 独立模型绑定" : agent.description)}</small><em>{isZh ? (agent.id === "codex" ? "不接收 Ambient Provider 凭据。" : "可跟随 Ambient 主模型或选择专用模型。") : agent.auth_hint}</em></span>
+                <span className={`coding-agent-status ${ready ? "is-available" : ""}`}>{status}</span>
+              </button>
+
+              <div className="coding-agent-actions">
+                {!agent.installed && agent.installable ? <button type="button" disabled={agent.install_state === "installing" || busy === `install-${agent.id}` || !props.onInstallCodingAgent} onClick={() => void run(`install-${agent.id}`, () => props.onInstallCodingAgent!(agent.id), isZh ? `${agent.name} 安装已开始` : `${agent.name} installation started`)}>{agent.install_state === "installing" ? <LoaderCircle className="is-spinning" size={12} /> : null}{isZh ? "安装" : "Install"}</button> : null}
+                {agent.installed && agent.auth_methods.length > 0 && !ready && authState !== "starting" && authState !== "waiting" ? <button type="button" disabled={busy === `auth-${agent.id}` || !props.onStartCodingAgentAuth} onClick={() => void beginAgentAuth(agent.id)}><LogIn size={12} />{isZh ? "使用 ChatGPT 登录" : "Sign in with ChatGPT"}</button> : null}
+                {agent.installed && ready && agent.auth_methods.length > 0 ? <button type="button" disabled={!props.onClearCodingAgentAuth} onClick={() => void run(`logout-${agent.id}`, async () => { await props.onClearCodingAgentAuth!(agent.id); setAgentAuth((current) => { const next = { ...current }; delete next[agent.id]; return next; }); }, isZh ? "已退出登录" : "Signed out")}><LogOut size={12} />{isZh ? "退出登录" : "Sign out"}</button> : null}
+                {agent.version ? <span>{agent.version}</span> : null}
+              </div>
+
+              {(authState === "starting" || authState === "waiting") && authSession ? <div className="coding-agent-device-auth" role="status">
+                <span>{authSession.status === "starting" ? (isZh ? "正在获取设备码…" : "Requesting a device code…") : (isZh ? "在浏览器中打开链接并输入一次性设备码" : "Open the link and enter the one-time device code")}</span>
+                {authSession.verification_uri ? <a href={authSession.verification_uri} target="_blank" rel="noreferrer"><ExternalLink size={12} />{isZh ? "打开登录页面" : "Open sign-in page"}</a> : null}
+                {authSession.user_code ? <button type="button" className="coding-agent-device-code" onClick={() => void navigator.clipboard?.writeText(authSession.user_code)}><code>{authSession.user_code}</code><Copy size={12} /></button> : null}
+                <button type="button" onClick={() => void run(`cancel-auth-${agent.id}`, async () => { await props.onClearCodingAgentAuth?.(agent.id); setAgentAuth((current) => { const next = { ...current }; delete next[agent.id]; return next; }); }, isZh ? "已取消登录" : "Sign-in cancelled")}>{isZh ? "取消" : "Cancel"}</button>
+              </div> : null}
+
+              {agent.installed && agent.model_capability.catalog_source === "provider_registry" ? <label className="coding-agent-model"><span>{isZh ? "执行模型" : "Execution model"}</span><select value={currentBinding} disabled={!props.onUpdateCodingAgentModel} onChange={(event) => {
+                const value = event.target.value;
+                const config: AgentModelConfig = value === "__inherit__"
+                  ? { mode: "shared_binding", inherit: "ambient.primary" }
+                  : { mode: "shared_binding", provider_id: value.slice(0, value.indexOf(":")), model_id: value.slice(value.indexOf(":") + 1) };
+                void run(`model-${agent.id}`, () => props.onUpdateCodingAgentModel!(agent.id, config), isZh ? `${agent.name} 模型绑定已更新` : `${agent.name} model binding updated`);
+              }}><option value="__inherit__">{isZh ? "跟随 Ambient 主模型" : "Inherit Ambient primary"}</option>{providers.filter((provider) => provider.enabled).flatMap((provider) => provider.models.map((model) => <option key={`${provider.id}:${model.id}`} value={`${provider.id}:${model.id}`}>{provider.name} · {model.display_name || model.id}</option>))}</select></label> : null}
+
+              {agent.installed && agent.model_capability.catalog_source === "agent" ? <div className="coding-agent-model"><label><span>{isZh ? `${agent.name} 模型` : `${agent.name} model`}</span><select aria-label={isZh ? `${agent.name} 模型` : `${agent.name} model`} value={selectedNativeModel} disabled={!ready || !nativeCatalog || agentModelLoading[agent.id] || !props.onUpdateCodingAgentModel} onChange={(event) => void run(`model-${agent.id}`, () => props.onUpdateCodingAgentModel!(agent.id, { mode: "native", native_model: event.target.value || null }), isZh ? `${agent.name} 模型配置已更新` : `${agent.name} model configuration updated`)}>
+                <option value="">{nativeDefault ? `${isZh ? "Agent 默认" : "Agent default"} · ${nativeDefault.display_name}` : (isZh ? "使用 Agent 默认模型" : "Use agent default")}</option>
+                {selectedNativeModel && !nativeCatalog?.models.some((model) => model.id === selectedNativeModel) ? <option value={selectedNativeModel}>{selectedNativeModel}</option> : null}
+                {nativeCatalog?.models.map((model) => <option key={model.id} value={model.id}>{model.display_name}{model.is_default ? (isZh ? "（当前默认）" : " (current default)") : ""}{model.description ? ` · ${model.description}` : ""}</option>)}
+              </select></label><button type="button" aria-label={isZh ? `刷新 ${agent.name} 模型` : `Refresh ${agent.name} models`} disabled={!ready || agentModelLoading[agent.id] || !onListCodingAgentModels} onClick={() => void refreshAgentModels(agent.id)}>{agentModelLoading[agent.id] ? <LoaderCircle className="is-spinning" size={12} /> : <RefreshCw size={12} />}{isZh ? "刷新" : "Refresh"}</button></div> : null}
+
+              {agent.install_operation?.status === "failed" && agent.install_operation.error ? <p className="coding-agent-error">{agent.install_operation.error}</p> : null}
+              {authSession?.status === "failed" && authSession.error ? <p className="coding-agent-error">{authSession.error}</p> : null}
+            </article>;
+          })}
+        </div>
+      </section> : null}
 
       {adding && preset ? <form className="llm-add-form" onSubmit={submitProvider}>
         <div className="llm-form-heading"><strong>{isZh ? "新增 Provider" : "New provider"}</strong><span>{isZh ? "自定义端点可能让服务端访问本地或内网地址。" : "Custom endpoints can let the server access local or private-network addresses."}</span></div>

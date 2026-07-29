@@ -1,435 +1,276 @@
-# Backend Class Diagram & Architecture
+# Backend Runtime UML
 
-The backend of Ambient Agent is built on FastAPI + SQLModel (SQLite), supporting multi-client WebSocket synchronization, dynamic widget execution sandboxing, and LLM query audits.
+This page documents scheduler-owned chat, the durable reducer, and unified side-effect execution boundaries. Python references in flowcharts are checked by `scripts/verify_uml.py`.
 
-## 1. Class Diagram
-
-## 1. Backend Class Diagrams (Summary-Detail Structure)
-
-To improve readability on web views, the comprehensive class diagram has been split into a high-level system relationship diagram and 5 focused modular class diagrams.
-
-### 1.1 Macro Class Diagram (Summary)
-
-Shows the macro dependencies and relationships between all core backend services and managers:
+## 1. One control plane
 
 ```mermaid
-classDiagram
-    class AgentOrchestrator {
-        +db: WorkspaceStorage
-        +app_manager: AppManager
-        +context_manager: ContextManager
-        +handle_message() tuple
-    }
-    class WorkspaceStorage {
-        +workspace_dir: str
-    }
-    class AppManager {
-        +apps_dir: str
-    }
-    class IntentRouter {
-        +route() IntentPlan
-        +refine_sub_intents() IntentPlan
-    }
-    class PlanExecutor {
-        +run_plan() PlanPhaseResult
-    }
-    class WidgetDAG {
-        +step() TaskResult
-    }
-    class BackendManager {
-        +workspace_dir: str
-    }
+flowchart TB
+    Chat[Browser /ws/chat] --> Main[main.py: websocket_chat]
+    RunAPI[REST /api/runs and /api/run-interactions] --> Coordinator[run_service.py: RunCoordinator]
+    RunWS[Browser /ws/runs] <-->|versioned event replay| Store[run_service.py: RunStore]
 
-    AgentOrchestrator --> WorkspaceStorage : references
-    AgentOrchestrator --> AppManager : references
-    AgentOrchestrator --> IntentRouter : references
-    AgentOrchestrator --> PlanExecutor : references
-    AgentOrchestrator --> WidgetDAG : references
-    AgentOrchestrator --> BackendManager : references
+    Main -->|persist message / submit Run / resolve| Coordinator
+    Coordinator --> Store
+    Coordinator -->|internal_agent| Workflow[durable_workflow.py: DurableAgentWorkflow]
+    Workflow --> State[run_service.py: AgentRunState]
+    Workflow --> Outcome[run_service.py: StepOutcome]
+    Outcome --> Commit[run_service.py: commit_step]
+    Commit --> Store
+
+    Workflow --> Domain[harness.py: AgentOrchestrator]
+    Workflow --> Tools[tools.py: ToolGateway]
+    Workflow --> ACP[coding_agent_acp.py: run_coding_agent_acp]
+    Coordinator --> MCP[backend_manager.py: StdioJsonRpcClient]
+    Coordinator --> Remote[backend_manager.py: handle_agent_message]
+
+    Store -->|project Run events to session| Main
 ```
 
-### 1.2 Storage & Session Module (Detail - Storage & Session)
+The WebSocket creates only lightweight submission/response-projection bridges; it does not execute agent, MCP, or remote-Agent effects in the connection task. The reducer reuses `AgentOrchestrator` as a domain helper, while `RunCoordinator` owns execution. Browser disconnection does not change authoritative Run state.
 
-Manages multi-client chat sessions, persistent Widget App source code storage, and SQLite graph CRUD operations:
+## 2. Persistent data model
 
 ```mermaid
-classDiagram
-    class ChatSession {
-        +id: str (PK)
-        +title: str
-        +model_selection: ModelSelection|None
-        +created_at: datetime
-        +updated_at: datetime
-    }
+erDiagram
+    RUNS ||--o{ RUN_STEPS : attempts
+    RUNS ||--o{ RUN_INTERACTIONS : waits_for
+    RUNS ||--o{ RUN_EVENTS : emits
+    RUNS ||--o{ RUNS : parent_or_retry
 
-    class ChatMessage {
-        +id: int (PK)
-        +session_id: str (FK)
-        +role: str
-        +sender: str
-        +content: str
-        +timestamp: datetime
+    RUNS {
+        string id PK
+        string status
+        json state_json
+        string workflow_type
+        int workflow_version
+        int version
+        string lease_owner
+        string lease_expires_at
+        int lease_epoch
+        json checkpoint_json
+        json result_json
+        json error_json
     }
-
-    class LLMAuditLog {
-        +id: int (PK)
-        +timestamp: datetime
-        +provider: str
-        +model: str
-        +prompt: str
-        +response: str
-        +stage: str
+    RUN_STEPS {
+        int id PK
+        string run_id FK
+        string step_key
+        int attempt
+        string status
+        json output_json
     }
-
-    class AppManager {
-        +apps_dir: str
-        +create_or_update_app(app_id: str, title: str, html: str, css: str, js: str, kwargs) void
-        +get_app_files(app_id: str) dict
-        +list_apps() List~dict~
-        +delete_app(app_id: str) bool
-        +get_manifest(app_id: str) AppManifest|None
+    RUN_INTERACTIONS {
+        string id PK
+        string run_id FK
+        string status
+        int run_version
+        json payload_json
+        json response_json
     }
-
-    class AppRecordStore {
-        +db_path: Path
-        +serialized() Iterator
-        +get(transaction, app_id) AppRecord
-        +put(transaction, app_id, created_at, updated_at) AppRecord
-        +delete(transaction, app_id) void
+    RUN_EVENTS {
+        int sequence PK
+        string event_id UK
+        int schema_version
+        string stream_epoch
+        string run_id FK
+        string session_id
+        string step_id
+        int attempt
+        string trace_id
+        float duration_ms
+        json model_usage_json
+        bool redacted
+        string type
+        json payload_json
     }
-
-    class WorkspaceStorage {
-        +workspace_dir: str
-        +sessions_dir: str
-        +apps_dir: str
-        +get(model_class, obj_id) BaseModel
-        +add(obj) void
-        +commit() void
-        +refresh(obj) void
-        +get_sessions() List
-        +get_messages(session_id) List
-        +get_audit_logs() List
-        +delete_session(session_id) bool
-        +get_canvas_config() dict
-        +save_canvas_config(config) void
-    }
-
-    ChatSession "1" --* "0..*" ChatMessage : contains
-    AppManager --> AppRecordStore : persists lifecycle timestamps
 ```
 
-### 1.3 Intent Routing & Context Module (Detail - Intent Routing & Context)
-
-Handles LLM prompt compilation/pruning, user message intent classification, and function routing:
+## 3. Claim, execution, and fencing
 
 ```mermaid
-classDiagram
-    class ContextManager {
-        -db: WorkspaceStorage
-        -app_manager: AppManager
-        +build_llm_prompt(session_id: str) List~dict~
-        -_prune_message_content(content: str) str
-    }
+sequenceDiagram
+    participant WS as WebSocket/API
+    participant S as RunStore
+    participant C as RunCoordinator
+    participant W as DurableAgentWorkflow
+    participant X as stale callback
 
-    class PromptManager {
-        +prompts_dir: Path
-        +env: Environment
-        +get_prompt(template_name, kwargs) str
-    }
+    WS->>S: persist user message
+    WS->>C: submit_internal_agent(state v2)
+    C->>S: claim_next(worker, limits, session lane)
+    S-->>C: running Run + lease_epoch=E
+    C->>S: begin_step_attempt(phase, E)
+    C->>W: reducer(run, state)
+    W-->>C: typed StepOutcome
+    C->>S: commit_step(state, outcome, E)
+    S->>S: step + checkpoint + status + events in one transaction
 
-    class IntentRouter {
-        +route(content, context) IntentPlan
-        +route_legacy(content, existing_apps) IntentPlan
-        +refine_sub_intents(plan, context) IntentPlan
-    }
-
-    class RouterContext {
-        +app_manifests: List~dict~
-        +graph_snapshot: GraphSnapshot
-        +session_recent: List~dict~
-        +build(app_manager, graph_db, session_messages) RouterContext
-        +render_for_prompt() str
-    }
-
-    class GraphSnapshot {
-        +type_counts: Dict
-        +recent_nodes_by_type: Dict
-        +schema_manifest: List~dict~
-        +node_count: int
-        +edge_count: int
-        +from_db(db, recent_per_type) GraphSnapshot
-    }
-
-    class IntentPlan {
-        +kind: IntentKind
-        +confidence: float
-        +rationale: str
-        +app_id: str
-        +instruction: str
-        +actions: List~dict~
-        +query: dict
-        +sub_intents: List~SubIntent~
-        +clarification_message: str
-        +clarification_options: List~dict~
-        +deprecated: bool
-        +to_dict() dict
-        +from_dict(data) IntentPlan
-        +from_tool_call_args(args) IntentPlan
-        +tool_schema() dict
-    }
-
-    class SubIntent {
-        +kind: SubIntentKind
-        +app_id: str
-        +instruction: str
-        +actions: List~dict~
-        +query: dict
-        +extend_schema_props: dict
-        +feedback: str
-        +to_dict() dict
-        +from_dict(data) SubIntent
-    }
-
-    class IntentKind {
-        <<enum>>
-        +WIDGET_CREATE
-        +WIDGET_MODIFY
-        +GRAPH_MUTATION
-        +GRAPH_QUERY
-        +PLAN_AND_ACT
-        +MULTI_INTENT
-        +CLARIFY
-        +CONVERSE
-    }
-
-    class SubIntentKind {
-        <<enum>>
-        +GRAPH_MUTATION
-        +GRAPH_QUERY
-        +WIDGET_CREATE
-        +WIDGET_MODIFY
-        +WIDGET_EXTEND_SCHEMA
-        +WIDGET_FIX_CODE
-        +WIDGET_REWRITE
-    }
-
-    IntentRouter --> IntentPlan : returns structured plan
-    IntentRouter --> RouterContext : consumed
-    RouterContext --> GraphSnapshot : embeds snapshot
-    IntentPlan --> IntentKind : kind is an enum value
-    IntentPlan --> SubIntent : 0..* sub_intents
-    SubIntent --> SubIntentKind : kind is an enum value
+    Note over S: recovery/cancel/new claim changes ownership
+    X->>S: commit_step(..., old E)
+    S-->>X: StaleLeaseError
 ```
 
-### 1.4 Widget DAG & Schema Verification Module (Detail - Widget DAG & Verification)
+A later same-session Run cannot be claimed while an earlier one is `running`, `waiting_user`, `cancel_requested`, or `needs_attention`. `waiting_user` releases a worker slot but retains the session lane.
 
-Drives the Widget lifecycle compilation process using a Directed Acyclic Graph (DAG) runtime, and verifies code data schemas:
+## 4. Version 2 workflow states
 
 ```mermaid
-classDiagram
-    class WidgetDAG {
-        +_nodes: Dict
-        +_order: List
-        +_dirty: Set
-        +register(node) void
-        +dirty(names) void
-        +idle() bool
-        +pending() List
-        +step(ctx) TaskResult
-    }
+flowchart TB
+    Route[route] --> Converse[converse bounded tool loop]
+    Route --> Query[graph_query]
+    Route --> GPre[graph_preflight]
+    GPre --> GWait[wait_graph_approval]
+    GWait -->|approve| GCommit[graph_commit]
+    GWait -->|deny| Failed[failed]
 
-    class TaskNode {
-        +name: str
-        +run: Callable
-        +needs_outputs_from: Set
-        +invalidates: Set
-    }
+    Route --> Plan[plan]
+    Plan --> WPlan[wait_plan]
+    WPlan -->|approve| Align[align_schema]
+    WPlan -->|refine| Plan
+    Align --> WSchema[wait_schema]
+    WSchema -->|approve| Stage[stage_code]
+    WSchema -->|refine| Align
+    WSchema -->|rework plan| Plan
+    Stage --> Verify[verify]
+    Verify -->|clean| Promote[promote]
+    Verify -->|findings| Override[wait_override]
+    Override -->|rework code| Stage
+    Override -->|rework schema| Align
+    Override -->|rework plan| Plan
+    Promote --> Success[succeeded]
 
-    class TaskResult {
-        +success: bool
-        +outputs: dict
-        +error: str
-        +ask_user: dict
-        +invalidates_if_redo: Set
-    }
-
-    class VerificationDiff {
-        +unknown_props: List
-        +type_mismatches: List
-        +unknown_types: List
-        +is_clean: bool
-        +to_markdown() str
-        +to_per_field_payload() List
-    }
-
-    class SchemaVerificationService {
-        +diff(app_id, widget_code, schemas) VerificationDiff
-        +verify(app_id, widget_code, schemas) str
-    }
-
-    WidgetDAG --> TaskNode : 0..* registered tasks
-    TaskNode --> TaskResult : runs produce results
-    SchemaVerificationService --> VerificationDiff : returns structured diff
+    Route --> Multi[multi_preflight]
+    Multi -->|whole plan valid| Saga[multi_dispatch saga]
+    Saga -->|next sub-intent| RouteSub[matching subflow]
+    RouteSub --> Saga
 ```
 
-### 1.5 Execution & Orchestration Module (Detail - Execution & Orchestration)
+Every wait phase persists its interaction before returning `Wait`. Resolution checks `expected_run_version` and atomically stores the response, closes sibling pending interactions, requeues the Run, and appends events.
 
-Coordinates overall orchestration, schedules plan execution, registers database mutation rollback tickets, and integrates LLM clients:
+## 5. Tool, MCP, and Coding Agent ACP boundaries
+
+```mermaid
+flowchart LR
+    Model[Model tool call] --> Registry[tools.py: ToolRegistry]
+    Registry --> Gateway[tools.py: ToolGateway]
+    Gateway -->|schema / effect / scope / approval / timeout / idempotency| LocalTool[Local Python tool]
+
+    Run[Durable capability Run] --> Backend[backend_manager.py: BackendManager]
+    Backend --> MCP[backend_manager.py: StdioJsonRpcClient]
+    MCP -->|initialize / deadline / cancel / bounded I/O| Process[MCP subprocess]
+
+    Stage[stage_code] --> Prepare[coding_agent_acp.py: _prepare_staging_app]
+    Prepare --> ACP[coding_agent_acp.py: run_coding_agent_acp]
+    ACP --> Validate[coding_agent_acp.py: validate_coding_agent_staging]
+    Validate -->|repairable + budget| ACP
+    Validate -->|pass| Verify[verify reads staging]
+    Validate -->|design/operator/repeated + handle| Retain[retain non-executable failed draft]
+    Verify -->|pass| Marker[durable promotion marker]
+    Marker --> Promote[coding_agent_acp.py: promote_coding_agent_staging]
+    Verify -->|failure| Retain
+    Retain -->|retry internal validation| Stage
+    Retain -->|retry later verification| Verify
+    Verify -->|rework / cancel / retention expiry| Discard[coding_agent_acp.py: discard_coding_agent_staging]
+    Promote --> Live[Live App]
+```
+
+`ToolGateway` currently unifies model-requested local Python tools. Capability, MCP, remote-Agent, and ACP execution retain separate adapter/permission policies. Every Coding Agent runs through the same ACP client, session, file/terminal permissions, output bounds, process group, staging, verification, and repair state machine. These controls are not an OS-level filesystem/network sandbox.
+
+The backend image must include both Node.js and the `@babel/standalone` version pinned by the frontend lockfile. `validate_coding_agent_staging` applies Babel parsing, host/network-global rejection, and a restricted-VM smoke test to staging shared by every Coding Agent. A missing or failed verifier must never be promoted to a live App.
+
+### 5.1 Widget isolation runtime
+
+```mermaid
+flowchart LR
+    Host[Trusted React host] -->|fixed frame assets| Frame[opaque-origin iframe]
+    Host <-->|nonce + MessageChannel| Frame
+    Host <-->|ticket + client-runtime WebSocket| Gateway[FastAPI client runtime]
+    Gateway -->|server-side session identity| Authorizer[CapabilityAuthorizer]
+    Authorizer --> Adapters[Graph / HTTP / Files / Capability adapters]
+    Gateway <-.->|pixel rollback only: Unix socket| Supervisor[Zero-network widget-runtime]
+    Supervisor -.-> Chromium["On-demand shared Chromium; closes after 60s idle"]
+    Chromium -.-> Contexts[At most 4 rollback BrowserContexts]
+```
 
 ```mermaid
 classDiagram
-    class AgentOrchestrator {
-        +db: WorkspaceStorage
-        +app_manager: AppManager
-        +context_manager: ContextManager
-        +run_opencode_agent_acp_fn: function
-        +handle_message(session_id: str, content: str, on_update: Callable) tuple
-        -_run_callback(callback: Callable, data: Any) void
-        -_handle_graph_mutation(plan, session_id, on_update) tuple
-        -_handle_graph_query(plan, session_id, on_update) tuple
-        -_handle_plan_and_act(plan, session_id, on_update) tuple
-        -_handle_multi_intent(plan, session_id, on_update) tuple
-        -_handle_widget_build(plan, session_id, on_update) tuple
+    class WidgetRuntimeGateway {
+        +open_session(app_id, viewport)
+        +close_session(session_id)
+        +forward_input(session_id, message)
+        +handle_runtime_message(session_id, message)
     }
+```
 
-    class PlanExecutor {
-        <<abstract>>
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
+On the default path, the ticket-authenticated client-runtime Gateway binds
+`session_id -> app_id/revision/grants_digest/artifact_digest` in memory; all
+Controller-supplied identity fields are ignored. The Controller executes only
+inside the opaque-origin frame and sends RPC through the MessageChannel to the
+trusted host and Backend authorizer. At steady state the Workspace retains at
+most the Active and Warm Widgets, plus one temporary Suspending Widget during a
+transition.
+
+`WidgetRuntimeGateway`, the Unix socket, shared Chromium, and independent
+BrowserContexts belong only to the explicit pixel rollback path. The Runtime
+has no workspace mount and uses `network_mode: none`; Chromium starts on
+demand, closes 60 seconds after the last session, and allows at most four
+Contexts by default.
+
+## 6. Event and recovery boundaries
+
+Run event payloads are redacted and bounded before insertion, while the envelope records duration, model usage, and `redacted` metadata; terminal events are retained for 30 days by default. A Graph effect ledger closes the checkpoint window against duplicate writes, and an App promotion marker distinguishes published artifacts from staging awaiting publication. Only saga steps with complete compensation data are rolled back automatically.
+
+## 7. Canonical ontology and KG storage boundary
+
+```mermaid
+classDiagram
+    class GraphDatabase {
+        +list_schemas()
+        +routing_snapshot(recent_per_type)
+        +preflight_actions(actions)
+        +apply_actions_atomic(actions)
+        +apply_schema_proposal_atomic(proposal)
+        +close()
     }
-
-    class CodingPlanExecutor {
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
+    class Neo4jGraphDatabase {
+        +from_env(workspace_dir)
+        +migrate_from_sqlite(path)
     }
-
-    class MutationPlanExecutor {
-        +run_plan(plan, instruction, on_update) PlanPhaseResult
-    }
-
-    class PlanPhaseResult {
-        +success: bool
-        +output: str
-        +error: str
-        +extra: dict
-    }
-
-    class MutationTicketManager {
-        +record(session_id, forward_actions, snapshot_before) MutationTicket
-        +pin(session_id, ticket_id) bool
-        +rollback(session_id, ticket_id) List~dict~
-        +get(session_id, ticket_id) MutationTicket
-    }
-
-    class LLMService {
-        +generate(selection: ResolvedModel, messages: List~dict~, tools: List~dict~|None) LLMResult
-    }
-
-    class LLMResult {
-        +text: str
-        +tool_calls: List~dict~|None
-        +usage: dict
-    }
-
-    class ModelSelection {
-        +provider_id: str
-        +model_id: str
-    }
-
-    class ModelRef {
-        +provider_id: str|None
-        +model_id: str|None
-        +display_name: str|None
-        +api_mode: str|None
-        +capabilities: ModelCapabilities
-        +source: str
-    }
-
-    class ProviderProfile {
+    class OntologyEntity {
         +id: str
-        +name: str
-        +preset: str
-        +enabled: bool
-        +connection: dict
-        +credential_refs: dict
-        +models: List~ModelRef~
+        +ontology_iri: str
+        +equivalent_to: tuple
+        +subclass_of: str
+        +properties: dict
+        +abstract: bool
     }
 
-    class LLMDefaults {
-        +default_model: ModelSelection|None
-        +fast_model: ModelSelection|None
-    }
-
-    class LLMConfigStore {
-        +list_providers() List~ProviderProfile~
-        +create_provider(profile, credentials) ProviderProfile
-        +update_provider(provider_id, changes, credentials) ProviderProfile
-        +delete_provider(provider_id) void
-        +get_settings() LLMDefaults
-        +update_settings(changes) LLMDefaults
-        +resolve(selection) ResolvedModel
-    }
-
-    ProviderProfile "1" *-- "many" ModelRef
-    LLMDefaults --> ModelSelection
-    LLMService --> LLMConfigStore : obtains connection credentials
-
-    PlanExecutor <|-- CodingPlanExecutor
-    PlanExecutor <|-- MutationPlanExecutor
-    MutationPlanExecutor --> MutationTicketManager : records rollback tickets
+    GraphDatabase <|-- Neo4jGraphDatabase
+    Neo4jGraphDatabase --> OntologyEntity
 ```
 
-### 1.6 External Integration & MCP Module (Detail - MCP & Integration)
+`create_graph_database()` is a runtime factory called only by the composition root: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. The same created adapter is injected into Workflows, Agent routing, and tools; requests and reducer steps must not create a second Driver. Both adapters enforce the same `ambient-context` ontology contract and are explicitly `close()`d by the composition root during shutdown; unknown entities, abstract entities, and unknown properties cannot be written as records.
 
-Launches, caches, and routes JSON-RPC 2.0 requests to local Model Context Protocol (MCP) CLI processes:
+## 8. Coding Agent Runtime and model ownership
 
 ```mermaid
-classDiagram
-    class StdioJsonRpcClient {
-        +command: list~str~
-        +args: list~str~
-        +env: dict~str, str~|None
-        +process: Process|None
-        +read_task: Task|None
-        +pending_requests: dict
-        +next_id: int
-        +lock: Lock
-        +start() void
-        -read_loop() void
-        +call(method: str, params: dict) Any
-        +stop() void
-    }
+flowchart LR
+    Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]
+    Runtime -->|ACP launch descriptor| ACP[coding_agent_acp.py: run_coding_agent_acp]
+    Settings --> Dispatch[coding_agent.py: run_coding_agent]
+    Dispatch --> ACP
+    Runtime --> OpenCode[OpenCode native ACP server]
+    Runtime --> Bridge[@agentclientprotocol/codex-acp]
+    Bridge --> AppServer[Codex app-server]
 
-    class BackendManager {
-        +workspace_dir: str
-        +permissions_file: Path
-        +mcp_clients: dict~str, StdioJsonRpcClient~
-        +pending_permissions: dict
-        +permissions: dict
-        -load_permissions() void
-        -save_permissions() void
-        +is_mcp_approved(app_id: str, command: list~str~, args: list~str~) bool
-        +approve_mcp(app_id: str, command: list~str~, args: list~str~) void
-        +is_agent_approved(app_id: str, agent_url: str) bool
-        +approve_agent(app_id: str, agent_url: str) void
-        +resolve_permission(request_id: str, approved: bool) void
-        +request_permission(app_id: str, permission_type: str, value: dict|str, send_ws_message_func: Callable) bool
-        +get_or_start_mcp_client(app_id: str, manifest: AppManifest, send_ws_message_func: Callable) StdioJsonRpcClient|None
-        +handle_agent_message(app_id: str, manifest: AppManifest, message: dict, send_ws_message_func: Callable) void
-        +shutdown() void
-    }
-
-    BackendManager --> StdioJsonRpcClient : manages MCP processes
+    Provider[Central Provider Registry] --> Ambient[primary / fast]
+    Provider -->|per-agent shared binding| OpenCode
+    Native[Codex-native login and subscription] --> AppServer
 ```
 
-## 2. Core Modules Description
+ACP is the only code-generation orchestration boundary. A built-in adapter declares only a trusted launch descriptor: ACP server command, underlying CLI, environment, model configuration, and version source. It cannot implement another prompt loop, permission model, or repair behavior. OpenCode starts native `opencode acp`. Codex uses the image-pinned `@agentclientprotocol/codex-acp`, points it at the Ambient-managed Codex CLI through `CODEX_PATH`, and that CLI starts the official app-server. A future non-native Agent must prefer an auditable, pinned, actively maintained bridge from the ACP Registry; the bridge only maps protocols while Ambient's ACP client owns permission and lifecycle behavior.
 
-### 2.1 Database Entity Layer (`models.py`)
-*   **ChatSession**: Manages chat sessions across multiple devices.
-*   **ChatMessage**: Stores dialog history supporting multiple sender roles (`user`, `agent`, `code`, `system`).
-*   **LLMAuditLog**: Records raw payloads and responses exchanged with LLM providers for the audit log dashboard.
+Each CLI is downloaded to a dedicated persistent volume only after the user requests installation. Installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
 
-### 2.2 Service & Control Logic
-*   **AppManager**: Coordinates dynamically compiled widget files (controller.js) in the local filesystem.
-*   **ContextManager**: Prunes redundant message content and injects active widget source codes as prompts.
-*   **AgentParser**: Extracts `<ambient-widget>` XML blocks from LLM stream responses using regex.
-*   **IntentRouter**: Evaluates user prompts to output a structured `IntentPlan` indicating intended system actions.
-*   **WidgetDAG**: Coordinates widget build cycles utilizing collapsible, linear task nodes with target invalidations.
+Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.

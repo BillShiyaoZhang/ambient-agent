@@ -17,13 +17,13 @@ def test_graph_snapshot_type_counts(tmp_path):
     db = _make_db(tmp_path)
     db.create_node(node_id="t1", node_type="Task", properties={"title": "T1", "status": "pending"})
     db.create_node(node_id="t2", node_type="Task", properties={"title": "T2", "status": "completed"})
-    db.create_node(node_id="e1", node_type="CalendarEvent", properties={"summary": "E1"})
+    db.create_node(node_id="e1", node_type="Event", properties={"title": "E1"})
 
     snap = GraphSnapshot.from_db(db, recent_per_type=5)
 
     assert "Task" in snap.type_counts
     assert snap.type_counts["Task"] == 2
-    assert snap.type_counts["CalendarEvent"] == 1
+    assert snap.type_counts["Event"] == 1
     assert snap.node_count == 3
 
 
@@ -49,6 +49,34 @@ def test_graph_snapshot_schema_manifest_present(tmp_path):
     assert {"Task", "Event", "Note"}.issubset(ids)
 
 
+def test_graph_snapshot_uses_backend_neutral_adapter_contract():
+    class SnapshotOnlyGraphAdapter:
+        def routing_snapshot(self, recent_per_type):
+            assert recent_per_type == 2
+            return {
+                "type_counts": {"Place": 1},
+                "recent_nodes_by_type": {
+                    "Place": [
+                        {
+                            "id": "place-1",
+                            "type": "Place",
+                            "properties": {"name": "上海"},
+                            "created_at": "2026-07-20T00:00:00+00:00",
+                        }
+                    ]
+                },
+                "schema_manifest": [{"id": "Place"}],
+                "node_count": 1,
+                "edge_count": 0,
+            }
+
+    snap = GraphSnapshot.from_db(SnapshotOnlyGraphAdapter(), recent_per_type=2)
+
+    assert snap.type_counts == {"Place": 1}
+    assert snap.recent_nodes_by_type["Place"][0]["properties"]["name"] == "上海"
+    assert snap.schema_manifest == [{"id": "Place"}]
+
+
 def test_router_context_build(tmp_path, monkeypatch):
     workspace_dir = str(tmp_path / "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
@@ -63,7 +91,7 @@ def test_router_context_build(tmp_path, monkeypatch):
     # Make an app
     am = AppManager()
     am.apps_dir = str(apps_dir)
-    am.create_or_update_app("todo-app-abcd", "Todo", "<html></html>", "css", "js")
+    am.create_or_update_app("todo-app-abcd", "Todo", js="export default function App() {}")
 
     ctx = RouterContext.build(
         app_manager=am,

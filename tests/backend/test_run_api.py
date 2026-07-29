@@ -49,6 +49,50 @@ class ApiCoordinator:
             attempt=original["attempt"] + 1,
         )
 
+    def resolve_interaction(self, interaction_id, response):
+        interaction = self.store.get_interaction(interaction_id)
+        self.store.resolve_interaction(
+            interaction_id,
+            response,
+            expected_run_version=response.get("run_version") if isinstance(response, dict) else None,
+        )
+        return self.store.get_run(interaction["run_id"])
+
+
+def test_chat_artifact_refs_are_recovered_from_successful_runs(monkeypatch):
+    class ArtifactStore:
+        def list_runs(self, **filters):
+            assert filters == {
+                "status": "succeeded",
+                "source_type": "chat",
+                "source_id": "session-one",
+                "limit": 100,
+            }
+            return [
+                {
+                    "state": {
+                        "artifact_refs": [
+                            {"type": "app", "id": "weather", "sha256": "new-hash"},
+                        ],
+                    },
+                    "artifacts": [{"type": "app", "id": "weather"}],
+                },
+                {
+                    "state": {"artifact_refs": []},
+                    "artifacts": [
+                        {"type": "widget", "id": "tasks"},
+                        {"type": "file", "id": "ignored"},
+                    ],
+                },
+            ]
+
+    monkeypatch.setattr(main_module, "run_store", ArtifactStore())
+
+    assert main_module._chat_artifact_refs("session-one") == [
+        {"type": "app", "id": "weather", "sha256": "new-hash"},
+        {"type": "app", "id": "tasks"},
+    ]
+
 
 def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
     store = RunStore(str(tmp_path))
@@ -70,11 +114,42 @@ def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
         assert created.status_code == 202
         run_id = created.json()["id"]
         assert client.get(f"/api/runs/{run_id}").json()["input"] == {"subject": "Hello"}
+        listed = client.get("/api/runs?limit=10").json()[0]
+        assert listed["input"] == {"subject": "Hello"}
+        assert "events" not in listed
+        summarized = client.get("/api/runs?limit=10&summary_only=true").json()[0]
+        assert summarized["id"] == run_id
+        assert summarized["status"] == "queued"
+        assert summarized["action_title"] == "Send"
+        assert {
+            "input",
+            "result",
+            "error",
+            "checkpoint",
+            "artifacts",
+            "state",
+            "correlation",
+            "events",
+        }.isdisjoint(summarized)
+        incompatible = client.get("/api/runs?limit=10&summary_only=true&include_details=true")
+        assert incompatible.status_code == 422
+        assert "mutually exclusive" in incompatible.json()["detail"]
+        detailed = client.get("/api/runs?limit=10&include_details=true").json()[0]
+        assert detailed["id"] == run_id
+        assert detailed["events"][0]["type"] == "run_created"
+        assert detailed["interactions"] == []
 
         with client.websocket_connect("/ws/runs?after_sequence=0") as websocket:
+            ready = websocket.receive_json()
+            assert ready["type"] == "run_stream_ready"
+            assert ready["stream_epoch"]
             event = websocket.receive_json()
             assert event["type"] == "run_event"
             assert event["event"]["run_id"] == run_id
+            assert event["event"]["event_id"]
+            assert event["event"]["schema_version"] == 1
+            assert event["event"]["stream_epoch"]
+            assert event["event"]["trace_id"] == run_id
             first_sequence = event["event"]["sequence"]
 
         cancelled = client.post(f"/api/runs/{run_id}/cancel")
@@ -84,5 +159,104 @@ def test_run_rest_api_and_replayable_websocket(tmp_path, monkeypatch):
         assert retried.json()["retry_of"] == run_id
 
         with client.websocket_connect(f"/ws/runs?after_sequence={first_sequence}") as websocket:
+            assert websocket.receive_json()["type"] == "run_stream_ready"
             next_event = websocket.receive_json()
             assert next_event["event"]["sequence"] > first_sequence
+
+
+def test_run_summary_listing_has_a_created_at_index(tmp_path):
+    store = RunStore(str(tmp_path))
+    with store._connect() as connection:
+        indexes = {str(row["name"]) for row in connection.execute("PRAGMA index_list('runs')").fetchall()}
+    assert "idx_runs_created_at" in indexes
+
+
+def test_widget_run_requires_explicit_action_id():
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/runs",
+        json={
+            "catalog_id": "mcp:acme:mail",
+            "input": {"subject": "Hello"},
+            "source": {
+                "type": "widget",
+                "id": "mail-widget",
+                "manifest_revision": "2:1.0.0",
+                "grants_digest": "digest",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Widget capability invocation requires an explicit action ID"
+
+
+def test_interaction_api_uses_run_version_and_atomically_requeues(tmp_path, monkeypatch):
+    store = RunStore(str(tmp_path))
+    coordinator = ApiCoordinator(store)
+    monkeypatch.setattr(main_module, "run_store", store)
+    monkeypatch.setattr(main_module, "run_coordinator", coordinator)
+
+    run = coordinator.submit("mcp:acme:mail", "send", {"subject": "Hello"})
+    claimed = store.claim_next("worker", global_limit=1, owner_limit=1)
+    interaction = store.create_interaction(run["id"], "approval", "Continue?", {})
+    waiting = store.transition(
+        run["id"],
+        "waiting_user",
+        expected_lease_owner="worker",
+        expected_lease_epoch=claimed["lease_epoch"],
+    )
+
+    with TestClient(app) as client:
+        conflict = client.post(
+            f"/api/run-interactions/{interaction['id']}/resolve",
+            json={"response": {"approved": True, "run_version": waiting["version"] - 1}},
+        )
+        assert conflict.status_code == 409
+        assert store.get_interaction(interaction["id"])["status"] == "pending"
+        assert store.get_run(run["id"])["status"] == "waiting_user"
+
+        resolved = client.post(
+            f"/api/run-interactions/{interaction['id']}/resolve",
+            json={"response": {"approved": True, "run_version": waiting["version"]}},
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["status"] == "queued"
+        assert store.get_interaction(interaction["id"])["status"] == "resolved"
+
+
+def test_needs_attention_api_requires_explicit_reconciliation(tmp_path, monkeypatch):
+    store = RunStore(str(tmp_path))
+    coordinator = ApiCoordinator(store)
+    monkeypatch.setattr(main_module, "run_store", store)
+    monkeypatch.setattr(main_module, "run_coordinator", coordinator)
+    run = store.create_run(
+        owner_id="mcp:acme:mail",
+        action_id="send",
+        action_title="Send",
+        source_type="user",
+        source_id=None,
+        adapter_type="mcp_tool",
+        runtime_id="mail",
+        tool_name="send",
+        input_data={"subject": "Hello"},
+        recovery="manual",
+        status="needs_attention",
+    )
+
+    with TestClient(app) as client:
+        refused = client.post(f"/api/runs/{run['id']}/cancel")
+        assert refused.status_code == 409
+        assert store.get_run(run["id"])["status"] == "needs_attention"
+
+        reconciled = client.post(
+            f"/api/runs/{run['id']}/reconcile",
+            json={
+                "resolution": "confirmed_not_committed",
+                "note": "provider operation ledger has no matching key",
+            },
+        )
+        assert reconciled.status_code == 200
+        assert reconciled.json()["status"] == "failed"
+        assert reconciled.json()["error"]["effect_state"] == "none"

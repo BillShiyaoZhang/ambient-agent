@@ -3,10 +3,50 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.agent.harness import AgentOrchestrator
+from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.agent.router import IntentRouter
 from backend.agent.tools import ToolRegistry
 from backend.models import ChatSession
 from backend.workspace_storage import WorkspaceStorage
+
+
+@pytest.mark.asyncio
+async def test_agent_orchestrator_reuses_injected_graph_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    db_session = MagicMock(spec=WorkspaceStorage)
+    db_session.get_messages.return_value = []
+    app_manager = MagicMock()
+    app_manager.list_apps.return_value = []
+    graph_db = MagicMock()
+    graph_db.routing_snapshot.return_value = {
+        "type_counts": {"Task": 2},
+        "recent_nodes_by_type": {},
+        "schema_manifest": [],
+        "node_count": 2,
+        "edge_count": 0,
+    }
+    route = AsyncMock(
+        return_value=IntentPlan(
+            kind=IntentKind.CONVERSE,
+            rationale="injected graph adapter",
+            instruction="hello",
+        )
+    )
+    graph_factory = MagicMock(side_effect=AssertionError("request path must not create a Graph adapter"))
+    monkeypatch.setattr("backend.agent.harness.IntentRouter.route", route)
+    monkeypatch.setattr("backend.graph_db.create_graph_database", graph_factory)
+
+    orchestrator = AgentOrchestrator(
+        db_session=db_session,
+        app_manager=app_manager,
+        graph_db=graph_db,
+    )
+    plan = await orchestrator._classify_intent("hello", session_id="session-1", language="en")
+
+    assert plan.kind == IntentKind.CONVERSE
+    graph_factory.assert_not_called()
+    graph_db.routing_snapshot.assert_called_once_with(5)
+    router_context = route.await_args.args[1]
+    assert router_context.graph_snapshot.type_counts == {"Task": 2}
 
 
 @pytest.mark.asyncio
@@ -107,25 +147,25 @@ async def test_intent_router(monkeypatch):
     monkeypatch.setattr("backend.agent.router.call_llm_api", mock_call_api)
 
     # 1. Conversational path
-    plan = await IntentRouter.route("Hello, how are you?", [])
+    plan = await IntentRouter.route("Hello, how are you?", RouterContext())
     assert plan.kind == IntentKind.CONVERSE
     assert plan.app_id is None
     assert plan.instruction == "Hello, how are you?"
 
     # 2. Explicit slash command
-    plan = await IntentRouter.route("/app calculator-app Add a new divide button", [])
+    plan = await IntentRouter.route("/app calculator-app Add a new divide button", RouterContext())
     assert plan.kind == IntentKind.WIDGET_MODIFY
     assert plan.app_id == "calculator-app"
     assert plan.instruction == "Add a new divide button"
 
     # 3. Chinese creation phrase
-    plan = await IntentRouter.route("给我创建一个待办 widget", [])
+    plan = await IntentRouter.route("给我创建一个待办 widget", RouterContext())
     assert plan.kind == IntentKind.WIDGET_CREATE
     assert "todo-app-" in (plan.app_id or "")
     assert plan.instruction == "给我创建一个待办 widget"
 
     # 4. English creation pattern
-    plan = await IntentRouter.route("build a new widget to show weather", [])
+    plan = await IntentRouter.route("build a new widget to show weather", RouterContext())
     assert plan.kind == IntentKind.WIDGET_CREATE
     assert "weather-app-" in (plan.app_id or "")
 
@@ -207,7 +247,13 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     app_manager = MagicMock()
     app_manager.list_apps.return_value = []
 
-    orchestrator = AgentOrchestrator(db_session=db_session, app_manager=app_manager)
+    graph_db = MagicMock()
+    graph_db.routing_snapshot.return_value = {}
+    orchestrator = AgentOrchestrator(
+        db_session=db_session,
+        app_manager=app_manager,
+        graph_db=graph_db,
+    )
 
     on_update = AsyncMock()
 
