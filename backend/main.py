@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
+from backend.agent.slash_commands import build_slash_command_catalog
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
 from backend.app_manifest import ManifestValidationError
@@ -544,6 +545,7 @@ async def no_store_control_plane_responses(request: Request, call_next):
         path == "/api/skill-market"
         or path == "/api/skills"
         or path.startswith("/api/skills/")
+        or path == "/api/chat/commands"
         or path == "/api/app-store"
         or path.startswith("/api/app-store/")
     ):
@@ -1532,6 +1534,16 @@ async def unregister_capability(catalog_id: str):
 @app.get("/api/apps")
 async def list_apps():
     return app_manager.list_apps()
+
+
+@app.get("/api/chat/commands")
+async def list_chat_commands():
+    """Return the complete command grammar and current dynamic ID choices."""
+
+    return build_slash_command_catalog(
+        apps=app_manager.list_apps(),
+        skills=skill_manager.list_catalog_items(),
+    )
 
 
 def _client_runtime_origin(headers: Any) -> str:

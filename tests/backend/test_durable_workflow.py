@@ -1905,6 +1905,80 @@ async def test_multi_intent_preflight_rejects_later_invalid_step_before_any_effe
 
 
 @pytest.mark.asyncio
+async def test_multi_converse_steps_use_their_own_instructions_and_one_final_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    intent = IntentPlan(
+        kind=IntentKind.MULTI_INTENT,
+        rationale="explicit slash command sequence",
+        sub_intents=[
+            SubIntent(kind=SubIntentKind.CONVERSE, instruction="first question"),
+            SubIntent(kind=SubIntentKind.CONVERSE, instruction="second question"),
+        ],
+    )
+    state = _state(
+        phase="multi_preflight",
+        workflow_type="multi_intent",
+        intent=intent,
+        data={
+            "language": "en",
+            "skill_selection_state": "pinned_none",
+            "active_skills": [],
+        },
+    )
+    run = _create_run(
+        store,
+        state,
+        content="/ask first question /ask second question",
+    )
+    seen: list[tuple[str, bool]] = []
+
+    async def scripted_converse(
+        self: AgentOrchestrator,
+        plan: IntentPlan,
+        session_id: str,
+        content: str,
+        language: str,
+        on_update: Any,
+        *,
+        persist: bool = True,
+    ) -> tuple[ChatMessage, None]:
+        del self, plan, on_update
+        seen.append((content, persist))
+        return ChatMessage(
+            session_id=session_id,
+            role="agent",
+            sender="agent",
+            content=f"answer: {content}",
+        ), None
+
+    monkeypatch.setattr(AgentOrchestrator, "_handle_converse", scripted_converse)
+
+    for _ in range(12):
+        outcome = await workflow(run, state)
+        if isinstance(outcome, Continue):
+            state.phase = outcome.next_phase
+            continue
+        assert isinstance(outcome, Succeeded)
+        assert outcome.result["message"] == (
+            "answer: first question\n\nanswer: second question"
+        )
+        break
+    else:
+        raise AssertionError("multi-converse workflow did not terminate")
+
+    assert seen == [("first question", False), ("second question", False)]
+    messages = WorkspaceStorage(str(tmp_path)).get_messages("session-1")
+    assert [(message.role, message.content) for message in messages] == [
+        ("agent", "answer: first question\n\nanswer: second question"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_multi_intent_denial_compensates_prior_graph_effect(tmp_path: Path) -> None:
     store = RunStore(str(tmp_path))
     graph_db = GraphDatabase(str(tmp_path))

@@ -23,7 +23,9 @@ import {
 } from "../lib/chatLayout";
 import { ChatRunCard, type RunInteractionAction } from "./ChatRunCard";
 import { ModelPicker } from "./LLMSettings";
+import { SlashCommandInput } from "./SlashCommandInput";
 import { SystemIconButton, SystemPopover } from "./system/SystemUI";
+import type { SlashCommandCatalog } from "../services/slashCommands";
 import "./Workspace.css";
 
 interface AgentChatOverlayProps {
@@ -52,6 +54,8 @@ interface AgentChatOverlayProps {
   onManageModels?: () => void;
   codingAgent?: CodingAgentDefinition;
   codingAgentModel?: AgentModelConfig;
+  apiBase?: string;
+  slashCommandCatalog?: SlashCommandCatalog;
 }
 
 type ConversationItem =
@@ -66,7 +70,7 @@ function timeValue(value: string | undefined, fallback: number): number {
 export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
   open, unreadCount, messages, runCards = [], liveStreams = {}, interactions = {}, sessions, activeSessionId, runningSessions, isConnected, language,
   onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession, onCancelRun, onResolveRunInteraction, onInspectRunInteraction,
-  providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel,
+  providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel, apiBase, slashCommandCatalog,
 }) => {
   const isZh = language === "zh";
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -196,12 +200,15 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
     applySize({ width, height });
   };
 
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
+  const submitInput = () => {
     if (!input.trim()) return;
     onSendMessage(input.trim());
     setInput("");
     scrollToLatest("smooth");
+  };
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    submitInput();
   };
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const anyRunning = runningSessions.length > 0 || runCards.some((run) => ["queued", "running", "waiting_user", "cancel_requested"].includes(run.status));
@@ -284,7 +291,15 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
             {codingAgent ? <span className="agent-chat-coding-model">{isZh ? "代码" : "Code"} · {codingAgent.name}{codingModelLabel ? ` · ${codingModelLabel}` : ""}</span> : null}
             {runningSessions.includes(activeSessionId ?? "") ? <span>{isZh ? "切换将从下次请求生效" : "Changes apply to the next request"}</span> : null}
           </div>
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={isZh ? "向 Ambient 发送消息…" : "Message Ambient…"} rows={1} />
+          <SlashCommandInput
+            value={input}
+            onChange={setInput}
+            onSubmit={submitInput}
+            placeholder={isZh ? "向 Ambient 发送消息… 输入 / 查看命令" : "Message Ambient… Type / for commands"}
+            language={language}
+            apiBase={apiBase}
+            catalog={slashCommandCatalog}
+          />
           <SystemIconButton className="agent-chat-send" type="submit" disabled={!input.trim() || !isConnected} label={isZh ? "发送" : "Send"} tone="accent"><Send size={16} /></SystemIconButton>
         </form>
       </aside>}

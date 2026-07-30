@@ -45,6 +45,33 @@ def test_app_api_preserves_existing_shape_and_adds_manifest_fields():
     assert detail["schema_refs"] == ["Task"]
 
 
+def test_chat_command_catalog_includes_all_installed_app_ids(isolate_apps_dir):
+    app_manager.create_or_update_app("planner", "Planner", js="console.log('plan')")
+    app_manager.create_or_update_app("calendar", "Calendar", js="console.log('calendar')")
+
+    with TestClient(app) as client:
+        response = client.get("/api/chat/commands")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    catalog = response.json()
+    assert [item["name"] for item in catalog["commands"]] == [
+        "ask",
+        "app",
+        "create",
+        "query",
+        "mutate",
+        "skill",
+    ]
+    app_argument = next(
+        item for item in catalog["commands"] if item["name"] == "app"
+    )["arguments"][0]
+    assert {option["value"] for option in app_argument["options"]} == {
+        "planner",
+        "calendar",
+    }
+
+
 def test_patch_app_updates_only_user_manageable_properties():
     app_manager.create_or_update_app(
         "planner",

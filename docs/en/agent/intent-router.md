@@ -33,6 +33,7 @@ The model must return structured arguments through the `classify_intent` tool sc
 
 `multi_intent` and `plan_and_act` may contain:
 
+- `converse`
 - `graph_mutation`
 - `graph_query`
 - `widget_create`
@@ -61,5 +62,47 @@ flowchart LR
 - Widgets still pass staging, controller verification, and schema verification.
 - Tools, MCP, and OpenCode still pass their permission and lifecycle policies.
 - A Run uses the model selection frozen at start; changing the session model affects only the next Run.
+
+## 5. Explicit `/` routing commands
+
+Slash commands form a small routing DSL, not another executor. The client reads
+the shared command definitions, argument shapes, and all current App/Skill IDs
+from `GET /api/chat/commands`. The backend reparses the original message and
+compiles it into an `IntentPlan`, so a forged client payload cannot bypass the
+Router, approvals, or the durable reducer.
+
+| Command | Compiled intent | Arguments |
+| --- | --- | --- |
+| `/ask` | `converse` | Natural-language instruction |
+| `/app` | `widget_modify` | Installed App ID + instruction |
+| `/create` | `widget_create` | New App ID + instruction |
+| `/query` | `graph_query` | Natural language; a constrained Router produces `query` |
+| `/mutate` | `graph_mutation` | Natural language; a constrained Router produces `actions` |
+| `/skill` | `converse` | Installed Skill ID + instruction |
+
+One message may contain up to eight commands. Multiple commands compile, in
+source order, into one `multi_intent` that is fully preflighted before its saga
+steps run. For example:
+
+```text
+/query list pending tasks /mutate create a "ship release" task /app planner add a week view
+```
+
+Text before the first command is preserved as the first `converse` step. Use
+`\/query` when an instruction needs a literal command-shaped word. Unknown
+`/word` values always remain ordinary text.
+
+Commands improve intent precision without expanding authority:
+
+- `/query` and `/mutate` constrain only the structured route. Query stays
+  read-only; mutation still requires Graph preflight and user approval.
+- `/app` and `/create` still use planning, Schema alignment, staging,
+  verification, and publication.
+- `/skill` may appear more than once. All Skill IDs are resolved and pinned in
+  the route phase. An external Skill still forces the read-only semantic
+  sandbox and cannot be combined with effect commands in the same Run.
+- For several conversation steps, each model call sees only its own
+  instruction. The client receives one ordered, durable final projection, and
+  recovery cannot duplicate calls or replies.
 
 See [Agent Harness](/en/agent/harness.md) and [Durable Runs](/en/architecture/runs.md) for execution details.

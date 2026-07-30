@@ -1088,6 +1088,7 @@ function App() {
         onManageModels={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
         codingAgent={codingAgents?.find((agent) => agent.id === codingAgentSettings?.default_agent)}
         codingAgentModel={codingAgentSettings?.agent_models?.[codingAgentSettings.default_agent]}
+        apiBase={API_BASE}
       />
 
       <LLMSettingsDialog

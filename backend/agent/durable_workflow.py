@@ -19,6 +19,7 @@ from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubIntentKind
 from backend.agent.providers import ToolLoopBudget
 from backend.agent.run_context import RunContext
+from backend.agent.slash_commands import SlashCommandParseError, explicit_skill_ids
 from backend.app_manager import AppManager
 from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
@@ -397,7 +398,21 @@ class DurableAgentWorkflow:
             state.data["skill_selection_state"] = "pinned_none"
             return
         try:
-            state.data["active_skills"] = self.skill_manager.select_for_context(content)
+            try:
+                selected_skill_ids = explicit_skill_ids(content)
+            except SlashCommandParseError:
+                # The router owns the user-facing clarification for an
+                # oversized sequence; selection must not replace it with a
+                # Skill workflow error.
+                selected_skill_ids = []
+            state.data["active_skills"] = (
+                self.skill_manager.select_for_context(
+                    content,
+                    explicit_names=selected_skill_ids,
+                )
+                if selected_skill_ids
+                else self.skill_manager.select_for_context(content)
+            )
         except SkillExplicitSelectionError as exc:
             raise WorkflowError(
                 f"Explicit Skill '{exc.target}' cannot be activated ({exc.reason})",
@@ -1186,13 +1201,38 @@ class DurableAgentWorkflow:
                 summary="Preparing response",
             )
 
+        return_to_multi = bool(state.data.get("return_to_multi"))
+        converse_kwargs = {"persist": False} if return_to_multi else {}
+        raw_content = str((run.get("input") or {}).get("content") or "")
+        converse_content = (
+            intent.instruction
+            if intent.instruction and (
+                return_to_multi
+                or intent.rationale == "explicit slash command"
+            )
+            else raw_content
+        )
         message, widget = await orchestrator._handle_converse(
             plan=intent,
             session_id=state.session_id or "default-session",
-            content=str((run.get("input") or {}).get("content") or ""),
+            content=converse_content,
             language=language,
             on_update=on_update,
+            **converse_kwargs,
         )
+        if return_to_multi:
+            result = {"message": message.content, "app_id": widget.get("id") if widget else None}
+            return await self._finish_subflow(
+                run,
+                state,
+                content=message.content,
+                result=result,
+                artifacts=(
+                    [{"type": "app", "id": widget.get("id")}]
+                    if widget
+                    else []
+                ),
+            )
         # Mark the persisted projection with its originating Run so a recovered
         # step can detect it. Older storage implementations are tolerated.
         if getattr(message, "run_id", None) is None:
@@ -1328,6 +1368,8 @@ class DurableAgentWorkflow:
                 graph_slices.append((-1, 0))
             if intent.kind == IntentKind.GRAPH_QUERY and not isinstance(intent.query, dict):
                 raise WorkflowError("Graph query must be an object", code="invalid_graph_query")
+            if intent.kind == IntentKind.CONVERSE and not (intent.instruction or "").strip():
+                raise WorkflowError("Converse step has no instruction", code="converse_instruction_missing")
             if intent.kind in {IntentKind.WIDGET_CREATE, IntentKind.WIDGET_MODIFY}:
                 validate_app_id(intent.app_id)
                 if not (intent.instruction or "").strip():
@@ -1395,6 +1437,12 @@ class DurableAgentWorkflow:
 
     @staticmethod
     def _intent_from_sub(sub: SubIntent) -> IntentPlan:
+        if sub.kind == SubIntentKind.CONVERSE:
+            return IntentPlan(
+                kind=IntentKind.CONVERSE,
+                instruction=sub.instruction or "",
+                rationale="multi_intent",
+            )
         if sub.kind == SubIntentKind.GRAPH_MUTATION:
             return IntentPlan(kind=IntentKind.GRAPH_MUTATION, actions=sub.actions, rationale="multi_intent")
         if sub.kind == SubIntentKind.GRAPH_QUERY:

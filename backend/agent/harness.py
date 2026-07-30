@@ -130,7 +130,10 @@ class AgentOrchestrator:
                 budget=self.tool_loop_budget,
                 capability_catalog=self.capability_catalog,
             )
-            if plan.kind in {IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT}:
+            if (
+                plan.kind in {IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT}
+                and plan.rationale != "explicit slash command sequence"
+            ):
                 plan = await IntentRouter.refine_sub_intents(
                     plan,
                     router_context,
@@ -160,6 +163,8 @@ class AgentOrchestrator:
         content: str,
         language: str,
         on_update: Callable[[Any], Any],
+        *,
+        persist: bool = True,
     ) -> tuple[ChatMessage, None]:
         del plan
         await self._run_callback(on_update, "🤔 思考中..." if language == "zh" else "🤔 Thinking...")
@@ -211,6 +216,13 @@ class AgentOrchestrator:
                 context_summary=self.context_summary,
                 artifact_ids=self.artifact_ids,
             )
+            # A multi-command Converse step must see its own instruction, not
+            # the raw message containing sibling slash commands.  For ordinary
+            # messages this simply replaces the latest turn with itself.
+            for message in reversed(messages):
+                if message.get("role") == "user":
+                    message["content"] = content
+                    break
         messages.insert(0, {"role": "system", "content": system_prompt})
         if self.skill_prompt_channels.untrusted_user_guidance:
             # External Skill text is deliberately a separate, lower-priority
@@ -290,9 +302,10 @@ class AgentOrchestrator:
                 else None
             ),
         )
-        self.db.add(message)
-        self.db.commit()
-        self.db.refresh(message)
+        if persist:
+            self.db.add(message)
+            self.db.commit()
+            self.db.refresh(message)
         return message, None
 
     @staticmethod

@@ -19,7 +19,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -28,10 +27,18 @@ from sqlmodel import Session
 from backend.agent.intent_plan import (
     IntentKind,
     IntentPlan,
+    SubIntent,
+    SubIntentKind,
+)
+from backend.agent.slash_commands import (
+    ParsedSlashCommand,
+    SlashCommandParseError,
+    parse_slash_commands,
 )
 from backend.agent.errors import BudgetExhaustedError
 from backend.agent.providers import ToolLoopBudget
 from backend.agent.prompts.manager import PromptManager
+from backend.app_manifest import ManifestValidationError, validate_app_id
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.llm_service import call_llm_api
 from backend.llm_config import LLMConfigError
@@ -39,13 +46,6 @@ from backend.llm_runtime import fast_selection, primary_selection, selection_ids
 from backend.router_context import RouterContext
 
 logger = logging.getLogger("agent.router")
-
-_SLASH_APP_PATTERN = re.compile(r"^/app\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?$", re.IGNORECASE)
-_SLASH_SKILL_PATTERN = re.compile(
-    r"^/skill\s+([a-z0-9]+(?:[-:./][a-z0-9]+)*)(?:\s+(.*))?$",
-    re.IGNORECASE | re.DOTALL,
-)
-
 
 def _default_context_sections() -> list[str]:
     return ["widgets", "graph_counts", "history"]
@@ -81,34 +81,31 @@ class IntentRouter:
         """
         content_stripped = (content or "").strip()
 
-        # 1. Fast-path: explicit /app command wins over LLM classification.
-        m = _SLASH_APP_PATTERN.match(content_stripped)
-        if m:
-            app_id = m.group(1).strip()
-            instruction = (m.group(2) or "Refactor or inspect the app.").strip()
-            return IntentPlan(
-                kind=IntentKind.WIDGET_MODIFY,
-                confidence=1.0,
-                rationale="explicit /app command",
-                app_id=app_id,
-                instruction=instruction,
-            )
-
-        # Explicit Skill activation remains a read-only Agent turn. Installing
-        # a Skill never grants effects or changes the Tool Gateway.
-        skill_match = _SLASH_SKILL_PATTERN.match(content_stripped)
-        if skill_match:
-            return IntentPlan(
-                kind=IntentKind.CONVERSE,
-                confidence=1.0,
-                rationale="explicit /skill command",
-                instruction=(skill_match.group(2) or content_stripped).strip(),
-            )
-
-        # 2. Normalize the optional structured context.
+        # 1. Normalize the optional structured context.
         ctx = context or RouterContext()
 
         sections = context_sections if context_sections is not None else _default_context_sections()
+
+        # 2. Slash commands are explicit routing directives.  They compile to
+        # the same IntentPlan consumed by the durable reducer; they never
+        # execute App, Graph, Tool, or Skill effects here.
+        try:
+            slash_commands = parse_slash_commands(content_stripped)
+        except SlashCommandParseError as exc:
+            return cls._slash_clarification(str(exc), language)
+        if slash_commands:
+            runtime_provider, runtime_model = selection_ids(fast_selection())
+            return await cls._route_explicit_slash_commands(
+                slash_commands,
+                context=ctx,
+                db_session=db_session,
+                provider_name=provider_name or runtime_provider,
+                model_name=model_name or runtime_model,
+                language=language,
+                audit_context=audit_context,
+                budget=budget,
+                capability_catalog=capability_catalog,
+            )
 
         # 3. LLM-driven routing via function-calling.
         try:
@@ -146,6 +143,267 @@ class IntentRouter:
             confidence=0.0,
             rationale="fallback heuristic",
             instruction=content_stripped,
+        )
+
+    @classmethod
+    async def _route_explicit_slash_commands(
+        cls,
+        commands: list[ParsedSlashCommand],
+        *,
+        context: RouterContext,
+        db_session: Any,
+        provider_name: str,
+        model_name: str,
+        language: str,
+        audit_context: dict[str, Any] | None,
+        budget: ToolLoopBudget | None,
+        capability_catalog: SystemCapabilityCatalog | None,
+    ) -> IntentPlan:
+        plans: list[IntentPlan] = []
+        app_by_id = {
+            str(item.get("id")): item
+            for item in context.app_manifests
+            if item.get("id")
+        }
+        for command in commands:
+            instruction = command.arguments.get("instruction", "").strip()
+            if command.name == "ask":
+                if not instruction:
+                    return cls._slash_clarification(
+                        "请在 `/ask` 后输入问题。" if language == "zh" else "Enter a question after `/ask`.",
+                        language,
+                    )
+                plans.append(
+                    IntentPlan(
+                        kind=IntentKind.CONVERSE,
+                        confidence=1.0,
+                        rationale="explicit slash command",
+                        instruction=instruction,
+                    )
+                )
+                continue
+
+            if command.name == "skill":
+                skill_id = command.arguments.get("skill_id", "").strip()
+                if not skill_id or not instruction:
+                    return cls._slash_clarification(
+                        (
+                            "请选择 Skill ID，并在其后输入指令。"
+                            if language == "zh"
+                            else "Choose a Skill ID and enter an instruction after it."
+                        ),
+                        language,
+                    )
+                # SkillManager resolves and pins every selected ID before the
+                # router can admit this read-only conversation step.
+                plans.append(
+                    IntentPlan(
+                        kind=IntentKind.CONVERSE,
+                        confidence=1.0,
+                        rationale="explicit slash command",
+                        instruction=instruction,
+                    )
+                )
+                continue
+
+            if command.name == "app":
+                app_id = command.arguments.get("app_id", "").strip()
+                if not app_id or (app_by_id and app_id not in app_by_id):
+                    options = [
+                        {
+                            "value": candidate_id,
+                            "label": str(item.get("title") or candidate_id),
+                        }
+                        for candidate_id, item in sorted(app_by_id.items())
+                    ]
+                    return IntentPlan(
+                        kind=IntentKind.CLARIFY,
+                        confidence=1.0,
+                        rationale="explicit slash command references an unknown app",
+                        clarification_message=(
+                            "请选择一个已安装的 App ID。"
+                            if language == "zh"
+                            else "Choose an installed App ID."
+                        ),
+                        clarification_options=options,
+                    )
+                plans.append(
+                    IntentPlan(
+                        kind=IntentKind.WIDGET_MODIFY,
+                        confidence=1.0,
+                        rationale="explicit slash command",
+                        app_id=app_id,
+                        instruction=instruction or (
+                            "检查并说明这个 App。"
+                            if language == "zh"
+                            else "Inspect and explain this App."
+                        ),
+                    )
+                )
+                continue
+
+            if command.name == "create":
+                app_id = command.arguments.get("app_id", "").strip()
+                try:
+                    validate_app_id(app_id)
+                except ManifestValidationError:
+                    return cls._slash_clarification(
+                        (
+                            "请为 `/create` 输入新的小写 kebab-case App ID。"
+                            if language == "zh"
+                            else "Enter a new lowercase kebab-case App ID after `/create`."
+                        ),
+                        language,
+                    )
+                if app_id in app_by_id:
+                    return cls._slash_clarification(
+                        (
+                            f"App `{app_id}` 已存在；请改用 `/app {app_id}` 或选择新的 ID。"
+                            if language == "zh"
+                            else f"App `{app_id}` already exists; use `/app {app_id}` or choose a new ID."
+                        ),
+                        language,
+                    )
+                if not instruction:
+                    return cls._slash_clarification(
+                        (
+                            "请在新 App ID 后描述要创建的内容。"
+                            if language == "zh"
+                            else "Describe what to create after the new App ID."
+                        ),
+                        language,
+                    )
+                plans.append(
+                    IntentPlan(
+                        kind=IntentKind.WIDGET_CREATE,
+                        confidence=1.0,
+                        rationale="explicit slash command",
+                        app_id=app_id,
+                        instruction=instruction,
+                    )
+                )
+                continue
+
+            expected_kind = (
+                IntentKind.GRAPH_QUERY
+                if command.name == "query"
+                else IntentKind.GRAPH_MUTATION
+            )
+            if not instruction:
+                return cls._slash_clarification(
+                    (
+                        f"请在 `/{command.name}` 后输入具体指令。"
+                        if language == "zh"
+                        else f"Enter a concrete instruction after `/{command.name}`."
+                    ),
+                    language,
+                )
+            constrained_prompt = cls._slash_router_prompt(expected_kind, language)
+            try:
+                plan = await cls._route_with_llm(
+                    content_stripped=instruction,
+                    context=context,
+                    provider_name=provider_name,
+                    model_name=model_name,
+                    db_session=db_session,
+                    language=language,
+                    override_system_prompt=constrained_prompt,
+                    context_sections=["graph_counts", "recent_nodes", "schemas"],
+                    audit_context=audit_context,
+                    budget=budget,
+                    capability_catalog=capability_catalog,
+                )
+            except (LLMConfigError, BudgetExhaustedError):
+                raise
+            except Exception:
+                logger.warning("Explicit slash command routing failed", exc_info=True)
+                plan = None
+            if (
+                plan is None
+                or plan.kind != expected_kind
+                or (
+                    expected_kind == IntentKind.GRAPH_QUERY
+                    and not isinstance(plan.query, dict)
+                )
+                or (
+                    expected_kind == IntentKind.GRAPH_MUTATION
+                    and not plan.actions
+                )
+            ):
+                return cls._slash_clarification(
+                    (
+                        f"`/{command.name}` 无法生成安全、完整的结构化计划，请补充更多信息。"
+                        if language == "zh"
+                        else f"`/{command.name}` could not produce a safe, complete structured plan. Add more detail."
+                    ),
+                    language,
+                )
+            plan.confidence = 1.0
+            plan.rationale = "explicit slash command"
+            plans.append(plan)
+
+        if len(plans) == 1:
+            return plans[0]
+        return IntentPlan(
+            kind=IntentKind.MULTI_INTENT,
+            confidence=1.0,
+            rationale="explicit slash command sequence",
+            instruction="",
+            sub_intents=[cls._slash_sub_intent(plan) for plan in plans],
+        )
+
+    @staticmethod
+    def _slash_sub_intent(plan: IntentPlan) -> SubIntent:
+        kind_by_intent = {
+            IntentKind.CONVERSE: SubIntentKind.CONVERSE,
+            IntentKind.GRAPH_QUERY: SubIntentKind.GRAPH_QUERY,
+            IntentKind.GRAPH_MUTATION: SubIntentKind.GRAPH_MUTATION,
+            IntentKind.WIDGET_CREATE: SubIntentKind.WIDGET_CREATE,
+            IntentKind.WIDGET_MODIFY: SubIntentKind.WIDGET_MODIFY,
+        }
+        kind = kind_by_intent.get(plan.kind)
+        if kind is None:
+            raise ValueError(f"Unsupported slash command intent: {plan.kind}")
+        return SubIntent(
+            kind=kind,
+            app_id=plan.app_id,
+            instruction=plan.instruction,
+            actions=list(plan.actions),
+            query=plan.query,
+        )
+
+    @staticmethod
+    def _slash_router_prompt(expected_kind: IntentKind, language: str) -> str:
+        field_rule = (
+            'Fill `query` with an object shaped like {"type": string, "properties": object, "include": array}.'
+            if expected_kind == IntentKind.GRAPH_QUERY
+            else (
+                "Fill `actions` with concrete create_node, update_node_property, "
+                "delete_node, create_edge, or delete_edge action objects."
+            )
+        )
+        language_rule = (
+            "Write natural-language fields in Chinese."
+            if language == "zh"
+            else "Write natural-language fields in English."
+        )
+        return (
+            "You are Ambient Agent's constrained explicit-command router.\n"
+            f"The user selected `/{'query' if expected_kind == IntentKind.GRAPH_QUERY else 'mutate'}`. "
+            f"You MUST call classify_intent exactly once with kind `{expected_kind.value}`. "
+            "Do not change the route, execute anything, or return prose.\n"
+            f"{field_rule}\n{language_rule}\n\n"
+            "# Available Graph context\n{{ router_context }}"
+        )
+
+    @staticmethod
+    def _slash_clarification(message: str, language: str) -> IntentPlan:
+        del language
+        return IntentPlan(
+            kind=IntentKind.CLARIFY,
+            confidence=1.0,
+            rationale="invalid explicit slash command",
+            clarification_message=message,
         )
 
     @classmethod
