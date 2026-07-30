@@ -71,6 +71,7 @@ from backend.coding_agent_acp import (
 from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
 from backend.run_live import RunLiveBroker
 from backend.session_title import is_placeholder_title, sanitize_title
+from backend.skill_catalog import build_skill_catalog
 from backend.skill_manager import SkillManager, SkillOntologyReferenceError
 from backend.skill_market import SkillMarketError
 from backend.skill_store import (
@@ -188,17 +189,15 @@ from backend.graph_db import GraphDatabase, create_graph_database
 
 graph_db = create_graph_database(WORKSPACE_DIR)
 _configured_skill_market_dir = os.getenv("SKILL_MARKET_DIR", "").strip()
-skill_manager = (
-    SkillManager(
+_configured_skill_catalog = os.getenv("SKILL_CATALOG_CONFIG", "").strip()
+skill_manager = SkillManager(
+    WORKSPACE_DIR,
+    catalog=build_skill_catalog(
         WORKSPACE_DIR,
-        market_dir=_configured_skill_market_dir,
-        ontology_ids_factory=lambda: graph_db.list_schemas(),
-    )
-    if _configured_skill_market_dir
-    else SkillManager(
-        WORKSPACE_DIR,
-        ontology_ids_factory=lambda: graph_db.list_schemas(),
-    )
+        local_market_dir=_configured_skill_market_dir or None,
+        config_path=_configured_skill_catalog or None,
+    ),
+    ontology_ids_factory=lambda: graph_db.list_schemas(),
 )
 app_store.add_provider(skill_manager)
 _closed_graph_db: GraphDatabase | None = None

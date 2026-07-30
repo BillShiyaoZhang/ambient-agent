@@ -213,6 +213,56 @@ MessageChannel 把 RPC 交给可信 host 和 Backend authorizer。Workspace 稳�
 显式 pixel 回滚链路。Runtime 不挂载工作区且使用 `network_mode: none`；浏览器
 按需启动，最后一个会话关闭 60 秒后回收，默认最多 4 个 Context。
 
+### 5.2 Skill Catalog 发现与授权边界
+
+```mermaid
+classDiagram
+    class SkillCatalogProvider {
+        <<protocol>>
+        +source_id: str
+        +kind: str
+        +required: bool
+        +list_entries() SkillMarketEntry[]
+    }
+    class SkillCatalog {
+        +list_snapshot() SkillCatalogSnapshot
+        +list_entries() SkillMarketEntry[]
+        +get(market_id) SkillMarketEntry
+    }
+    class SkillMarket {
+        +list_entries() SkillMarketEntry[]
+    }
+    class GitHubSkillCatalogProvider {
+        +list_entries() SkillMarketEntry[]
+        -_read_or_fetch(url, expected_hash) bytes
+        -_read_verified_cache(path, expected_hash) bytes
+    }
+    class SkillManager {
+        +list_market()
+        +install(market_id)
+        +set_authorization(catalog_id, policy, digest)
+    }
+    class SkillStore {
+        +install(record, skill_content, market_content)
+        +set_authorization(...)
+    }
+
+    SkillCatalogProvider <|.. SkillMarket
+    SkillCatalogProvider <|.. GitHubSkillCatalogProvider
+    SkillCatalog o-- SkillCatalogProvider
+    SkillManager --> SkillCatalog
+    SkillManager --> SkillStore
+```
+
+Provider 只负责发现、不可变来源 pin、下载与标准化；Catalog 负责跨来源去重、
+确定性排序和可选来源故障隔离；Manager/Store 仍是唯一安装与授权控制面。
+GitHub commit/hash、registry badge 或上游扫描都不会产生 Ambient trust。
+远程 standalone Skill 与本地外部 Skill 一样安装为
+`quarantined + disabled`，并复用精确 digest/revision 绑定的
+`agent.context.inject` 通道。`scripts/`、`references/`、`assets/` 和依赖不进入
+这个 Runtime；未来可执行扩展必须转成 Capability/Plugin/Widget，继续经过各自
+的 sandbox、grant、approval 和 audit。
+
 ## 6. 事件与恢复边界
 
 Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/model usage/`redacted` 元数据；终态 event 默认保留 30 天。Graph effect ledger 防止 checkpoint 窗口重复写，App promotion marker 区分已发布与待发布 staging。只有完整补偿数据的 saga step 才自动回滚。

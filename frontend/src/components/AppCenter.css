@@ -105,7 +105,11 @@
 .app-center-grid { width: 100%; display: grid; grid-template-columns: repeat(8, minmax(86px, 1fr)); gap: clamp(20px, 3.5vh, 38px) clamp(14px, 2.6vw, 42px); align-content: center; }
 .app-center-grid.is-search-grid { align-content: start; max-height: 100%; overflow-y: auto; padding: 24px 8px 50px; }
 
-.app-center-market-grid { width: min(1120px, 100%); margin: 0 auto; display: grid; grid-template-columns: repeat(3, minmax(250px, 1fr)); gap: 16px; align-content: start; padding: 4px 0 40px; }
+.app-center-market-layout { width: min(1120px, 100%); margin: 0 auto; }
+.app-center-market-source-warning { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 14px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warning), transparent 68%); border-radius: 11px; color: var(--warning); background: color-mix(in srgb, var(--warning), transparent 92%); }
+.app-center-market-source-warning svg { flex: none; margin-top: 1px; }
+.app-center-market-source-warning p { margin: 0; color: var(--text-secondary); font-size: 10px; line-height: 1.5; }
+.app-center-market-grid { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(250px, 1fr)); gap: 16px; align-content: start; padding: 4px 0 40px; }
 .app-center-market-card { display: flex; min-width: 0; flex-direction: column; padding: 18px; border: 1px solid var(--border-strong); border-radius: 20px; background: color-mix(in srgb, var(--surface-panel), transparent 10%); box-shadow: var(--shadow-panel); backdrop-filter: blur(18px); }
 .app-center-market-card > header { display: flex; align-items: center; gap: 10px; }
 .app-center-market-card > header > div:nth-child(2) { flex: 1; min-width: 0; }

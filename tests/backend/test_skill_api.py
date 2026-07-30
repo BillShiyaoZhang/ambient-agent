@@ -53,7 +53,22 @@ def test_skill_market_api_lifecycle_and_installed_catalog_projection(
         market = client.get("/api/skill-market")
         assert market.status_code == 200
         assert market.headers["cache-control"] == "no-store"
+        assert market.json()["sources"] == [
+            {
+                "id": "bundled",
+                "kind": "bundled",
+                "required": True,
+                "status": "available",
+                "entry_count": 1,
+            }
+        ]
         assert market.json()["items"][0]["install_state"] == "not_installed"
+        assert market.json()["items"][0]["catalog_source"]["id"] == "bundled"
+        assert market.json()["items"][0]["package_compatibility"] == {
+            "profile": "context-only-v1",
+            "status": "compatible",
+            "reasons": [],
+        }
         assert market.json()["items"][0]["provenance"]["verified"] is True
         assert market.json()["items"][0]["provenance"]["trust"] == "bundled"
 

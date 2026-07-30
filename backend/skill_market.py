@@ -65,6 +65,15 @@ class SkillMarketEntry:
     source_dir: Path
     skill_content: bytes
     market_content: bytes
+    catalog_source_id: str = "local"
+    catalog_source_kind: str = "local"
+    source_uri: str | None = None
+    source_revision: str | None = None
+    upstream_hash: str | None = None
+    update_strategy: str = "semver"
+    compatibility_profile: str = "context-only-v1"
+    compatibility_status: str = "compatible"
+    compatibility_reasons: tuple[str, ...] = ()
 
     @property
     def name(self) -> str:
@@ -97,6 +106,19 @@ class SkillMarketEntry:
                 "verified": self.provenance_verified,
                 "trust": self.provenance_trust,
             },
+            "catalog_source": {
+                "id": self.catalog_source_id,
+                "kind": self.catalog_source_kind,
+                "source_uri": self.source_uri or self.provenance_source,
+                "source_revision": self.source_revision,
+                "upstream_hash": self.upstream_hash,
+                "update_strategy": self.update_strategy,
+            },
+            "package_compatibility": {
+                "profile": self.compatibility_profile,
+                "status": self.compatibility_status,
+                "reasons": list(self.compatibility_reasons),
+            },
         }
 
     def as_install_record(self) -> dict[str, Any]:
@@ -112,7 +134,14 @@ class SkillMarketEntry:
 class SkillMarket:
     """Read a trusted, local directory of immutable context-only skill packages."""
 
-    def __init__(self, market_dir: str | Path = BUNDLED_SKILL_MARKET_DIR):
+    def __init__(
+        self,
+        market_dir: str | Path = BUNDLED_SKILL_MARKET_DIR,
+        *,
+        source_id: str | None = None,
+        kind: str | None = None,
+        required: bool = True,
+    ):
         self.market_dir = Path(market_dir).expanduser().absolute()
         # Trust is a loader property, never a publisher-controlled manifest
         # claim. Conservative path equality means an alias of the bundled
@@ -120,6 +149,13 @@ class SkillMarket:
         self._is_bundled_market = (
             self.market_dir == BUNDLED_SKILL_MARKET_DIR.expanduser().absolute()
         )
+        self.source_id = source_id or (
+            "bundled" if self._is_bundled_market else "local"
+        )
+        self.kind = kind or (
+            "bundled" if self._is_bundled_market else "local"
+        )
+        self.required = required
 
     def list_entries(self) -> list[SkillMarketEntry]:
         self._validate_market_dir()
@@ -278,6 +314,12 @@ class SkillMarket:
             source_dir=entry_dir,
             skill_content=skill_content,
             market_content=market_content,
+            catalog_source_id=self.source_id,
+            catalog_source_kind=self.kind,
+            source_uri=source,
+            source_revision=version,
+            upstream_hash=None,
+            update_strategy="semver",
         )
 
 

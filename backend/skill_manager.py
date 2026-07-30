@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from backend.skill_authorization import compute_skill_grant_digest, skill_principal_id
-from backend.skill_market import BUNDLED_SKILL_MARKET_DIR, SkillMarket, SkillMarketEntry
+from backend.skill_catalog import SkillCatalog
+from backend.skill_market import (
+    BUNDLED_SKILL_MARKET_DIR,
+    SkillMarket,
+    SkillMarketEntry,
+    SkillMarketError,
+)
 from backend.skill_store import (
     InstalledSkill,
     SkillAuthorizationRequiredError,
@@ -91,10 +97,14 @@ class SkillManager:
         workspace_dir: str | Path,
         market_dir: str | Path = BUNDLED_SKILL_MARKET_DIR,
         *,
+        catalog: SkillCatalog | None = None,
         ontology_ids_factory: Callable[[], Iterable[Any]] | None = None,
     ):
         self.store = SkillStore(workspace_dir)
-        self.market = SkillMarket(market_dir)
+        self.catalog = catalog or SkillCatalog([SkillMarket(market_dir)])
+        # Backward-compatible alias for integrations that resolve an entry
+        # before calling install.
+        self.market = self.catalog
         self._ontology_ids_factory = ontology_ids_factory or _default_ontology_ids
 
     @property
@@ -109,7 +119,8 @@ class SkillManager:
             item.market_id: item for item in installed_skills
         }
         items: list[dict[str, Any]] = []
-        for entry in self.market.list_entries():
+        catalog_snapshot = self.catalog.list_snapshot()
+        for entry in catalog_snapshot.entries:
             self._validate_ontology_refs(entry)
             installed = installed_by_market.get(entry.market_id)
             item = entry.as_market_item()
@@ -117,6 +128,22 @@ class SkillManager:
                 item["install_state"] = "not_installed"
             elif installed.version == entry.version and installed.digest == entry.digest:
                 item["install_state"] = "installed"
+            elif entry.update_strategy == "content_hash":
+                installed_source = installed.record.get("catalog_source")
+                if (
+                    isinstance(installed_source, Mapping)
+                    and installed_source.get("id") == entry.catalog_source_id
+                    and installed_source.get("kind") == entry.catalog_source_kind
+                    and installed_source.get("update_strategy") == "content_hash"
+                ):
+                    item["install_state"] = (
+                        "integrity_conflict"
+                        if installed_source.get("source_revision")
+                        == entry.source_revision
+                        else "update_available"
+                    )
+                else:
+                    item["install_state"] = "integrity_conflict"
             else:
                 precedence = compare_semver(entry.version, installed.version)
                 if precedence > 0:
@@ -143,13 +170,25 @@ class SkillManager:
                     }
                 )
             items.append(item)
-        return {"version": 1, "revision": revision, "items": items}
+        return {
+            "version": 1,
+            "revision": revision,
+            "sources": [
+                source.as_dict() for source in catalog_snapshot.sources
+            ],
+            "items": items,
+        }
 
     def list_market_items(self) -> list[dict[str, Any]]:
         return self.list_market()["items"]
 
     def install(self, market_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
-        entry = self.market.get(market_id)
+        entry = self.catalog.get(market_id)
+        if entry.compatibility_status != "compatible":
+            raise SkillMarketError(
+                f"Skill '{entry.market_id}' is incompatible with "
+                f"{entry.compatibility_profile}"
+            )
         self._validate_ontology_refs(entry)
         installed = self.store.install(
             entry.as_install_record(),

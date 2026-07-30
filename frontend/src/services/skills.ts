@@ -33,6 +33,30 @@ export interface SkillProvenance {
   trust?: "bundled" | "local";
 }
 
+export interface SkillCatalogSource {
+  id: string;
+  kind: string;
+  required: boolean;
+  status: "available" | "unavailable";
+  entry_count: number;
+  error?: string;
+}
+
+export interface SkillCatalogOrigin {
+  id: string;
+  kind: string;
+  source_uri?: string | null;
+  source_revision?: string | null;
+  upstream_hash?: string | null;
+  update_strategy: "semver" | "content_hash";
+}
+
+export interface SkillPackageCompatibility {
+  profile: string;
+  status: "compatible" | "incompatible";
+  reasons: string[];
+}
+
 export interface MarketSkill {
   market_id: string;
   catalog_id: string;
@@ -49,6 +73,8 @@ export interface MarketSkill {
   ontology_refs: string[];
   surfaces: SkillSurface[];
   provenance: SkillProvenance;
+  catalog_source?: SkillCatalogOrigin;
+  package_compatibility?: SkillPackageCompatibility;
   install_state: SkillInstallState;
   installed_version?: string | null;
   enabled?: boolean;
@@ -58,6 +84,7 @@ export interface MarketSkill {
 export interface SkillMarket {
   version: 1;
   revision?: number;
+  sources?: SkillCatalogSource[];
   items: MarketSkill[];
 }
 

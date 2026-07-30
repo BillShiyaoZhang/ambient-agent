@@ -1,6 +1,6 @@
 # Agent Skills: Installation, Activation, and Security Boundaries
 
-Ambient Agent supports the `SKILL.md` format from the [Agent Skills specification](https://agentskills.io/specification). A Skill is instruction and workflow knowledge loaded on demand; it is not executable code, a model Tool, a Capability grant, or an App. The MVP installs Skills from the bundled Market or an administrator-configured local external Market. External packages are not trusted merely because an administrator made the directory discoverable: they install disabled and quarantined, then require a digest-bound `agent.context.inject` decision. Discovery, installation, and update never expand Agent, Widget, or Runtime authority.
+Ambient Agent supports the `SKILL.md` format from the [Agent Skills specification](https://agentskills.io/specification). A Skill is instruction and workflow knowledge loaded on demand; it is not executable code, a model Tool, a Capability grant, or an App. The Catalog can aggregate the bundled Market, administrator-configured local Markets, and GitHub sources pinned to immutable Git commits and expected SHA-256 values. Making a source discoverable does not trust its packages: external packages install disabled and quarantined, then require a digest-bound `agent.context.inject` decision. Discovery, download, installation, and update never expand Agent, Widget, or Runtime authority.
 
 ## 1. Domain boundaries
 
@@ -45,7 +45,7 @@ Ambient applies additional package constraints:
 - `market.json.ontology_refs` may reference only canonical entity IDs already registered in the current `ambient-context`;
 - the Skill directory, `SKILL.md`, and `market.json` must be real directories or regular files; symlinks, invalid UTF-8, duplicate or unknown fields, and content beyond size limits are rejected;
 - `SKILL.md` is not evaluated as Jinja or any other template; its frontmatter and body are data;
-- installation runs no hooks, downloads no dependencies, reads no remote content, and registers no Tools.
+- installation runs no hooks, downloads no dependencies, and registers no Tools. The GitHub Provider may read only one administrator-pinned, expected-SHA-256 `SKILL.md`; package instructions cannot trigger another network read.
 
 `allowed-tools` does not pre-approve a call. If a Tool is absent from the current turn, the current scope is insufficient, or its effect requires an interaction, the Skill declaration does not change the denial.
 
@@ -57,7 +57,7 @@ Skill Market and App Center are separate views:
 - `POST /api/skills/install` installs the current Market version by `market_id` and also performs an explicit update; `PATCH /api/skills/{catalog_id}` changes the enabled state of a trusted or already-authorized installation, `PATCH /api/skills/{catalog_id}/authorization` grants, changes, or revokes external context injection, and `DELETE /api/skills/{catalog_id}` uninstalls;
 - `GET /api/app-store` remains the launcher and layout for installed Apps, Skills, and executable capabilities; it is not a remote Market index.
 
-The MVP uses the bundled Market by default. An administrator may point `SKILL_MARKET_DIR` at a local external Market root. Directory configuration makes packages discoverable, not trusted or authorized. The installer does not accept arbitrary URLs, Git repositories, or archives. Installation proceeds as follows:
+The default Catalog always contains the bundled Market. `SKILL_MARKET_DIR` remains a compatible configuration that is added to the Catalog instead of replacing the bundled source. An administrator may also point `SKILL_CATALOG_CONFIG` at a versioned JSON configuration declaring one or more pinned GitHub Providers. Configuration makes packages discoverable, not trusted or authorized. The install API still accepts no arbitrary URL, Git repository, or archive. Installation proceeds as follows:
 
 1. parse and validate `SKILL.md`, file boundaries, and public metadata;
 2. compute a stable digest over the exact `SKILL.md` and `market.json` content;
@@ -98,6 +98,61 @@ Installation state and content have separate responsibilities:
 - uninstall removes only the installation record. The content-addressed package remains as an immutable cache so request-path cleanup cannot race a concurrent reinstall. Future GC must use locking or leases, a grace period, and mark-and-sweep. An already-started Run uses its own pinned body copy and does not depend on the installation directory remaining present.
 
 Installed snapshots continue to work when the Market is temporarily unavailable. A missing, corrupt, or digest-mismatched snapshot makes the Skill unavailable rather than falling back to the newest content with the same name.
+
+### 3.1 Multi-source Catalog and supply-chain boundary
+
+`SkillCatalog` is a discovery aggregator, not a new execution runtime. Each Provider only lists normalized candidate snapshots and returns its own health:
+
+| Provider | Default | Installable content | Trust semantics |
+| --- | --- | --- | --- |
+| `bundled` | Required and release-loaded | `SKILL.md + market.json` | Only this loader may produce `bundled/verified` |
+| `local` | Optional through `SKILL_MARKET_DIR` | Two regular files | Always `local/unverified` |
+| `github` | Optional through `SKILL_CATALOG_CONFIG` | One expected-SHA-256 `SKILL.md` at a pinned commit | Always `local/unverified`; a commit/hash proves reproducibility, not publisher trust |
+| Future registry/search | Disabled by default | Discovery metadata only, or conversion into the immutable snapshot above | Rank, downloads, platform review, and upstream scans are advisory signals only |
+
+The minimum Provider contract is a stable `source_id`, `kind`, `required`, `list_entries()`, and bounded errors. The Catalog owns deterministic ordering, cross-source `market_id/catalog_id` conflict detection, and failure isolation. A required-source failure fails the Catalog request. An optional failure appears as `unavailable` in `GET /api/skill-market.sources` while other sources remain discoverable and installed snapshots remain usable. The same ID from two healthy sources fails the whole merge; Provider order never silently wins.
+
+GitHub configuration version is `1`, and both Provider and entry data are administrator-controlled. Every entry declares:
+
+```json
+{
+  "repository": "owner/repository",
+  "commit": "40-character-lowercase-git-sha",
+  "path": "skills/example",
+  "sha256": "sha256:<SKILL.md-sha256>",
+  "files": ["SKILL.md"],
+  "namespace": "github-owner-repository",
+  "title": "Example",
+  "provider": "Publisher",
+  "tags": ["example"],
+  "triggers": ["example workflow"],
+  "ontology_refs": []
+}
+```
+
+The Host constructs only `raw.githubusercontent.com/<repo>/<commit>/<path>/SKILL.md`, bounds the response, timeout, and redirects, verifies the exact SHA-256, then writes a content-addressed Catalog cache in the workspace. `files` must equal `["SKILL.md"]`, so an upstream Skill with `scripts/`, `references/`, `assets/`, hooks, dependencies, or executable entry points is incompatible with the current profile and cannot be installed. A cache hit is re-hashed. A network failure may use only an already verified cache for the same expected hash—never a branch, tag, HEAD, or different commit.
+
+Catalog source identity and installation trust are shown separately:
+
+- `catalog_source` records Provider ID/kind, `source_uri`, `source_revision`, `upstream_hash`, and `update_strategy`;
+- `provenance.digest` is Ambient's package digest over the exact `SKILL.md` and synthesized `market.json`;
+- a Git commit and upstream file hash are supply-chain pins; they never set `provenance.verified` to true or bypass quarantine approval;
+- local Markets retain SemVer comparison. A GitHub installation `version` equals its commit rather than inventing SemVer, and uses `content_hash`: changed bytes under the same commit are an integrity conflict; a different commit/hash is an explicit `update_available`, and updating always revokes the old approval;
+- API `version = 1` remains unchanged. `sources`, `catalog_source`, and `package_compatibility` are additive fields.
+
+A mature market is integrated through a new Provider adapter, never by embedding its permission model, install command, or executor into Ambient. `skills.sh` is a suitable future search and audit-signal source, but each result must still resolve to a pinned commit/hash standalone snapshot. A result without an immutable revision or complete file inventory is display-only and cannot install. Entries requiring scripts, MCP, network, files, or UI must become a Capability, Plugin, or Widget and pass that runtime's sandbox and grant channel; they cannot widen `agent.context.inject`.
+
+The repository ships a **disabled-by-default** Anthropic official-source
+configuration at
+[`backend/catalogs/anthropic.json`](../../backend/catalogs/anthropic.json).
+Host development can set
+`SKILL_CATALOG_CONFIG=backend/catalogs/anthropic.json`; Docker can set
+`SKILL_CATALOG_CONFIG=/app/backend/catalogs/anthropic.json`. It pins an exact
+`anthropics/skills` commit and includes only `doc-coauthoring`, whose directory
+contains exactly one `SKILL.md` at that revision. The other top-level Skills
+carry scripts, references, or assets and therefore do not enter the current
+profile. This curated list is an auditable compatibility list, not Ambient
+authorization of Anthropic content; first installation is still quarantined.
 
 ## 4. Progressive disclosure and Run snapshots
 
@@ -193,7 +248,10 @@ User-context facts actually produced while using a Skill, such as a `Task`, `Eve
 | A checkpoint selection marker contradicts its snapshot | Resume fails with `invalid_skill_snapshot`; it never silently becomes an empty selection or re-resolves current installation state |
 | Body names a missing Tool or unapproved adapter | Existing interaction/failure semantics apply; never pretend success |
 | Skill is mistaken for an executable or UI item | App Center opens details only; execution and UI generation remain existing Capability/App behavior |
-| Market is unavailable | Installed Skills continue to work; the Market listing returns an explicit error |
+| An optional Catalog source is unavailable | Installed Skills continue to work; that source is `unavailable` and other sources still return |
+| The same ID appears in multiple sources | Fail the Catalog merge until the administrator removes the ambiguity |
+| GitHub commit/hash mismatch or redirect | Reject the candidate; only a verified cache for the same expected hash may be used |
+| Upstream package includes scripts/references/assets | Mark incompatible and forbid installation; executable behavior uses Capability/Plugin/Widget |
 
 Install, update, enable/disable, and uninstall are serialized and committed atomically in SQLite transactions; idempotent installation and stable catalog IDs avoid duplicate records. Registry or snapshot corruption is reported as an error and must not be treated as an empty catalog or substituted with the latest same-name content.
 
@@ -211,7 +269,9 @@ Install, update, enable/disable, and uninstall are serialized and committed atom
 
 The following are outside this version:
 
-- installation from an arbitrary network URL, Git repository, or community archive;
+- installation from a request-supplied arbitrary URL, mutable Git branch/tag, or community archive;
+- automatic GitHub repository enumeration or direct execution of a third-party market install command;
+- treating `skills.sh`, a community registry, popularity, publisher badges, or upstream malware scans as an Ambient trust grant;
 - packaging or reading the standard's optional `references/`, `assets/`, or `scripts/` directories;
 - executing a Skill-provided script, install hook, shell command, or dynamic Python/JavaScript Tool;
 - automatic installation, authentication, or approval of Skill dependencies;

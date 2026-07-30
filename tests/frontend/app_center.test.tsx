@@ -445,6 +445,79 @@ describe("App Center", () => {
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
   });
 
+  it("shows catalog source health separately from package trust and pinned provenance", async () => {
+    const commit = "a".repeat(40);
+    const remoteMarket = {
+      ...marketState,
+      sources: [
+        {
+          id: "bundled",
+          kind: "bundled",
+          required: true,
+          status: "available",
+          entry_count: 1,
+        },
+        {
+          id: "community-search",
+          kind: "registry",
+          required: false,
+          status: "unavailable",
+          entry_count: 0,
+          error: "registry timed out",
+        },
+      ],
+      items: [
+        {
+          ...marketState.items[1],
+          catalog_source: {
+            id: "anthropic-official",
+            kind: "github",
+            source_uri: `https://github.com/anthropics/skills/tree/${commit}/skills/meeting-brief`,
+            source_revision: commit,
+            upstream_hash: `sha256:${"b".repeat(64)}`,
+            update_strategy: "content_hash",
+          },
+          package_compatibility: {
+            profile: "context-only-v1",
+            status: "compatible",
+            reasons: [],
+          },
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => ({
+        ok: true,
+        status: 200,
+        json: async () => String(input).endsWith("/api/skill-market")
+          ? remoteMarket
+          : skillState,
+      })),
+    );
+
+    render(
+      <AppCenter
+        isOpen
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="en"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Discover Skills" }));
+    expect(
+      await screen.findByText("community-search is unavailable: registry timed out"),
+    ).toBeDefined();
+    expect(screen.getByText("GitHub · anthropic-official")).toBeDefined();
+    expect(screen.getByText("context-only-v1")).toBeDefined();
+    expect(screen.getByText("a".repeat(12))).toBeDefined();
+    expect(screen.getByText("Not verified")).toBeDefined();
+  });
+
   it("quarantines external skills and confirms digest-bound authorization or revocation", async () => {
     let enabled = false;
     let registryRevision = 11;

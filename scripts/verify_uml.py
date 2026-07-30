@@ -51,6 +51,12 @@ CLASS_TO_FILE = {
     "BackendManager": "backend/backend_manager.py",
     "StdioJsonRpcClient": "backend/backend_manager.py",
     "WidgetRuntimeGateway": "backend/widget_runtime.py",
+    "SkillCatalogProvider": "backend/skill_catalog.py",
+    "SkillCatalog": "backend/skill_catalog.py",
+    "GitHubSkillCatalogProvider": "backend/skill_catalog.py",
+    "SkillMarket": "backend/skill_market.py",
+    "SkillManager": "backend/skill_manager.py",
+    "SkillStore": "backend/skill_store.py",
 }
 
 

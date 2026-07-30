@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "anthropic-official",
+      "kind": "github",
+      "required": false,
+      "entries": [
+        {
+          "repository": "anthropics/skills",
+          "commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+          "path": "skills/doc-coauthoring",
+          "sha256": "sha256:2e47d78846faeea4a56e9809c52700087a15a2155a3f293a3efbaded81398ef4",
+          "files": [
+            "SKILL.md"
+          ],
+          "namespace": "github-anthropics-skills",
+          "title": "Document Co-authoring",
+          "provider": "Anthropic",
+          "tags": [
+            "documentation",
+            "writing"
+          ],
+          "triggers": [
+            "co-author documentation",
+            "draft a technical specification",
+            "write a proposal"
+          ],
+          "ontology_refs": []
+        }
+      ]
+    }
+  ]
+}

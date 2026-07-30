@@ -464,7 +464,19 @@ function MarketSkillCard({
   const updateAvailable = skill.install_state === "update_available";
   const marketOlder = skill.install_state === "market_older";
   const integrityConflict = skill.install_state === "integrity_conflict";
-  const blocked = marketOlder || integrityConflict;
+  const incompatible = skill.package_compatibility?.status === "incompatible";
+  const blocked = marketOlder || integrityConflict || incompatible;
+  const contentRevision = skill.catalog_source?.update_strategy === "content_hash"
+    ? skill.catalog_source.source_revision
+    : null;
+  const displayedVersion = contentRevision
+    ? `commit ${contentRevision.slice(0, 12)}`
+    : skill.version;
+  const displayedInstalledVersion = (
+    contentRevision && skill.installed_version
+      ? skill.installed_version.slice(0, 12)
+      : skill.installed_version
+  );
   const actionLabel = installed
     ? (isZh ? "已安装" : "Installed")
     : updateAvailable
@@ -473,6 +485,8 @@ function MarketSkillCard({
         ? (isZh ? "已安装较新版本" : "Newer version installed")
         : integrityConflict
           ? (isZh ? "版本内容冲突" : "Version conflict")
+          : incompatible
+            ? (isZh ? "当前版本不兼容" : "Incompatible")
           : (isZh ? "安装" : "Install");
   return (
     <article className="app-center-market-card">
@@ -480,7 +494,7 @@ function MarketSkillCard({
         <AppIcon item={item} compact />
         <div>
           <h2>{skill.title}</h2>
-          <p>{skill.provider} · {skill.version}</p>
+          <p>{skill.provider} · {displayedVersion}</p>
         </div>
         <span className={`app-center-market-trust ${skill.provenance.verified ? "is-verified" : ""}`}>
           {skill.provenance.verified ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
@@ -517,10 +531,22 @@ function MarketSkillCard({
       )}
       <div className="app-center-market-meta">
         <span>{isZh ? "按需 Agent 上下文" : "On-demand agent context"}</span>
+        {skill.catalog_source && (
+          <span>
+            {skill.catalog_source.kind === "github" ? "GitHub" : skill.catalog_source.kind}
+            {" · "}
+            {skill.catalog_source.id}
+          </span>
+        )}
+        {skill.package_compatibility && (
+          <span>{skill.package_compatibility.profile}</span>
+        )}
         {updateAvailable && (
           <span className="is-update">
             <span>{isZh ? "有可用更新" : "Update available"}</span>
-            {skill.installed_version ? ` · ${skill.installed_version} → ${skill.version}` : ""}
+            {displayedInstalledVersion
+              ? ` · ${displayedInstalledVersion} → ${contentRevision?.slice(0, 12) ?? skill.version}`
+              : ""}
           </span>
         )}
         {marketOlder && (
@@ -533,6 +559,12 @@ function MarketSkillCard({
             {isZh ? "同一版本的内容摘要不同" : "Same version has a different digest"}
           </span>
         )}
+        {incompatible && (
+          <span>
+            {skill.package_compatibility?.reasons[0]
+              ?? (isZh ? "当前运行环境不支持该包" : "This package is not supported by the current runtime")}
+          </span>
+        )}
       </div>
       {skill.ontology_refs.length > 0 && (
         <div className="app-center-market-refs" aria-label={isZh ? "本体引用" : "Ontology references"}>
@@ -541,6 +573,22 @@ function MarketSkillCard({
       )}
       <dl className="app-center-market-provenance">
         <div><dt>{isZh ? "来源" : "Source"}</dt><dd title={skill.provenance.source}>{skill.provenance.source}</dd></div>
+        {skill.catalog_source?.source_revision && (
+          <div>
+            <dt>{isZh ? "版本钉住" : "Revision"}</dt>
+            <dd title={skill.catalog_source.source_revision}>
+              {skill.catalog_source.source_revision.slice(0, 12)}
+            </dd>
+          </div>
+        )}
+        {skill.catalog_source?.upstream_hash && (
+          <div>
+            <dt>{isZh ? "上游摘要" : "Upstream"}</dt>
+            <dd title={skill.catalog_source.upstream_hash}>
+              {skill.catalog_source.upstream_hash}
+            </dd>
+          </div>
+        )}
         <div><dt>Digest</dt><dd title={skill.provenance.digest}>{skill.provenance.digest}</dd></div>
       </dl>
       <button
@@ -1321,16 +1369,34 @@ export const AppCenter: React.FC<AppCenterProps> = ({
           ) : filteredMarketSkills.length === 0 ? (
             <div className="app-center-state"><Search size={30} /><h2>{isZh ? "没有找到技能" : "No skills found"}</h2><p>{isZh ? "试试更短的关键词。" : "Try a shorter search term."}</p></div>
           ) : (
-            <div className="app-center-market-grid">
-              {filteredMarketSkills.map((skill) => (
-                <MarketSkillCard
-                  key={skill.market_id}
-                  skill={skill}
-                  busy={skillBusyId === `market:${skill.market_id}`}
-                  isZh={isZh}
-                  onInstall={() => void installMarketSkill(skill)}
-                />
-              ))}
+            <div className="app-center-market-layout">
+              {(market?.sources ?? [])
+                .filter((source) => source.status === "unavailable")
+                .map((source) => (
+                  <div
+                    className="app-center-market-source-warning"
+                    role="status"
+                    key={source.id}
+                  >
+                    <AlertCircle size={15} />
+                    <p>
+                      {isZh
+                        ? `${source.id} 暂时不可用：${source.error ?? "来源没有返回可用快照"}`
+                        : `${source.id} is unavailable: ${source.error ?? "the source returned no usable snapshot"}`}
+                    </p>
+                  </div>
+                ))}
+              <div className="app-center-market-grid">
+                {filteredMarketSkills.map((skill) => (
+                  <MarketSkillCard
+                    key={skill.market_id}
+                    skill={skill}
+                    busy={skillBusyId === `market:${skill.market_id}`}
+                    isZh={isZh}
+                    onInstall={() => void installMarketSkill(skill)}
+                  />
+                ))}
+              </div>
             </div>
           )
         ) : loading && !store ? (

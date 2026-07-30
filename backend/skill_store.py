@@ -385,23 +385,39 @@ class SkillStore:
                 if existing.digest == digest and existing_row["record_json"] == canonical_record:
                     self._ensure_package(skill_content, market_content, digest)
                     return existing
-                version_precedence = compare_semver(
-                    normalized_record["version"],
-                    existing.version,
+                content_hash_update = _is_content_hash_update(
+                    existing.record,
+                    normalized_record,
                 )
-                if version_precedence == 0 and existing.digest != digest:
+                content_hash_governed = (
+                    _record_uses_content_hash(existing.record)
+                    or _record_uses_content_hash(normalized_record)
+                )
+                if content_hash_governed and not content_hash_update:
                     raise SkillVersionConflict(
                         existing.catalog_id,
                         existing.version,
                         existing.digest,
                         digest,
                     )
-                if version_precedence < 0:
-                    raise SkillDowngradeConflict(
-                        existing.catalog_id,
-                        existing.version,
+                if not content_hash_governed:
+                    version_precedence = compare_semver(
                         normalized_record["version"],
+                        existing.version,
                     )
+                    if version_precedence == 0 and existing.digest != digest:
+                        raise SkillVersionConflict(
+                            existing.catalog_id,
+                            existing.version,
+                            existing.digest,
+                            digest,
+                        )
+                    if version_precedence < 0:
+                        raise SkillDowngradeConflict(
+                            existing.catalog_id,
+                            existing.version,
+                            normalized_record["version"],
+                        )
                 installed_at = existing.installed_at
                 if _record_has_bundled_trust(normalized_record):
                     enabled = int(existing.enabled)
@@ -773,7 +789,29 @@ class SkillStore:
                 raise ValueError(f"Skill installation field '{field}' must be a non-empty string")
             if value != value.strip():
                 raise ValueError(f"Skill installation field '{field}' must not contain surrounding whitespace")
-        parse_semver(normalized["version"])
+        if _record_uses_content_hash(normalized):
+            source = normalized.get("catalog_source")
+            if not isinstance(source, dict):
+                raise ValueError("Content-addressed Skill source metadata is missing")
+            source_revision = source.get("source_revision")
+            upstream_hash = source.get("upstream_hash")
+            if (
+                not isinstance(source_revision, str)
+                or not source_revision
+                or normalized["version"] != source_revision
+            ):
+                raise ValueError(
+                    "Content-addressed Skill version must equal source_revision"
+                )
+            if (
+                not isinstance(upstream_hash, str)
+                or _DIGEST_PATTERN.fullmatch(upstream_hash) is None
+            ):
+                raise ValueError(
+                    "Content-addressed Skill upstream_hash must be a SHA-256 digest"
+                )
+        else:
+            parse_semver(normalized["version"])
 
         manifest = SkillManifest.from_bytes(skill_content, expected_name=normalized["name"])
         if manifest.name != normalized["name"]:
@@ -948,6 +986,51 @@ def _record_has_bundled_trust(record: dict[str, Any]) -> bool:
         and provenance.get("trust") == "bundled"
         and provenance.get("verified") is True
         and provenance.get("source") == f"bundled://ambient-agent/{name}"
+    )
+
+
+def _is_content_hash_update(
+    installed_record: dict[str, Any],
+    candidate_record: dict[str, Any],
+) -> bool:
+    """Allow an explicit immutable-revision update without inventing SemVer.
+
+    Both records must be owned by the same content-addressed catalog source.
+    A byte change under one revision is never an update: it falls through to
+    the existing same-version integrity conflict.
+    """
+
+    installed_source = installed_record.get("catalog_source")
+    candidate_source = candidate_record.get("catalog_source")
+    if not isinstance(installed_source, dict) or not isinstance(candidate_source, dict):
+        return False
+    if (
+        installed_source.get("update_strategy") != "content_hash"
+        or candidate_source.get("update_strategy") != "content_hash"
+        or installed_source.get("id") != candidate_source.get("id")
+        or installed_source.get("kind") != candidate_source.get("kind")
+    ):
+        return False
+    installed_revision = installed_source.get("source_revision")
+    candidate_revision = candidate_source.get("source_revision")
+    installed_hash = installed_source.get("upstream_hash")
+    candidate_hash = candidate_source.get("upstream_hash")
+    return (
+        isinstance(installed_revision, str)
+        and isinstance(candidate_revision, str)
+        and installed_revision != candidate_revision
+        and isinstance(installed_hash, str)
+        and _DIGEST_PATTERN.fullmatch(installed_hash) is not None
+        and isinstance(candidate_hash, str)
+        and _DIGEST_PATTERN.fullmatch(candidate_hash) is not None
+    )
+
+
+def _record_uses_content_hash(record: dict[str, Any]) -> bool:
+    source = record.get("catalog_source")
+    return (
+        isinstance(source, dict)
+        and source.get("update_strategy") == "content_hash"
     )
 
 

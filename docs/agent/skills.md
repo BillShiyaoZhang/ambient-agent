@@ -1,6 +1,6 @@
 # Agent Skills：安装、激活与安全边界
 
-Ambient Agent 支持 [Agent Skills 规范](https://agentskills.io/specification)中的 `SKILL.md` 格式。Skill 是可按需加载的说明与工作流知识，不是可执行代码、模型 Tool、Capability grant 或 App。MVP 从系统随附 Market 或管理员配置的本地外部 Market 安装 Skill。管理员让一个目录可被发现，不等于信任其中的包：外部包安装后默认停用并隔离，必须经过绑定内容摘要的 `agent.context.inject` 授权。发现、安装和更新都不会扩大 Agent、Widget 或 Runtime 的权限。
+Ambient Agent 支持 [Agent Skills 规范](https://agentskills.io/specification)中的 `SKILL.md` 格式。Skill 是可按需加载的说明与工作流知识，不是可执行代码、模型 Tool、Capability grant 或 App。Catalog 可以聚合系统随附 Market、管理员配置的本地 Market，以及固定到不可变 Git commit 和预期 SHA-256 的 GitHub 来源。让一个来源可被发现，不等于信任其中的包：外部包安装后默认停用并隔离，必须经过绑定内容摘要的 `agent.context.inject` 授权。发现、下载、安装和更新都不会扩大 Agent、Widget 或 Runtime 的权限。
 
 ## 1. 领域边界
 
@@ -45,7 +45,7 @@ Ambient 对包再施加以下约束：
 - `market.json.ontology_refs` 只能引用当前 `ambient-context` 中已经注册的 canonical entity ID；
 - Skill 目录、`SKILL.md` 和 `market.json` 都必须是真实目录/普通文件；符号链接、无效 UTF-8、重复或未知字段以及超出大小上限的内容都会被拒绝；
 - `SKILL.md` 不作为 Jinja 或其他模板执行，frontmatter 和正文都按数据处理；
-- 安装不会运行 hook、下载依赖、读取远程内容或注册 Tool。
+- 安装不会运行 hook、下载依赖或注册 Tool。GitHub Provider 只能读取管理员预先固定且验过 SHA-256 的单个 `SKILL.md`；包正文不能触发第二次网络读取。
 
 `allowed-tools` 不会预批准任何调用。实际 turn 没有提供该 Tool、当前 scope 不满足或 effect 需要 interaction 时，Skill 中的声明不会改变拒绝结果。
 
@@ -57,7 +57,7 @@ Skill Market 与 App Center 是两个不同的视图：
 - `POST /api/skills/install` 按 `market_id` 安装当前 Market 版本，也用于显式更新；`PATCH /api/skills/{catalog_id}` 修改可信或已授权安装的启用状态，`PATCH /api/skills/{catalog_id}/authorization` 授予、变更或撤销外部上下文注入，`DELETE /api/skills/{catalog_id}` 卸载；
 - `GET /api/app-store` 仍是已安装 App、Skill 和 executable capability 的启动器及布局，不是远程 Market 索引。
 
-MVP 默认使用系统随附 Market；管理员也可以用 `SKILL_MARKET_DIR` 指向一个本地外部 Market 根目录。目录配置只让包可被发现，并不让包获得信任或授权。安装器不接受任意 URL、Git 仓库或压缩包。安装流程为：
+默认 Catalog 总是包含系统随附 Market。`SKILL_MARKET_DIR` 继续作为兼容配置加入 Catalog，而不再替换内置来源。管理员还可以用 `SKILL_CATALOG_CONFIG` 指向一个版本化的 JSON 配置，声明一个或多个固定 GitHub Provider。配置只让包可被发现，并不让包获得信任或授权。安装器仍不接受来自 API 的任意 URL、Git 仓库或压缩包。安装流程为：
 
 1. 解析并验证 `SKILL.md`、文件边界和公开 metadata；
 2. 根据 `SKILL.md` 与 `market.json` 的精确内容计算稳定 digest；
@@ -98,6 +98,58 @@ MVP 默认使用系统随附 Market；管理员也可以用 `SKILL_MARKET_DIR` �
 - 卸载只移除 installation record；内容寻址 package 作为不可变缓存保留，避免请求路径清理与并发重装发生竞态。未来 GC 必须使用持锁或租约、宽限期和 mark-and-sweep。已开始的 Run 使用自身固定的正文副本，不依赖安装目录继续存在。
 
 Market 暂时不可用时，已安装 snapshot 仍可工作。损坏、缺失或 digest 不匹配的 snapshot 会使该 Skill 变为不可用，而不是回退到同名最新内容。
+
+### 3.1 多源 Catalog 与供应链边界
+
+`SkillCatalog` 是发现层聚合器，不是新的执行 Runtime。每个 Provider 只实现“列出经过标准化的候选快照”，并返回独立健康状态：
+
+| Provider | 默认状态 | 可安装内容 | 信任语义 |
+| --- | --- | --- | --- |
+| `bundled` | 必需、随发行版加载 | `SKILL.md + market.json` | 只有该 loader 可以产生 `bundled/verified` |
+| `local` | 通过 `SKILL_MARKET_DIR` 可选 | 两个普通文件 | 始终是 `local/unverified` |
+| `github` | 通过 `SKILL_CATALOG_CONFIG` 可选 | 固定 commit 下、预期 SHA-256 的单个 `SKILL.md` | 始终是 `local/unverified`；commit/hash 证明可复现，不证明作者可信 |
+| 未来 registry/search | 默认关闭 | 只返回 discovery metadata，或先转换成上述不可变快照 | 排名、下载量、平台审核和上游扫描都只是 advisory signal |
+
+Provider 的最小契约是稳定 `source_id`、`kind`、`required`、`list_entries()` 和有界错误；Catalog 负责确定性排序、跨来源 `market_id/catalog_id` 冲突检查以及故障隔离。必需来源失败会使 Catalog 请求失败；可选来源失败只在 `GET /api/skill-market.sources` 中标为 `unavailable`，其他来源仍可发现，已安装快照始终不受影响。相同 ID 出现在两个健康来源时必须整体失败关闭，不能按 Provider 顺序偷偷覆盖。
+
+GitHub 配置版本为 `1`，Provider/entry 均为管理员控制的数据。entry 必须声明：
+
+```json
+{
+  "repository": "owner/repository",
+  "commit": "40-character-lowercase-git-sha",
+  "path": "skills/example",
+  "sha256": "sha256:<SKILL.md-sha256>",
+  "files": ["SKILL.md"],
+  "namespace": "github-owner-repository",
+  "title": "Example",
+  "provider": "Publisher",
+  "tags": ["example"],
+  "triggers": ["example workflow"],
+  "ontology_refs": []
+}
+```
+
+Host 只构造 `raw.githubusercontent.com/<repo>/<commit>/<path>/SKILL.md`，限制响应大小、超时和 redirect，校验精确 SHA-256 后写入 workspace 的内容寻址 Catalog cache。`files` 必须精确为 `["SKILL.md"]`，因此带有 `scripts/`、`references/`、`assets/`、hook、依赖或可执行入口的上游 Skill 在当前 profile 下标为不兼容且不能安装。缓存命中仍会重新校验 hash；网络失败时只允许读取同一预期 hash 的已验证缓存，绝不回退到 branch、tag、HEAD 或另一个 commit。
+
+Catalog 来源身份和安装信任必须分开显示：
+
+- `catalog_source` 记录 Provider ID/kind、`source_uri`、`source_revision`、`upstream_hash` 和 `update_strategy`；
+- `provenance.digest` 是 Ambient 对合成 `market.json` 与精确 `SKILL.md` 计算的 package digest；
+- Git commit 与上游文件 hash 只是供应链 pin，不会把 `provenance.verified` 变成 true，也不会跳过隔离授权；
+- 本地 Market 继续用 SemVer 比较；GitHub 快照的 installation `version` 直接等于 commit，不伪造 SemVer，并使用 `content_hash` 更新策略。相同 commit 下字节变化是完整性冲突，不同 commit/hash 是显式 `update_available`，更新后旧授权必然撤销；
+- API 响应保持 `version = 1`，新增 `sources`、`catalog_source` 和 `package_compatibility` 都是 additive 字段。
+
+接入成熟市场时先实现新的 Provider adapter，不把其权限模型、安装命令或执行器嵌入 Ambient。`skills.sh` 适合作为未来的搜索与审计信号来源，但结果仍须解析为固定 commit/hash 的 standalone snapshot；无法得到不可变 revision 或完整文件清单时只能展示，不能安装。需要 scripts、MCP、网络、文件或 UI 的条目应转成 Capability/Plugin/Widget，并分别走其 sandbox 和 grant 通道，不能扩展 `agent.context.inject`。
+
+仓库随附一个**默认关闭**的 Anthropic 官方来源配置：
+[`backend/catalogs/anthropic.json`](../../backend/catalogs/anthropic.json)。Host
+开发可设置 `SKILL_CATALOG_CONFIG=backend/catalogs/anthropic.json`，Docker 可设置
+`SKILL_CATALOG_CONFIG=/app/backend/catalogs/anthropic.json`。该配置固定到
+`anthropics/skills` 的精确 commit，并且只收录该 revision 下目录中唯一文件为
+`SKILL.md` 的 `doc-coauthoring`；同仓库其他顶层 Skill 带有 scripts、references
+或 assets，因此不进入当前 profile。该 curated 列表是可审计兼容清单，不是对
+Anthropic 内容的 Ambient 授权，首次安装仍会隔离。
 
 ## 4. Progressive disclosure 与 Run 快照
 
@@ -193,7 +245,10 @@ Skill 执行过程中真正产生的用户上下文事实，例如 `Task`、`Eve
 | checkpoint 的 selection marker 与 snapshot 矛盾 | 恢复以 `invalid_skill_snapshot` 失败，绝不静默改成空选择或重新解析当前安装状态 |
 | 正文引用不存在的 Tool 或未授权 adapter | 调用按现有 interaction/失败语义处理；不伪装成功 |
 | Skill 被误当成可执行或 UI 条目 | App Center 只打开详情；执行和 UI 生成仍属于现有 Capability/App |
-| Market 不可达 | 已安装 Skill 正常工作；Market 列表显式返回错误 |
+| 可选 Catalog 来源不可达 | 已安装 Skill 正常工作；该来源标为 `unavailable`，其他来源继续返回 |
+| 相同 ID 出现在多个来源 | Catalog 整体失败关闭，直到管理员消除歧义 |
+| GitHub commit/hash 不匹配或 redirect | 拒绝候选；只可使用同一预期 hash 的已验证缓存 |
+| 上游包包含 scripts/references/assets | 标为不兼容且禁止安装；需要执行的能力走 Capability/Plugin/Widget |
 
 安装、更新、启停与卸载在 SQLite transaction 中串行化并原子提交；幂等安装和稳定 catalog ID 避免产生重复记录。Registry 或 snapshot 损坏时系统报告错误，不能把校验失败当成空目录或同名最新内容继续执行。
 
@@ -211,7 +266,9 @@ Skill 执行过程中真正产生的用户上下文事实，例如 `Task`、`Eve
 
 以下内容不属于本版本：
 
-- 从任意网络 URL、Git 仓库或社区压缩包安装；
+- 从请求携带的任意网络 URL、可变 Git branch/tag 或社区压缩包安装；
+- 自动枚举 GitHub 仓库，或直接执行第三方 Market 的安装命令；
+- 把 `skills.sh`、社区 registry、流行度、publisher badge 或上游恶意软件扫描当作 Ambient trust grant；
 - 打包或读取标准中的可选 `references/`、`assets/`、`scripts/` 目录；
 - 运行 Skill 自带的 script、安装 hook、shell 或动态 Python/JavaScript Tool；
 - 自动安装、认证或批准 Skill 依赖；

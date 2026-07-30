@@ -217,6 +217,58 @@ has no workspace mount and uses `network_mode: none`; Chromium starts on
 demand, closes 60 seconds after the last session, and allows at most four
 Contexts by default.
 
+### 5.2 Skill Catalog discovery and authorization boundary
+
+```mermaid
+classDiagram
+    class SkillCatalogProvider {
+        <<protocol>>
+        +source_id: str
+        +kind: str
+        +required: bool
+        +list_entries() SkillMarketEntry[]
+    }
+    class SkillCatalog {
+        +list_snapshot() SkillCatalogSnapshot
+        +list_entries() SkillMarketEntry[]
+        +get(market_id) SkillMarketEntry
+    }
+    class SkillMarket {
+        +list_entries() SkillMarketEntry[]
+    }
+    class GitHubSkillCatalogProvider {
+        +list_entries() SkillMarketEntry[]
+        -_read_or_fetch(url, expected_hash) bytes
+        -_read_verified_cache(path, expected_hash) bytes
+    }
+    class SkillManager {
+        +list_market()
+        +install(market_id)
+        +set_authorization(catalog_id, policy, digest)
+    }
+    class SkillStore {
+        +install(record, skill_content, market_content)
+        +set_authorization(...)
+    }
+
+    SkillCatalogProvider <|.. SkillMarket
+    SkillCatalogProvider <|.. GitHubSkillCatalogProvider
+    SkillCatalog o-- SkillCatalogProvider
+    SkillManager --> SkillCatalog
+    SkillManager --> SkillStore
+```
+
+A Provider owns discovery, immutable source pins, download, and
+normalization only. The Catalog owns cross-source uniqueness, deterministic
+ordering, and optional-source failure isolation. Manager and Store remain the
+only installation and authorization control plane. A GitHub commit/hash,
+registry badge, or upstream scan never creates Ambient trust. A remote
+standalone Skill installs as `quarantined + disabled`, exactly like a local
+external Skill, and reuses digest/revision-bound `agent.context.inject`.
+`scripts/`, `references/`, `assets/`, and dependencies do not enter this
+Runtime. A future executable extension must become a Capability, Plugin, or
+Widget and pass its own sandbox, grant, approval, and audit path.
+
 ## 6. Event and recovery boundaries
 
 Run event payloads are redacted and bounded before insertion, while the envelope records duration, model usage, and `redacted` metadata; terminal events are retained for 30 days by default. A Graph effect ledger closes the checkpoint window against duplicate writes, and an App promotion marker distinguishes published artifacts from staging awaiting publication. Only saga steps with complete compensation data are rolled back automatically.
