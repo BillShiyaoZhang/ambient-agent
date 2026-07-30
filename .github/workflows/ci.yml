@@ -159,6 +159,9 @@ jobs:
         run: npm ci --ignore-scripts
         working-directory: widget-runtime
 
+      - name: Enable Chromium user namespace sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Run Widget Runtime tests
         run: npm test
         working-directory: widget-runtime
