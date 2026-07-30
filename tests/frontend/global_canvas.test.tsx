@@ -17,7 +17,12 @@ vi.mock("../../frontend/src/services/websocket", () => {
       }),
       disconnect: vi.fn(),
       isConnected: vi.fn(() => true),
-      sendMessage: vi.fn(),
+      sendMessage: vi.fn(() => true),
+      retry: vi.fn(),
+      subscribeStatus: vi.fn((listener: (state: string) => void) => {
+        listener("connected");
+        return () => {};
+      }),
       // Helper to trigger socket mock events in tests
       triggerMessage: (data: any) => cb(data),
     },

@@ -22,6 +22,10 @@ class LayoutConflictError(RuntimeError):
         self.current = current
 
 
+class AppStoreCorruptionError(RuntimeError):
+    """Persisted launcher state exists but cannot be read safely."""
+
+
 class CapabilityInvocation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -207,8 +211,21 @@ class AppStoreService:
         self.layout_path = self.store_dir / "app-store-layout.json"
         self.app_manager = app_manager
         self.generated_provider = GeneratedAppProvider(app_manager)
+        self.providers: list[CapabilityProvider] = []
         self._lock = threading.RLock()
         self.generating_ids: set[str] = set()
+
+    def add_provider(self, provider: CapabilityProvider) -> None:
+        """Add an installed-item provider without changing the legacy registry.
+
+        Providers are intentionally limited to already-installed workspace
+        items. Discovery/marketplace entries belong to a separate API and must
+        never enter the launcher layout.
+        """
+
+        with self._lock:
+            if provider not in self.providers:
+                self.providers.append(provider)
 
     @staticmethod
     def catalog_id(manifest: CapabilityManifest) -> str:
@@ -226,12 +243,16 @@ class AppStoreService:
 
     @staticmethod
     def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+        if not path.exists():
+            return default
         try:
             with path.open(encoding="utf-8") as file:
                 data = json.load(file)
-            return data if isinstance(data, dict) else default
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return default
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AppStoreCorruptionError(f"Unable to read persisted App Store state: {path.name}") from exc
+        if not isinstance(data, dict):
+            raise AppStoreCorruptionError(f"Persisted App Store state must be a JSON object: {path.name}")
+        return data
 
     def _write_json_atomic(self, path: Path, data: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,7 +380,16 @@ class AppStoreService:
         capabilities = self._capability_items()
         bound_app_ids = {item["ui_app_id"] for item in capabilities if item.get("ui_app_id")}
         apps = [item for item in self.generated_provider.list_catalog_items() if item["ui_app_id"] not in bound_app_ids]
-        return apps + capabilities
+        result = apps + capabilities
+        seen = {str(item["catalog_id"]) for item in result}
+        for provider in tuple(self.providers):
+            for item in provider.list_catalog_items():
+                catalog_id = str(item.get("catalog_id") or "")
+                if not catalog_id or catalog_id in seen:
+                    continue
+                seen.add(catalog_id)
+                result.append(item)
+        return result
 
     def list_capabilities(self) -> list[dict[str, Any]]:
         """Return only installed executable capability descriptors."""

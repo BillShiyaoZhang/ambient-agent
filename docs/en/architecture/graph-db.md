@@ -67,6 +67,10 @@ The KG accepts only `user_context` data. Facts such as a user's task, meeting, p
 
 Data needed only to keep an App running—cache entries, sync cursors, UI state, job checkpoints, credentials, and provider payloads—belongs under that App's workspace directory. If its existence is useful context, the KG may contain a `Document` or `SoftwareApplication`-style reference with a URI and summary, but not the private payload. Schema proposals with a non-context data scope are rejected.
 
+Instruction Skill installation records live in the workspace `.ambient/skills.db`; the validated `SKILL.md` and `market.json` live in content-addressed `.ambient/skills/packages/<sha256>/` snapshots. They are system installation state, not `user_context`: installing, enabling, updating, or uninstalling a Skill must not create an `OntologyEntity`, `ContextRecord`, or edge, and must not change the ontology version. `market.json.ontology_refs` may reference only existing canonical entities; it neither registers nor extends a schema, and it grants no Graph access.
+
+User facts produced by a Skill run may enter the KG, but they must pass through the existing schema-alignment, mutation-preflight, user-approval, and atomic-mutation path in full. A Skill cannot bypass approval or write its own instructions, Market descriptor, or installation metadata into the KG.
+
 ## 4. Queries and mutations
 
 Widgets register live queries with `ambient.graph.subscribe(query, callback)`. The backend retains subscriptions, reruns bounded queries after mutations, and pushes changes. Agent read-only queries execute through `graph_query_engine.execute_graph_query`; `RouterContext` asks the Graph adapter for a bounded `routing_snapshot()` instead of reading SQLite tables or placing the whole graph in a prompt. SQLite and Neo4j adapters must expose the same counts, recent-record, and schema snapshot contract.
@@ -94,3 +98,4 @@ Setting `GRAPH_MIGRATE_SQLITE=1` imports an existing `workspace/graph.db` once. 
 - SQLite-to-Neo4j migration is opt-in, repeatable, and does not delete the source.
 - Router snapshot construction is storage-independent and behaves consistently with the Dev Container Neo4j backend and the SQLite test adapter.
 - The static schema diff does not report unknown dynamic JavaScript expressions as type mismatches; actual mutations must still pass backend preflight.
+- Installing, enabling, updating, or uninstalling a Skill leaves the ontology and KG unchanged; user facts produced by a Skill still align to canonical entities and pass the existing approval and mutation flow.

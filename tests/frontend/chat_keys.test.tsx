@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { AgentChatOverlay } from "../../frontend/src/components/AgentChatOverlay";
 import { ChatPanel } from "../../frontend/src/components/ChatPanel";
 
@@ -34,5 +34,26 @@ describe("chat message keys", () => {
 
     expect(error.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
     error.mockRestore();
+  });
+
+  it("shows external Skill provenance in the legacy chat panel", () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    render(<ChatPanel
+      messages={[{
+        id: 9,
+        sender: "agent",
+        content: "Sandboxed advice",
+        context_policy: "display_only",
+        provenance: {
+          kind: "external_skill_output",
+          skills: [{ catalog_id: "agent-skill:external:review-notes" }],
+        },
+      }]}
+      onSendMessage={vi.fn()}
+      isConnected
+      language="en"
+    />);
+
+    expect(screen.getByText("External Skill sandbox · review-notes")).toBeDefined();
   });
 });

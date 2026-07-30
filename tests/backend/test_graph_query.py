@@ -1,9 +1,11 @@
 import os
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.graph_db import GraphDatabase
 from backend.graph_query_engine import execute_graph_query
+from backend.graph_subscription import MAX_SUBSCRIPTIONS_PER_TARGET, SubscriptionManager
 from backend.main import app
 
 
@@ -104,6 +106,35 @@ def test_execute_graph_query_uses_the_adapter_contract() -> None:
     ]
 
 
+def test_graph_query_and_subscription_budgets_are_enforced(tmp_path):
+    database = GraphDatabase(str(tmp_path / "workspace"))
+    for index in range(3):
+        database.create_node(
+            node_id=f"task-{index}",
+            node_type="Task",
+            properties={"title": f"Task {index}", "status": "pending"},
+        )
+
+    assert len(execute_graph_query({"type": "Task", "limit": 2}, database)) == 2
+    with pytest.raises(ValueError, match="limit"):
+        execute_graph_query({"type": "Task", "limit": 0}, database)
+    with pytest.raises(ValueError, match="include"):
+        execute_graph_query({"type": "Task", "include": ["invalid"]}, database)
+
+    manager = SubscriptionManager()
+    target = object()
+    for index in range(MAX_SUBSCRIPTIONS_PER_TARGET):
+        manager.register(target, f"subscription-{index}", {"type": "Task", "limit": 1}, database)
+    with pytest.raises(ValueError, match="subscription limit"):
+        manager.register(target, "one-too-many", {"type": "Task", "limit": 1}, database)
+    assert len(manager.active_subscriptions[target]) == MAX_SUBSCRIPTIONS_PER_TARGET
+
+    invalid_target = object()
+    with pytest.raises(ValueError, match="limit"):
+        manager.register(invalid_target, "invalid-query", {"type": "Task", "limit": 0}, database)
+    assert invalid_target not in manager.active_subscriptions
+
+
 def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     workspace_dir = str(tmp_path / "workspace")
     monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
@@ -185,3 +216,101 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     node_t = db.get_node("t-mut-1")
     assert node_t["properties"]["status"] == "completed"
     assert len(db.get_edges("t-mut-1")) == 0
+
+
+def test_graph_mutation_endpoint_rejects_invalid_and_oversized_batches(tmp_path, monkeypatch):
+    workspace_dir = str(tmp_path / "workspace")
+    monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
+
+    from backend import main
+
+    main.graph_db = GraphDatabase(workspace_dir)
+    client = TestClient(app)
+
+    invalid = client.post(
+        "/api/graph/mutate",
+        json={"actions": [{"action": "not-supported"}]},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "invalid_graph_mutation"
+
+    too_many = client.post(
+        "/api/graph/mutate",
+        json={"actions": [{"action": "create_node", "id": f"node-{index}"} for index in range(501)]},
+    )
+    assert too_many.status_code == 422
+
+    too_large = client.post(
+        "/api/graph/mutate",
+        json={
+            "actions": [
+                {
+                    "action": "create_node",
+                    "id": "oversized",
+                    "properties": {"payload": "x" * (1024 * 1024)},
+                }
+            ]
+        },
+    )
+    assert too_large.status_code == 422
+
+
+def test_graph_mutation_idempotency_precedes_state_dependent_preflight(tmp_path, monkeypatch):
+    workspace_dir = str(tmp_path / "workspace")
+    monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
+
+    from backend import main
+
+    main.graph_db = GraphDatabase(workspace_dir)
+    client = TestClient(app)
+
+    generated_payload = {
+        "idempotency_key": f"generated-id:{tmp_path}",
+        "actions": [
+            {
+                "action": "create_node",
+                "type": "Task",
+                "properties": {"title": "Generated identity"},
+            }
+        ],
+    }
+    created = client.post("/api/graph/mutate", json=generated_payload)
+    duplicate_create = client.post("/api/graph/mutate", json=generated_payload)
+    assert created.status_code == duplicate_create.status_code == 200
+    assert duplicate_create.json()["run_id"] == created.json()["run_id"]
+    assert duplicate_create.json()["ticket_id"] == created.json()["ticket_id"]
+    generated_id = created.json()["actions"][0]["id"]
+    assert generated_id
+
+    delete_payload = {
+        "idempotency_key": f"post-delete:{tmp_path}",
+        "actions": [{"action": "delete_node", "id": generated_id}],
+    }
+    deleted = client.post("/api/graph/mutate", json=delete_payload)
+    duplicate_delete = client.post("/api/graph/mutate", json=delete_payload)
+    assert deleted.status_code == duplicate_delete.status_code == 200
+    assert duplicate_delete.json()["run_id"] == deleted.json()["run_id"]
+    assert duplicate_delete.json()["ticket_id"] == deleted.json()["ticket_id"]
+    assert main.graph_db.get_node(generated_id) is None
+
+
+def test_graph_mutation_wait_timeout_returns_pollable_pending_contract(monkeypatch):
+    from backend import main
+
+    async def pending_mutation(*_args, **_kwargs):
+        return {"id": "run-still-active", "status": "running", "_wait_timed_out": True}
+
+    monkeypatch.setattr(main, "_run_approved_graph_mutation", pending_mutation)
+    response = TestClient(app).post(
+        "/api/graph/mutate",
+        json={"actions": [{"action": "create_node", "id": "pending-node"}]},
+    )
+
+    assert response.status_code == 202
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "status": "pending",
+        "run_id": "run-still-active",
+        "poll_url": "/api/runs/run-still-active",
+        "message": "Graph mutation is still running; poll the durable Run for its terminal result",
+    }

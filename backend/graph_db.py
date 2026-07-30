@@ -1,7 +1,9 @@
 import hashlib
 import json
+import logging
 import os
 import sqlite3
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -17,6 +19,12 @@ from backend.ontology import (
     validate_correspondences,
     validate_property_definition,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class GraphMigrationError(RuntimeError):
+    """Legacy graph data could not be migrated without risking data loss."""
 
 
 class GraphDatabase:
@@ -231,16 +239,26 @@ class GraphDatabase:
                 )
 
     def _migrate_legacy_data(self) -> None:
-        if not os.path.exists(self.legacy_filepath):
+        if not os.path.lexists(self.legacy_filepath):
             return
 
         try:
+            if os.path.islink(self.legacy_filepath) or not os.path.isfile(self.legacy_filepath):
+                raise ValueError("legacy graph source must be a regular file, not a link")
             print("[GraphDB] Migrating legacy graph.json to graph.db...")
             with open(self.legacy_filepath, encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("legacy graph root must be a JSON object")
 
             legacy_nodes = data.get("nodes", {})
             legacy_edges = data.get("edges", [])
+            if not isinstance(legacy_nodes, dict) or not isinstance(legacy_edges, list):
+                raise ValueError("legacy graph nodes and edges have invalid shapes")
+            if any(not isinstance(node, dict) for node in legacy_nodes.values()):
+                raise ValueError("legacy graph nodes must be JSON objects")
+            if any(not isinstance(edge, dict) for edge in legacy_edges):
+                raise ValueError("legacy graph edges must be JSON objects")
             definitions: dict[str, dict[str, str]] = {}
             for node in legacy_nodes.values():
                 node_type = str(node.get("type") or "LegacyRecord")
@@ -276,27 +294,52 @@ class GraphDatabase:
                     )
 
             for node_id, node in legacy_nodes.items():
+                normalized_node_id = str(node_id)
+                if self.get_node(normalized_node_id) is not None:
+                    logger.warning(
+                        "Keeping existing graph node %r; legacy value remains in the migration backup",
+                        normalized_node_id,
+                    )
+                    continue
                 self.create_node(
-                    node_id=str(node_id),
+                    node_id=normalized_node_id,
                     node_type=str(node.get("type") or "LegacyRecord"),
                     properties=node.get("properties") or {},
                 )
             for edge in legacy_edges:
+                from_id = str(edge.get("from_id") or "")
+                to_id = str(edge.get("to_id") or "")
+                edge_type = str(edge.get("type") or "")
+                existing_edges = self.get_edges(from_id) if from_id else []
+                if any(
+                    current["from_id"] == from_id and current["to_id"] == to_id and current["type"] == edge_type
+                    for current in existing_edges
+                ):
+                    logger.warning(
+                        "Keeping existing graph edge %r -> %r (%r); legacy value remains in the migration backup",
+                        from_id,
+                        to_id,
+                        edge_type,
+                    )
+                    continue
                 self.create_edge(
-                    from_id=str(edge.get("from_id") or ""),
-                    to_id=str(edge.get("to_id") or ""),
-                    edge_type=str(edge.get("type") or ""),
+                    from_id=from_id,
+                    to_id=to_id,
+                    edge_type=edge_type,
                     properties=edge.get("properties") or {},
                 )
 
             # Backup old file to avoid re-migration
             backup_path = self.legacy_filepath + ".backup"
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
+            suffix = 1
+            if os.path.lexists(backup_path):
+                while os.path.lexists(f"{self.legacy_filepath}.backup-{suffix}"):
+                    suffix += 1
+                backup_path = f"{self.legacy_filepath}.backup-{suffix}"
             os.rename(self.legacy_filepath, backup_path)
             print("[GraphDB] Migration completed successfully.")
         except Exception as e:
-            print(f"[GraphDB] Error migrating legacy JSON graph: {e}")
+            raise GraphMigrationError(f"Unable to migrate legacy JSON graph: {e}") from e
 
     @staticmethod
     def _infer_property_type(value: Any) -> str:
@@ -623,6 +666,25 @@ class GraphDatabase:
                     "to_id": row["to_id"],
                     "type": row["type"],
                     "properties": json.loads(row["properties"]),
+                }
+                for row in rows
+            ]
+
+    def list_edges(self) -> list[dict[str, Any]]:
+        """Return every context-record relationship in stable adapter order."""
+
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT from_id, to_id, type, properties
+                   FROM graph_edges
+                   ORDER BY from_id, to_id, type"""
+            ).fetchall()
+            return [
+                {
+                    "from_id": row["from_id"],
+                    "to_id": row["to_id"],
+                    "type": row["type"],
+                    "properties": json.loads(row["properties"] or "{}"),
                 }
                 for row in rows
             ]
@@ -1325,11 +1387,21 @@ class GraphDatabase:
         """
         Exports the current nodes and edges to graph.json for backward compatibility and test assertions.
         """
+        temporary_path: str | None = None
         try:
-            with open(self.legacy_filepath, "w", encoding="utf-8") as f:
+            fd, temporary_path = tempfile.mkstemp(
+                prefix=".graph-json-",
+                suffix=".tmp",
+                dir=self.workspace_dir,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"nodes": self.nodes, "edges": self.edges}, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"[GraphDB] Error exporting to json: {e}")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, self.legacy_filepath)
+        finally:
+            if temporary_path is not None and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     # --- Mutation History (for undo of graph_mutation tickets) ---
 

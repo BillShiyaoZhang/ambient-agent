@@ -12,12 +12,14 @@
   - [Widget 与应用中心](/architecture/apps.md)
   - [持久 Run 与 Runtime](/architecture/runs.md)
   - [图数据库](/architecture/graph-db.md)
+  - [图数据可视化](/architecture/graph-visualization.md)
   - [后端 UML](/architecture/uml.md)
 
 - **智能体引擎**
   - [意图路由](/agent/intent-router.md)
   - [Agent Harness](/agent/harness.md)
   - [Agent 系统能力目录](/agent/system-capabilities.md)
+  - [Agent Skills](/agent/skills.md)
 
 - **Widget 开发**
   - [Widget 格式与生命周期](/widgets/guide.md)

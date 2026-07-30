@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -18,6 +19,7 @@ from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubIntentKind
 from backend.agent.providers import ToolLoopBudget
 from backend.agent.run_context import RunContext
+from backend.agent.slash_commands import SlashCommandParseError, explicit_skill_ids
 from backend.app_manager import AppManager
 from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
@@ -52,6 +54,21 @@ from backend.run_service import (
 )
 from backend.schema_alignment import SchemaAlignmentService, validate_schema_capability_proposal
 from backend.schema_verification import SchemaVerificationService
+from backend.skill_manager import (
+    SkillContextBudgetError,
+    SkillExplicitSelectionError,
+    SkillManager,
+)
+from backend.skill_sandbox import (
+    SkillPromptChannels,
+    SkillSandboxError,
+    build_skill_prompt_channels,
+)
+from backend.skill_store import (
+    SkillAuthorizationRequiredError,
+    SkillPackageIntegrityError,
+    SkillStoreCorruptionError,
+)
 from backend.workspace_storage import WorkspaceStorage
 
 logger = logging.getLogger("agent.durable_workflow")
@@ -102,6 +119,7 @@ class DurableAgentWorkflow:
         live_event_sink: LiveEventSink | None = None,
         app_diagnostic_loader: Callable[[str], list[dict[str, Any]]] | None = None,
         capability_catalog_factory: Callable[[], SystemCapabilityCatalog] | None = None,
+        skill_manager: SkillManager | None = None,
     ) -> None:
         self.workspace_dir = workspace_dir
         self.run_store = run_store
@@ -113,6 +131,7 @@ class DurableAgentWorkflow:
         self.live_event_sink = live_event_sink
         self.app_diagnostic_loader = app_diagnostic_loader
         self.capability_catalog_factory = capability_catalog_factory or SystemCapabilityCatalog.build
+        self.skill_manager = skill_manager
         self._event_buffer: ContextVar[list[PendingRunEvent] | None] = ContextVar(
             "durable_agent_event_buffer",
             default=None,
@@ -278,6 +297,19 @@ class DurableAgentWorkflow:
             for ref in state.artifact_refs
             if isinstance(ref, dict) and ref.get("id") and ref.get("sha256")
         }
+        active_skills = state.data.get("active_skills", [])
+        if isinstance(active_skills, list):
+            for snapshot in active_skills:
+                if not isinstance(snapshot, dict):
+                    continue
+                catalog_id = snapshot.get("catalog_id")
+                digest = snapshot.get("digest")
+                if isinstance(catalog_id, str) and catalog_id and isinstance(digest, str) and digest:
+                    # Audit contexts use bare SHA-256 values. The durable
+                    # checkpoint retains the algorithm-qualified digest.
+                    artifact_hashes[catalog_id] = (
+                        digest.removeprefix("sha256:") if digest.startswith("sha256:") else digest
+                    )
         return RunContext(
             run_id=str(run["id"]),
             session_id=str(state.session_id or run.get("source_id") or ""),
@@ -288,6 +320,111 @@ class DurableAgentWorkflow:
             fast_model=dict(state.model_snapshot.get("fast") or {}),
             artifact_hashes=artifact_hashes,
         )
+
+    def _active_skill_prompt_channels(self, state: AgentRunState) -> SkillPromptChannels:
+        snapshots = state.data.get("active_skills")
+        if snapshots is None:
+            return SkillPromptChannels()
+        if not isinstance(snapshots, list) or any(not isinstance(item, dict) for item in snapshots):
+            raise WorkflowError("Durable Skill snapshot is malformed", code="invalid_skill_snapshot")
+        if not snapshots:
+            return SkillPromptChannels()
+        if self.skill_manager is None:
+            # Old deployments can resume checkpoints without silently loading
+            # mutable package state, but cannot interpret an unknown snapshot.
+            raise WorkflowError("Skill runtime is unavailable", code="skill_runtime_unavailable")
+        try:
+            return build_skill_prompt_channels(
+                snapshots,
+                render_context=self.skill_manager.render_context,
+            )
+        except (SkillContextBudgetError, SkillSandboxError, ValueError, TypeError) as exc:
+            raise WorkflowError("Durable Skill snapshot is invalid", code="invalid_skill_snapshot") from exc
+
+    def _select_active_skills(self, content: str, state: AgentRunState) -> None:
+        """Select once at route time and persist exact instructions for replay."""
+
+        marker = state.data.get("skill_selection_state")
+        has_snapshots = "active_skills" in state.data
+        snapshots = state.data.get("active_skills")
+
+        if marker is None:
+            if has_snapshots:
+                raise WorkflowError(
+                    "Legacy Skill checkpoint has an unexpected snapshot",
+                    code="invalid_skill_snapshot",
+                )
+            # Checkpoints created before Skill support have neither a marker
+            # nor snapshots. Pin an empty selection so an upgrade cannot inject
+            # a Skill installed after the Run began.
+            state.data["active_skills"] = []
+            state.data["skill_selection_state"] = "pinned_none"
+            return
+
+        if marker == "pinned":
+            if not has_snapshots or not isinstance(snapshots, list) or not snapshots:
+                raise WorkflowError(
+                    "Pinned Skill checkpoint is missing its snapshot",
+                    code="invalid_skill_snapshot",
+                )
+            # Never re-resolve a recovered Run against a newer installation.
+            self._active_skill_prompt_channels(state)
+            return
+
+        if marker == "pinned_none":
+            if snapshots is not None and snapshots != []:
+                raise WorkflowError(
+                    "Empty Skill checkpoint contains an active snapshot",
+                    code="invalid_skill_snapshot",
+                )
+            state.data["active_skills"] = []
+            return
+
+        if marker != "pending":
+            raise WorkflowError(
+                "Skill checkpoint has an unknown selection state",
+                code="invalid_skill_snapshot",
+            )
+        if has_snapshots:
+            raise WorkflowError(
+                "Pending Skill checkpoint already contains a snapshot",
+                code="invalid_skill_snapshot",
+            )
+
+        if self.skill_manager is None:
+            state.data["active_skills"] = []
+            state.data["skill_selection_state"] = "pinned_none"
+            return
+        try:
+            try:
+                selected_skill_ids = explicit_skill_ids(content)
+            except SlashCommandParseError:
+                # The router owns the user-facing clarification for an
+                # oversized sequence; selection must not replace it with a
+                # Skill workflow error.
+                selected_skill_ids = []
+            state.data["active_skills"] = (
+                self.skill_manager.select_for_context(
+                    content,
+                    explicit_names=selected_skill_ids,
+                )
+                if selected_skill_ids
+                else self.skill_manager.select_for_context(content)
+            )
+        except SkillExplicitSelectionError as exc:
+            raise WorkflowError(
+                f"Explicit Skill '{exc.target}' cannot be activated ({exc.reason})",
+                code=f"skill_{exc.reason}",
+            ) from exc
+        except SkillPackageIntegrityError as exc:
+            raise WorkflowError(
+                "The selected Skill package failed integrity verification",
+                code="skill_package_integrity_error",
+            ) from exc
+        except (SkillContextBudgetError, ValueError, TypeError) as exc:
+            raise WorkflowError("Skill context selection failed validation", code="invalid_skill_context") from exc
+        state.data["skill_selection_state"] = "pinned" if state.data["active_skills"] else "pinned_none"
+        self._active_skill_prompt_channels(state)
 
     async def _emit_live(
         self,
@@ -511,6 +648,8 @@ class DurableAgentWorkflow:
                 "sender": message.sender,
                 "role": message.role,
                 "content": message.content,
+                "context_policy": message.context_policy,
+                "provenance": message.provenance,
                 "timestamp": message.timestamp.isoformat() if message.timestamp else None,
             },
         }
@@ -897,22 +1036,38 @@ class DurableAgentWorkflow:
                 error_code="empty_command",
                 message="Chat command content must not be empty",
             )
-        context_summary = self._ensure_context_summary(state, storage)
-        orchestrator = AgentOrchestrator(
-            db_session=storage,
-            app_manager=self.app_manager,
-            graph_db=self.graph_db,
-            run_context=self._run_context(run, state),
-            context_summary=context_summary,
-            artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
-            tool_loop_budget=self._model_budget(state),
-            capability_catalog=self.capability_catalog_factory(),
-        )
-        intent = await orchestrator._classify_intent(
-            content,
-            session_id=session_id,
-            language=session.language or "zh",
-        )
+        self._select_active_skills(content, state)
+        skill_prompt_channels = self._active_skill_prompt_channels(state)
+        if skill_prompt_channels.untrusted_user_guidance:
+            # External natural-language guidance never gets a chance to steer
+            # the LLM Router into Widget, Graph, or other effect workflows.
+            # Its only execution surface is the bounded read-only Converse
+            # phase, where it remains a lower-priority data message.
+            intent = IntentPlan(
+                kind=IntentKind.CONVERSE,
+                confidence=1.0,
+                rationale="external Skill semantic sandbox requires read-only Converse",
+                instruction=content,
+            )
+        else:
+            context_summary = self._ensure_context_summary(state, storage)
+            orchestrator = AgentOrchestrator(
+                db_session=storage,
+                app_manager=self.app_manager,
+                graph_db=self.graph_db,
+                run_context=self._run_context(run, state),
+                context_summary=context_summary,
+                artifact_ids=[
+                    str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")
+                ],
+                tool_loop_budget=self._model_budget(state),
+                capability_catalog=self.capability_catalog_factory(),
+            )
+            intent = await orchestrator._classify_intent(
+                content,
+                session_id=session_id,
+                language=session.language or "zh",
+            )
         if intent.deprecated:
             return Failed(
                 summary="Deprecated intent",
@@ -943,7 +1098,6 @@ class DurableAgentWorkflow:
 
     async def _phase_converse(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         storage = self._run_storage(state)
-        context_summary = self._ensure_context_summary(state, storage)
         existing = self._message_for_run(storage, state.session_id or "default-session", run["id"])
         if existing is not None and existing.role == "agent":
             cached_result = state.data.get("converse_result")
@@ -958,19 +1112,64 @@ class DurableAgentWorkflow:
         intent = self._current_intent(state)
         language = str(state.data.get("language") or "zh")
         remaining_model_turns = state.budget.max_model_turns - state.budget.model_turns
+        skill_prompt_channels = self._active_skill_prompt_channels(state)
+        external_skill_sandbox = bool(skill_prompt_channels.untrusted_user_guidance)
+
+        def require_live_external_skill_grant() -> None:
+            if not external_skill_sandbox:
+                return
+            if self.skill_manager is None:
+                raise WorkflowError(
+                    "Skill runtime is unavailable",
+                    code="skill_runtime_unavailable",
+                )
+            try:
+                self.skill_manager.require_current_external_authorizations(state.data.get("active_skills", []))
+            except SkillAuthorizationRequiredError as exc:
+                raise WorkflowError(
+                    "External Skill authorization changed before context injection",
+                    code="skill_authorization_required",
+                ) from exc
+            except SkillPackageIntegrityError as exc:
+                raise WorkflowError(
+                    "The selected Skill package failed integrity verification",
+                    code="skill_package_integrity_error",
+                ) from exc
+            except (
+                SkillStoreCorruptionError,
+                OSError,
+                ValueError,
+                sqlite3.DatabaseError,
+            ) as exc:
+                raise WorkflowError(
+                    "The Skill authorization registry is unavailable",
+                    code="skill_registry_unavailable",
+                ) from exc
+
+        if external_skill_sandbox:
+            # Reject stale checkpoints early, then repeat this same check at
+            # the actual provider-admission boundary below.
+            require_live_external_skill_grant()
+        context_summary = None if external_skill_sandbox else self._ensure_context_summary(state, storage)
         orchestrator = AgentOrchestrator(
             db_session=storage,
             app_manager=self.app_manager,
             graph_db=self.graph_db,
             run_context=self._run_context(run, state),
             context_summary=context_summary,
-            artifact_ids=[str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")],
+            artifact_ids=(
+                []
+                if external_skill_sandbox
+                else [str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")]
+            ),
             tool_loop_budget=self._model_budget(
                 state,
                 max_iterations=remaining_model_turns,
                 max_tool_calls=12,
             ),
             capability_catalog=self.capability_catalog_factory(),
+            skill_prompt_channels=skill_prompt_channels,
+            pre_model_call_guard=(require_live_external_skill_grant if external_skill_sandbox else None),
         )
 
         async def on_update(payload: Any) -> None:
@@ -981,13 +1180,31 @@ class DurableAgentWorkflow:
                 summary="Preparing response",
             )
 
+        return_to_multi = bool(state.data.get("return_to_multi"))
+        converse_kwargs = {"persist": False} if return_to_multi else {}
+        raw_content = str((run.get("input") or {}).get("content") or "")
+        converse_content = (
+            intent.instruction
+            if intent.instruction and (return_to_multi or intent.rationale == "explicit slash command")
+            else raw_content
+        )
         message, widget = await orchestrator._handle_converse(
             plan=intent,
             session_id=state.session_id or "default-session",
-            content=str((run.get("input") or {}).get("content") or ""),
+            content=converse_content,
             language=language,
             on_update=on_update,
+            **converse_kwargs,
         )
+        if return_to_multi:
+            result = {"message": message.content, "app_id": widget.get("id") if widget else None}
+            return await self._finish_subflow(
+                run,
+                state,
+                content=message.content,
+                result=result,
+                artifacts=([{"type": "app", "id": widget.get("id")}] if widget else []),
+            )
         # Mark the persisted projection with its originating Run so a recovered
         # step can detect it. Older storage implementations are tolerated.
         if getattr(message, "run_id", None) is None:
@@ -1024,7 +1241,10 @@ class DurableAgentWorkflow:
 
     async def _phase_graph_preflight(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         intent = self._current_intent(state)
-        normalized = self.graph_db.preflight_actions(intent.actions)
+        try:
+            normalized = self.graph_db.preflight_actions(intent.actions)
+        except ValueError as exc:
+            raise WorkflowError(str(exc), code="invalid_graph_mutation") from exc
         state.data["graph_actions"] = normalized
         summary = AgentOrchestrator._summarize_actions(normalized, str(state.data.get("language") or "zh"))
         await self._emit(
@@ -1123,6 +1343,8 @@ class DurableAgentWorkflow:
                 graph_slices.append((-1, 0))
             if intent.kind == IntentKind.GRAPH_QUERY and not isinstance(intent.query, dict):
                 raise WorkflowError("Graph query must be an object", code="invalid_graph_query")
+            if intent.kind == IntentKind.CONVERSE and not (intent.instruction or "").strip():
+                raise WorkflowError("Converse step has no instruction", code="converse_instruction_missing")
             if intent.kind in {IntentKind.WIDGET_CREATE, IntentKind.WIDGET_MODIFY}:
                 validate_app_id(intent.app_id)
                 if not (intent.instruction or "").strip():
@@ -1190,6 +1412,12 @@ class DurableAgentWorkflow:
 
     @staticmethod
     def _intent_from_sub(sub: SubIntent) -> IntentPlan:
+        if sub.kind == SubIntentKind.CONVERSE:
+            return IntentPlan(
+                kind=IntentKind.CONVERSE,
+                instruction=sub.instruction or "",
+                rationale="multi_intent",
+            )
         if sub.kind == SubIntentKind.GRAPH_MUTATION:
             return IntentPlan(kind=IntentKind.GRAPH_MUTATION, actions=sub.actions, rationale="multi_intent")
         if sub.kind == SubIntentKind.GRAPH_QUERY:

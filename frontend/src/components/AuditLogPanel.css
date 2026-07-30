@@ -1,0 +1,80 @@
+.audit-panel-tabs {
+  display: flex;
+  gap: 5px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.audit-panel-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.audit-panel-tabs button.is-active {
+  color: var(--text-primary);
+  background: var(--control-hover);
+}
+
+.audit-data-map {
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+}
+
+.audit-data-map-explorer {
+  height: 100%;
+  min-height: 520px;
+}
+
+.audit-map-message {
+  display: grid;
+  height: 100%;
+  min-height: 320px;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.audit-map-message.is-error {
+  color: var(--danger);
+}
+
+.audit-log-toggle {
+  width: 100%;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+.audit-log-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger), transparent 70%);
+  border-radius: 10px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 11px;
+}
+
+.audit-log-error button {
+  flex: none;
+  padding: 5px 9px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}

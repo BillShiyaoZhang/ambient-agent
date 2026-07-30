@@ -1,6 +1,6 @@
 # Widget 与应用中心
 
-“Widget”是可在工作区渲染的 React UI；“App”是带持久 Manifest V2 和 Controller 的 Widget；“Capability”是应用中心中可调用、但不一定有 UI 的后端动作。App 只能通过批准的 capability grants 访问宿主或外部资源。
+“Widget”是可在工作区渲染的 React UI；“App”是带持久 Manifest V2 和 Controller 的 Widget；“Capability”是应用中心中可调用、但不一定有 UI 的后端动作；“Instruction Skill”是按需注入 Agent turn 的 `SKILL.md` 说明。Skill、Capability 与 App 可以组合，但不能互相替代。App 只能通过批准的 capability grants 访问宿主或外部资源。
 
 ## 1. App 产物
 
@@ -78,9 +78,15 @@ flowchart LR
 
 ## 4. 应用中心
 
-`GET /api/app-store` 合并 `generated_app`、`skill` 和 `mcp` 条目。没有 UI 的能力可启动持久 UI 生成 Run；生成的 UI 必须申请只允许目标 `catalog_id + action_id` 的 `capability.invoke` grant，不能直接绑定 provider、MCP server 或 tool name。
+`GET /api/app-store` 只合并当前 workspace 已安装的 `generated_app`、Instruction Skill 和 executable capability 条目，并维护启动器布局。可安装但尚未安装的 Skill 来自独立的 `GET /api/skill-market`；安装、启用、更新和卸载使用独立 Skill API。Market 响应不是 App Center layout 的事实源，未安装条目不会被写入 layout。
+
+没有 UI 的 Capability 可直接作为结构化 action 运行，也可以显式启动持久 UI 生成 Run；生成的 UI 必须申请只允许目标 `catalog_id + action_id` 的 `capability.invoke` grant，不能直接绑定 provider、MCP server 或 tool name，并继续经过既有 approval、staging、verification 和原子发布路径。Instruction Skill 则使用 `launch_mode = "details"`：App Center 只提供详情、启停和卸载，实际说明通过相关 Agent turn 按需加载。它不会因为没有 UI 而变成 system-level Tool，本版本也不为纯 Instruction Skill 提供 Run 或 UI 生成入口。
 
 条目状态为 `ready`、`needs_ui`、`generating` 或 `unavailable`。布局以 revision 乐观并发控制；冲突返回 `409`，客户端重新加载后再提交。
+
+生成 App 的图标支持右键或保持按压约 500 ms 打开管理菜单；指针移动超过容差、抬起或取消时不得误触发长按，成功打开菜单后不得继续启动 App。菜单提供查看详情、配置属性、重命名和卸载；键盘上下文菜单继续可用。
+
+`PATCH /api/apps/{app_id}` 只更新用户可管理的 Manifest 展示属性：`title`、`description`、`app_version` 和 `intents`。请求为 partial update，未知字段、空更新和不满足 Manifest V2 约束的值返回 `422`，不存在的 App 返回 `404`。重命名只修改 `title`；稳定的 App ID、目录、grant、schema reference 与 Controller 不变。配置成功后，应用中心和已打开窗口必须刷新为最新属性。
 
 ## 5. 数据与能力边界
 
@@ -90,5 +96,8 @@ flowchart LR
 - `file.*` 只访问 `app://data/`，不能读取 Manifest、Controller、会话、Graph 或凭据。
 - `capability.invoke` 只调用精确批准的应用中心 action；直接 `ambient.mcp` 已从 Widget SDK 删除。
 - Grant 只代表 App 可以发起请求；Run interaction、adapter spawn permission、输入/输出 schema、幂等和恢复 policy 继续执行。
+- Skill 安装记录位于 workspace SQLite，经过验证的 `SKILL.md` 与 Market 描述符位于内容寻址 snapshot；它们不是 App data，也不进入 ontology/KG。Skill 的 `ontology_refs` 只引用已有 canonical schema。
 
 运行时错误使用稳定的 `code`、`capability`、`operation`、`hint` 和安全 `details`，并写入有界审计/诊断，供后续修复使用。
+
+Skill 的完整安装、上下文和安全契约见 [Agent Skills](/agent/skills.md)。

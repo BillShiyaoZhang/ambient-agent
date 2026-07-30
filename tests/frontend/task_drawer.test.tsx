@@ -1,8 +1,8 @@
 import React, { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-const { list, get, runtimes, resolve, reconcile, subscribe, emitRunEvent } = vi.hoisted(() => {
+const { list, get, runtimes, resolve, reconcile, retry, subscribe, emitRunEvent } = vi.hoisted(() => {
   let listener: ((event: { run_id: string }) => void) | null = null;
   return {
     list: vi.fn(),
@@ -10,6 +10,7 @@ const { list, get, runtimes, resolve, reconcile, subscribe, emitRunEvent } = vi.
     runtimes: vi.fn(),
     resolve: vi.fn(),
     reconcile: vi.fn(),
+    retry: vi.fn(),
     subscribe: vi.fn((nextListener: (event: { run_id: string }) => void) => {
       listener = nextListener;
       return () => {
@@ -29,7 +30,7 @@ vi.mock("../../frontend/src/services/runs", () => ({
     reconcile,
     subscribe,
     cancel: vi.fn(),
-    retry: vi.fn(),
+    retry,
     stopRuntime: vi.fn(),
   },
 }));
@@ -85,8 +86,138 @@ describe("TaskDrawer", () => {
     await waitFor(() => expect(onCountsChange).toHaveBeenCalledWith({ active: 0, attention: 1 }));
     fireEvent.click(screen.getByText("Attention"));
     fireEvent.click(await screen.findByText("Send mail"));
-    fireEvent.click(await screen.findByText("Allow"));
+    const allowButton = await screen.findByText("Allow");
+    expect(screen.queryByRole("button", { name: "Execution graph" })).toBeNull();
+    fireEvent.click(allowButton);
     await waitFor(() => expect(resolve).toHaveBeenCalledWith("interaction-1", { approved: true }));
+  });
+
+  it("projects a selected durable Run onto the shared execution graph", async () => {
+    const workflowRun = {
+      ...waitingRun,
+      adapter_type: "internal_agent",
+      workflow_type: "widget_create",
+      state: { phase: "wait_schema" },
+      checkpoint: { phase: "wait_schema" },
+      steps: [
+        { step_key: "plan", status: "succeeded", attempt: 1 },
+        { step_key: "align_schema", status: "succeeded", attempt: 1 },
+        { step_key: "wait_schema", status: "waiting_user", attempt: 1 },
+      ],
+      events: [
+        {
+          sequence: 1,
+          event_id: "event-1",
+          schema_version: 1,
+          stream_epoch: "epoch",
+          run_id: "run-1",
+          session_id: null,
+          step_id: "wait_schema",
+          attempt: 1,
+          trace_id: "run-1",
+          duration_ms: null,
+          model_usage: null,
+          redacted: true,
+          type: "run_status_changed",
+          payload: { status: "waiting_user" },
+          created_at: new Date().toISOString(),
+        },
+      ],
+    };
+    get.mockResolvedValue(workflowRun);
+
+    const view = render(<TaskDrawer open language="en" onClose={() => {}} />);
+    fireEvent.click(screen.getByText("Attention"));
+    fireEvent.click(await screen.findByText("Send mail"));
+    fireEvent.click(await screen.findByRole("button", { name: "Execution graph" }));
+
+    expect(await screen.findByText("Schema approval")).toBeDefined();
+    expect(screen.getByText("Waiting for user")).toBeDefined();
+    expect(
+      within(screen.getByRole("navigation", { name: "Run detail views" }))
+        .getByRole("button", { name: "Overview" }),
+    ).toBeDefined();
+
+    view.rerender(<TaskDrawer open language="zh" onClose={() => {}} />);
+    expect(screen.getByRole("searchbox", { name: "搜索图谱" })).toBeDefined();
+    expect(screen.getByText("路由意图")).toBeDefined();
+    expect(screen.getAllByText("Send mail").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "关闭任务中心" })).toBeDefined();
+  });
+
+  it("keeps the execution graph reachable for a migrated legacy durable Run", async () => {
+    const legacyWorkflowRun = {
+      ...waitingRun,
+      adapter_type: "internal",
+      workflow_type: "legacy",
+      workflow_version: 1,
+      status: "needs_attention",
+      interactions: [],
+      events: [{
+        sequence: 1,
+        event_id: "migration-event",
+        schema_version: 1,
+        stream_epoch: "epoch",
+        run_id: "run-1",
+        session_id: null,
+        step_id: null,
+        attempt: null,
+        trace_id: "run-1",
+        redacted: true,
+        type: "migration_attention_required",
+        payload: {
+          from: "running",
+          to: "needs_attention",
+          workflow_version: 1,
+          reason: "legacy_state_not_replayable",
+        },
+        created_at: new Date().toISOString(),
+      }],
+    };
+    list.mockResolvedValue([legacyWorkflowRun]);
+    get.mockResolvedValue(legacyWorkflowRun);
+
+    render(<TaskDrawer open language="en" onClose={() => {}} />);
+    fireEvent.click(screen.getByText("Attention"));
+    fireEvent.click(await screen.findByText("Send mail"));
+    fireEvent.click(await screen.findByRole("button", { name: "Execution graph" }));
+
+    expect(await screen.findByText("Route intent")).toBeDefined();
+  });
+
+  it("does not treat an ordinary internal attention Run as a durable workflow", async () => {
+    const internalManualRun = {
+      ...waitingRun,
+      adapter_type: "internal",
+      workflow_type: "legacy",
+      workflow_version: 1,
+      status: "needs_attention",
+      interactions: [],
+      events: [{
+        sequence: 1,
+        event_id: "run-event",
+        schema_version: 1,
+        stream_epoch: "epoch",
+        run_id: "run-1",
+        session_id: null,
+        step_id: null,
+        attempt: null,
+        trace_id: "run-1",
+        redacted: true,
+        type: "run_created",
+        payload: { status: "queued" },
+        created_at: new Date().toISOString(),
+      }],
+    };
+    list.mockResolvedValue([internalManualRun]);
+    get.mockResolvedValue(internalManualRun);
+
+    render(<TaskDrawer open language="en" onClose={() => {}} />);
+    fireEvent.click(screen.getByText("Attention"));
+    fireEvent.click(await screen.findByText("Send mail"));
+    await screen.findByRole("button", { name: "Back to task list" });
+
+    expect(screen.queryByRole("button", { name: "Execution graph" })).toBeNull();
   });
 
   it("lists backend runtimes in the same drawer", async () => {
@@ -96,6 +227,35 @@ describe("TaskDrawer", () => {
     expect(runtimes).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Runtimes"));
     expect(await screen.findByText("internal:agent")).toBeDefined();
+  });
+
+  it("explains a terminal non-retryable failure without exposing a Retry action or raw JSON", async () => {
+    const failedRun = {
+      ...waitingRun,
+      status: "failed",
+      summary: "Active time exhausted",
+      interactions: [],
+      error: {
+        code: "budget_exhausted",
+        message: "Active time exhausted",
+        retryable: false,
+        effect_state: "none",
+      },
+    };
+    list.mockResolvedValue([failedRun]);
+    get.mockResolvedValue(failedRun);
+    const onClose = vi.fn();
+
+    render(<TaskDrawer open language="zh" onClose={onClose} />);
+    fireEvent.click(screen.getByText("历史"));
+    fireEvent.click(await screen.findByText("Send mail"));
+
+    expect(await screen.findByText("任务已达到运行预算上限")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    expect(screen.queryByText(/"retryable"/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "关闭任务中心" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
   });
 
   it("coalesces a replay burst into one lightweight refresh without loading runtimes", async () => {

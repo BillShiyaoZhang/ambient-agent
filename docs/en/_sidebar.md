@@ -12,12 +12,14 @@
   - [Widgets and App Center](/en/architecture/apps.md)
   - [Durable Runs and Runtimes](/en/architecture/runs.md)
   - [Graph Database](/en/architecture/graph-db.md)
+  - [Graph Data Visualization](/en/architecture/graph-visualization.md)
   - [Backend UML](/en/architecture/uml.md)
 
 - **Agent Engine**
   - [Intent Router](/en/agent/intent-router.md)
   - [Agent Harness](/en/agent/harness.md)
   - [Agent System Capability Catalog](/en/agent/system-capabilities.md)
+  - [Agent Skills](/en/agent/skills.md)
 
 - **Widget Development**
   - [Widget Format and Lifecycle](/en/widgets/guide.md)

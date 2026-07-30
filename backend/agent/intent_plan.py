@@ -23,6 +23,7 @@ class IntentKind(StrEnum):
 # Sub-intent kinds (what each entry in sub_intents[] can be). Mirrors
 # IntentKind for the cases we allow inside multi_intent plans.
 class SubIntentKind(StrEnum):
+    CONVERSE = "converse"
     GRAPH_MUTATION = "graph_mutation"
     GRAPH_QUERY = "graph_query"
     WIDGET_CREATE = "widget_create"

@@ -228,6 +228,51 @@ class AppManager:
                 logger.warning("Unable to load App %s", app_id, exc_info=True)
                 return None
 
+    def update_app_properties(
+        self,
+        app_id: str,
+        *,
+        title: Any = _UNSET,
+        description: Any = _UNSET,
+        app_version: Any = _UNSET,
+        intents: Any = _UNSET,
+    ) -> dict[str, Any] | None:
+        """Update user-manageable Manifest presentation fields atomically."""
+
+        self._reconcile_pending_deletions()
+        app_path = self.app_path(app_id)
+        with self._record_store.serialized() as transaction:
+            loaded = self._read_manifest(transaction, app_id, app_path)
+            if loaded is None:
+                return None
+            manifest, record = loaded
+            manifest_data = manifest.to_dict()
+            for field, value in {
+                "title": title,
+                "description": description,
+                "app_version": app_version,
+                "intents": intents,
+            }.items():
+                if value is not _UNSET:
+                    manifest_data[field] = value
+
+            updated = AppManifest.from_dict(manifest_data, expected_app_id=app_id)
+            manifest_path = app_path / "manifest.json"
+            original = manifest_path.read_bytes()
+
+            def restore() -> None:
+                manifest_path.write_bytes(original)
+
+            transaction.add_rollback(restore)
+            updated.write_atomic(manifest_path)
+            verified = AppManifest.read(manifest_path, expected_app_id=app_id)
+            updated_record = self._record_store.put(
+                transaction,
+                app_id,
+                created_at=record.created_at,
+            )
+            return self._manifest_record(verified, updated_record)
+
     def list_apps(self) -> list[dict[str, Any]]:
         self._reconcile_pending_deletions()
         apps_root = Path(self.apps_dir)

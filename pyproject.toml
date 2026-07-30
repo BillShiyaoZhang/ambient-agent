@@ -1,9 +1,22 @@
 [project]
 name = "ambient-agent"
 version = "0.1.0"
-description = "Ambient Agent is an open-source, self-hostable personal AI assistant framework."
+description = "A self-hosted personal AI workspace with durable runs, graph data, and sandboxed widgets."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Shiyao Zhang" },
+]
+keywords = ["agent", "ai", "llm", "self-hosted", "workspace"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "agent-client-protocol>=0.11.0",
     "fastapi>=0.139.0",
@@ -17,7 +30,14 @@ dependencies = [
     "litellm==1.92.0",
     "neo4j>=6.0,<7",
     "orjson>=3.10.0",
+    "pyyaml>=6.0.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/BillShiyaoZhang/ambient-agent"
+Documentation = "https://github.com/BillShiyaoZhang/ambient-agent/tree/main/docs"
+Repository = "https://github.com/BillShiyaoZhang/ambient-agent.git"
+Issues = "https://github.com/BillShiyaoZhang/ambient-agent/issues"
 
 [dependency-groups]
 dev = [

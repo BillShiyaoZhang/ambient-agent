@@ -21,7 +21,12 @@ flowchart LR
 
 Docker Compose adds a `widget-frame` service. Its browser-reachable port 8001 serves only the fixed Shell, renderer, and compiler assets. It receives no App ID, ticket, Controller, or user data and sets no Cookie. The Backend continues to issue tickets and process capability RPC on port 8000.
 
-Local Compose always publishes port 8001. An HTTPS reverse proxy or path-prefixed deployment sets both the browser build variable `VITE_API_BASE_URL` and the Backend's `WIDGET_FRAME_URL` to public browser-reachable URLs; a Docker service name must never be returned to the browser.
+Local Compose always publishes port 8001. An HTTPS reverse proxy or
+path-prefixed deployment sets the browser build variable `VITE_API_BASE_URL`
+to either a same-origin path prefix or an absolute `http(s)` URL, and sets the
+Backend's `WIDGET_FRAME_URL` to the complete public frame URL. Both resolved
+addresses must be browser-reachable; a Docker service name must never be
+returned to the browser.
 
 The iframe combines:
 

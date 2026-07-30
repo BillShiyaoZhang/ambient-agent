@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 import backend.main as main_module
 from backend.main import app
-from backend.run_service import RunStore
+from backend.run_service import AgentRunState, RunStore
 
 
 class ApiCoordinator:
@@ -169,6 +169,59 @@ def test_run_summary_listing_has_a_created_at_index(tmp_path):
     with store._connect() as connection:
         indexes = {str(row["name"]) for row in connection.execute("PRAGMA index_list('runs')").fetchall()}
     assert "idx_runs_created_at" in indexes
+
+
+def test_public_run_payload_redacts_pinned_skill_instructions(tmp_path, monkeypatch):
+    store = RunStore(str(tmp_path))
+    state = AgentRunState(
+        workflow_type="converse",
+        session_id="session-skill",
+        phase="converse",
+        data={
+            "active_skills": [
+                {
+                    "catalog_id": "agent-skill:test:private-procedure",
+                    "name": "private-procedure",
+                    "title": "Private Procedure",
+                    "version": "1.0.0",
+                    "digest": f"sha256:{'b' * 64}",
+                    "instructions": "PRIVATE SKILL BODY MUST NOT LEAVE THE CHECKPOINT",
+                    "allowed_tools": "Read",
+                }
+            ]
+        },
+    )
+    run = store.create_run(
+        owner_id="session:session-skill",
+        action_id="chat",
+        action_title="Chat",
+        source_type="chat",
+        source_id="session-skill",
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        input_data={"content": "use the procedure"},
+        state=state,
+        workflow_type=state.workflow_type,
+        workflow_version=state.workflow_version,
+    )
+    monkeypatch.setattr(main_module, "run_store", store)
+
+    with TestClient(app) as client:
+        listed = client.get("/api/runs").json()
+        detailed = client.get(f"/api/runs/{run['id']}").json()
+
+    assert "PRIVATE SKILL BODY" not in str(listed)
+    assert "PRIVATE SKILL BODY" not in str(detailed)
+    public_snapshot = detailed["state"]["data"]["active_skills"][0]
+    assert public_snapshot["catalog_id"] == "agent-skill:test:private-procedure"
+    assert public_snapshot["digest"] == f"sha256:{'b' * 64}"
+    assert "instructions" not in public_snapshot
+    assert "allowed_tools" not in public_snapshot
+    # Internal reducers still receive the full self-contained replay snapshot.
+    assert "PRIVATE SKILL BODY" in store.get_run(run["id"])["state"]["data"]["active_skills"][0]["instructions"]
+
+    public_event = main_module._public_run_payload({"payload": {"state": state.model_dump(mode="json")}})
+    assert "PRIVATE SKILL BODY" not in str(public_event)
 
 
 def test_widget_run_requires_explicit_action_id():

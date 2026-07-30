@@ -9,6 +9,7 @@ import pytest
 
 from backend.app_manifest import AppManifest
 from backend.backend_manager import (
+    BackendPermissionsError,
     BackendManager,
     MCP_PROTOCOL_VERSION,
     MCPProtocolError,
@@ -51,6 +52,32 @@ async def test_permission_management(tmp_workspace):
 
     manager3 = BackendManager()
     assert manager3.is_agent_approved(app_id, url)
+
+
+def test_corrupt_backend_permissions_fail_closed_without_overwrite(tmp_workspace):
+    permissions_file = tmp_workspace / "backend_permissions.json"
+    permissions_file.write_text('{"test-app":', encoding="utf-8")
+
+    with pytest.raises(BackendPermissionsError, match="cannot be read"):
+        BackendManager()
+
+    assert permissions_file.read_text(encoding="utf-8") == '{"test-app":'
+
+
+def test_failed_permission_replace_does_not_grant_in_memory(tmp_workspace, monkeypatch):
+    manager = BackendManager()
+    manager.approve_agent("existing-app", "https://agent.example/one")
+    persisted = manager.permissions_file.read_bytes()
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(BackendPermissionsError, match="persist"):
+        manager.approve_agent("new-app", "https://agent.example/two")
+
+    assert not manager.is_agent_approved("new-app", "https://agent.example/two")
+    assert manager.permissions_file.read_bytes() == persisted
 
 
 @pytest.mark.asyncio

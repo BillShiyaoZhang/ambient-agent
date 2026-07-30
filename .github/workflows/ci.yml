@@ -1,39 +1,53 @@
 name: CI Pipeline
 
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend-ci:
     name: Backend Lint & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: '.python-version'
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8.3.2
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
-          version: 'latest'
+          version: '0.9.15'
           enable-cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '22.18.0'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Install Widget verifier dependencies
         run: npm ci --omit=dev --ignore-scripts
@@ -51,35 +65,61 @@ jobs:
       - name: Run UML Contract Consistency Check
         run: uv run python scripts/verify_uml.py
 
+      - name: Check generated Run event types
+        run: uv run python scripts/generate_run_event_types.py --check
+
+      - name: Verify documentation pairs and links
+        run: uv run python scripts/verify_docs.py
+
   docker-smoke:
-    name: Docker opencode binary smoke test
+    name: Production Compose Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Build backend image
-        run: docker build -f backend/Dockerfile -t ambient-agent-backend:smoke .
+      - name: Create local-only release configuration
+        run: cp .env.example .env
 
-      - name: Verify opencode binary is available in image
+      - name: Validate Compose model
+        run: docker compose config --quiet
+
+      - name: Start production stack
+        run: docker compose up --build --detach --wait --wait-timeout 300
+
+      - name: Verify release endpoints and bundled OpenCode
         run: |
           set -euo pipefail
-          docker run --rm ambient-agent-backend:smoke opencode --version
-          docker run --rm ambient-agent-backend:smoke which opencode
+          curl --fail --silent --show-error http://127.0.0.1:5173/healthz
+          curl --fail --silent --show-error http://127.0.0.1:8000/health
+          curl --fail --silent --show-error http://127.0.0.1:8001/health
+          test "$(docker compose exec -T backend opencode --version)" = "1.17.18"
+
+      - name: Show diagnostics
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color --tail=200
+
+      - name: Stop production stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
 
   frontend-ci:
     name: Frontend Lint & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '22.18.0'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -94,3 +134,34 @@ jobs:
       - name: Run Vitest Tests
         run: npm run test
         working-directory: frontend
+
+      - name: Build production frontend
+        run: npm run build
+        working-directory: frontend
+
+  widget-runtime-ci:
+    name: Widget Runtime Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22.18.0'
+          cache: 'npm'
+          cache-dependency-path: widget-runtime/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+        working-directory: widget-runtime
+
+      - name: Enable Chromium user namespace sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Run Widget Runtime tests
+        run: npm test
+        working-directory: widget-runtime

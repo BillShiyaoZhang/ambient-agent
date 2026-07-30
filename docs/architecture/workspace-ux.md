@@ -16,7 +16,7 @@ Ambient Agent 采用 App-first 桌面工作区。聊天是浮层辅助界面，�
 
 桌面工作区在应用舞台上方保留一行 52 px 系统栏。最大化应用的关闭/恢复和标题进入系统栏；浮动或贴靠窗口保留自己的标题栏，因此不会出现重复标题栏。
 
-- 宽度至少 1024 px：显示活动应用信息、居中的应用/任务切换区，以及布局、审计、模型、语言、主题操作。
+- 宽度至少 1024 px：显示活动应用信息、居中的应用/任务切换区，以及布局、图谱探索、审计、模型、语言、主题操作。
 - 720–1023 px：保留核心切换操作，其余动作进入“更多”菜单。
 - 小于 720 px：活动应用填满舞台，系统栏只保留活动标题和关闭操作，其他动作进入“更多”。
 - 系统栏和浮层遵循 `safe-area-inset-*`。
@@ -77,6 +77,7 @@ hover、临时菜单等纯展示状态允许重置。旧 App 如果只把
 - 聊天从右下角按钮打开为 380 × 560 px 浮层，小屏下变为 bottom sheet/全屏 drawer。
 - 任务抽屉展示活动、需关注、历史 Run 和 runtime；用户确认通过 blocking dialog 完成。
 - 应用中心在首页为主界面，在有窗口时作为 overlay 打开。
+- 图谱探索工作台复用同一交互式图组件浏览 Ontology、KG、Agent 编排与隐私数据地图；它是可信 Host 的辅助界面，不作为生成 App 安装。
 - 审计日志、模型设置和系统菜单使用共享的 `SystemDialog`、`SystemDrawer`、`SystemPopover` 与 `SystemIconButton`。
 
 Popovers 支持 Escape、外部点击和焦点返回。审批对话框是 blocking 的：Escape 或点击遮罩不会被解释为批准或拒绝。
@@ -105,8 +106,10 @@ Popovers 支持 Escape、外部点击和焦点返回。审批对话框是 blocki
 
 - 主题偏好为 `system`、`light` 或 `dark`；默认 `system` 并跟随操作系统实时变化。
 - 宿主和标准 `ambient.components` 使用有效主题；自定义 Widget 的硬编码颜色不会自动改写。
-- Widget 通过同一 Runtime session 接收 `{ theme, locale, reducedMotion }` 展示上下文；主题或语言变化不重建 Chromium BrowserContext。
+- Widget 通过同一 Runtime session 接收 `{ theme, locale, reducedMotion }` 展示上下文；主题或语言变化不重建默认 iframe。pixel 回滚模式也会复用现有 Chromium BrowserContext。
 - 控件具有 accessible name、可见焦点和至少 40 px 点击区域；移动端至少 44 px。
+- 浅色主题的宿主 tooltip 使用浅色 surface 与深色文字，不能出现与主题割裂的黑色背景框。
+- 聊天历史行的删除图标使用紧凑的 28 px 视觉按钮，并只在行 hover、focus-within 或当前项中显示，避免挤占可截断标题的主列；其 accessible name 保持完整。
 - reduced-motion 会关闭 spring/transform 动画；透明材质在不支持 backdrop filter 时有不透明 fallback。
 - 普通文本以 WCAG AA 对比度为目标，焦点状态不只依赖颜色表达。
 

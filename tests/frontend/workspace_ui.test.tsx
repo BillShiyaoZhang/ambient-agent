@@ -54,6 +54,26 @@ describe("App-first workspace UI", () => {
     onThemeChange={vi.fn()}
   />);
 
+  it("opens the shared graph explorer from system chrome", () => {
+    const onOpenGraph = vi.fn();
+    render(<AppWorkspace
+      widgets={[]}
+      canvas={{ version: 3, open_app_ids: [], active_app_id: null, windows: {} }}
+      onCanvasChange={vi.fn()}
+      renderWidgetContent={() => null}
+      onOpenAppStore={vi.fn()}
+      onOpenAudit={vi.fn()}
+      onOpenGraph={onOpenGraph}
+      language="en"
+      onLanguageChange={vi.fn()}
+      theme={{ preference: "system", effective: "dark" }}
+      onThemeChange={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Graph Explorer" }));
+    expect(onOpenGraph).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps active and warm apps mounted and closes a window without uninstalling it", () => {
     const change = vi.fn();
     renderWorkspace(change);

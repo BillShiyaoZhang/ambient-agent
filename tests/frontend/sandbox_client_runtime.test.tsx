@@ -42,9 +42,13 @@ class ClientRuntimeSocket {
     this.sent.push(payload);
   }
 
-  close() {
+  closeWith(code: number) {
     this.readyState = ClientRuntimeSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code } as CloseEvent);
+  }
+
+  close() {
+    this.closeWith(1000);
   }
 }
 
@@ -135,7 +139,7 @@ describe("SandboxWidget isolated client runtime", () => {
     vi.stubGlobal("crypto", {
       randomUUID: () => "host-nonce",
     });
-    vi.spyOn(wsService, "sendMessage").mockImplementation(() => {});
+    vi.spyOn(wsService, "sendMessage").mockImplementation(() => true);
   });
 
   afterEach(() => {
@@ -219,6 +223,59 @@ describe("SandboxWidget isolated client runtime", () => {
     });
     expect(transferred[1]).toBe("*");
     expect(transferred[2]).toEqual([channel.port2]);
+  });
+
+  it("surfaces a host message that could not reach the Ambient command socket", async () => {
+    vi.mocked(wsService.sendMessage).mockReturnValueOnce(false);
+    const { channel } = await startReadySession();
+
+    act(() => {
+      channel.port1.emit({ type: "host_event", event: "send_message", text: "open notes" });
+    });
+
+    expect(screen.getByRole("alert").textContent).toContain("Message not sent");
+  });
+
+  it("gets a fresh one-time ticket after a transient runtime disconnect", async () => {
+    const { socket } = await startReadySession();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    act(() => socket.closeWith(1006));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(499);
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(ClientRuntimeSocket.instances).toHaveLength(2);
+  });
+
+  it("offers a retry when the initial one-time ticket request fails", async () => {
+    vi.mocked(global.fetch)
+      .mockRejectedValueOnce(new Error("temporary ticket outage"))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ticketResponse,
+      } as Response);
+    render(<SandboxWidget widget={widget} />);
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(screen.getByText("temporary ticket outage")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry Widget Runtime" }));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(ClientRuntimeSocket.instances).toHaveLength(1);
   });
 
   it("uses the configured HTTPS API base for both ticket and WebSocket traffic", async () => {

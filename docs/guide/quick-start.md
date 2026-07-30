@@ -2,13 +2,13 @@
 
 ## 环境要求
 
-- Docker Desktop；或本机 Python 3.11–3.13、`uv`、Node.js 和 npm。
+- Docker Desktop（包含 Compose v2）；或本机 Python 3.11–3.13、`uv`、Node.js 22.18+（22.x）或 24.11+，以及 npm。
 - 使用 Dev Container 开发时，还需要 VS Code 与 Dev Containers 扩展。
 
 ## 方式一：Docker Compose（推荐）
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/BillShiyaoZhang/ambient-agent.git
 cd ambient-agent
 cp .env.example .env
 docker compose up --build -d
@@ -48,13 +48,22 @@ ssh -N \
 `WIDGET_RUNTIME_MAX_CONTEXTS=16` 会覆盖 Compose 的新默认值。除非已经同步提高并
 压测 Runtime 的 768MiB 内存与 192 PID 上限，否则应改为 `4`。
 
-`VITE_WIDGET_UI_TRANSPORT` 会写入前端构建产物；`VITE_API_BASE_URL` 当前只控制隔离 Widget client runtime 的 ticket/socket 地址，主工作区 API 仍使用浏览器当前 hostname 的 `8000` 端口。修改任一构建变量后，需要重新运行 `docker compose up --build -d`，而不只是重启容器。
+`VITE_WIDGET_UI_TRANSPORT` 与 `VITE_API_BASE_URL` 都会写入前端构建产物。后者统一控制主工作区和隔离 Widget client runtime 的 HTTP/WebSocket Backend 地址：留空时沿用页面协议和 hostname，并使用 `8000` 端口；也可以填写绝对 `http(s)` URL 或相对当前 origin 的路径前缀，HTTPS 会自动派生 WSS。修改任一构建变量后，需要重新运行 `docker compose up --build -d`，而不只是重启容器。
 
-Docker Compose 也会为规范知识图谱启动 Neo4j，其 Browser 位于 `http://localhost:7474`。在非纯本机环境暴露服务前请修改 `NEO4J_PASSWORD`。如果需要导入已有的 `workspace/graph.db`，请在一次启动中设置 `GRAPH_MIGRATE_SQLITE=1`，完成后再改回 `0`。
+只要浏览器实际访问的 Frontend origin 发生变化，或 Frontend 与 Backend 跨源，就必须把该 Frontend origin（精确的 scheme、host 和 port，不含任何路径；多项用逗号分隔）同步加入 `AMBIENT_FRONTEND_ORIGINS`。设置 `VITE_API_BASE_URL` 只会改变客户端连接地址，不会自动放行 Backend 的 CORS 或 WebSocket Origin 校验。例如，本地前端从 `http://localhost:5173` 连接 `http://localhost:8000`：
+
+```dotenv
+VITE_API_BASE_URL=http://localhost:8000
+AMBIENT_FRONTEND_ORIGINS=http://localhost:5173
+```
+
+修改 `VITE_API_BASE_URL` 后需要重新构建 Frontend；修改 `AMBIENT_FRONTEND_ORIGINS` 后需要重启 Backend。
+
+Docker Compose 也会为规范知识图谱启动 Neo4j，其 Browser 位于 `http://localhost:7474`。默认 Neo4j 凭据只适合受信任本机；修改 `NEO4J_PASSWORD` 也不会给 Backend 增加认证，不能据此公开整个栈。如果需要导入已有的 `workspace/graph.db`，请在一次启动中设置 `GRAPH_MIGRATE_SQLITE=1`，完成后再改回 `0`。
 
 `.env` 只保存 Coding Agent 等进程级参数。LLM Provider、密钥、默认模型和 OpenCode/Codex 选择在应用的“模型与 Provider”界面配置；密钥写入被 Git 忽略的 `workspace/llm/secrets.json`，不会写入 `.env`。
 
-Coding Agent CLI 不全部预装在镜像中。打开“模型与 Provider”后可按需安装 Codex；安装产物和原生凭据保存在 `coding_agent_data` volume。安装完成后点击“使用 ChatGPT 登录”，在浏览器打开设备码页面并输入一次性代码；成功后界面会从 Codex 动态加载当前账号可用模型。删除该 volume 会同时删除已安装 CLI 和容器内登录状态。生产镜像与 Dev Container 都固定并预装 Codex ACP bridge；直接在宿主机运行后端时，需要安装 `@agentclientprotocol/codex-acp` 并用 `CODEX_ACP_COMMAND` 指向其可执行命令。更新 bridge 配置后必须重建 Dev Container，单纯重启不会刷新镜像层。
+Coding Agent CLI 不全部预装在镜像中。生产镜像与 Dev Container 固定包含 OpenCode 1.17.18；`OPENCODE_VERSION` 是构建参数，修改后必须重建镜像。打开“模型与 Provider”后可按需安装 Codex；安装产物和原生凭据保存在 `coding_agent_data` volume。安装完成后点击“使用 ChatGPT 登录”，在浏览器打开设备码页面并输入一次性代码；成功后界面会从 Codex 动态加载当前账号可用模型。删除该 volume 会同时删除已安装 CLI 和容器内登录状态。生产镜像与 Dev Container 都固定并预装 Codex ACP bridge；直接在宿主机运行后端时，需要安装 `@agentclientprotocol/codex-acp` 并用 `CODEX_ACP_COMMAND` 指向其可执行命令。更新 bridge 配置后必须重建 Dev Container，单纯重启不会刷新镜像层。
 
 Provider Connection 与凭据集中管理，但模型绑定按消费者隔离：Ambient 使用主模型和快速模型；OpenCode 默认继承 Ambient 主模型，也可选择专用 Provider 模型；Codex 使用自己的原生登录和可选原生模型，不接收 Ambient Provider 凭据。
 
@@ -99,7 +108,14 @@ npm --prefix docs install
 
 本地测试显式使用 SQLite 兼容适配器。若要运行接近生产的本机后端，请先启动 Neo4j，并在启动 Uvicorn 前设置 `GRAPH_DATABASE_BACKEND=neo4j`、`NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD` 与 `NEO4J_DATABASE`。
 
-然后使用与 Dev Container 相同的后端和前端命令。若要预览文档：
+本机后端应只监听 loopback；再在另一个终端启动前端：
+
+```bash
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+npm --prefix frontend run dev
+```
+
+若要预览文档：
 
 ```bash
 npm --prefix docs run dev

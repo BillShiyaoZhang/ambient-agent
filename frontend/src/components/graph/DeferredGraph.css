@@ -1,0 +1,48 @@
+.deferred-graph-status {
+  display: grid;
+  min-height: 300px;
+  grid-template-columns: auto auto;
+  place-content: center;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--glass-border, rgba(148, 163, 184, .24));
+  border-radius: 14px;
+  color: var(--text-muted, #94a3b8);
+  background: var(--surface-panel-solid, #101827);
+  font-size: 11px;
+}
+
+.deferred-graph-status.is-compact {
+  min-height: 260px;
+}
+
+.deferred-graph-workbench-status {
+  min-height: min(68vh, 620px);
+  margin: 0 20px 20px;
+}
+
+.deferred-graph-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid color-mix(in srgb, var(--accent, #6366f1), transparent 72%);
+  border-top-color: var(--accent, #6366f1);
+  border-radius: 999px;
+  animation: deferred-graph-spin .8s linear infinite;
+}
+
+@keyframes deferred-graph-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 719px) {
+  .deferred-graph-workbench-status {
+    min-height: min(62vh, 480px);
+    margin: 0 10px 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deferred-graph-spinner {
+    animation: none;
+  }
+}

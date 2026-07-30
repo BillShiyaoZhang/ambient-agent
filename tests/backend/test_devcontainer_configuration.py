@@ -44,7 +44,15 @@ def test_devcontainer_runs_all_widget_dependencies_and_forwards_browser_frame() 
 def test_devcontainer_pins_the_same_codex_acp_bridge_as_production() -> None:
     dev_dockerfile = (REPOSITORY_ROOT / ".devcontainer/Dockerfile").read_text(encoding="utf-8")
     production_dockerfile = (REPOSITORY_ROOT / "backend/Dockerfile").read_text(encoding="utf-8")
+    manifest = json.loads((REPOSITORY_ROOT / "coding-agent-acp/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((REPOSITORY_ROOT / "coding-agent-acp/package-lock.json").read_text(encoding="utf-8"))
+
+    assert manifest["dependencies"]["@agentclientprotocol/codex-acp"] == "1.1.7"
+    locked_bridge = lock["packages"]["node_modules/@agentclientprotocol/codex-acp"]
+    assert locked_bridge["version"] == "1.1.7"
+    assert locked_bridge["integrity"].startswith("sha512-")
 
     for dockerfile in (dev_dockerfile, production_dockerfile):
-        assert "@agentclientprotocol/codex-acp@1.1.7" in dockerfile
+        assert "coding-agent-acp/package-lock.json" in dockerfile
+        assert "npm ci --omit=dev --ignore-scripts" in dockerfile
         assert "/opt/coding-agent-acp" in dockerfile

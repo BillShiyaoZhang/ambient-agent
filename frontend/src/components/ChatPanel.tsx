@@ -1,11 +1,21 @@
 import React, { useState, useRef, useEffect } from "react";
 import { getTranslation } from "../services/i18n";
+import { externalSkillMessageLabel } from "./chatMessageProvenance";
 
 export interface Message {
   id?: number;
   sender: "user" | "agent";
   content: string;
   timestamp?: string;
+  context_policy?: string;
+  provenance?: {
+    kind?: string;
+    skills?: Array<{
+      catalog_id?: string;
+      name?: string;
+      principal_id?: string;
+    }>;
+  } | null;
 }
 
 interface ChatPanelProps {
@@ -87,27 +97,35 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               : "Start talking to your Ambient Agent. The agent can spawn custom widgets on your canvas workspace."}
           </div>
         ) : (
-          messages.map((msg, index) => (
-            <div
-              key={`${msg.id ?? "local"}:${msg.sender}:${msg.timestamp ?? ""}:${index}`}
-              className={`flex flex-col ${
-                msg.sender === "user" ? "items-end" : "items-start"
-              }`}
-            >
+          messages.map((msg, index) => {
+            const externalSkillLabel = externalSkillMessageLabel(msg, isZh);
+            return (
               <div
-                className={`max-w-[85%] rounded-lg px-3 py-1.5 text-xs leading-relaxed ${
-                  msg.sender === "user"
-                    ? "bg-[#0f141c] text-white border border-cyan-500/20 shadow-sm"
-                    : "bg-white/[0.02] text-white/90 border border-white/[0.06]"
+                key={`${msg.id ?? "local"}:${msg.sender}:${msg.timestamp ?? ""}:${index}`}
+                className={`flex flex-col ${
+                  msg.sender === "user" ? "items-end" : "items-start"
                 }`}
               >
-                {msg.content}
+                <div
+                  className={`max-w-[85%] rounded-lg px-3 py-1.5 text-xs leading-relaxed ${
+                    msg.sender === "user"
+                      ? "bg-[#0f141c] text-white border border-cyan-500/20 shadow-sm"
+                      : externalSkillLabel
+                        ? "bg-amber-500/[0.04] text-white/90 border border-amber-400/20"
+                        : "bg-white/[0.02] text-white/90 border border-white/[0.06]"
+                  }`}
+                >
+                  {msg.content}
+                </div>
+                <span className={`text-[9px] mt-0.5 px-0.5 ${
+                  externalSkillLabel ? "text-amber-300/70" : "text-white/20"
+                }`}>
+                  {externalSkillLabel
+                    ?? (msg.sender === "user" ? (isZh ? "您" : "You") : (isZh ? "智能助手" : "Agent"))}
+                </span>
               </div>
-              <span className="text-[9px] text-white/20 mt-0.5 px-0.5">
-                {msg.sender === "user" ? (isZh ? "您" : "You") : (isZh ? "智能助手" : "Agent")}
-              </span>
-            </div>
-          ))
+            );
+          })
         )}
         <div ref={messagesEndRef} />
       </div>

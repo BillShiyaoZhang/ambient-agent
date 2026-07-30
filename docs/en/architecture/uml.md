@@ -217,6 +217,68 @@ has no workspace mount and uses `network_mode: none`; Chromium starts on
 demand, closes 60 seconds after the last session, and allows at most four
 Contexts by default.
 
+### 5.2 Skill Catalog discovery and authorization boundary
+
+```mermaid
+classDiagram
+    class SkillCatalogProvider {
+        <<protocol>>
+        +source_id: str
+        +kind: str
+        +required: bool
+        +list_entries() SkillMarketEntry[]
+    }
+    class SkillCatalog {
+        +list_snapshot(source_enabled) SkillCatalogSnapshot
+        +list_entries(source_enabled) SkillMarketEntry[]
+        +get(market_id, source_enabled) SkillMarketEntry
+    }
+    class SkillMarket {
+        +list_entries() SkillMarketEntry[]
+    }
+    class GitHubSkillCatalogProvider {
+        +list_entries() SkillMarketEntry[]
+        -_read_or_fetch(url, expected_hash) bytes
+        -_read_verified_cache(path, expected_hash) bytes
+    }
+    class SkillManager {
+        +list_market()
+        +install(market_id)
+        +set_source_enabled(source_id, enabled, expected_revision)
+        +set_authorization(catalog_id, policy, digest)
+    }
+    class SkillStore {
+        +install(record, skill_content, market_content)
+        +list_source_preferences()
+        +set_source_enabled(source_id, enabled, expected_revision)
+        +set_authorization(...)
+    }
+
+    SkillCatalogProvider <|.. SkillMarket
+    SkillCatalogProvider <|.. GitHubSkillCatalogProvider
+    SkillCatalog o-- SkillCatalogProvider
+    SkillManager --> SkillCatalog
+    SkillManager --> SkillStore
+```
+
+A Provider owns discovery, immutable source pins, download, and
+normalization only. The Catalog owns cross-source uniqueness, deterministic
+ordering, and optional-source failure isolation. Manager and Store remain the
+only installation and authorization control plane. A GitHub commit/hash,
+registry badge, or upstream scan never creates Ambient trust. A remote
+standalone Skill installs as `quarantined + disabled`, exactly like a local
+external Skill, and reuses digest/revision-bound `agent.context.inject`.
+`scripts/`, `references/`, `assets/`, and dependencies do not enter this
+Runtime. A future executable extension must become a Capability, Plugin, or
+Widget and pass its own sandbox, grant, approval, and audit path.
+
+A source toggle is a workspace control-plane preference in `SkillStore`,
+defaults to enabled, and shares the Skill-registry CAS revision. When disabled,
+`SkillCatalog` does not invoke that Provider but keeps it in source status so
+the UI can re-enable it. Installed snapshots and approvals do not change. The
+toggle is neither Provider trust nor a Skill grant and never enters the
+ontology/KG.
+
 ## 6. Event and recovery boundaries
 
 Run event payloads are redacted and bounded before insertion, while the envelope records duration, model usage, and `redacted` metadata; terminal events are retained for 30 days by default. A Graph effect ledger closes the checkpoint window against duplicate writes, and an App promotion marker distinguishes published artifacts from staging awaiting publication. Only saga steps with complete compensation data are rolled back automatically.
@@ -227,6 +289,8 @@ Run event payloads are redacted and bounded before insertion, while the envelope
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +list_nodes(node_type)
+        +list_edges()
         +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
@@ -250,7 +314,7 @@ classDiagram
     Neo4jGraphDatabase --> OntologyEntity
 ```
 
-`create_graph_database()` is a runtime factory called only by the composition root: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. The same created adapter is injected into Workflows, Agent routing, and tools; requests and reducer steps must not create a second Driver. Both adapters enforce the same `ambient-context` ontology contract and are explicitly `close()`d by the composition root during shutdown; unknown entities, abstract entities, and unknown properties cannot be written as records.
+`create_graph_database()` is a runtime factory called only by the composition root: deployments select Neo4j, while the SQLite `GraphDatabase` remains a test and migration compatibility adapter. The same created adapter is injected into Workflows, Agent routing, and tools; requests and reducer steps must not create a second Driver. Both adapters enforce the same `ambient-context` ontology contract and are explicitly `close()`d by the composition root during shutdown; unknown entities, abstract entities, and unknown properties cannot be written as records. A bounded trusted-Host graph snapshot is assembled only through `list_schemas()`, `list_nodes()`, and one `list_edges()` call; it cannot depend on a private SQLite connection or issue an N+1 relationship query per node.
 
 ## 8. Coding Agent Runtime and model ownership
 
@@ -271,6 +335,6 @@ flowchart LR
 
 ACP is the only code-generation orchestration boundary. A built-in adapter declares only a trusted launch descriptor: ACP server command, underlying CLI, environment, model configuration, and version source. It cannot implement another prompt loop, permission model, or repair behavior. OpenCode starts native `opencode acp`. Codex uses the image-pinned `@agentclientprotocol/codex-acp`, points it at the Ambient-managed Codex CLI through `CODEX_PATH`, and that CLI starts the official app-server. A future non-native Agent must prefer an auditable, pinned, actively maintained bridge from the ACP Registry; the bridge only maps protocols while Ambient's ACP client owns permission and lifecycle behavior.
 
-Each CLI is downloaded to a dedicated persistent volume only after the user requests installation. Installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
+The system image supplies the OpenCode CLI. Codex is downloaded to a dedicated persistent volume only after the user requests installation. Codex installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
 
 Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.

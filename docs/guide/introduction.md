@@ -12,13 +12,13 @@ Ambient Agent 是一个开源、自托管的个人 AI 助理。它把对话、�
 - **应用工作区**：支持浮动、最大化、贴靠、缩放、切换和预设布局；Canvas V3 配置由后端持久化。
 - **动态 Widget**：Widget 使用 Manifest V2 与导出 React 组件的 `controller.js`；创建或修改先批准 schema + capability proposal，再在 staging 中生成、校验并原子发布。
 - **统一图数据**：Widget 和 Agent 通过经过本体校验的 Graph API，在规范 Neo4j 知识图谱中读写用户上下文事实。
-- **模型与工具集成**：Provider、模型默认值和会话模型在界面中配置；Agent 可经 Tool Gateway、MCP 或 OpenCode 调用外部能力。
+- **模型与工具集成**：Provider、模型默认值和会话模型在界面中配置；Agent 经 Tool Gateway 或 MCP 调用外部能力，Widget 生成可选择 OpenCode 或 Codex。
 - **审计与确认**：LLM 请求写入工作区审计日志；有副作用的流程由后端策略、interaction 和持久 effect 记录约束。
 - **最小能力授权**：Widget 只获得在 schema 对齐时批准的 Graph、Network、File 或 installed-capability grants，后端对每次访问重新授权。
 
 ## 需要理解的边界
 
-- `SandboxWidget` 是组件名称，不是运行不受信任 JavaScript 的强安全沙箱。Widget controller 仍在页面 JavaScript realm 中执行，只应加载可信工作区代码。
+- Widget Controller 默认只在独立 `widget-frame` 服务提供的 `sandbox="allow-scripts"` opaque-origin iframe 中执行；可信 React Host 与 Backend 都不求值 Controller 源码。浏览器 sandbox 不是 VM，因此 Controller 仍按不可信代码处理，所有 Graph、Network、File 与 installed-capability 访问仍须逐次通过 Backend 授权。
 - WebSocket 用于聊天投影、图订阅和 Run 事件更新；当前代码没有用户身份、设备配对或冲突合并协议，因此文档不把它描述为完整的多用户或多设备协同系统。
 - 本地模型是否“离线”取决于所配置的 Provider 和工具。使用云模型、MCP 或 Widget 网络请求时仍会产生外部通信。
 

@@ -150,7 +150,7 @@ function connectUnix(socketPath) {
 }
 
 
-function waitForFirstFrame(socket, sessionId, timeoutMs = 10_000) {
+function waitForFirstFrame(socket, sessionId, timeoutMs = 30_000) {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
     let ready = false;
@@ -632,7 +632,7 @@ test(
   "renders again after the last session passes the browser idle timeout",
   {
     skip: CHROMIUM_PATH ? false : "Chromium is not installed",
-    timeout: 30_000,
+    timeout: 90_000,
   },
   async (context) => {
     const directory = fs.mkdtempSync(

@@ -6,6 +6,7 @@ import {
   CircleStop,
   Clock3,
   LoaderCircle,
+  Network,
   RotateCcw,
   Server,
   X,
@@ -17,6 +18,8 @@ import {
   type RunEvent,
   type RuntimeSnapshot,
 } from "../services/runs";
+import { workflowToGraph } from "../lib/graphScenes";
+import { DeferredGraphExplorer } from "./graph/DeferredGraph";
 import { SystemDrawer, SystemIconButton } from "./system/SystemUI";
 import "./TaskDrawer.css";
 
@@ -29,11 +32,20 @@ interface TaskDrawerProps {
 }
 
 type Tab = "active" | "attention" | "history" | "runtimes";
+type DetailView = "overview" | "graph";
 const ACTIVE = new Set(["queued", "running", "cancel_requested"]);
 const ATTENTION = new Set(["waiting_user", "needs_attention"]);
 const EVENT_REFRESH_DEBOUNCE_MS = 100;
 const EVENT_REFRESH_MAX_WAIT_MS = 500;
 const OPEN_RUN_STATUSES = [...ACTIVE, ...ATTENTION].join(",");
+
+function isDurableWorkflowRun(run: AmbientRun | null): boolean {
+  if (run?.adapter_type === "internal_agent") return true;
+  return run?.adapter_type === "internal"
+    && run.workflow_version === 1
+    && run.status === "needs_attention"
+    && Boolean(run.events?.some((event) => event.type === "migration_attention_required"));
+}
 
 function formatDuration(run: AmbientRunSummary): string {
   const start = new Date(run.started_at || run.created_at).getTime();
@@ -44,6 +56,34 @@ function formatDuration(run: AmbientRunSummary): string {
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+const RUN_ERROR_TITLES: Record<string, { zh: string; en: string }> = {
+  budget_exhausted: {
+    zh: "任务已达到运行预算上限",
+    en: "The task reached its execution budget",
+  },
+  verification_failed: { zh: "任务验证未通过", en: "Task verification failed" },
+  widget_verification_failed: { zh: "App 验证未通过", en: "App verification failed" },
+  llm_configuration_required: { zh: "尚未配置可用模型", en: "No model is configured" },
+  llm_timeout: { zh: "模型响应超时", en: "The model request timed out" },
+  llm_rate_limited: { zh: "模型请求过于频繁", en: "The model rate limit was reached" },
+  coding_agent_not_installed: { zh: "尚未安装编码 Agent", en: "The coding agent is not installed" },
+  runtime_rpc_unavailable: { zh: "后台运行时暂时不可用", en: "The background runtime is unavailable" },
+  widget_runtime_unavailable: { zh: "App 运行时暂时不可用", en: "The app runtime is unavailable" },
+};
+
+function runErrorPresentation(
+  error: NonNullable<AmbientRun["error"]>,
+  language: "zh" | "en",
+) {
+  const title = error.code ? RUN_ERROR_TITLES[error.code]?.[language] : undefined;
+  return {
+    title: title ?? (language === "zh" ? "任务执行失败" : "Task execution failed"),
+    message: error.message,
+    code: error.code ?? error.type,
+    retryable: error.retryable,
+  };
+}
+
 export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSource }: TaskDrawerProps) {
   const isZh = language === "zh";
   const [runs, setRuns] = useState<AmbientRunSummary[]>([]);
@@ -51,6 +91,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   const [tab, setTab] = useState<Tab>("active");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<AmbientRun | null>(null);
+  const [detailView, setDetailView] = useState<DetailView>("overview");
   const [error, setError] = useState("");
   const runsRefreshGeneration = useRef(0);
 
@@ -183,6 +224,10 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
     for (const run of visible) groups.set(run.owner_id, [...(groups.get(run.owner_id) || []), run]);
     return [...groups.entries()];
   }, [visible]);
+  const hasDurableWorkflow = isDurableWorkflowRun(selected);
+  const selectedError = selected?.error
+    ? runErrorPresentation(selected.error, language)
+    : null;
 
   const perform = async (operation: () => Promise<unknown>) => {
     try {
@@ -198,12 +243,19 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   };
 
   const openDetail = async (run: AmbientRunSummary) => {
+    setDetailView("overview");
     setSelectedId(run.id);
     setSelected(await runService.get(run.id));
   };
 
   return (
-    <SystemDrawer open={open} onClose={onClose} label={isZh ? "任务中心" : "Task Center"} className="task-drawer">
+    <SystemDrawer
+      open={open}
+      onClose={onClose}
+      label={isZh ? "任务中心" : "Task Center"}
+      closeLabel={isZh ? "关闭任务中心" : "Close Task Center"}
+      className="task-drawer"
+    >
         <header>
           <div><h2>{isZh ? "任务中心" : "Task Center"}</h2><p>{isZh ? "后台工作与运行环境" : "Background work and runtimes"}</p></div>
           <SystemIconButton onClick={onClose} label={isZh ? "关闭" : "Close"}><X size={18} /></SystemIconButton>
@@ -248,29 +300,98 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
         </div>
         {selected && (
           <section className="task-run-detail">
-            <header><button onClick={() => { setSelected(null); setSelectedId(null); }}>←</button><div><h3>{selected.action_title}</h3><small>{selected.status} · {formatDuration(selected)}</small></div></header>
-            <p>{selected.summary || (isZh ? "暂无摘要" : "No summary")}</p>
-            {selected.source_id && <button className="task-source-link" onClick={() => onOpenSource?.(selected)}>{isZh ? "打开来源" : "Open source"} · {selected.source_type}:{selected.source_id}</button>}
-            {(selected.interactions || []).filter((item) => item.status === "pending").map((interaction) => (
-              <div className="task-interaction" key={interaction.id}>
-                <strong>{interaction.prompt}</strong>
-                <pre>{JSON.stringify(interaction.payload, null, 2)}</pre>
-                <div><button onClick={() => perform(() => runService.resolve(interaction.id, { approved: false }))}>{isZh ? "拒绝" : "Deny"}</button><button className="is-primary" onClick={() => perform(() => runService.resolve(interaction.id, { approved: true }))}>{isZh ? "允许" : "Allow"}</button></div>
+            <header>
+              <SystemIconButton
+                label={isZh ? "返回任务列表" : "Back to task list"}
+                onClick={() => { setSelected(null); setSelectedId(null); setDetailView("overview"); }}
+              >
+                ←
+              </SystemIconButton>
+              <div><h3>{selected.action_title}</h3><small>{selected.status} · {formatDuration(selected)}</small></div>
+              <SystemIconButton
+                className="task-detail-close"
+                label={isZh ? "关闭任务中心" : "Close Task Center"}
+                onClick={onClose}
+              >
+                <X size={17} />
+              </SystemIconButton>
+            </header>
+            <nav className="task-detail-tabs" aria-label={isZh ? "运行详情视图" : "Run detail views"}>
+              <button
+                aria-pressed={detailView === "overview"}
+                className={detailView === "overview" ? "is-active" : ""}
+                onClick={() => setDetailView("overview")}
+                type="button"
+              >
+                {isZh ? "概览" : "Overview"}
+              </button>
+              {hasDurableWorkflow && (
+                <button
+                  aria-pressed={detailView === "graph"}
+                  className={detailView === "graph" ? "is-active" : ""}
+                  onClick={() => setDetailView("graph")}
+                  type="button"
+                >
+                  <Network size={13} />
+                  {isZh ? "执行图" : "Execution graph"}
+                </button>
+              )}
+            </nav>
+            {detailView === "graph" && hasDurableWorkflow ? (
+              <div className="task-run-graph">
+                <DeferredGraphExplorer
+                  dataset={workflowToGraph(selected, language)}
+                  language={language}
+                  loadingLabel={isZh ? "正在加载执行图" : "Execution graph loading"}
+                  loadingMessage={isZh ? "正在加载交互式执行图…" : "Loading interactive execution graph…"}
+                />
               </div>
-            ))}
-            {selected.result !== undefined && selected.result !== null && <><h4>{isZh ? "结果" : "Result"}</h4><pre>{JSON.stringify(selected.result, null, 2)}</pre></>}
-            {(selected.artifacts || []).length > 0 && <><h4>{isZh ? "产物" : "Artifacts"}</h4><pre>{JSON.stringify(selected.artifacts, null, 2)}</pre></>}
-            {selected.error && <><h4>{isZh ? "错误" : "Error"}</h4><pre>{JSON.stringify(selected.error, null, 2)}</pre></>}
-            <h4>{isZh ? "输入" : "Input"}</h4><pre>{JSON.stringify(selected.input, null, 2)}</pre>
-            <footer>
-              {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button onClick={() => perform(() => runService.cancel(selected.id))}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
-              {["failed", "cancelled"].includes(selected.status) && !["unknown", "committed"].includes(selected.error?.effect_state || "") ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button> : null}
-              {selected.status === "needs_attention" ? <>
-                <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"))}>{isZh ? "确认未执行" : "Not committed"}</button>
-                <button onClick={() => perform(() => runService.reconcile(selected.id, "compensated"))}>{isZh ? "确认已补偿" : "Compensated"}</button>
-                <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_committed"))}>{isZh ? "确认已执行" : "Committed"}</button>
-              </> : null}
-            </footer>
+            ) : (
+              <>
+                <p>{selected.summary || (isZh ? "暂无摘要" : "No summary")}</p>
+                {selected.source_id && <button className="task-source-link" onClick={() => onOpenSource?.(selected)}>{isZh ? "打开来源" : "Open source"} · {selected.source_type}:{selected.source_id}</button>}
+                {(selected.interactions || []).filter((item) => item.status === "pending").map((interaction) => (
+                  <div className="task-interaction" key={interaction.id}>
+                    <strong>{interaction.prompt}</strong>
+                    <pre>{JSON.stringify(interaction.payload, null, 2)}</pre>
+                    <div><button onClick={() => perform(() => runService.resolve(interaction.id, { approved: false }))}>{isZh ? "拒绝" : "Deny"}</button><button className="is-primary" onClick={() => perform(() => runService.resolve(interaction.id, { approved: true }))}>{isZh ? "允许" : "Allow"}</button></div>
+                  </div>
+                ))}
+                {selected.result !== undefined && selected.result !== null && <><h4>{isZh ? "结果" : "Result"}</h4><pre>{JSON.stringify(selected.result, null, 2)}</pre></>}
+                {(selected.artifacts || []).length > 0 && <><h4>{isZh ? "产物" : "Artifacts"}</h4><pre>{JSON.stringify(selected.artifacts, null, 2)}</pre></>}
+                {selectedError && (
+                  <>
+                    <h4>{isZh ? "错误" : "Error"}</h4>
+                    <div className="task-run-error" role="alert">
+                      <strong>{selectedError.title}</strong>
+                      {selectedError.message && <p>{selectedError.message}</p>}
+                      {selectedError.code && <code>{selectedError.code}</code>}
+                      {selectedError.retryable === false && (
+                        <small>
+                          {isZh
+                            ? "此失败不可直接重试，请调整配置或输入后重新发起任务。"
+                            : "This failure cannot be retried directly. Adjust the configuration or input, then start a new task."}
+                        </small>
+                      )}
+                    </div>
+                  </>
+                )}
+                <h4>{isZh ? "输入" : "Input"}</h4><pre>{JSON.stringify(selected.input, null, 2)}</pre>
+                <footer>
+                  {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button onClick={() => perform(() => runService.cancel(selected.id))}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
+                  {["failed", "cancelled"].includes(selected.status)
+                    && selected.error?.retryable !== false
+                    && !["unknown", "committed"].includes(selected.error?.effect_state || "")
+                    ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button>
+                    : null}
+                  {selected.status === "needs_attention" ? <>
+                    <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"))}>{isZh ? "确认未执行" : "Not committed"}</button>
+                    <button onClick={() => perform(() => runService.reconcile(selected.id, "compensated"))}>{isZh ? "确认已补偿" : "Compensated"}</button>
+                    <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_committed"))}>{isZh ? "确认已执行" : "Committed"}</button>
+                  </> : null}
+                </footer>
+              </>
+            )}
           </section>
         )}
     </SystemDrawer>

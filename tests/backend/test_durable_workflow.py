@@ -13,6 +13,7 @@ import pytest
 
 import backend.agent.durable_workflow as durable_workflow_module
 from backend.agent.durable_workflow import DurableAgentWorkflow
+from backend.agent.errors import WorkflowError
 from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubIntentKind
 from backend.app_manifest import AppManifest
@@ -22,6 +23,12 @@ from backend.models import ChatMessage, ChatSession
 from backend.coding_agent_acp import CodingAgentDraftError, OpenCodeStagedResult
 from backend.run_service import AgentRunState, Continue, Failed, RunCoordinator, RunStore, Succeeded, Wait
 from backend.schema_diff import UnknownProperty, VerificationDiff
+from backend.skill_authorization import compute_skill_grant_digest, skill_principal_id
+from backend.skill_sandbox import build_skill_prompt_channels
+from backend.skill_store import (
+    SkillAuthorizationRequiredError,
+    SkillStoreCorruptionError,
+)
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -179,6 +186,7 @@ def _workflow(
     emitted: list[dict[str, Any]] | None = None,
     live_emitted: list[dict[str, Any]] | None = None,
     app_diagnostic_loader: Any = None,
+    skill_manager: Any = None,
 ) -> DurableAgentWorkflow:
     async def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("OpenCode must not be called in this workflow tape")
@@ -201,6 +209,7 @@ def _workflow(
         event_sink=event_sink,
         live_event_sink=live_event_sink,
         app_diagnostic_loader=app_diagnostic_loader,
+        skill_manager=skill_manager,
     )
 
 
@@ -348,7 +357,7 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     store = RunStore(str(tmp_path))
     graph_db = GraphDatabase(str(tmp_path))
     workflow = _workflow(tmp_path, store, graph_db)
-    state = _state()
+    state = _state(data={"skill_selection_state": "pending"})
     run = _create_run(store, state, content="say hello")
     converse_calls = 0
 
@@ -400,6 +409,406 @@ async def test_route_converse_tape_recovers_without_duplicate_model_call_or_fina
     assert reply_event.payload["message"]["content"] == "hello"
     assert "schema_version" not in reply_event.payload
     assert "event_id" not in reply_event.payload
+
+
+@pytest.mark.asyncio
+async def test_route_pins_selected_skill_body_and_digest_for_converse_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSkillManager:
+        def __init__(self) -> None:
+            self.select_calls = 0
+            self.authorization_current = True
+            self.authorization_error: Exception | None = None
+            catalog_id = "agent-skill:test:daily-planning"
+            digest = f"sha256:{'a' * 64}"
+            self.selection = [
+                {
+                    "catalog_id": catalog_id,
+                    "name": "daily-planning",
+                    "title": "Daily Planning",
+                    "version": "1.0.0",
+                    "digest": digest,
+                    "instructions": "Use the original installed procedure.",
+                    "source": "local-market://test/daily-planning",
+                    "trust": "local",
+                    "authorization": {
+                        "state": "authorized",
+                        "activation_policy": "explicit_only",
+                        "digest": digest,
+                        "grant_digest": compute_skill_grant_digest(
+                            catalog_id,
+                            digest,
+                            "explicit_only",
+                        ),
+                        "principal_id": skill_principal_id(catalog_id, digest),
+                    },
+                }
+            ]
+
+        def select_for_context(self, content: str) -> list[dict[str, Any]]:
+            assert content == "plan my day"
+            self.select_calls += 1
+            return json.loads(json.dumps(self.selection))
+
+        def render_context(self, snapshots: list[dict[str, Any]]) -> str:
+            return f"[INSTALLED SKILL CONTEXT]\n{snapshots[0]['instructions']}"
+
+        def require_current_external_authorizations(
+            self,
+            snapshots: list[dict[str, Any]],
+        ) -> None:
+            assert snapshots[0]["digest"] == f"sha256:{'a' * 64}"
+            if self.authorization_error is not None:
+                raise self.authorization_error
+            if not self.authorization_current:
+                raise SkillAuthorizationRequiredError(snapshots[0]["catalog_id"])
+
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    skill_manager = FakeSkillManager()
+    workflow = _workflow(
+        tmp_path,
+        store,
+        graph_db,
+        skill_manager=skill_manager,
+    )
+    state = _state(data={"skill_selection_state": "pending"})
+    run = _create_run(store, state, content="plan my day")
+
+    async def forbidden_route(
+        _self: AgentOrchestrator,
+        _content: str,
+        _session_id: str,
+        _language: str,
+    ) -> IntentPlan:
+        raise AssertionError("External Skill activation must bypass the LLM Router")
+
+    async def scripted_converse(
+        self: AgentOrchestrator,
+        plan: IntentPlan,
+        session_id: str,
+        content: str,
+        language: str,
+        on_update: Any,
+    ) -> tuple[ChatMessage, None]:
+        assert self.skill_prompt_channels.trusted_system_guidance is None
+        assert self.context_summary is None
+        assert self.artifact_ids == []
+        context = self.skill_prompt_channels.untrusted_user_guidance or ""
+        assert "Use the original installed procedure." in context
+        assert "Use a newer procedure." not in context
+        assert "untrusted_skill_data" in context
+        message = ChatMessage(session_id=session_id, role="agent", sender="agent", content="planned")
+        self.db.add(message)
+        self.db.commit()
+        self.db.refresh(message)
+        return message, None
+
+    monkeypatch.setattr(AgentOrchestrator, "_classify_intent", forbidden_route)
+    monkeypatch.setattr(AgentOrchestrator, "_handle_converse", scripted_converse)
+
+    routed = await workflow(run, state)
+    assert isinstance(routed, Continue)
+    assert routed.next_phase == "converse"
+    assert state.intent is not None
+    assert state.intent["kind"] == "converse"
+    assert "semantic sandbox" in state.intent["rationale"]
+    assert state.budget.model_turns == 0
+    assert state.data["active_skills"][0]["instructions"] == "Use the original installed procedure."
+    assert DurableAgentWorkflow._run_context(run, state).artifact_hashes == {
+        "agent-skill:test:daily-planning": "a" * 64
+    }
+
+    skill_manager.selection[0]["instructions"] = "Use a newer procedure."
+    state.phase = routed.next_phase
+    skill_manager.authorization_current = False
+    with pytest.raises(
+        WorkflowError,
+        match="authorization changed before context injection",
+    ):
+        await workflow._phase_converse(run, state)
+
+    skill_manager.authorization_current = True
+    skill_manager.authorization_error = SkillStoreCorruptionError("corrupt registry")
+    with pytest.raises(WorkflowError) as exc_info:
+        await workflow._phase_converse(run, state)
+    assert exc_info.value.code == "skill_registry_unavailable"
+
+    skill_manager.authorization_error = None
+    completed = await workflow(run, state)
+
+    assert isinstance(completed, Succeeded)
+    assert completed.result == {"message": "planned", "app_id": None}
+    assert skill_manager.select_calls == 1
+
+
+def test_external_skill_snapshot_is_digest_bound_and_rendered_as_untrusted_data() -> None:
+    catalog_id = "agent-skill:third-party:research"
+    digest = f"sha256:{'a' * 64}"
+    grant_digest = compute_skill_grant_digest(catalog_id, digest, "explicit_only")
+    snapshot = {
+        "catalog_id": catalog_id,
+        "name": "research",
+        "title": "Research",
+        "version": "2.0.0",
+        "digest": digest,
+        "instructions": "EXTERNAL_BODY",
+        "source": "local-market://third-party/research",
+        "trust": "local",
+        "authorization": {
+            "state": "authorized",
+            "activation_policy": "explicit_only",
+            "digest": digest,
+            "grant_digest": grant_digest,
+            "principal_id": skill_principal_id(catalog_id, digest),
+        },
+    }
+
+    channels = build_skill_prompt_channels(
+        [snapshot],
+        render_context=lambda values: "\n".join(str(value["instructions"]) for value in values),
+    )
+
+    assert channels.trusted_system_guidance is None
+    assert channels.untrusted_user_guidance is not None
+    assert "EXTERNAL_BODY" in channels.untrusted_user_guidance
+    assert "untrusted_skill_data" in channels.untrusted_user_guidance
+    assert (f'"principal_id":"agent-skill:third-party:research@sha256:{"a" * 64}"') in channels.untrusted_user_guidance
+    assert f'"grant_digest":"{grant_digest}"' in channels.untrusted_user_guidance
+
+    with pytest.raises(ValueError, match="empty context"):
+        build_skill_prompt_channels(
+            [snapshot],
+            render_context=lambda _values: "",
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"trust": "local", "authorization": None},
+        {
+            "trust": "local",
+            "authorization": {
+                "state": "authorized",
+                "activation_policy": "explicit_only",
+                "digest": f"sha256:{'c' * 64}",
+                "grant_digest": f"sha256:{'b' * 64}",
+                "principal_id": (f"agent-skill:third-party:research@sha256:{'c' * 64}"),
+            },
+        },
+        {
+            "trust": "bundled",
+            "authorization": {
+                "state": "authorized",
+                "activation_policy": "implicit",
+                "digest": f"sha256:{'a' * 64}",
+                "grant_digest": f"sha256:{'b' * 64}",
+                "principal_id": (f"agent-skill:third-party:research@sha256:{'a' * 64}"),
+            },
+        },
+        {
+            "catalog_id": "agent-skill:ambient-agent:research",
+            "trust": "bundled",
+            "source": "bundled://ambient-agent/research",
+            "authorization": {
+                "state": "trusted",
+                "activation_policy": "explicit_only",
+                "digest": f"sha256:{'a' * 64}",
+                "grant_digest": compute_skill_grant_digest(
+                    "agent-skill:ambient-agent:research",
+                    f"sha256:{'a' * 64}",
+                    "explicit_only",
+                ),
+                "principal_id": skill_principal_id(
+                    "agent-skill:ambient-agent:research",
+                    f"sha256:{'a' * 64}",
+                ),
+            },
+        },
+        {"trust": "local", "source": "bundled://ambient-agent/research"},
+    ],
+)
+def test_skill_prompt_sandbox_rejects_missing_stale_or_contradictory_authorization(
+    overrides: dict[str, Any],
+) -> None:
+    catalog_id = "agent-skill:third-party:research"
+    digest = f"sha256:{'a' * 64}"
+    snapshot: dict[str, Any] = {
+        "catalog_id": catalog_id,
+        "name": "research",
+        "title": "Research",
+        "version": "2.0.0",
+        "digest": digest,
+        "instructions": "EXTERNAL_BODY",
+        "source": "local-market://third-party/research",
+        "trust": "local",
+        "authorization": {
+            "state": "authorized",
+            "activation_policy": "explicit_only",
+            "digest": digest,
+            "grant_digest": compute_skill_grant_digest(
+                catalog_id,
+                digest,
+                "explicit_only",
+            ),
+            "principal_id": skill_principal_id(catalog_id, digest),
+        },
+    }
+    snapshot.update(overrides)
+
+    with pytest.raises(ValueError):
+        build_skill_prompt_channels(
+            [snapshot],
+            render_context=lambda _values: "must not render",
+        )
+
+
+def test_legacy_bundled_skill_snapshot_remains_compatible() -> None:
+    snapshot = {
+        "catalog_id": "agent-skill:ambient-agent:daily-planning",
+        "name": "daily-planning",
+        "title": "Daily Planning",
+        "version": "1.0.0",
+        "digest": f"sha256:{'a' * 64}",
+        "instructions": "LEGACY_BUNDLED_BODY",
+        "source": "bundled://ambient-agent/daily-planning",
+    }
+
+    channels = build_skill_prompt_channels(
+        [snapshot],
+        render_context=lambda values: "\n".join(str(value["instructions"]) for value in values),
+    )
+
+    assert channels.trusted_system_guidance == "LEGACY_BUNDLED_BODY"
+    assert channels.untrusted_user_guidance is None
+
+
+def test_current_bundled_skill_snapshot_stays_in_trusted_system_channel() -> None:
+    catalog_id = "agent-skill:ambient-agent:daily-planning"
+    digest = f"sha256:{'a' * 64}"
+    snapshot = {
+        "catalog_id": catalog_id,
+        "name": "daily-planning",
+        "title": "Daily Planning",
+        "version": "1.0.0",
+        "digest": digest,
+        "instructions": "CURRENT_BUNDLED_BODY",
+        "source": "bundled://ambient-agent/daily-planning",
+        "trust": "bundled",
+        "authorization": {
+            "state": "trusted",
+            "activation_policy": "implicit",
+            "digest": digest,
+            "grant_digest": compute_skill_grant_digest(
+                catalog_id,
+                digest,
+                "implicit",
+            ),
+            "principal_id": skill_principal_id(catalog_id, digest),
+        },
+    }
+
+    channels = build_skill_prompt_channels(
+        [snapshot],
+        render_context=lambda values: "\n".join(str(value["instructions"]) for value in values),
+    )
+
+    assert channels.trusted_system_guidance == "CURRENT_BUNDLED_BODY"
+    assert channels.untrusted_user_guidance is None
+
+
+@pytest.mark.asyncio
+async def test_pre_skill_route_checkpoint_does_not_gain_later_installed_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedSkillManager:
+        def select_for_context(self, _content: str) -> list[dict[str, Any]]:
+            raise AssertionError("legacy checkpoint must not resolve current Skill state")
+
+        def render_context(self, _snapshots: list[dict[str, Any]]) -> str:
+            raise AssertionError("legacy checkpoint has no Skill snapshot")
+
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(
+        tmp_path,
+        store,
+        graph_db,
+        skill_manager=UnexpectedSkillManager(),
+    )
+    # Absence of skill_selection_state identifies a checkpoint created before
+    # this feature, even when it is still waiting in the route phase.
+    state = _state()
+    run = _create_run(store, state, content="plan my day")
+
+    async def scripted_route(
+        _self: AgentOrchestrator,
+        content: str,
+        session_id: str,
+        language: str,
+    ) -> IntentPlan:
+        return IntentPlan(kind=IntentKind.CONVERSE, confidence=1.0, rationale="legacy")
+
+    monkeypatch.setattr(AgentOrchestrator, "_classify_intent", scripted_route)
+
+    routed = await workflow(run, state)
+
+    assert isinstance(routed, Continue)
+    assert state.data["skill_selection_state"] == "pinned_none"
+    assert state.data["active_skills"] == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"skill_selection_state": "pinned"},
+        {"skill_selection_state": "unknown"},
+        {
+            "skill_selection_state": "pinned_none",
+            "active_skills": [
+                {
+                    "catalog_id": "agent-skill:test:daily-planning",
+                    "name": "daily-planning",
+                    "title": "Daily Planning",
+                    "version": "1.0.0",
+                    "digest": f"sha256:{'a' * 64}",
+                    "instructions": "Unexpected body.",
+                }
+            ],
+        },
+        {"skill_selection_state": "pending", "active_skills": []},
+    ],
+)
+def test_skill_checkpoint_rejects_missing_unknown_or_contradictory_state(
+    tmp_path: Path,
+    data: dict[str, Any],
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    state = _state(data=data)
+
+    with pytest.raises(durable_workflow_module.WorkflowError) as exc_info:
+        workflow._select_active_skills("plan my day", state)
+
+    assert exc_info.value.code == "invalid_skill_snapshot"
+
+
+def test_pinned_none_skill_checkpoint_normalizes_missing_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    state = _state(data={"skill_selection_state": "pinned_none"})
+
+    workflow._select_active_skills("plan my day", state)
+
+    assert state.data["active_skills"] == []
 
 
 @pytest.mark.asyncio
@@ -1474,6 +1883,78 @@ async def test_multi_intent_preflight_rejects_later_invalid_step_before_any_effe
     assert isinstance(outcome, Failed)
     assert graph_db.get_node("must-never-commit") is None
     assert state.data.get("effects_committed") is not True
+
+
+@pytest.mark.asyncio
+async def test_multi_converse_steps_use_their_own_instructions_and_one_final_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    intent = IntentPlan(
+        kind=IntentKind.MULTI_INTENT,
+        rationale="explicit slash command sequence",
+        sub_intents=[
+            SubIntent(kind=SubIntentKind.CONVERSE, instruction="first question"),
+            SubIntent(kind=SubIntentKind.CONVERSE, instruction="second question"),
+        ],
+    )
+    state = _state(
+        phase="multi_preflight",
+        workflow_type="multi_intent",
+        intent=intent,
+        data={
+            "language": "en",
+            "skill_selection_state": "pinned_none",
+            "active_skills": [],
+        },
+    )
+    run = _create_run(
+        store,
+        state,
+        content="/ask first question /ask second question",
+    )
+    seen: list[tuple[str, bool]] = []
+
+    async def scripted_converse(
+        self: AgentOrchestrator,
+        plan: IntentPlan,
+        session_id: str,
+        content: str,
+        language: str,
+        on_update: Any,
+        *,
+        persist: bool = True,
+    ) -> tuple[ChatMessage, None]:
+        del self, plan, on_update
+        seen.append((content, persist))
+        return ChatMessage(
+            session_id=session_id,
+            role="agent",
+            sender="agent",
+            content=f"answer: {content}",
+        ), None
+
+    monkeypatch.setattr(AgentOrchestrator, "_handle_converse", scripted_converse)
+
+    for _ in range(12):
+        outcome = await workflow(run, state)
+        if isinstance(outcome, Continue):
+            state.phase = outcome.next_phase
+            continue
+        assert isinstance(outcome, Succeeded)
+        assert outcome.result["message"] == ("answer: first question\n\nanswer: second question")
+        break
+    else:
+        raise AssertionError("multi-converse workflow did not terminate")
+
+    assert seen == [("first question", False), ("second question", False)]
+    messages = WorkspaceStorage(str(tmp_path)).get_messages("session-1")
+    assert [(message.role, message.content) for message in messages] == [
+        ("agent", "answer: first question\n\nanswer: second question"),
+    ]
 
 
 @pytest.mark.asyncio

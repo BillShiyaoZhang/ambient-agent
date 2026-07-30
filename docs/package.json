@@ -1,6 +1,7 @@
 {
   "name": "ambient-agent-docs",
-  "version": "1.0.0",
+  "private": true,
+  "version": "0.1.0",
   "description": "Ambient Agent Documentation Site",
   "type": "module",
   "scripts": {
@@ -8,6 +9,6 @@
     "verify": "uv run python ../scripts/verify_docs.py"
   },
   "devDependencies": {
-    "docsify-cli": "^4.4.4"
+    "docsify-cli": "5.0.0"
   }
 }

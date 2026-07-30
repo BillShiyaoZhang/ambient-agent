@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.main import app, app_manager, get_db
+from backend.models import ChatSession
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -48,6 +49,8 @@ def test_app_slash_command_uses_durable_router_without_opencode_bypass(test_sess
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
     session_id = f"opencode-routing-{uuid4().hex}"
+    test_session.add(ChatSession(id=session_id, title="OpenCode routing"))
+    test_session.commit()
 
     with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
         active_list = websocket.receive_json()

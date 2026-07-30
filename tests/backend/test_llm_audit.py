@@ -26,7 +26,11 @@ async def test_llm_audit_logging(test_session, monkeypatch):
 
     # Run the generate service
     response = await generate_agent_response(
-        user_message="Hello!", provider="ollama", model="llama3", session=test_session
+        user_message="Hello!",
+        provider="ollama",
+        model="llama3",
+        session=test_session,
+        session_id="audit-session",
     )
 
     assert response == mock_response
@@ -39,6 +43,9 @@ async def test_llm_audit_logging(test_session, monkeypatch):
     assert "Hello!" in logs[0].prompt
     assert logs[0].response == mock_response
     assert logs[0].timestamp is not None
+    assert logs[0].session_id == "audit-session"
+    assert test_session.delete_audit_logs_for_session("audit-session") == 1
+    assert test_session.get_audit_logs() == []
 
 
 @pytest.mark.asyncio

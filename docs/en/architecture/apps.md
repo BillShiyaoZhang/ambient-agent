@@ -1,6 +1,6 @@
 # Widgets and App Center
 
-A “Widget” is a React UI rendered in the workspace. An “App” is a Widget with a persistent Manifest V2 and Controller. A “Capability” is an invokable backend action in App Center that may not have a UI. An App accesses host or external resources only through approved capability grants.
+A “Widget” is a React UI rendered in the workspace. An “App” is a Widget with a persistent Manifest V2 and Controller. A “Capability” is an invokable backend action in App Center that may not have a UI. An “Instruction Skill” is `SKILL.md` guidance injected into an Agent turn on demand. Skills, Capabilities, and Apps can be composed but cannot replace one another. An App accesses host or external resources only through approved capability grants.
 
 ## 1. App artifacts
 
@@ -78,9 +78,15 @@ See [Widget Capability Security](/en/architecture/capability-security.md) for th
 
 ## 4. App Center
 
-`GET /api/app-store` combines `generated_app`, `skill`, and `mcp` items. A headless capability may start a durable UI-generation Run. Its UI requests a `capability.invoke` grant limited to the target `catalog_id + action_id`; it never binds a provider, MCP server, or tool name directly.
+`GET /api/app-store` combines only the `generated_app`, Instruction Skill, and executable-capability items installed in the current workspace and maintains their launcher layout. Installable but not yet installed Skills come from the separate `GET /api/skill-market`; installation, enable, update, and uninstall use the separate Skill API. A Market response is not the source of truth for App Center layout, and uninstalled items are never written into that layout.
+
+A headless Capability can run directly as a structured action or explicitly start a Durable UI-generation Run. Its generated UI requests a `capability.invoke` grant restricted to the target `catalog_id + action_id`; it never binds a provider, MCP server, or tool name directly, and still passes through the existing approval, staging, verification, and atomic-publication path. An Instruction Skill instead uses `launch_mode = "details"`: App Center provides details, enable/disable, and uninstall, while a relevant Agent turn loads its guidance on demand. Being headless does not make it a system-level Tool, and this version offers no Run or UI-generation entry point for a pure Instruction Skill.
 
 Items are `ready`, `needs_ui`, `generating`, or `unavailable`. Layout uses revision-based optimistic concurrency. A conflict returns `409`, after which the client reloads before submitting again.
+
+A generated App icon opens its management menu through right-click or a hold of about 500 ms. Movement beyond the gesture tolerance, pointer release, or cancellation must cancel the hold; a successful hold must not subsequently launch the App. The menu provides details, property configuration, rename, and uninstall actions, while the keyboard context-menu path remains available.
+
+`PATCH /api/apps/{app_id}` updates only user-manageable Manifest presentation properties: `title`, `description`, `app_version`, and `intents`. It is a partial update; unknown fields, empty updates, and values that violate Manifest V2 return `422`, while a missing App returns `404`. Rename changes `title` only. The stable App ID, directory, grants, schema references, and Controller remain unchanged. After a successful update, App Center and any open window refresh to the latest properties.
 
 ## 5. Data and capability boundaries
 
@@ -90,5 +96,8 @@ Items are `ready`, `needs_ui`, `generating`, or `unavailable`. Layout uses revis
 - `file.*` accesses only `app://data/`; it cannot read the Manifest, Controller, sessions, Graph, or credentials.
 - `capability.invoke` calls only exact approved App Center actions. Direct `ambient.mcp` has been removed from the Widget SDK.
 - A grant only allows the App to request an operation. Run interactions, adapter spawn permission, input/output schemas, idempotency, and recovery policy remain in force.
+- Skill installation records live in workspace SQLite, while the validated `SKILL.md` and Market descriptor live in content-addressed snapshots. They are not App data and never enter the ontology or KG. Skill `ontology_refs` reference existing canonical schemas only.
 
 Runtime errors use stable `code`, `capability`, `operation`, `hint`, and safe `details`, and write bounded audit/diagnostic records for later repair.
+
+See [Agent Skills](/en/agent/skills.md) for the complete installation, context, and security contract.

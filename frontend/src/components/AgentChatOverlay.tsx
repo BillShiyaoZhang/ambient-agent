@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { History, LoaderCircle, Maximize2, MessageCircle, Plus, Send, Trash2, X } from "lucide-react";
 import type { Message } from "./ChatPanel";
+import { externalSkillMessageLabel } from "./chatMessageProvenance";
 import type { Session } from "./SessionSidebar";
 import type { LLMProvider, ModelSelection } from "../services/llm";
 import type { AgentModelConfig, CodingAgentDefinition } from "../services/codingAgents";
+import type { SocketConnectionState } from "../services/socketReconnect";
 import {
   interactionsForRun,
   liveStreamsForRun,
@@ -22,7 +24,9 @@ import {
 } from "../lib/chatLayout";
 import { ChatRunCard, type RunInteractionAction } from "./ChatRunCard";
 import { ModelPicker } from "./LLMSettings";
+import { SlashCommandInput } from "./SlashCommandInput";
 import { SystemIconButton, SystemPopover } from "./system/SystemUI";
+import type { SlashCommandCatalog } from "../services/slashCommands";
 import "./Workspace.css";
 
 interface AgentChatOverlayProps {
@@ -36,9 +40,13 @@ interface AgentChatOverlayProps {
   activeSessionId: string | null;
   runningSessions: string[];
   isConnected: boolean;
+  connectionState?: SocketConnectionState;
+  deliveryError?: string | null;
+  sessionError?: string | null;
   language: "zh" | "en";
   onOpenChange: (open: boolean) => void;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string) => boolean | void;
+  onRetryConnection?: () => void;
   onSelectSession: (id: string) => void;
   onCreateSession: () => void;
   onDeleteSession: (id: string) => void;
@@ -51,6 +59,8 @@ interface AgentChatOverlayProps {
   onManageModels?: () => void;
   codingAgent?: CodingAgentDefinition;
   codingAgentModel?: AgentModelConfig;
+  apiBase?: string;
+  slashCommandCatalog?: SlashCommandCatalog;
 }
 
 type ConversationItem =
@@ -64,8 +74,8 @@ function timeValue(value: string | undefined, fallback: number): number {
 
 export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
   open, unreadCount, messages, runCards = [], liveStreams = {}, interactions = {}, sessions, activeSessionId, runningSessions, isConnected, language,
-  onOpenChange, onSendMessage, onSelectSession, onCreateSession, onDeleteSession, onCancelRun, onResolveRunInteraction, onInspectRunInteraction,
-  providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel,
+  connectionState, deliveryError, sessionError, onOpenChange, onSendMessage, onRetryConnection, onSelectSession, onCreateSession, onDeleteSession, onCancelRun, onResolveRunInteraction, onInspectRunInteraction,
+  providers = [], modelSelection = null, onModelChange, onManageModels, codingAgent, codingAgentModel, apiBase, slashCommandCatalog,
 }) => {
   const isZh = language === "zh";
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -195,15 +205,32 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
     applySize({ width, height });
   };
 
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
+  const submitInput = () => {
     if (!input.trim()) return;
-    onSendMessage(input.trim());
+    if (onSendMessage(input.trim()) === false) return;
     setInput("");
     scrollToLatest("smooth");
   };
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    submitInput();
+  };
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const anyRunning = runningSessions.length > 0 || runCards.some((run) => ["queued", "running", "waiting_user", "cancel_requested"].includes(run.status));
+  const effectiveConnectionState = connectionState ?? (isConnected ? "connected" : "connecting");
+  const connectionLabels: Record<SocketConnectionState, string> = {
+    connected: isZh ? "Ambient 已连接" : "Ambient connected",
+    connecting: isZh ? "正在连接…" : "Connecting…",
+    retrying: isZh ? "正在重新连接…" : "Reconnecting…",
+    unavailable: isZh ? "连接不可用" : "Connection unavailable",
+    disconnected: isZh ? "连接已断开" : "Disconnected",
+  };
+  const connectionNotice = deliveryError
+    ?? (["unavailable", "disconnected"].includes(effectiveConnectionState)
+      ? (isZh
+          ? "响应与新消息会保留在本机，连接恢复后可重试。"
+          : "Responses and new messages stay on this device until the connection returns.")
+      : null);
   const codingModelLabel = codingAgent?.id === "codex"
     ? (codingAgentModel?.native_model || (isZh ? "Agent 默认" : "Agent default"))
     : codingAgentModel?.inherit
@@ -223,7 +250,7 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
         <header className="agent-chat-header">
           <div className="agent-chat-identity">
             <span className={`agent-status-dot ${isConnected ? "is-online" : ""}`} />
-            <div><strong>{activeSession?.title ?? (isZh ? "新对话" : "New conversation")}</strong><span>{isConnected ? (isZh ? "Ambient 已连接" : "Ambient connected") : (isZh ? "连接中…" : "Connecting…")}</span></div>
+            <div><strong>{activeSession?.title ?? (isZh ? "新对话" : "New conversation")}</strong><span>{connectionLabels[effectiveConnectionState]}</span></div>
           </div>
           <div className="agent-chat-actions">
             <div className="workspace-menu-anchor">
@@ -239,14 +266,23 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
               <SystemIconButton ref={historyTriggerRef} label={isZh ? "聊天历史" : "Chat history"} onClick={() => setHistoryOpen((value) => !value)} aria-expanded={historyOpen}><History size={17} /></SystemIconButton>
               <SystemPopover open={historyOpen} onClose={() => setHistoryOpen(false)} triggerRef={historyTriggerRef} label={isZh ? "聊天记录" : "Conversations"} className="chat-history-popover">
                 <div className="chat-history-heading"><span>{isZh ? "聊天记录" : "Conversations"}</span><button onClick={() => { onCreateSession(); setHistoryOpen(false); }}><Plus size={15} />{isZh ? "新建" : "New"}</button></div>
+                {sessionError && <p className="chat-history-error" role="alert">{sessionError}</p>}
                 <div className="chat-history-list">
-                  {sessions.map((session) => <div key={session.id} className={`chat-history-item ${session.id === activeSessionId ? "is-active" : ""}`}>
-                    <button className="chat-history-select" onClick={() => { onSelectSession(session.id); setHistoryOpen(false); }}>
-                      {runningSessions.includes(session.id) ? <LoaderCircle className="is-spinning" size={14} /> : <MessageCircle size={14} />}
-                      <span><strong>{session.title}</strong><small>{session.updated_at ? new Date(session.updated_at).toLocaleDateString(language) : ""}</small></span>
-                    </button>
-                    <SystemIconButton className="chat-history-delete" label={isZh ? `删除 ${session.title}` : `Delete ${session.title}`} tone="danger" onClick={() => onDeleteSession(session.id)}><Trash2 size={13} /></SystemIconButton>
-                  </div>)}
+                  {sessions.map((session) => {
+                    const hasActiveTasks = runningSessions.includes(session.id);
+                    const deleteLabel = hasActiveTasks
+                      ? (isZh
+                          ? `请先完成或取消活动任务，再删除 ${session.title}`
+                          : `Finish or cancel active tasks before deleting ${session.title}`)
+                      : (isZh ? `删除 ${session.title}` : `Delete ${session.title}`);
+                    return <div key={session.id} className={`chat-history-item ${session.id === activeSessionId ? "is-active" : ""}`}>
+                      <button className="chat-history-select" onClick={() => { onSelectSession(session.id); setHistoryOpen(false); }}>
+                        {hasActiveTasks ? <LoaderCircle className="is-spinning" size={14} /> : <MessageCircle size={14} />}
+                        <span><strong>{session.title}</strong><small>{session.updated_at ? new Date(session.updated_at).toLocaleDateString(language) : ""}</small></span>
+                      </button>
+                      <SystemIconButton className="chat-history-delete" label={deleteLabel} tone="danger" disabled={hasActiveTasks} onClick={() => onDeleteSession(session.id)}><Trash2 size={13} /></SystemIconButton>
+                    </div>;
+                  })}
                 </div>
               </SystemPopover>
             </div>
@@ -257,7 +293,10 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
         <div ref={messagesRef} className="agent-chat-messages" onScroll={handleMessagesScroll}>
           {conversationItems.length === 0 ? <div className="agent-chat-empty"><span><MessageCircle size={22} /></span><strong>{isZh ? "需要我做什么？" : "What can I help with?"}</strong><p>{isZh ? "我可以创建 App、整理信息，或协助你操作当前工作区。" : "I can create apps, organize information, or help with your workspace."}</p></div> : conversationItems.map((item) => (
             item.kind === "message"
-              ? <div key={item.key} className={`agent-message ${item.message.sender === "user" ? "is-user" : "is-agent"}`}><div>{item.message.content}</div><span>{item.message.sender === "user" ? (isZh ? "你" : "You") : "Ambient"}</span></div>
+              ? (() => {
+                  const externalSkillLabel = externalSkillMessageLabel(item.message, isZh);
+                  return <div key={item.key} className={`agent-message ${item.message.sender === "user" ? "is-user" : "is-agent"} ${externalSkillLabel ? "is-external-skill" : ""}`}><div>{item.message.content}</div><span>{externalSkillLabel ?? (item.message.sender === "user" ? (isZh ? "你" : "You") : "Ambient")}</span></div>;
+                })()
               : <ChatRunCard
                   key={item.key}
                   run={item.run}
@@ -274,13 +313,35 @@ export const AgentChatOverlay: React.FC<AgentChatOverlayProps> = ({
         {newProgress ? <button type="button" className="agent-chat-new-progress" onClick={() => scrollToLatest()}>
           <LoaderCircle size={13} />{isZh ? "查看最新进度" : "View latest progress"}
         </button> : null}
+        {connectionNotice ? (
+          <div
+            className="agent-chat-connection-notice"
+            role={deliveryError ? "alert" : "status"}
+          >
+            <span>{connectionNotice}</span>
+            {onRetryConnection && effectiveConnectionState !== "connected" ? (
+              <button type="button" onClick={onRetryConnection}>
+                {isZh ? "重试连接" : "Retry connection"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <form className="agent-chat-composer" onSubmit={submit}>
           <div className="agent-chat-model-row">
             <div className="agent-chat-model-choice"><span>Ambient</span><ModelPicker providers={providers} value={modelSelection} onChange={(selection) => onModelChange?.(selection)} onManage={onManageModels} language={language} disabled={!onModelChange} /></div>
             {codingAgent ? <span className="agent-chat-coding-model">{isZh ? "代码" : "Code"} · {codingAgent.name}{codingModelLabel ? ` · ${codingModelLabel}` : ""}</span> : null}
             {runningSessions.includes(activeSessionId ?? "") ? <span>{isZh ? "切换将从下次请求生效" : "Changes apply to the next request"}</span> : null}
           </div>
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={isZh ? "向 Ambient 发送消息…" : "Message Ambient…"} rows={1} />
+          <SlashCommandInput
+            autoFocus
+            value={input}
+            onChange={setInput}
+            onSubmit={submitInput}
+            placeholder={isZh ? "向 Ambient 发送消息… 输入 / 查看命令" : "Message Ambient… Type / for commands"}
+            language={language}
+            apiBase={apiBase}
+            catalog={slashCommandCatalog}
+          />
           <SystemIconButton className="agent-chat-send" type="submit" disabled={!input.trim() || !isConnected} label={isZh ? "发送" : "Send"} tone="accent"><Send size={16} /></SystemIconButton>
         </form>
       </aside>}

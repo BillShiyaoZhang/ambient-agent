@@ -83,6 +83,7 @@ class SessionTitleService:
                 prompt=json.dumps(messages, ensure_ascii=False),
                 response=raw_title,
                 stage="session_title",
+                session_id=session_id,
             )
         )
         self.storage.commit()

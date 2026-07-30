@@ -213,6 +213,64 @@ MessageChannel 把 RPC 交给可信 host 和 Backend authorizer。Workspace 稳�
 显式 pixel 回滚链路。Runtime 不挂载工作区且使用 `network_mode: none`；浏览器
 按需启动，最后一个会话关闭 60 秒后回收，默认最多 4 个 Context。
 
+### 5.2 Skill Catalog 发现与授权边界
+
+```mermaid
+classDiagram
+    class SkillCatalogProvider {
+        <<protocol>>
+        +source_id: str
+        +kind: str
+        +required: bool
+        +list_entries() SkillMarketEntry[]
+    }
+    class SkillCatalog {
+        +list_snapshot(source_enabled) SkillCatalogSnapshot
+        +list_entries(source_enabled) SkillMarketEntry[]
+        +get(market_id, source_enabled) SkillMarketEntry
+    }
+    class SkillMarket {
+        +list_entries() SkillMarketEntry[]
+    }
+    class GitHubSkillCatalogProvider {
+        +list_entries() SkillMarketEntry[]
+        -_read_or_fetch(url, expected_hash) bytes
+        -_read_verified_cache(path, expected_hash) bytes
+    }
+    class SkillManager {
+        +list_market()
+        +install(market_id)
+        +set_source_enabled(source_id, enabled, expected_revision)
+        +set_authorization(catalog_id, policy, digest)
+    }
+    class SkillStore {
+        +install(record, skill_content, market_content)
+        +list_source_preferences()
+        +set_source_enabled(source_id, enabled, expected_revision)
+        +set_authorization(...)
+    }
+
+    SkillCatalogProvider <|.. SkillMarket
+    SkillCatalogProvider <|.. GitHubSkillCatalogProvider
+    SkillCatalog o-- SkillCatalogProvider
+    SkillManager --> SkillCatalog
+    SkillManager --> SkillStore
+```
+
+Provider 只负责发现、不可变来源 pin、下载与标准化；Catalog 负责跨来源去重、
+确定性排序和可选来源故障隔离；Manager/Store 仍是唯一安装与授权控制面。
+GitHub commit/hash、registry badge 或上游扫描都不会产生 Ambient trust。
+远程 standalone Skill 与本地外部 Skill 一样安装为
+`quarantined + disabled`，并复用精确 digest/revision 绑定的
+`agent.context.inject` 通道。`scripts/`、`references/`、`assets/` 和依赖不进入
+这个 Runtime；未来可执行扩展必须转成 Capability/Plugin/Widget，继续经过各自
+的 sandbox、grant、approval 和 audit。
+
+来源开关是 `SkillStore` 中的 workspace 控制面偏好，缺省为开启，并与 Skill
+registry 共用 CAS revision。关闭来源后 `SkillCatalog` 不调用对应 Provider，
+但仍在 source status 中保留它以便 UI 重新开启；已安装 snapshot 与授权不变。
+开关不是 Provider trust 或 Skill grant，也不写入 ontology/KG。
+
 ## 6. 事件与恢复边界
 
 Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/model usage/`redacted` 元数据；终态 event 默认保留 30 天。Graph effect ledger 防止 checkpoint 窗口重复写，App promotion marker 区分已发布与待发布 staging。只有完整补偿数据的 saga step 才自动回滚。
@@ -223,6 +281,8 @@ Run event payload 在入库前脱敏并限制大小，envelope 记录 duration/m
 classDiagram
     class GraphDatabase {
         +list_schemas()
+        +list_nodes(node_type)
+        +list_edges()
         +routing_snapshot(recent_per_type)
         +preflight_actions(actions)
         +apply_actions_atomic(actions)
@@ -246,7 +306,7 @@ classDiagram
     Neo4jGraphDatabase --> OntologyEntity
 ```
 
-`create_graph_database()` 是组合根唯一调用的运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。创建后的同一 adapter 被注入 Workflow、Agent 路由与工具；请求和 reducer step 不得创建第二个 Driver。两种 adapter 执行同一 `ambient-context` 本体契约，并由组合根在 shutdown 显式 `close()`；未知实体、抽象实体和未知属性都不能写入 record。
+`create_graph_database()` 是组合根唯一调用的运行时 factory：部署选择 Neo4j，SQLite `GraphDatabase` 仅作为测试与迁移兼容适配器。创建后的同一 adapter 被注入 Workflow、Agent 路由与工具；请求和 reducer step 不得创建第二个 Driver。两种 adapter 执行同一 `ambient-context` 本体契约，并由组合根在 shutdown 显式 `close()`；未知实体、抽象实体和未知属性都不能写入 record。可信 Host 的有界图谱快照只能通过 `list_schemas()`、`list_nodes()` 与一次性 `list_edges()` 组装，不能依赖 SQLite 私有连接，也不能按节点执行 N+1 关系查询。
 
 ## 8. Coding Agent Runtime 与模型所有权
 
@@ -267,6 +327,6 @@ flowchart LR
 
 ACP 是唯一的代码生成 orchestration 边界。内置 Adapter 只声明受信任的 launch descriptor：ACP server 命令、底层 CLI、环境、模型配置与版本来源；不能另写一套 prompt loop、权限或 repair 行为。OpenCode 启动原生 `opencode acp`。Codex 使用镜像中固定版本的 `@agentclientprotocol/codex-acp`，通过 `CODEX_PATH` 连接 Ambient 管理的 Codex CLI，再由后者启动官方 app-server。若新增 Agent 不原生支持 ACP，必须优先选择 ACP Registry 中可审计、版本固定、维护活跃的 bridge；bridge 只做协议映射，权限与生命周期仍由 Ambient ACP client 所有。
 
-CLI 只有在用户选择安装时才下载到独立持久卷。安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
+OpenCode CLI 由系统镜像提供；Codex 只有在用户选择安装时才下载到独立持久卷。Codex 的安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
 
 Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。

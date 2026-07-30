@@ -1,8 +1,10 @@
 import asyncio
+import copy
 import hashlib
 import json
 import logging
 import os
+import tempfile
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -55,6 +57,10 @@ class MCPTransportError(RuntimeError):
 
 class MCPProtocolError(RuntimeError):
     """The MCP subprocess emitted an invalid JSON-RPC message."""
+
+
+class BackendPermissionsError(RuntimeError):
+    """Durable backend approval state could not be loaded or committed."""
 
 
 class StdioJsonRpcClient:
@@ -489,19 +495,45 @@ class BackendManager:
     def _load_permissions(self):
         if self.permissions_file.exists():
             try:
-                self.permissions = json.loads(self.permissions_file.read_text(encoding="utf-8"))
-            except Exception as e:
-                logger.error(f"Error loading permissions: {e}")
-                self.permissions = {}
+                permissions = json.loads(self.permissions_file.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise BackendPermissionsError("Persisted backend permissions cannot be read") from exc
+            if not isinstance(permissions, dict):
+                raise BackendPermissionsError("Persisted backend permissions must be a JSON object")
+            for app_id, grants in permissions.items():
+                if not isinstance(app_id, str) or not isinstance(grants, dict):
+                    raise BackendPermissionsError("Persisted backend permission entries are invalid")
+                mcp_servers = grants.get("mcp_servers", [])
+                agents = grants.get("agents", [])
+                if not isinstance(mcp_servers, list) or not isinstance(agents, list):
+                    raise BackendPermissionsError("Persisted backend permission grants are invalid")
+            self.permissions = permissions
         else:
             self.permissions = {}
 
-    def _save_permissions(self):
+    def _save_permissions(self, permissions: dict[str, Any]) -> None:
+        temporary_path: Path | None = None
         try:
             self.permissions_file.parent.mkdir(parents=True, exist_ok=True)
-            self.permissions_file.write_text(json.dumps(self.permissions, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error(f"Error saving permissions: {e}")
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.permissions_file.parent,
+                prefix=".backend-permissions-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                json.dump(permissions, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.permissions_file)
+        except OSError as exc:
+            raise BackendPermissionsError("Unable to persist backend permissions") from exc
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     @staticmethod
     def _mcp_permission_target(
@@ -569,13 +601,13 @@ class BackendManager:
 
     def approve_mcp_identity(self, app_id: str, identity: dict[str, Any]) -> None:
         normalized = self._normalize_mcp_identity(identity)
-        if app_id not in self.permissions:
-            self.permissions[app_id] = {}
-        if "mcp_servers" not in self.permissions[app_id]:
-            self.permissions[app_id]["mcp_servers"] = []
-        if normalized not in self.permissions[app_id]["mcp_servers"]:
-            self.permissions[app_id]["mcp_servers"].append(normalized)
-            self._save_permissions()
+        next_permissions = copy.deepcopy(self.permissions)
+        app_permissions = next_permissions.setdefault(app_id, {})
+        mcp_servers = app_permissions.setdefault("mcp_servers", [])
+        if normalized not in mcp_servers:
+            mcp_servers.append(normalized)
+            self._save_permissions(next_permissions)
+            self.permissions = next_permissions
 
     def is_mcp_approved(
         self,
@@ -598,14 +630,14 @@ class BackendManager:
         env: dict[str, str] | None | object = _PERMISSION_VALUE_UNSET,
         manifest_revision: Any = _PERMISSION_VALUE_UNSET,
     ):
-        if app_id not in self.permissions:
-            self.permissions[app_id] = {}
-        if "mcp_servers" not in self.permissions[app_id]:
-            self.permissions[app_id]["mcp_servers"] = []
+        next_permissions = copy.deepcopy(self.permissions)
+        app_permissions = next_permissions.setdefault(app_id, {})
+        mcp_servers = app_permissions.setdefault("mcp_servers", [])
         target = self._mcp_permission_target(command, args, env, manifest_revision)
-        if target not in self.permissions[app_id]["mcp_servers"]:
-            self.permissions[app_id]["mcp_servers"].append(target)
-            self._save_permissions()
+        if target not in mcp_servers:
+            mcp_servers.append(target)
+            self._save_permissions(next_permissions)
+            self.permissions = next_permissions
 
     def is_agent_approved(self, app_id: str, agent_url: str) -> bool:
         app_perms = self.permissions.get(app_id, {})
@@ -613,13 +645,13 @@ class BackendManager:
         return agent_url in agent_perms
 
     def approve_agent(self, app_id: str, agent_url: str):
-        if app_id not in self.permissions:
-            self.permissions[app_id] = {}
-        if "agents" not in self.permissions[app_id]:
-            self.permissions[app_id]["agents"] = []
-        if agent_url not in self.permissions[app_id]["agents"]:
-            self.permissions[app_id]["agents"].append(agent_url)
-            self._save_permissions()
+        next_permissions = copy.deepcopy(self.permissions)
+        app_permissions = next_permissions.setdefault(app_id, {})
+        agents = app_permissions.setdefault("agents", [])
+        if agent_url not in agents:
+            agents.append(agent_url)
+            self._save_permissions(next_permissions)
+            self.permissions = next_permissions
 
     async def get_or_start_mcp_client(
         self, app_id: str, manifest: AppManifest, send_ws_message_func: Callable

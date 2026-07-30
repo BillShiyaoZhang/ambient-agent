@@ -4,7 +4,12 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 from backend.main import app
 from backend.app_manager import AppManager
-from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
+from backend.app_store import (
+    AppStoreCorruptionError,
+    AppStoreService,
+    CapabilityManifest,
+    LayoutConflictError,
+)
 
 
 @pytest.fixture
@@ -114,6 +119,28 @@ def test_generated_ui_id_is_stable_and_safe(app_store):
     assert first == first.lower()
 
 
+def test_corrupt_registry_fails_closed_without_overwrite(app_store):
+    service, _ = app_store
+    service.capabilities_path.parent.mkdir(parents=True, exist_ok=True)
+    service.capabilities_path.write_text('{"capabilities":[', encoding="utf-8")
+
+    with pytest.raises(AppStoreCorruptionError):
+        service.register_capability(capability())
+
+    assert service.capabilities_path.read_text(encoding="utf-8") == '{"capabilities":['
+
+
+def test_corrupt_layout_fails_closed_without_normalization_overwrite(app_store):
+    service, _ = app_store
+    service.layout_path.parent.mkdir(parents=True, exist_ok=True)
+    service.layout_path.write_text('{"root":[', encoding="utf-8")
+
+    with pytest.raises(AppStoreCorruptionError):
+        service.get_state()
+
+    assert service.layout_path.read_text(encoding="utf-8") == '{"root":['
+
+
 def test_app_store_api_registration_and_revision_conflict(app_store, monkeypatch):
     service, manager = app_store
     manager.create_or_update_app("one", "One", js="export default function App() {}")
@@ -121,7 +148,7 @@ def test_app_store_api_registration_and_revision_conflict(app_store, monkeypatch
     manifest = capability().model_dump(mode="json")
     catalog_id = service.catalog_id(capability())
 
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50_000)) as client:
         registered = client.put(f"/api/capabilities/{catalog_id}", json=manifest)
         initial = client.get("/api/app-store")
         first_save = client.put(
@@ -183,3 +210,33 @@ def test_v1_capability_normalizes_to_default_run_action():
     assert action.id == "run"
     assert action.input_schema == {"type": "object"}
     assert action.invocation.tool_name == "events"
+
+
+def test_installed_item_provider_extends_launcher_without_changing_legacy_registry(app_store):
+    service, _ = app_store
+
+    class InstalledSkillProvider:
+        def list_catalog_items(self):
+            return [
+                {
+                    "catalog_id": "agent-skill:ambient-agent:daily-planning",
+                    "kind": "skill",
+                    "title": "Daily Planning",
+                    "description": "Plan a day with the Agent.",
+                    "version": "1.0.0",
+                    "provider": "Ambient Agent",
+                    "tags": ["planning"],
+                    "launch_mode": "details",
+                    "surfaces": ["agent_context"],
+                    "actions": [],
+                    "status": "ready",
+                }
+            ]
+
+    service.add_provider(InstalledSkillProvider())
+
+    state = service.get_state()
+
+    assert [item["catalog_id"] for item in state["items"]] == ["agent-skill:ambient-agent:daily-planning"]
+    assert state["root"] == ["agent-skill:ambient-agent:daily-planning"]
+    assert service.list_capabilities() == []

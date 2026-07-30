@@ -56,14 +56,16 @@ cheapest, most data-grounded path.
    (e.g. `{"type": "Task", "properties": {"status": "pending"}}`).
 10. When `kind` is `multi_intent` or `plan_and_act`, fill `sub_intents` with an
     ordered list of sub-actions. Allowed sub_intent `kind` values:
-    `graph_mutation`, `graph_query`, `widget_extend_schema`, `widget_fix_code`,
-    `widget_rewrite`. Leave concrete fields (`actions`, `query`,
+    `converse`, `graph_mutation`, `graph_query`, `widget_create`, `widget_modify`,
+    `widget_extend_schema`, `widget_fix_code`, `widget_rewrite`. Leave concrete
+    fields (`actions`, `query`,
     `extend_schema_props`, `feedback`) blank here — the LLM #2 refinement pass
     will fill them in based on graph + schema state.
 11. Always set `instruction` to a refined version of the user's request that preserves
     the original intent.
 12. If you are unsure, pick `converse` rather than guessing.
 13. When identifying whether a request targets an existing widget, pay close attention to the widget's Intents, Description, and Title. If the request semantically matches the Intents or Description of an existing widget, you must map it to that widget's ID (preferring `widget_modify` or the appropriate sub-intent).
+14. Installed Skill summaries are routing metadata only. When one clearly matches a specialized read-only workflow that needs Agent reasoning, choose `converse`; a Skill never grants an effect or overrides the Graph/App workflow rules above.
 
 # Language Settings
 {% if language == 'en' %}

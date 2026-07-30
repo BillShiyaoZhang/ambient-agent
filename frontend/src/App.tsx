@@ -5,6 +5,10 @@ import type { Widget } from "./components/DashboardCanvas";
 import { SandboxWidget } from "./components/SandboxWidget";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AuditLogPanel } from "./components/AuditLogPanel";
+import {
+  DeferredGraphExplorer,
+  DeferredGraphWorkbench,
+} from "./components/graph/DeferredGraph";
 import type { Session } from "./components/SessionSidebar";
 import { AppCenter } from "./components/AppCenter";
 import { AppPermissionModal } from "./components/AppPermissionModal";
@@ -39,7 +43,8 @@ import {
   schemaProposalDependencyErrors,
   type WidgetSchemaProposal,
 } from "./lib/widgetDesign";
-import { Languages, ListTodo, Moon, Settings2, ShieldCheck, Sun } from "lucide-react";
+import { schemaProposalToGraph } from "./lib/graphScenes";
+import { Languages, ListTodo, Moon, Network, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
   clearCodingAgentAuth,
@@ -67,8 +72,24 @@ import {
   type ModelSelection,
   type ProviderPreset,
 } from "./services/llm";
+import { getApiBaseUrl, webSocketUrl } from "./services/apiBase";
+import type { SocketConnectionState } from "./services/socketReconnect";
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = getApiBaseUrl();
+
+function combinedConnectionState(
+  commandState: SocketConnectionState,
+  runState: SocketConnectionState | null,
+  runLiveState: SocketConnectionState | null,
+): SocketConnectionState {
+  const states = [commandState, runState, runLiveState]
+    .filter((state): state is SocketConnectionState => state !== null);
+  if (states.includes("unavailable")) return "unavailable";
+  if (states.includes("retrying")) return "retrying";
+  if (states.includes("connecting")) return "connecting";
+  if (states.includes("disconnected")) return "disconnected";
+  return "connected";
+}
 
 function mergeBootstrapWidgets(current: Widget[], snapshots: Widget[]): Widget[] {
   if (snapshots.length === 0) return current;
@@ -108,6 +129,36 @@ function localizedLLMError(code: string, language: "zh" | "en"): string {
   return pair[language === "zh" ? 0 : 1];
 }
 
+function CommandDeliveryNotice({
+  connectionState,
+  error,
+  language,
+  onRetry,
+}: {
+  connectionState: SocketConnectionState;
+  error: string | null;
+  language: "zh" | "en";
+  onRetry: () => void;
+}) {
+  if (connectionState === "connected" && !error) return null;
+  const isZh = language === "zh";
+  const statusMessage = connectionState === "retrying"
+    ? (isZh ? "正在重新连接。响应尚未发送，请在连接恢复后重试。" : "Reconnecting. Your response has not been sent; retry after the connection returns.")
+    : connectionState === "connecting"
+      ? (isZh ? "正在连接。响应尚未发送，请稍候重试。" : "Connecting. Your response has not been sent; try again shortly.")
+      : (isZh ? "Ambient 连接不可用。响应仍保留在这里，请恢复连接后重试。" : "The Ambient connection is unavailable. Your response remains here; reconnect and try again.");
+  return (
+    <div className="system-delivery-notice" role={error ? "alert" : "status"}>
+      <span>{error ?? statusMessage}</span>
+      {connectionState !== "connected" ? (
+        <button type="button" onClick={onRetry}>
+          {isZh ? "重试连接" : "Retry connection"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -127,7 +178,17 @@ function App() {
     },
   });
   const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  const [commandConnectionState, setCommandConnectionState] = useState<SocketConnectionState>("disconnected");
+  const [runConnectionState, setRunConnectionState] = useState<SocketConnectionState | null>(null);
+  const [runLiveConnectionState, setRunLiveConnectionState] = useState<SocketConnectionState | null>(null);
+  const [commandDeliveryError, setCommandDeliveryError] = useState<string | null>(null);
+  const [sessionActionError, setSessionActionError] = useState<string | null>(null);
+  const connectionState = combinedConnectionState(
+    commandConnectionState,
+    runConnectionState,
+    runLiveConnectionState,
+  );
+  const isConnected = connectionState === "connected";
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [isChatOpen, setIsChatOpen] = useState(false);
   const chatOpenRef = useRef(false);
@@ -217,9 +278,28 @@ function App() {
   }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
+  const [isGraphOpen, setIsGraphOpen] = useState(false);
   const [isTaskDrawerOpen, setIsTaskDrawerOpen] = useState(false);
   const [taskCounts, setTaskCounts] = useState({ active: 0, attention: 0 });
-  
+
+  const retryCommandConnection = useCallback(() => {
+    wsService.retry();
+    runService.retryConnection();
+    runLiveService.retryConnection();
+  }, []);
+
+  const sendCommand = useCallback((message: Record<string, unknown>): boolean => {
+    const delivered = wsService.sendMessage(message);
+    if (!delivered) {
+      setCommandDeliveryError(language === "zh"
+        ? "响应尚未发送。请求仍保留，请确认连接恢复后重试。"
+        : "Response not sent. Your request is still here; retry after the connection returns.");
+      return false;
+    }
+    setCommandDeliveryError(null);
+    return true;
+  }, [language]);
+
   interface PermissionRequest {
     request_id: string;
     tool_call: string;
@@ -230,21 +310,21 @@ function App() {
 
   const handleResolvePermission = (approved: boolean) => {
     if (!pendingPermission) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "permission_response",
       request_id: pendingPermission.request_id,
       approved: approved
-    });
+    })) return;
     setPendingPermission(null);
   };
 
   const handleResolveBackendPermission = (approved: boolean) => {
     if (!pendingBackendPermission) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "backend_permission_response",
       request_id: pendingBackendPermission.request_id,
       approved: approved
-    });
+    })) return;
     setPendingBackendPermission(null);
   };
 
@@ -281,6 +361,7 @@ function App() {
 
   const [pendingSchemaRequest, setPendingSchemaRequest] = useState<SchemaApprovalRequest | null>(null);
   const [editedProposal, setEditedProposal] = useState<SchemaProposal | null>(null);
+  const [schemaServerDiagnosticsStale, setSchemaServerDiagnosticsStale] = useState(false);
   const [pendingPlanRequest, setPendingPlanRequest] = useState<PlanApprovalRequest | null>(null);
   const [planFeedback, setPlanFeedback] = useState("");
   const [runningSessions, setRunningSessions] = useState<string[]>([]);
@@ -294,9 +375,11 @@ function App() {
       const proposal = JSON.parse(JSON.stringify(pendingSchemaRequest.proposal));
       proposal.capabilities = Array.isArray(proposal.capabilities) ? proposal.capabilities : [];
       setEditedProposal(proposal);
+      setSchemaServerDiagnosticsStale(false);
       setSchemaFeedback("");
     } else {
       setEditedProposal(null);
+      setSchemaServerDiagnosticsStale(false);
       setSchemaFeedback("");
     }
   }, [pendingSchemaRequest]);
@@ -310,28 +393,41 @@ function App() {
   const schemaDependencyErrors = editedProposal
     ? schemaProposalDependencyErrors(editedProposal)
     : [];
+  const schemaServerDiagnostics = [...new Set(
+    pendingSchemaRequest?.validation_errors || [],
+  )];
+  const schemaApprovalErrors = [...new Set([
+    ...(schemaServerDiagnosticsStale ? [] : schemaServerDiagnostics),
+    ...schemaDependencyErrors,
+  ])];
+  const staleSchemaServerDiagnostics = schemaServerDiagnosticsStale
+    ? schemaServerDiagnostics
+    : [];
+  const schemaVisualization = editedProposal
+    ? schemaProposalToGraph(editedProposal, schemaApprovalErrors, language)
+    : null;
 
   const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
     if (!pendingSchemaRequest) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "schema_approval_response",
       request_id: pendingSchemaRequest.request_id,
       approved: approved,
       proposal: editedProposal || pendingSchemaRequest.proposal,
       feedback: feedbackText || ""
-    });
+    })) return;
     setPendingSchemaRequest(null);
   };
 
   const handleResolveVerificationRequest = (approved: "approve" | "rework_code" | "rework_schema" | "rework_plan", feedbackText?: string, approvedOptions?: Array<{ node_type: string; property_name: string }>) => {
     if (!pendingVerificationRequest) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "verification_approval_response",
       request_id: pendingVerificationRequest.request_id,
       approved: approved,
       feedback: feedbackText || "",
       approved_options: approvedOptions || []
-    });
+    })) return;
     setPendingVerificationRequest(null);
   };
 
@@ -347,46 +443,44 @@ function App() {
 
   const handleResolvePlanRequest = (approved: boolean | "refine", feedbackText?: string) => {
     if (!pendingPlanRequest) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "plan_approval_response",
       request_id: pendingPlanRequest.request_id,
       approved: approved,
       plan: pendingPlanRequest.plan,
       feedback: feedbackText || ""
-    });
+    })) return;
     setPendingPlanRequest(null);
   };
 
   const handleResolveRunInteraction = (
     interaction: RunInteractionState,
     action: RunInteractionAction,
-  ) => {
+  ): boolean => {
     const payload = interaction.payload;
     if (interaction.kind === "plan_approval") {
-      wsService.sendMessage({
+      return sendCommand({
         type: "plan_approval_response",
         request_id: interaction.id,
         approved: action === "approve",
         plan: String(payload.plan || ""),
         feedback: "",
       });
-      return;
     }
     if (interaction.kind === "schema_approval") {
-      wsService.sendMessage({
+      return sendCommand({
         type: "schema_approval_response",
         request_id: interaction.id,
         approved: action === "approve",
         proposal: payload.proposal,
         feedback: "",
       });
-      return;
     }
     if (
       interaction.kind === "verification_approval"
       && ["rework_code", "rework_schema", "rework_plan"].includes(action)
     ) {
-      wsService.sendMessage({
+      return sendCommand({
         type: "verification_approval_response",
         request_id: interaction.id,
         approved: action,
@@ -394,10 +488,12 @@ function App() {
         approved_options: [],
       });
     }
+    return false;
   };
 
   const handleInspectRunInteraction = (interaction: RunInteractionState) => {
     if (interaction.status !== "pending") return;
+    setCommandDeliveryError(null);
     const payload = interaction.payload;
     if (interaction.kind === "plan_approval") {
       setPendingPlanRequest(payload as unknown as PlanApprovalRequest);
@@ -406,6 +502,11 @@ function App() {
     } else if (interaction.kind === "verification_approval") {
       setPendingVerificationRequest(payload as unknown as VerificationApprovalRequest);
     }
+  };
+
+  const updateEditedSchemaProposal = (proposal: SchemaProposal) => {
+    setEditedProposal(proposal);
+    setSchemaServerDiagnosticsStale(true);
   };
 
   // Helper functions for editing Reused Schema extensions
@@ -420,7 +521,7 @@ function App() {
       newKey = `new_field_${counter}`;
     }
     schema.extended_properties[newKey] = "string";
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateExtendedPropertyKey = (schemaIndex: number, oldKey: string, newKey: string) => {
@@ -432,21 +533,21 @@ function App() {
     const val = schema.extended_properties[oldKey];
     delete schema.extended_properties[oldKey];
     schema.extended_properties[newKey] = val;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateExtendedPropertyType = (schemaIndex: number, key: string, newType: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.reused_schemas[schemaIndex].extended_properties[key] = newType;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleRemoveExtendedProperty = (schemaIndex: number, key: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     delete updated.reused_schemas[schemaIndex].extended_properties[key];
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   // Helper functions for editing New Schemas
@@ -461,7 +562,7 @@ function App() {
       newKey = `field_${counter}`;
     }
     schema.properties[newKey] = "string";
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateNewSchemaPropertyKey = (schemaIndex: number, oldKey: string, newKey: string) => {
@@ -473,21 +574,21 @@ function App() {
     const val = schema.properties[oldKey];
     delete schema.properties[oldKey];
     schema.properties[newKey] = val;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateNewSchemaPropertyType = (schemaIndex: number, key: string, newType: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.new_schemas[schemaIndex].properties[key] = newType;
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleRemoveNewSchemaProperty = (schemaIndex: number, key: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     delete updated.new_schemas[schemaIndex].properties[key];
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateNewSchemaMeta = (
@@ -505,17 +606,17 @@ function App() {
       if (schema.ontology_iri === `urn:ambient:ontology:${previousId}`) {
         schema.ontology_iri = `urn:ambient:ontology:${val}`;
       }
-      setEditedProposal(reconcileProposalGraphEntity(updated, previousId, val));
+      updateEditedSchemaProposal(reconcileProposalGraphEntity(updated, previousId, val));
       return;
     }
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleUpdateEquivalentOntologyIris = (schemaIndex: number, value: string) => {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.new_schemas[schemaIndex].equivalent_to = parseEquivalentOntologyIris(value);
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const handleRemoveNewSchema = (schemaIndex: number) => {
@@ -523,7 +624,7 @@ function App() {
     const updated = { ...editedProposal };
     const removedId = updated.new_schemas[schemaIndex]?.id;
     updated.new_schemas.splice(schemaIndex, 1);
-    setEditedProposal(
+    updateEditedSchemaProposal(
       removedId ? reconcileProposalGraphEntity(updated, removedId, null) : updated,
     );
   };
@@ -532,7 +633,7 @@ function App() {
     if (!editedProposal) return;
     const updated = { ...editedProposal };
     updated.new_schemas.push(createCustomOntologyEntity(updated.new_schemas.map((schema) => schema.id)));
-    setEditedProposal(updated);
+    updateEditedSchemaProposal(updated);
   };
 
   const [mutationPreview, setMutationPreview] = useState<MutationPreviewData | null>(null);
@@ -577,16 +678,26 @@ function App() {
   };
 
   useEffect(() => {
+    const unsubscribeConnectionStatus = wsService.subscribeStatus(setCommandConnectionState);
+    const handleRunStreamStatus = (event: Event) => {
+      const state = (event as CustomEvent<{ state?: unknown }>).detail?.state;
+      if (
+        state === "disconnected"
+        || state === "connecting"
+        || state === "connected"
+        || state === "retrying"
+        || state === "unavailable"
+      ) {
+        setRunConnectionState(state);
+      }
+    };
+    window.addEventListener("ambient_run_stream_status", handleRunStreamStatus);
     fetchSessions();
     void refreshLLMConfiguration();
 
-    // Check connection state every second
-    const interval = setInterval(() => {
-      setIsConnected(wsService.isConnected());
-    }, 1000);
-
     return () => {
-      clearInterval(interval);
+      unsubscribeConnectionStatus();
+      window.removeEventListener("ambient_run_stream_status", handleRunStreamStatus);
       wsService.disconnect();
     };
     // Session bootstrap is intentionally mount-only; subsequent refreshes are explicit.
@@ -713,8 +824,10 @@ function App() {
       } else if (typeof data.type === "string" && data.type.startsWith("capability_ui_generation_")) {
         window.dispatchEvent(new CustomEvent("app-store-refresh", { detail: data }));
       } else if (data.type === "permission_request") {
+        setCommandDeliveryError(null);
         setPendingPermission(data);
       } else if (data.type === "backend_permission_request") {
+        setCommandDeliveryError(null);
         setPendingBackendPermission(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
@@ -758,7 +871,7 @@ function App() {
 
     // /ws/chat is now the command/control socket. Durable reducer output is
     // projected from the canonical replayable /ws/runs stream below.
-    const wsUrl = `ws://${window.location.hostname}:8000/ws/chat?projection=commands_only`;
+    const wsUrl = webSocketUrl("/ws/chat?projection=commands_only", API_BASE);
     wsService.connect(wsUrl, activeSessionId, handleProjection);
     const projectedTypes = new Set([
       "reply",
@@ -777,6 +890,7 @@ function App() {
         liveBatcher.clear();
         setChatProjection((current) => clearLiveStreams(current));
       },
+      setRunLiveConnectionState,
     );
     const unsubscribeRunEvents = runService.subscribe((event) => {
       if (event.session_id !== activeSessionId) return;
@@ -822,24 +936,52 @@ function App() {
   };
 
   const handleDeleteSession = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this conversation?")) return;
+    if (!window.confirm(language === "zh" ? "确定要删除这个对话吗？" : "Are you sure you want to delete this conversation?")) return;
+    setSessionActionError(null);
+    const deletingActiveSession = activeSessionId === id;
+    let deleted = false;
+    if (deletingActiveSession) {
+      // Cancel any queued reconnect before DELETE. Otherwise /ws/chat could
+      // recreate the session while the request is still in flight.
+      wsService.disconnect();
+      localStorage.removeItem("last_active_session");
+      setActiveSessionId(null);
+    }
     try {
       const res = await fetch(`${API_BASE}/api/sessions/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        // If we deleted the active session, clear selection to force fallback
-        if (activeSessionId === id) {
-          localStorage.removeItem("last_active_session");
-          setActiveSessionId(null);
-        }
-        fetchSessions();
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null) as {
+          detail?: string | { code?: string; message?: string };
+        } | null;
+        const detail = payload?.detail;
+        const code = typeof detail === "object" ? detail.code : null;
+        const serverMessage = typeof detail === "string" ? detail : detail?.message;
+        setSessionActionError(code === "session_has_active_runs"
+          ? (language === "zh"
+              ? "请先取消或处理仍在运行的任务，再删除这个对话。"
+              : "Cancel or resolve active tasks before deleting this conversation.")
+          : (serverMessage || (language === "zh"
+              ? `无法删除对话（HTTP ${res.status}）。请重试。`
+              : `Unable to delete the conversation (HTTP ${res.status}). Try again.`)));
+        return;
       }
+      deleted = true;
+      fetchSessions();
     } catch (err) {
       console.error("Error deleting session:", err);
+      setSessionActionError(language === "zh"
+        ? "删除请求未完成。对话仍然保留，请检查连接后重试。"
+        : "The delete request did not complete. The conversation is still here; check the connection and retry.");
+    } finally {
+      if (!deleted && deletingActiveSession) {
+        localStorage.setItem("last_active_session", id);
+        setActiveSessionId(id);
+      }
     }
   };
 
   const handleSendMessage = (text: string) => {
-    wsService.sendMessage({
+    return sendCommand({
       sender: "user",
       content: text,
     });
@@ -871,6 +1013,18 @@ function App() {
       return next;
     });
   };
+
+  const handleAppUpdated = useCallback(async (id: string) => {
+    const response = await fetch(`${API_BASE}/api/apps/${id}`);
+    if (!response.ok) return;
+    const appData = await response.json() as Widget;
+    setWidgets((previous) => {
+      const exists = previous.some((widget) => widget.id === id);
+      return exists
+        ? previous.map((widget) => widget.id === id ? appData : widget)
+        : previous;
+    });
+  }, []);
 
   const handleOpenApp = async (id: string) => {
     try {
@@ -966,9 +1120,16 @@ function App() {
       onUnpinWidget={handleRemoveWidget}
       onRunFullscreen={handleOpenApp}
       onRunCreated={() => setIsTaskDrawerOpen(true)}
+      onAppUpdated={handleAppUpdated}
+      onOpenChat={() => handleChatOpenChange(true)}
+      onConfigureModels={() => {
+        setIsLLMSettingsOpen(true);
+        void refreshLLMConfiguration();
+      }}
       language={language}
       headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
         <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
+        <SystemIconButton label={language === "zh" ? "图谱探索" : "Graph Explorer"} onClick={() => setIsGraphOpen(true)}><Network size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={() => setIsAuditOpen(true)}><ShieldCheck size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "模型与 Provider" : "Models & Providers"} onClick={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}><Settings2 size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "切换为英文" : "Switch to Chinese"} onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
@@ -1007,6 +1168,7 @@ function App() {
               </ErrorBoundary>
             )}
             onOpenAudit={() => setIsAuditOpen(true)}
+            onOpenGraph={() => setIsGraphOpen(true)}
             onOpenTasks={() => setIsTaskDrawerOpen(true)}
             onOpenLLMSettings={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
             taskCount={taskCounts.active + taskCounts.attention}
@@ -1031,9 +1193,13 @@ function App() {
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
         isConnected={isConnected}
+        connectionState={connectionState}
+        deliveryError={commandDeliveryError}
+        sessionError={sessionActionError}
         language={language}
         onOpenChange={handleChatOpenChange}
         onSendMessage={handleSendMessage}
+        onRetryConnection={retryCommandConnection}
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
@@ -1046,6 +1212,7 @@ function App() {
         onManageModels={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}
         codingAgent={codingAgents?.find((agent) => agent.id === codingAgentSettings?.default_agent)}
         codingAgentModel={codingAgentSettings?.agent_models?.[codingAgentSettings.default_agent]}
+        apiBase={API_BASE}
       />
 
       <LLMSettingsDialog
@@ -1074,7 +1241,16 @@ function App() {
       />
 
       {/* Audit Log Panel Overlay */}
-      <AuditLogPanel isOpen={isAuditOpen} onClose={() => setIsAuditOpen(false)} />
+      <AuditLogPanel
+        isOpen={isAuditOpen}
+        language={language}
+        onClose={() => setIsAuditOpen(false)}
+      />
+      <DeferredGraphWorkbench
+        open={isGraphOpen}
+        language={language}
+        onClose={() => setIsGraphOpen(false)}
+      />
       <TaskDrawer
         open={isTaskDrawerOpen}
         language={language}
@@ -1092,11 +1268,12 @@ function App() {
       {/* 🧮 Mutation preview / rollback */}
       <MutationPreview
         preview={mutationPreview}
+        deliveryError={commandDeliveryError}
         onRollback={(ticketId) => {
-          wsService.sendMessage({ type: "rollback_mutation", ticket_id: ticketId });
+          sendCommand({ type: "rollback_mutation", ticket_id: ticketId });
         }}
         onPin={(ticketId) => {
-          wsService.sendMessage({ type: "pin_mutation_history", ticket_id: ticketId });
+          sendCommand({ type: "pin_mutation_history", ticket_id: ticketId });
         }}
         onDismiss={(ticketId) => {
           setMutationPreview((curr) => (curr && curr.ticket_id === ticketId ? null : curr));
@@ -1111,6 +1288,12 @@ function App() {
               <span className="system-dialog-code-label">【{language === "zh" ? "类型" : "Type"}: {pendingPermission.tool_call}】</span>
               {pendingPermission.details}
             </div>
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
             <div className="system-dialog-actions">
               <button
                 onClick={() => handleResolvePermission(false)}
@@ -1133,13 +1316,43 @@ function App() {
       <AppPermissionModal
         pendingRequest={pendingBackendPermission}
         onResolve={handleResolveBackendPermission}
+        deliveryNotice={<CommandDeliveryNotice
+          connectionState={connectionState}
+          error={commandDeliveryError}
+          language={language}
+          onRetry={retryCommandConnection}
+        />}
       />
 
 
       {/* 🧠 Canonical ontology alignment modal */}
       {pendingSchemaRequest && editedProposal && (
-        <SystemDialog open blocking size="large" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
+        <SystemDialog className="schema-alignment-dialog" open blocking size="workbench" title={language === "zh" ? "Schema 与能力授权对齐" : "Schema and Capability Alignment"} description={language === "zh" ? `为应用 ${pendingSchemaRequest.app_id} 同时批准 ambient-context Schema 与最小运行时能力；确认后权限不可由编码 Agent 扩大。` : `Approve ambient-context schemas and least-privilege runtime capabilities for ${pendingSchemaRequest.app_id}; the coding agent cannot expand them afterward.`}>
           <div className="system-dialog-body flex flex-col gap-4">
+
+            {schemaVisualization && (
+              <section aria-label={language === "zh" ? "Schema 提案关系预览" : "Schema proposal relationship preview"}>
+                <div className="mb-2">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                    {language === "zh" ? "关系预览" : "Relationship preview"}
+                  </h4>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    {language === "zh"
+                      ? "修改实体、父类或能力范围时，图会同步更新；红色节点表示批准前必须关注的问题。"
+                      : "The graph updates as entities, parents, and capability scopes change; red nodes flag issues to review before approval."}
+                  </p>
+                </div>
+                <DeferredGraphExplorer
+                  ariaLabel={language === "zh" ? "Schema 提案关系图" : "Schema proposal graph"}
+                  className="h-[360px] min-h-[360px] overflow-hidden rounded-xl border border-white/10"
+                  compact
+                  dataset={schemaVisualization}
+                  language={language}
+                  loadingLabel={language === "zh" ? "正在加载 Schema 提案关系图" : "Schema proposal graph loading"}
+                  loadingMessage={language === "zh" ? "正在加载交互式关系图…" : "Loading interactive relationship graph…"}
+                />
+              </section>
+            )}
 
             {pendingSchemaRequest.plan && (
               <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-4">
@@ -1152,7 +1365,7 @@ function App() {
               </div>
             )}
 
-            {((pendingSchemaRequest.validation_errors?.length || 0) > 0 || schemaDependencyErrors.length > 0) && (
+            {schemaApprovalErrors.length > 0 && (
               <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4">
                 <h4 className="text-xs font-semibold text-red-300">
                   {language === "zh" ? "设计依赖尚未对齐" : "Design dependencies are not aligned"}
@@ -1163,10 +1376,27 @@ function App() {
                     : "Schema edits affect Graph grants. Fix the issues below, or ask the agent to realign the proposal before approval."}
                 </p>
                 <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-red-200">
-                  {[...new Set([
-                    ...(pendingSchemaRequest.validation_errors || []),
-                    ...schemaDependencyErrors,
-                  ])].map((error) => <li key={error}>{error}</li>)}
+                  {schemaApprovalErrors.map((error) => <li key={error}>{error}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {staleSchemaServerDiagnostics.length > 0 && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4">
+                <h4 className="text-xs font-semibold text-amber-300">
+                  {language === "zh"
+                    ? "上次提交的服务端诊断（已过期）"
+                    : "Server diagnostics from the previous submission (stale)"}
+                </h4>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  {language === "zh"
+                    ? "当前提案已编辑；这些诊断仅保留作参考，不会阻止批准。提交后端时仍会以当前内容重新执行权威校验。"
+                    : "The proposal has changed. These diagnostics remain for context but no longer block approval; the backend will validate the current submission authoritatively."}
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-amber-200">
+                  {staleSchemaServerDiagnostics.map((diagnostic) => (
+                    <li key={diagnostic}>{diagnostic}</li>
+                  ))}
                 </ul>
               </div>
             )}
@@ -1408,6 +1638,13 @@ function App() {
               />
             </div>
 
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
+
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
               <button
@@ -1440,8 +1677,8 @@ function App() {
                 )}
                 <button
                   onClick={() => handleResolveSchemaRequest(true)}
-                  disabled={schemaDependencyErrors.length > 0}
-                  title={schemaDependencyErrors.length > 0
+                  disabled={schemaApprovalErrors.length > 0}
+                  title={schemaApprovalErrors.length > 0
                     ? (language === "zh" ? "请先修复 Schema 与 Graph grant 的依赖" : "Fix Schema and Graph grant dependencies first")
                     : undefined}
                   className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-40 transition-all text-white text-xs shadow-md shadow-cyan-600/10"
@@ -1485,6 +1722,13 @@ function App() {
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-cyan-500 resize-none font-sans"
               />
             </div>
+
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
 
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
@@ -1586,6 +1830,13 @@ function App() {
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-red-500 resize-none font-sans"
               />
             </div>
+
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
 
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">

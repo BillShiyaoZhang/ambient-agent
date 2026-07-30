@@ -21,7 +21,7 @@ flowchart LR
 
 Docker Compose 新增 `widget-frame` 服务，在浏览器可访问的 8001 端口只提供固定 Shell、renderer 和编译器资源。它不接收 App ID、ticket、Controller 或用户数据，也不设置 Cookie。Backend 仍在 8000 端口签发 ticket 和处理 capability RPC。
 
-本地 Compose 固定公开 8001。HTTPS 或带路径前缀的反向代理部署应同时设置浏览器构建变量 `VITE_API_BASE_URL` 和 Backend 的 `WIDGET_FRAME_URL`，两者都必须是浏览器可访问的公网 URL；不能把 Docker service name 发送给浏览器。
+本地 Compose 固定公开 8001。HTTPS 或带路径前缀的反向代理部署应同时设置浏览器构建变量 `VITE_API_BASE_URL`（同源路径前缀或绝对 `http(s)` URL）和 Backend 的 `WIDGET_FRAME_URL`（完整的 frame 公网 URL）。两者解析后都必须能由浏览器访问；不能把 Docker service name 发送给浏览器。
 
 iframe 同时使用：
 

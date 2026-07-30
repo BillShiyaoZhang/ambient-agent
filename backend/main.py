@@ -2,10 +2,12 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from ipaddress import ip_address, ip_network
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 
@@ -15,18 +17,22 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Query,
     Request,
     Response,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
+from backend.agent.slash_commands import build_slash_command_catalog
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
+from backend.app_manifest import ManifestValidationError
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.capabilities.files import AppFileError, AppFileGateway
 from backend.capabilities.catalog import SystemCapabilityCatalog
@@ -51,6 +57,7 @@ from backend.client_widget_runtime import (
     ClientWidgetRuntimeTicketError,
     ClientWidgetRuntimeTicketStore,
     LockedClientWidgetRuntimeConnection,
+    allowed_client_runtime_origins,
     client_runtime_frame_url,
     client_runtime_origin,
 )
@@ -58,15 +65,40 @@ from backend.models import ChatMessage, ChatSession
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
 from backend.llm_service import set_default_llm_store
+from backend.graph_visualization import build_graph_explorer_snapshot, project_data_map
 from backend.coding_agent_acp import (
     CodingAgentStagedResult,
     cleanup_orphaned_coding_agent_staging,
     recover_interrupted_coding_agent_promotions,
 )
-from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
+from backend.run_service import (
+    ACTIVE_STATUSES,
+    ActiveSessionRunsError,
+    AgentRunState,
+    RunCoordinator,
+    RunStore,
+)
 from backend.run_live import RunLiveBroker
 from backend.session_title import is_placeholder_title, sanitize_title
-from backend.workspace_storage import WorkspaceStorage, migrate_old_data
+from backend.skill_catalog import build_skill_catalog
+from backend.skill_manager import SkillManager, SkillOntologyReferenceError
+from backend.skill_market import SkillMarketError
+from backend.skill_store import (
+    SkillAuthorizationDigestMismatch,
+    SkillAuthorizationRequiredError,
+    SkillNotInstalledError,
+    SkillPackageIntegrityError,
+    SkillRevisionConflict,
+    SkillStoreCorruptionError,
+    SkillStoreError,
+    SkillTrustedAuthorizationImmutableError,
+)
+from backend.workspace_storage import (
+    WorkspaceStorage,
+    WorkspaceStorageCorruptionError,
+    migrate_old_data,
+    validate_session_id,
+)
 from backend.widget_runtime import (
     WidgetRuntimeBinding,
     WidgetRuntimeGateway,
@@ -74,9 +106,15 @@ from backend.widget_runtime import (
 )
 from backend.widget_runtime_smoke import WidgetRuntimeSmokeTester
 
+logger = logging.getLogger(__name__)
+
 # Global registry of active WebSockets mapping session_id -> Set[WebSocket]
 active_websockets: dict[str, set[WebSocket]] = {}
 legacy_run_projection_websockets: set[WebSocket] = set()
+deleting_chat_sessions: set[str] = set()
+MAX_CHAT_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024
+MAX_CHAT_CONTENT_BYTES = 256 * 1024
+MAX_CHAT_SENDER_LENGTH = 64
 
 # Set of active session IDs currently running generation tasks
 active_running_sessions: set[str] = set()
@@ -95,6 +133,21 @@ async def _accept_websocket_safely(websocket: WebSocket) -> bool:
             return False
         raise
     return True
+
+
+async def _accept_trusted_browser_websocket(websocket: WebSocket) -> bool:
+    """Accept native clients and browser clients from the Frontend allowlist."""
+
+    if websocket.headers.get("origin"):
+        try:
+            client_runtime_origin(websocket.headers)
+        except ClientWidgetRuntimeTicketError:
+            try:
+                await websocket.close(code=CLIENT_WIDGET_RUNTIME_POLICY_VIOLATION)
+            except Exception:
+                pass
+            return False
+    return await _accept_websocket_safely(websocket)
 
 
 async def send_to_session(session_id: str, data: Any):
@@ -161,6 +214,7 @@ def _system_capability_catalog() -> SystemCapabilityCatalog:
     ]
     return SystemCapabilityCatalog.build(
         installed_capabilities=app_store.list_capabilities(),
+        installed_skills=skill_manager.discovery_metadata(),
         model_tools=model_tools,
         coding_agents=coding_agent_config_store.catalog(),
     )
@@ -169,6 +223,18 @@ def _system_capability_catalog() -> SystemCapabilityCatalog:
 from backend.graph_db import GraphDatabase, create_graph_database
 
 graph_db = create_graph_database(WORKSPACE_DIR)
+_configured_skill_market_dir = os.getenv("SKILL_MARKET_DIR", "").strip()
+_configured_skill_catalog = os.getenv("SKILL_CATALOG_CONFIG", "").strip()
+skill_manager = SkillManager(
+    WORKSPACE_DIR,
+    catalog=build_skill_catalog(
+        WORKSPACE_DIR,
+        local_market_dir=_configured_skill_market_dir or None,
+        config_path=_configured_skill_catalog or None,
+    ),
+    ontology_ids_factory=lambda: graph_db.list_schemas(),
+)
+app_store.add_provider(skill_manager)
 _closed_graph_db: GraphDatabase | None = None
 
 
@@ -246,6 +312,7 @@ durable_agent_workflow = DurableAgentWorkflow(
     live_event_sink=run_live_broker.publish,
     app_diagnostic_loader=app_data_source_gateway.recent_diagnostics,
     capability_catalog_factory=_system_capability_catalog,
+    skill_manager=skill_manager,
 )
 run_coordinator.register_internal_agent_executor(durable_agent_workflow)
 
@@ -441,6 +508,12 @@ async def lifespan(app: FastAPI):
         active_running_sessions.clear()
         active_running_sessions.update(_active_chat_session_ids())
         db_storage.cleanup_audit_logs()
+        # Validate persistent control-plane state before reporting startup as
+        # complete. Corrupt files must fail closed instead of being replaced
+        # with empty defaults by the first UI mutation.
+        llm_config_store.get_settings()
+        coding_agent_config_store.get_settings()
+        app_store.get_state()
         try:
             recover_interrupted_coding_agent_promotions(app_manager.apps_dir)
         except (OSError, ValueError):
@@ -492,14 +565,52 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
 
-# Allow CORS for local dev
+
+@app.exception_handler(WorkspaceStorageCorruptionError)
+async def workspace_storage_corruption_handler(
+    _request: Request,
+    _exc: WorkspaceStorageCorruptionError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "code": "workspace_state_corrupt",
+                "message": "Persisted workspace state could not be read safely; the original file was preserved",
+            }
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# Browser access is limited to the same explicit Frontend allowlist used by
+# client Widget Runtime tickets. Native same-machine clients do not use CORS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(allowed_client_runtime_origins()),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_store_control_plane_responses(request: Request, call_next):
+    """Prevent caching even when request validation short-circuits an endpoint."""
+
+    response = await call_next(request)
+    path = request.url.path
+    if (
+        path == "/api/skill-market"
+        or path.startswith("/api/skill-market/")
+        or path == "/api/skills"
+        or path.startswith("/api/skills/")
+        or path == "/api/chat/commands"
+        or path == "/api/app-store"
+        or path.startswith("/api/app-store/")
+    ):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/health")
@@ -507,22 +618,157 @@ async def health_check():
     return {"status": "ok", "message": "Ambient Agent is running"}
 
 
+def _require_trusted_host(
+    request: Request,
+    *,
+    denied_code: str,
+    denied_message: str,
+) -> None:
+    """Reject sensitive reads unless they come from the trusted local Host.
+
+    Every request must originate from loopback or an explicitly configured
+    peer network. Browser requests must additionally use the frontend Origin
+    allowlist, so a remote client cannot gain access by spoofing Origin.
+    """
+
+    def denied(cause: Exception | None = None) -> None:
+        error = HTTPException(
+            status_code=403,
+            detail={
+                "code": denied_code,
+                "message": denied_message,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+        if cause is None:
+            raise error
+        raise error from cause
+
+    client_host = request.client.host if request.client is not None else ""
+    try:
+        client_address = ip_address(client_host)
+    except ValueError:
+        denied()
+
+    peer_is_trusted = client_address.is_loopback
+    if not peer_is_trusted and client_address.version == 6 and client_address.ipv4_mapped:
+        peer_is_trusted = client_address.ipv4_mapped.is_loopback
+    if not peer_is_trusted:
+        for value in os.getenv("AMBIENT_TRUSTED_HOST_PEERS", "").split(","):
+            value = value.strip()
+            if not value:
+                continue
+            try:
+                network = ip_network(value, strict=False)
+            except ValueError:
+                continue
+            if client_address.version == network.version and client_address in network:
+                peer_is_trusted = True
+                break
+    if not peer_is_trusted:
+        denied()
+
+    if request.headers.get("origin"):
+        try:
+            client_runtime_origin(request.headers)
+        except ClientWidgetRuntimeTicketError as exc:
+            denied(exc)
+
+
 @app.get("/api/audit-logs")
-async def get_audit_logs(session: WorkspaceStorage = Depends(get_db)):
+def get_audit_logs(
+    request: Request,
+    response: Response,
+    session: WorkspaceStorage = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="audit_log_origin_denied",
+        denied_message="Raw Audit Logs are only available to the trusted Host",
+    )
     return session.get_audit_logs()
+
+
+@app.get("/api/graph/explorer")
+def get_graph_explorer(
+    request: Request,
+    response: Response,
+    record_limit: int = Query(default=200, ge=1, le=500),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="graph_visualization_origin_denied",
+        denied_message="Graph visualization is only available to the trusted Host",
+    )
+    try:
+        return build_graph_explorer_snapshot(graph_db, record_limit=record_limit)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "graph_explorer_unavailable",
+                "message": "Graph explorer snapshot is temporarily unavailable",
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+
+
+@app.get("/api/data-map")
+def get_data_map(
+    request: Request,
+    response: Response,
+    session: WorkspaceStorage = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="graph_visualization_origin_denied",
+        denied_message="Graph visualization is only available to the trusted Host",
+    )
+    try:
+        return project_data_map(session.get_audit_logs(), app_manager.list_apps())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "data_map_unavailable",
+                "message": "Privacy data map is temporarily unavailable",
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
 
 
 # --- Multi-Session REST endpoints ---
 
 
 class SessionCreate(BaseModel):
-    id: str
-    title: str
-    language: str = "zh"
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    language: str = Field(default="zh", min_length=2, max_length=16)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        return validate_session_id(value)
 
 
 class SessionUpdateLanguage(BaseModel):
-    language: str
+    language: str = Field(min_length=2, max_length=16)
+
+
+def _require_valid_session_id(value: str) -> str:
+    try:
+        return validate_session_id(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_session_id",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 class ProviderCreateRequest(BaseModel):
@@ -584,6 +830,7 @@ async def create_session(data: SessionCreate, session: WorkspaceStorage = Depend
 async def update_session_language(
     session_id: str, data: SessionUpdateLanguage, session: WorkspaceStorage = Depends(get_db)
 ):
+    session_id = _require_valid_session_id(session_id)
     db_sess = session.get(ChatSession, session_id)
     if not db_sess:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -595,6 +842,7 @@ async def update_session_language(
 
 @app.put("/api/sessions/{session_id}/model")
 async def update_session_model(session_id: str, data: ModelSelection, session: WorkspaceStorage = Depends(get_db)):
+    session_id = _require_valid_session_id(session_id)
     try:
         llm_config_store.resolve(data)
     except LLMConfigError as exc:
@@ -612,6 +860,7 @@ async def update_session_model(session_id: str, data: ModelSelection, session: W
 
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, session: WorkspaceStorage = Depends(get_db)):
+    session_id = _require_valid_session_id(session_id)
     return session.get_messages(session_id)
 
 
@@ -803,10 +1052,79 @@ async def update_llm_settings(data: LLMSettingsUpdateRequest):
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, session: WorkspaceStorage = Depends(get_db)):
-    success = session.delete_session(session_id)
-    if success:
-        return {"status": "ok"}
-    return {"status": "error", "message": "Session not found"}
+    session_id = _require_valid_session_id(session_id)
+    try:
+        run_ids = run_store.session_runs_for_purge(session_id)
+    except ActiveSessionRunsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "session_has_active_runs",
+                "message": "Cancel or resolve active tasks before deleting this conversation",
+                "run_ids": exc.run_ids,
+            },
+        ) from exc
+
+    deleting_chat_sessions.add(session_id)
+    try:
+        sockets = list(active_websockets.pop(session_id, set()))
+        for websocket in sockets:
+            legacy_run_projection_websockets.discard(websocket)
+            try:
+                await websocket.close(code=1000)
+            except Exception:
+                pass
+        active_running_sessions.discard(session_id)
+
+        try:
+            removed_run_ids = run_store.purge_session(session_id)
+        except ActiveSessionRunsError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "session_has_active_runs",
+                    "message": "A task started while the conversation was being deleted; cancel it and retry",
+                    "run_ids": exc.run_ids,
+                },
+            ) from exc
+        try:
+            removed_audit_logs = session.delete_audit_logs_for_session(session_id, run_ids=removed_run_ids)
+        except OSError as exc:
+            logger.exception("Session Run purge completed but Audit Log cleanup failed")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "session_delete_incomplete",
+                    "message": "Conversation deletion is incomplete; retry to remove its Audit Logs and session file",
+                    "removed": {"session": False, "runs": len(removed_run_ids), "audit_logs": 0},
+                },
+            ) from exc
+        try:
+            removed_session = session.delete_session(session_id)
+        except OSError as exc:
+            logger.exception("Session Run and Audit Log purge completed but session unlink failed")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "session_delete_incomplete",
+                    "message": "Conversation deletion is incomplete; retry to remove its session file",
+                    "removed": {
+                        "session": False,
+                        "runs": len(removed_run_ids),
+                        "audit_logs": removed_audit_logs,
+                    },
+                },
+            ) from exc
+        return {
+            "status": "ok",
+            "removed": {
+                "session": removed_session,
+                "runs": len(removed_run_ids),
+                "audit_logs": removed_audit_logs,
+            },
+        }
+    finally:
+        deleting_chat_sessions.discard(session_id)
 
 
 # --- Canvas Config REST endpoints ---
@@ -841,6 +1159,35 @@ class AppStoreLayoutUpdate(BaseModel):
     folders: list[dict[str, Any]]
 
 
+class SkillInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    market_id: str
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
+class SkillCatalogSourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    expected_revision: int = Field(ge=0)
+
+
+class SkillEnabledUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
+class SkillAuthorizationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activation_policy: Literal["none", "explicit_only", "implicit"]
+    expected_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_revision: int = Field(ge=0)
+
+
 class RunCreate(BaseModel):
     catalog_id: str
     action_id: str | None = None
@@ -857,6 +1204,31 @@ class RunInteractionResolve(BaseModel):
 class RunEffectReconcile(BaseModel):
     resolution: str
     note: str | None = None
+
+
+def _public_run_payload(value: Any) -> Any:
+    """Copy a Run payload while removing private, replay-only Skill bodies."""
+
+    if isinstance(value, list):
+        return [_public_run_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "active_skills" and isinstance(item, list):
+            result[key] = [
+                {
+                    snapshot_key: _public_run_payload(snapshot_value)
+                    for snapshot_key, snapshot_value in snapshot.items()
+                    if snapshot_key not in {"instructions", "allowed_tools"}
+                }
+                if isinstance(snapshot, dict)
+                else None
+                for snapshot in item
+            ]
+            continue
+        result[key] = _public_run_payload(item)
+    return result
 
 
 @app.post("/api/runs", status_code=202)
@@ -882,14 +1254,16 @@ async def create_run(data: RunCreate):
                 str(source["manifest_revision"]) if source.get("manifest_revision") is not None else None,
                 str(source["grants_digest"]),
             )
-        return run_coordinator.submit(
-            data.catalog_id,
-            action_id,
-            {} if data.input is None else data.input,
-            source_type=str(source.get("type", "user")),
-            source_id=str(source["id"]) if source.get("id") is not None else None,
-            idempotency_key=data.idempotency_key,
-            parent_run_id=data.parent_run_id,
+        return _public_run_payload(
+            run_coordinator.submit(
+                data.catalog_id,
+                action_id,
+                {} if data.input is None else data.input,
+                source_type=str(source.get("type", "user")),
+                source_id=str(source["id"]) if source.get("id") is not None else None,
+                idempotency_key=data.idempotency_key,
+                parent_run_id=data.parent_run_id,
+            )
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -925,9 +1299,11 @@ async def list_runs(
         summary_only=summary_only,
     )
     if not include_details:
-        return runs
+        return _public_run_payload(runs)
     return [
-        detailed for run in runs if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
+        _public_run_payload(detailed)
+        for run in runs
+        if (detailed := run_store.get_run(str(run["id"]), include_events=True)) is not None
     ]
 
 
@@ -936,13 +1312,13 @@ async def get_run(run_id: str):
     run = run_store.get_run(run_id, include_events=True)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return _public_run_payload(run)
 
 
 @app.post("/api/runs/{run_id}/cancel")
 async def cancel_run(run_id: str):
     try:
-        return run_coordinator.cancel(run_id)
+        return _public_run_payload(run_coordinator.cancel(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     except ValueError as exc:
@@ -952,7 +1328,7 @@ async def cancel_run(run_id: str):
 @app.post("/api/runs/{run_id}/reconcile")
 async def reconcile_run_effect(run_id: str, data: RunEffectReconcile):
     try:
-        return run_store.reconcile_effect(run_id, data.resolution, note=data.note)
+        return _public_run_payload(run_store.reconcile_effect(run_id, data.resolution, note=data.note))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     except ValueError as exc:
@@ -962,7 +1338,7 @@ async def reconcile_run_effect(run_id: str, data: RunEffectReconcile):
 @app.post("/api/runs/{run_id}/retry", status_code=202)
 async def retry_run(run_id: str):
     try:
-        return run_coordinator.retry(run_id)
+        return _public_run_payload(run_coordinator.retry(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     except ValueError as exc:
@@ -976,7 +1352,7 @@ async def resolve_run_interaction(interaction_id: str, data: RunInteractionResol
         if interaction is None:
             raise KeyError(interaction_id)
         response = data.response if isinstance(data.response, dict) else {"approved": bool(data.response)}
-        return run_coordinator.resolve_interaction(interaction_id, response)
+        return _public_run_payload(run_coordinator.resolve_interaction(interaction_id, response))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Interaction not found") from exc
     except ValueError as exc:
@@ -999,7 +1375,7 @@ async def stop_runtime(runtime_id: str):
 
 @app.websocket("/ws/runs")
 async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_epoch: str | None = None):
-    if not await _accept_websocket_safely(websocket):
+    if not await _accept_trusted_browser_websocket(websocket):
         return
     sequence = max(0, after_sequence)
     stream = run_store.stream_info()
@@ -1038,7 +1414,7 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_e
             events = run_store.events_after(sequence)
             for event in events:
                 sequence = max(sequence, int(event["sequence"]))
-                await websocket.send_json({"type": "run_event", "event": event})
+                await websocket.send_json({"type": "run_event", "event": _public_run_payload(event)})
             idle_ticks += 1
             if idle_ticks >= 40:
                 await websocket.send_json(
@@ -1054,7 +1430,15 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_e
 async def websocket_run_live(websocket: WebSocket, session_id: str):
     """Session-scoped, non-replayable progress lane for active Runs."""
 
-    if not await _accept_websocket_safely(websocket):
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError:
+        try:
+            await websocket.close(code=CLIENT_WIDGET_RUNTIME_PROTOCOL_ERROR)
+        except Exception:
+            pass
+        return
+    if not await _accept_trusted_browser_websocket(websocket):
         return
     queue = run_live_broker.subscribe(session_id)
     try:
@@ -1071,22 +1455,223 @@ async def websocket_run_live(websocket: WebSocket, session_id: str):
         run_live_broker.unsubscribe(session_id, queue)
 
 
+def _require_app_store_host(request: Request, response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="app_store_origin_denied",
+        denied_message="App Store control-plane state is only available to the trusted Host",
+    )
+
+
 @app.get("/api/app-store")
-async def get_app_store():
+async def get_app_store(request: Request, response: Response):
+    _require_app_store_host(request, response)
     return app_store.get_state()
 
 
+def _require_skill_market_host(request: Request, response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    _require_trusted_host(
+        request,
+        denied_code="skill_market_origin_denied",
+        denied_message="Skill installation state is only available to the trusted Host",
+    )
+
+
+def _raise_skill_api_error(exc: Exception) -> None:
+    if isinstance(exc, SkillRevisionConflict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_revision_conflict",
+                "message": str(exc),
+                "expected_revision": exc.expected,
+                "actual_revision": exc.actual,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillAuthorizationDigestMismatch):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_authorization_digest_mismatch",
+                "message": str(exc),
+                "expected_digest": exc.expected_digest,
+                "actual_digest": exc.actual_digest,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillAuthorizationRequiredError):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_authorization_required",
+                "message": str(exc),
+                "catalog_id": exc.catalog_id,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillTrustedAuthorizationImmutableError):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_trusted_authorization_immutable",
+                "message": str(exc),
+                "catalog_id": exc.catalog_id,
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, SkillNotInstalledError):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "skill_not_installed", "message": "Skill is not installed"},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, KeyError):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "skill_market_item_not_found", "message": "Skill market item was not found"},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, (SkillOntologyReferenceError, SkillMarketError, ValueError)):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_skill_package", "message": str(exc)},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, (SkillStoreCorruptionError, OSError)):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "skill_registry_unavailable", "message": "Skill registry is unavailable"},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    if isinstance(exc, (SkillPackageIntegrityError, SkillStoreError)):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "skill_installation_conflict", "message": str(exc)},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    raise exc
+
+
+@app.get("/api/skill-market")
+def get_skill_market(request: Request, response: Response):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.list_market()
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.patch("/api/skill-market/sources/{source_id}")
+def set_skill_catalog_source_enabled(
+    source_id: str,
+    data: SkillCatalogSourceUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.set_source_enabled(
+            source_id,
+            data.enabled,
+            expected_revision=data.expected_revision,
+        )
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.post("/api/skills/install")
+def install_skill(data: SkillInstallRequest, request: Request, response: Response):
+    _require_skill_market_host(request, response)
+    try:
+        entry = skill_manager.get_market_entry(data.market_id)
+        if app_store.get_capability(entry.catalog_id) is not None:
+            raise SkillStoreError(f"Catalog id '{entry.catalog_id}' is already used by an executable capability")
+        return skill_manager.install(data.market_id, expected_revision=data.expected_revision)
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.patch("/api/skills/{catalog_id}")
+def set_skill_enabled(
+    catalog_id: str,
+    data: SkillEnabledUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.set_enabled(
+            catalog_id,
+            data.enabled,
+            expected_revision=data.expected_revision,
+        )
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.patch("/api/skills/{catalog_id}/authorization")
+def set_skill_authorization(
+    catalog_id: str,
+    data: SkillAuthorizationUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.set_authorization(
+            catalog_id,
+            data.activation_policy,
+            expected_digest=data.expected_digest,
+            expected_revision=data.expected_revision,
+        )
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
+@app.delete("/api/skills/{catalog_id}")
+def uninstall_skill(
+    catalog_id: str,
+    request: Request,
+    response: Response,
+    expected_revision: int | None = Query(default=None, ge=0),
+):
+    _require_skill_market_host(request, response)
+    try:
+        revision = skill_manager.uninstall_with_revision(
+            catalog_id,
+            expected_revision=expected_revision,
+        )
+        if revision is None:
+            raise SkillNotInstalledError(catalog_id)
+        return {"status": "ok", "catalog_id": catalog_id, "revision": revision}
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
 @app.put("/api/app-store/layout")
-async def update_app_store_layout(data: AppStoreLayoutUpdate):
+async def update_app_store_layout(
+    data: AppStoreLayoutUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_app_store_host(request, response)
     try:
         return app_store.save_layout(data.revision, data.root, data.folders)
     except LayoutConflictError as exc:
         raise HTTPException(
             status_code=409,
             detail={"message": "App Store layout changed in another client", "state": exc.current},
+            headers={"Cache-Control": "no-store"},
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+            headers={"Cache-Control": "no-store"},
+        ) from exc
 
 
 @app.put("/api/capabilities/{catalog_id}")
@@ -1094,6 +1679,11 @@ async def register_capability(catalog_id: str, data: CapabilityManifest):
     expected = app_store.catalog_id(data)
     if catalog_id != expected:
         raise HTTPException(status_code=400, detail=f"catalog id must be {expected}")
+    if skill_manager.store.get(catalog_id, verify_package=False) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Catalog id is already used by an installed Instruction Skill",
+        )
     return app_store.register_capability(data)
 
 
@@ -1123,6 +1713,16 @@ async def unregister_capability(catalog_id: str):
 @app.get("/api/apps")
 async def list_apps():
     return app_manager.list_apps()
+
+
+@app.get("/api/chat/commands")
+async def list_chat_commands():
+    """Return the complete command grammar and current dynamic ID choices."""
+
+    return build_slash_command_catalog(
+        apps=app_manager.list_apps(),
+        skills=skill_manager.list_catalog_items(),
+    )
 
 
 def _client_runtime_origin(headers: Any) -> str:
@@ -1199,6 +1799,33 @@ async def get_app_files(app_id: str):
     if files:
         return {key: value for key, value in files.items() if key != "js"}
     raise HTTPException(status_code=404, detail="App not found")
+
+
+class AppPropertiesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    description: str | None = None
+    app_version: str | None = None
+    intents: list[str] | None = None
+
+
+@app.patch("/api/apps/{app_id}")
+async def update_app_properties(app_id: str, data: AppPropertiesUpdate):
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="At least one App property is required")
+    try:
+        app_manager.app_path(app_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        updated = app_manager.update_app_properties(app_id, **changes)
+    except ManifestValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="App not found")
+    return updated
 
 
 class AppDataSourceRequest(BaseModel):
@@ -1320,11 +1947,27 @@ async def delete_app(app_id: str):
 
 
 class GraphMutateRequest(BaseModel):
-    actions: list[dict[str, Any]]
-    session_id: str = "graph-api"
-    idempotency_key: str | None = None
-    manifest_revision: str | None = None
-    grants_digest: str | None = None
+    actions: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+    session_id: str = Field(default="graph-api", min_length=1, max_length=200)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+    manifest_revision: str | None = Field(default=None, min_length=1, max_length=256)
+    grants_digest: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("actions")
+    @classmethod
+    def validate_actions_size(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (OverflowError, RecursionError, TypeError, ValueError) as exc:
+            raise ValueError("Graph mutation actions must be finite JSON values") from exc
+        if len(encoded) > 1024 * 1024:
+            raise ValueError("Graph mutation actions exceed the 1 MiB limit")
+        return value
 
 
 async def _send_graph_subscription_payload(target: Any, payload: dict[str, Any]) -> None:
@@ -1423,7 +2066,10 @@ async def _run_approved_graph_mutation(
                     expected_run_version=current["version"],
                 )
         if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError(f"Durable graph Run {run['id']} did not finish in 30s")
+            # The durable Run continues independently of this HTTP/RPC wait.
+            # Preserve its identity so callers poll instead of retrying an
+            # unkeyed mutation that may still commit.
+            return {**current, "_wait_timed_out": True}
         await asyncio.sleep(0.01)
 
 
@@ -1436,13 +2082,48 @@ async def mutate_graph(data: GraphMutateRequest):
             idempotency_key=data.idempotency_key,
             title="Graph mutation",
         )
+        if completed.get("_wait_timed_out"):
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "pending",
+                    "run_id": completed["id"],
+                    "poll_url": f"/api/runs/{completed['id']}",
+                    "message": "Graph mutation is still running; poll the durable Run for its terminal result",
+                },
+                headers={"Cache-Control": "no-store"},
+            )
         if completed["status"] != "succeeded":
             error = completed.get("error") or {}
-            return {
-                "status": "error",
-                "run_id": completed["id"],
-                "message": error.get("message", completed["status"]),
-            }
+            error_code = str(error.get("code") or "")
+            if completed["status"] == "failed" and error_code in {"ValueError", "invalid_graph_mutation"}:
+                state = completed.get("state") if isinstance(completed.get("state"), dict) else {}
+                if state.get("phase") == "graph_preflight":
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "invalid_graph_mutation",
+                            "message": str(error.get("message") or "Graph mutation is invalid"),
+                            "run_id": completed["id"],
+                        },
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "graph_mutation_conflict",
+                        "message": str(error.get("message") or "Graph changed before the mutation committed"),
+                        "run_id": completed["id"],
+                    },
+                )
+            status_code = 409 if completed["status"] == "cancelled" else 503
+            raise HTTPException(
+                status_code=status_code,
+                detail={
+                    "code": f"graph_mutation_{completed['status']}",
+                    "message": "Graph mutation did not complete",
+                    "run_id": completed["id"],
+                },
+            )
         mutation = completed.get("result") or {}
         # Broadcast changes to all websocket subscribers
         from backend.graph_subscription import subscription_manager
@@ -1458,8 +2139,22 @@ async def mutate_graph(data: GraphMutateRequest):
             "ticket_id": mutation["ticket_id"],
             "actions": mutation["actions"],
         }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_graph_mutation", "message": str(exc)},
+        ) from exc
+    except Exception as exc:
+        logger.exception("Graph mutation endpoint failed")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "graph_mutation_unavailable",
+                "message": "Graph mutation is temporarily unavailable",
+            },
+        ) from exc
 
 
 @app.post("/api/apps/{app_id}/graph/mutate")
@@ -1552,6 +2247,12 @@ async def _handle_widget_runtime_rpc(
             idempotency_key=(f"widget:{binding.app_id}:{binding.session_id}:{runtime_request_id}"),
             title=f"{binding.app_id} Graph mutation",
         )
+        if completed.get("_wait_timed_out"):
+            return {
+                "status": "pending",
+                "run_id": completed["id"],
+                "message": "Graph mutation is still running",
+            }
         if completed["status"] != "succeeded":
             error = completed.get("error") or {}
             raise RuntimeError(error.get("message", completed["status"]))
@@ -1773,7 +2474,7 @@ async def websocket_widget_runtime(
     locale: str = "en-US",
     reduced_motion: bool = False,
 ):
-    if not await _accept_websocket_safely(websocket):
+    if not await _accept_trusted_browser_websocket(websocket):
         return
 
     binding: WidgetRuntimeBinding | None = None
@@ -1874,11 +2575,37 @@ async def websocket_chat(
     projection: str = "legacy",
     session: WorkspaceStorage = Depends(get_db),
 ):
-    if not await _accept_websocket_safely(websocket):
-        return
-
     if not session_id:
         session_id = "default-session"
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError:
+        try:
+            await websocket.close(code=CLIENT_WIDGET_RUNTIME_PROTOCOL_ERROR)
+        except Exception:
+            pass
+        return
+    if session_id in deleting_chat_sessions or session.get(ChatSession, session_id) is None:
+        # A WebSocket must never be able to resurrect a deleted conversation.
+        # Reject before accept so stale clients do not register in the active
+        # socket map during the DELETE await window.
+        try:
+            await websocket.close(code=4404)
+        except Exception:
+            pass
+        return
+    if not await _accept_trusted_browser_websocket(websocket):
+        return
+
+    # Recheck after the handshake await: DELETE may have started after the
+    # pre-accept check, and its socket snapshot must remain complete.
+    db_session_obj = session.get(ChatSession, session_id)
+    if session_id in deleting_chat_sessions or db_session_obj is None:
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
+        return
 
     # Register websocket session mapping
     if session_id not in active_websockets:
@@ -1886,13 +2613,6 @@ async def websocket_chat(
     active_websockets[session_id].add(websocket)
     if projection != "commands_only":
         legacy_run_projection_websockets.add(websocket)
-
-    # Ensure session exists in DB
-    db_session_obj = session.get(ChatSession, session_id)
-    if not db_session_obj:
-        db_session_obj = ChatSession(id=session_id, title="Active Chat")
-        session.add(db_session_obj)
-        session.commit()
 
     async def update_session_title(content: str) -> None:
         """Name a new session deterministically without an out-of-band model task."""
@@ -1908,11 +2628,32 @@ async def websocket_chat(
         session.commit()
         await broadcast_global({"type": "session_title_updated", "session_id": session_id, "title": title})
 
-    async def submit_user_message(content_str: str, sender_str: str) -> dict[str, Any] | None:
+    async def submit_user_message(content_str: Any, sender_str: Any) -> dict[str, Any] | None:
         """Persist the command and enqueue the scheduler-owned workflow."""
 
+        if not isinstance(content_str, str):
+            await websocket.send_json(
+                {"type": "error", "code": "invalid_message_content", "message": "Message content must be text"}
+            )
+            return None
         if not content_str.strip():
-            await send_to_session(session_id, {"type": "error", "message": "Message content must not be empty"})
+            await websocket.send_json(
+                {"type": "error", "code": "invalid_message_content", "message": "Message content must not be empty"}
+            )
+            return None
+        if len(content_str.encode("utf-8")) > MAX_CHAT_CONTENT_BYTES:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "message_too_large",
+                    "message": f"Message content exceeds {MAX_CHAT_CONTENT_BYTES // 1024} KiB",
+                }
+            )
+            return None
+        if not isinstance(sender_str, str) or not sender_str or len(sender_str) > MAX_CHAT_SENDER_LENGTH:
+            await websocket.send_json(
+                {"type": "error", "code": "invalid_message_sender", "message": "Message sender is invalid"}
+            )
             return None
 
         user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
@@ -1978,6 +2719,7 @@ async def websocket_chat(
             data={
                 "workspace_dir": session.workspace_dir,
                 "user_message_id": user_msg.id,
+                "skill_selection_state": "pending",
             },
         )
         run = run_coordinator.submit_internal_agent(
@@ -2181,8 +2923,47 @@ async def websocket_chat(
     try:
         while True:
             # Receive message from user client
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message must be valid JSON"}
+                )
+                continue
+            if not isinstance(data, dict):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message must be a JSON object"}
+                )
+                continue
+            try:
+                encoded_size = len(
+                    json.dumps(
+                        data,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+            except (OverflowError, RecursionError, TypeError, ValueError):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message must contain finite JSON values"}
+                )
+                continue
+            if encoded_size > MAX_CHAT_WEBSOCKET_MESSAGE_BYTES:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "message_too_large",
+                        "message": f"Message envelope exceeds {MAX_CHAT_WEBSOCKET_MESSAGE_BYTES // (1024 * 1024)} MiB",
+                    }
+                )
+                continue
             msg_type = data.get("type")
+            if msg_type is not None and not isinstance(msg_type, str):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message type must be text"}
+                )
+                continue
 
             if msg_type == "backend_permission_response":
                 request_id = data.get("request_id")
@@ -2243,6 +3024,8 @@ async def websocket_chat(
                 from backend.graph_subscription import subscription_manager
 
                 try:
+                    if not isinstance(query, dict):
+                        raise ValueError("Graph subscription query must be a JSON object")
                     if not data.get("manifest_revision") or not data.get("grants_digest"):
                         raise CapabilityDenied(
                             "capability_snapshot_required",
@@ -2271,6 +3054,17 @@ async def websocket_chat(
                 except CapabilityDenied as exc:
                     await websocket.send_json(
                         {"type": "graph_subscription_error", "subscription_id": sub_id, "error": exc.to_dict()}
+                    )
+                except ValueError as exc:
+                    await websocket.send_json(
+                        {
+                            "type": "graph_subscription_error",
+                            "subscription_id": sub_id,
+                            "error": {
+                                "code": "graph_subscription_invalid",
+                                "message": str(exc),
+                            },
+                        }
                     )
             elif msg_type == "graph_unsubscribe":
                 sub_id = data.get("subscription_id")
@@ -2340,10 +3134,18 @@ async def websocket_chat(
                             "pinned": True,
                         },
                     )
-            else:
+            elif msg_type is None:
                 sender = data.get("sender", "user")
                 content = data.get("content", "")
                 await submit_user_message(content, sender)
+            else:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "unsupported_message_type",
+                        "message": f"Unsupported message type: {msg_type}",
+                    }
+                )
 
     except WebSocketDisconnect:
         pass

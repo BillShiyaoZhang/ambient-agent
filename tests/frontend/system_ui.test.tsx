@@ -1,7 +1,14 @@
 import React from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { SystemDialog, SystemIconButton, SystemPopover } from "../../frontend/src/components/system/SystemUI";
+import {
+  SystemDialog,
+  SystemDrawer,
+  SystemIconButton,
+  SystemPopover,
+} from "../../frontend/src/components/system/SystemUI";
 
 describe("System UI primitives", () => {
   it("gives icon-only controls a visible tooltip contract", () => {
@@ -9,6 +16,13 @@ describe("System UI primitives", () => {
     const button = screen.getByRole("button", { name: "Open settings" });
     expect(button.getAttribute("data-tooltip")).toBe("Open settings");
     expect(button.hasAttribute("aria-pressed")).toBe(false);
+  });
+
+  it("uses a light tooltip surface in light mode", () => {
+    const stylesheet = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+    expect(stylesheet).toMatch(
+      /:root\[data-theme="light"\]\s*\{[\s\S]*?--surface-tooltip:\s*rgba\(252,252,254,.98\)/,
+    );
   });
 
   it("keeps only one system popover open across independent owners", () => {
@@ -42,5 +56,22 @@ describe("System UI primitives", () => {
     render(<SystemDialog open title="Details" onClose={close}>Details</SystemDialog>);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("unmounts a closed drawer so hidden interactive content cannot leak into navigation", () => {
+    const view = render(
+      <SystemDrawer open label="Tasks" onClose={() => {}}>
+        <button>Hidden graph node</button>
+      </SystemDrawer>,
+    );
+    expect(screen.getByRole("button", { name: "Hidden graph node" })).toBeDefined();
+
+    view.rerender(
+      <SystemDrawer open={false} label="Tasks" onClose={() => {}}>
+        <button>Hidden graph node</button>
+      </SystemDrawer>,
+    );
+    expect(screen.queryByRole("button", { name: "Hidden graph node" })).toBeNull();
+    expect(document.body.textContent).not.toContain("Hidden graph node");
   });
 });

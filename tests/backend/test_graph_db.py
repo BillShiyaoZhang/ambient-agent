@@ -1,11 +1,12 @@
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import backend.main as main_module
-from backend.graph_db import GraphDatabase
+from backend.graph_db import GraphDatabase, GraphMigrationError
 
 
 def test_graph_db_crud(tmp_path):
@@ -83,6 +84,123 @@ def test_sqlite_graph_adapter_exposes_idempotent_close(tmp_path):
 
     assert db.close() is None
     assert db.close() is None
+
+
+def test_invalid_legacy_graph_fails_startup_without_hiding_source(tmp_path):
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text('{"nodes":[', encoding="utf-8")
+
+    with pytest.raises(GraphMigrationError, match="legacy JSON graph"):
+        GraphDatabase(str(tmp_path))
+
+    assert graph_file.read_text(encoding="utf-8") == '{"nodes":['
+    assert not (tmp_path / "graph.json.backup").exists()
+
+
+def test_legacy_graph_migration_rejects_symlink_source(tmp_path):
+    outside = tmp_path / "outside-graph.json"
+    outside.write_text(json.dumps({"nodes": {}, "edges": []}), encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    try:
+        (workspace / "graph.json").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not available")
+
+    with pytest.raises(GraphMigrationError, match="regular file"):
+        GraphDatabase(str(workspace))
+
+    assert (workspace / "graph.json").is_symlink()
+    assert json.loads(outside.read_text(encoding="utf-8")) == {"nodes": {}, "edges": []}
+
+
+def test_legacy_graph_migration_preserves_current_records_and_older_backup(tmp_path):
+    database = GraphDatabase(str(tmp_path))
+    database.create_node("shared", "Task", {"title": "Current", "status": "pending"})
+    (tmp_path / "graph.json.backup").write_text("older backup", encoding="utf-8")
+    (tmp_path / "graph.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "shared": {
+                        "type": "Task",
+                        "properties": {"title": "Legacy", "status": "completed"},
+                    },
+                    "legacy-only": {
+                        "type": "Task",
+                        "properties": {"title": "Imported", "status": "pending"},
+                    },
+                },
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = GraphDatabase(str(tmp_path))
+
+    assert migrated.get_node("shared")["properties"]["title"] == "Current"
+    assert migrated.get_node("legacy-only")["properties"]["title"] == "Imported"
+    assert (tmp_path / "graph.json.backup").read_text(encoding="utf-8") == "older backup"
+    assert (tmp_path / "graph.json.backup-1").is_file()
+
+
+def test_sqlite_graph_adapter_lists_all_edges_in_stable_order(tmp_path):
+    db = GraphDatabase(str(tmp_path))
+    db.create_node("alpha", "Task", {"title": "Alpha"})
+    db.create_node("beta", "Task", {"title": "Beta"})
+    db.create_node("gamma", "Task", {"title": "Gamma"})
+    db.create_edge("beta", "gamma", "z-edge", {"order": 3})
+    db.create_edge("alpha", "beta", "z-edge", {"order": 2})
+    db.create_edge("alpha", "beta", "a-edge", {"order": 1})
+
+    edges = db.list_edges()
+
+    assert [(edge["from_id"], edge["to_id"], edge["type"], edge["properties"]) for edge in edges] == [
+        ("alpha", "beta", "a-edge", {"order": 1}),
+        ("alpha", "beta", "z-edge", {"order": 2}),
+        ("beta", "gamma", "z-edge", {"order": 3}),
+    ]
+
+
+def test_neo4j_graph_adapter_lists_all_edges_with_one_stable_query():
+    from backend.neo4j_graph_db import Neo4jGraphDatabase
+
+    class FakeTransaction:
+        query = ""
+        params = {}
+
+        def run(self, query, **params):
+            self.query = query
+            self.params = params
+            return [
+                {
+                    "from_id": "alpha",
+                    "to_id": "beta",
+                    "type": "a-edge",
+                    "properties_json": '{"order":1}',
+                },
+                {
+                    "from_id": "beta",
+                    "to_id": "gamma",
+                    "type": "z-edge",
+                    "properties_json": '{"order":2}',
+                },
+            ]
+
+    transaction = FakeTransaction()
+    db = Neo4jGraphDatabase.__new__(Neo4jGraphDatabase)
+    db._read = lambda callback: callback(transaction)
+
+    edges = db.list_edges()
+
+    assert [(edge["from_id"], edge["to_id"], edge["type"], edge["properties"]) for edge in edges] == [
+        ("alpha", "beta", "a-edge", {"order": 1}),
+        ("beta", "gamma", "z-edge", {"order": 2}),
+    ]
+    assert "MATCH (a:ContextRecord)-[r:GRAPH_EDGE]->(b:ContextRecord)" in transaction.query
+    assert "ORDER BY from_id, to_id, type" in transaction.query
+    assert transaction.params == {}
 
 
 @pytest.mark.asyncio

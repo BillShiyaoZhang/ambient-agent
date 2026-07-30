@@ -10,6 +10,7 @@ import pytest
 
 from backend.app_store import CapabilityAction, CapabilityInvocation
 from backend.run_service import (
+    ActiveSessionRunsError,
     AgentRunState,
     Cancelled,
     Continue,
@@ -56,6 +57,52 @@ def test_run_state_machine_idempotency_and_retry_history(tmp_path):
     assert completed["result"] == {"ok": True}
     with pytest.raises(ValueError, match="invalid run transition"):
         store.transition(first["id"], "running")
+
+
+def test_session_run_purge_cascades_descendants_and_refuses_active_work(tmp_path):
+    store = RunStore(str(tmp_path))
+    root = create(
+        store,
+        source_type="chat",
+        source_id="delete-me",
+        status="succeeded",
+    )
+    child = create(
+        store,
+        owner_id="child",
+        action_id="child",
+        source_type="widget",
+        source_id="another-source",
+        parent_run_id=root["id"],
+        status="failed",
+    )
+    other = create(
+        store,
+        owner_id="other",
+        action_id="other",
+        source_type="chat",
+        source_id="keep-me",
+        status="succeeded",
+    )
+    store.append_event(root["id"], "private", {"content": "delete this"})
+
+    assert store.session_runs_for_purge("delete-me") == {root["id"], child["id"]}
+    assert store.purge_session("delete-me") == {root["id"], child["id"]}
+    assert store.get_run(root["id"], include_events=True) is None
+    assert store.get_run(child["id"]) is None
+    assert store.get_run(other["id"]) is not None
+
+    active = create(
+        store,
+        owner_id="active",
+        action_id="active",
+        source_type="chat",
+        source_id="active-session",
+    )
+    with pytest.raises(ActiveSessionRunsError) as failure:
+        store.purge_session("active-session")
+    assert failure.value.run_ids == [active["id"]]
+    assert store.get_run(active["id"]) is not None
 
 
 def test_run_correlation_is_durable_and_part_of_idempotency_identity(tmp_path):
