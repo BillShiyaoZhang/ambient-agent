@@ -163,5 +163,5 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Run Widget Runtime tests
-        run: npm test -- --test-concurrency=1
+        run: npm test
         working-directory: widget-runtime
