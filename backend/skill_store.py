@@ -20,6 +20,7 @@ from backend.skill_version import compare_semver, parse_semver
 
 
 _DIGEST_PATTERN = re.compile(r"^sha256:([0-9a-f]{64})$")
+_SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PACKAGE_FILES = frozenset({"SKILL.md", "market.json"})
 MAX_MARKET_FILE_BYTES = 128 * 1024
 SKILL_ACTIVATION_POLICIES = frozenset({"none", "explicit_only", "implicit"})
@@ -226,6 +227,12 @@ class SkillStore:
                     installed_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS skill_catalog_source_preferences (
+                    source_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             # Serialize additive DDL/backfill across concurrently starting Host
@@ -344,6 +351,88 @@ class SkillStore:
             return self._revision(connection)
         finally:
             connection.close()
+
+    def list_source_preferences(self) -> dict[str, bool]:
+        """Return explicit catalog-source preferences; an absent row means enabled."""
+
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT source_id, enabled
+                FROM skill_catalog_source_preferences
+                ORDER BY source_id
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        preferences: dict[str, bool] = {}
+        for row in rows:
+            source_id = row["source_id"]
+            enabled = row["enabled"]
+            if (
+                not isinstance(source_id, str)
+                or _SOURCE_ID_PATTERN.fullmatch(source_id) is None
+                or enabled not in (0, 1)
+            ):
+                raise SkillStoreCorruptionError(
+                    "Skill catalog source preference is malformed"
+                )
+            preferences[source_id] = bool(enabled)
+        return preferences
+
+    def set_source_enabled(
+        self,
+        source_id: str,
+        enabled: bool,
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
+        """Persist an explicit disable while keeping enabled as the default."""
+
+        if (
+            not isinstance(source_id, str)
+            or _SOURCE_ID_PATTERN.fullmatch(source_id) is None
+        ):
+            raise ValueError("source_id must be a lowercase hyphenated name")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        now = datetime.now(UTC).isoformat()
+        with self._transaction(expected_revision=expected_revision) as connection:
+            row = connection.execute(
+                """
+                SELECT enabled
+                FROM skill_catalog_source_preferences
+                WHERE source_id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+            current_enabled = True if row is None else bool(row["enabled"])
+            revision = self._revision(connection)
+            if current_enabled == enabled:
+                return revision
+            if enabled:
+                connection.execute(
+                    """
+                    DELETE FROM skill_catalog_source_preferences
+                    WHERE source_id = ?
+                    """,
+                    (source_id,),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO skill_catalog_source_preferences (
+                        source_id, enabled, updated_at
+                    )
+                    VALUES (?, 0, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        enabled = 0,
+                        updated_at = excluded.updated_at
+                    """,
+                    (source_id, now),
+                )
+            return self._increment_revision(connection)
 
     def install(
         self,

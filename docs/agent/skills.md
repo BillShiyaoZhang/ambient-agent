@@ -53,7 +53,7 @@ Ambient 对包再施加以下约束：
 
 Skill Market 与 App Center 是两个不同的视图：
 
-- `GET /api/skill-market` 列出可安装包的版本、摘要、来源、信任类别和 digest；
+- `GET /api/skill-market` 列出可安装包的版本、摘要、来源、来源开关状态、信任类别和 digest；`PATCH /api/skill-market/sources/{source_id}` 以当前 Skill registry revision 为 CAS 条件修改 workspace 级来源开关；
 - `POST /api/skills/install` 按 `market_id` 安装当前 Market 版本，也用于显式更新；`PATCH /api/skills/{catalog_id}` 修改可信或已授权安装的启用状态，`PATCH /api/skills/{catalog_id}/authorization` 授予、变更或撤销外部上下文注入，`DELETE /api/skills/{catalog_id}` 卸载；
 - `GET /api/app-store` 仍是已安装 App、Skill 和 executable capability 的启动器及布局，不是远程 Market 索引。
 
@@ -111,6 +111,15 @@ Market 暂时不可用时，已安装 snapshot 仍可工作。损坏、缺失或
 | 未来 registry/search | 默认关闭 | 只返回 discovery metadata，或先转换成上述不可变快照 | 排名、下载量、平台审核和上游扫描都只是 advisory signal |
 
 Provider 的最小契约是稳定 `source_id`、`kind`、`required`、`list_entries()` 和有界错误；Catalog 负责确定性排序、跨来源 `market_id/catalog_id` 冲突检查以及故障隔离。必需来源失败会使 Catalog 请求失败；可选来源失败只在 `GET /api/skill-market.sources` 中标为 `unavailable`，其他来源仍可发现，已安装快照始终不受影响。相同 ID 出现在两个健康来源时必须整体失败关闭，不能按 Provider 顺序偷偷覆盖。
+
+每个已配置来源都有 workspace 级 `enabled` 偏好，默认值为 `true`，包括 bundled、local 和 GitHub。App Center 必须始终显示全部已配置来源，用户可以单独开关：
+
+- 未写入偏好记录的新来源自动开启，避免新增 Provider 因迁移缺省而不可见；
+- 关闭来源后 Catalog 不调用其 `list_entries()`，因此不会发生该来源的网络或本地 Market 读取；API 以 `status = "disabled"`、`enabled = false` 返回来源，但不返回其候选条目；
+- 关闭来源只影响发现和新的安装/更新；已经安装的内容寻址 snapshot、授权状态与正在运行的 Run 不改变；
+- 从已关闭来源按 `market_id` 安装必须失败，不能绕过 UI 直接调用 install API；
+- 偏好保存在 `.ambient/skills.db` 的控制面表中，并与安装/授权 mutation 共用 Skill registry revision，避免开关与安装发生静默覆盖；
+- 来源开关不是 trust、授权、网络 grant 或 Skill 启用状态。重新开启只恢复发现，外部 Skill 仍须安装后隔离并按 digest 授权。
 
 GitHub 配置版本为 `1`，Provider/entry 均为管理员控制的数据。entry 必须声明：
 
@@ -246,6 +255,7 @@ Skill 执行过程中真正产生的用户上下文事实，例如 `Task`、`Eve
 | 正文引用不存在的 Tool 或未授权 adapter | 调用按现有 interaction/失败语义处理；不伪装成功 |
 | Skill 被误当成可执行或 UI 条目 | App Center 只打开详情；执行和 UI 生成仍属于现有 Capability/App |
 | 可选 Catalog 来源不可达 | 已安装 Skill 正常工作；该来源标为 `unavailable`，其他来源继续返回 |
+| 用户关闭 Catalog 来源 | 不调用 Provider、不返回候选条目并拒绝从该来源安装；已安装 snapshot 继续工作 |
 | 相同 ID 出现在多个来源 | Catalog 整体失败关闭，直到管理员消除歧义 |
 | GitHub commit/hash 不匹配或 redirect | 拒绝候选；只可使用同一预期 hash 的已验证缓存 |
 | 上游包包含 scripts/references/assets | 标为不兼容且禁止安装；需要执行的能力走 Capability/Plugin/Widget |
@@ -257,6 +267,7 @@ Skill 执行过程中真正产生的用户上下文事实，例如 `Task`、`Eve
 - Manifest V2、Capability Ontology、Tool Gateway、Capability action 和 Durable Run 协议保持不变；
 - 既有 `CapabilityManifest.kind = "skill"` 条目继续按 executable capability 解释并保留 `skill:` ID；Instruction Skill 使用 `agent-skill:` ID，不能被静默互转；
 - 旧 workspace 没有 Skill installation 表或 snapshot 时等价于“未安装 Skill”；迁移是 additive，不改动 Apps、Capabilities、layout 或 KG。既有内置记录获得 loader 推导的 `trusted + implicit`；所有 legacy external/local 记录都停用并隔离，避免历史 `enabled` 位被误当成授权；
+- 旧 workspace 没有来源偏好表时，所有当前与未来来源都默认开启；只有用户明确写入的 `enabled = false` 才会关闭来源；
 - 新 Run 在创建时显式写入 `skill_selection_state = pending`，route 后变为 `pinned | pinned_none`；只有 marker 与 snapshot 都缺失的旧 checkpoint 才按 `pinned_none` 恢复，因此不会补注入后来安装的 Skill；未知 marker、缺失的 pinned snapshot 或其他矛盾组合均失败关闭；
 - App Center 的既有条目和布局字段保持可读；Instruction Skill 作为 `details` 启动模式的向后兼容扩展，不改变 Capability 的 action/UI 行为；
 - Capability Ontology 与 Widget grant schema 保持不变。`agent.context.inject` 是 Skill 控制面决策，刻意不创建第二套 executable-grant 词汇；

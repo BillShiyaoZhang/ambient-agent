@@ -454,6 +454,7 @@ describe("App Center", () => {
           id: "bundled",
           kind: "bundled",
           required: true,
+          enabled: true,
           status: "available",
           entry_count: 1,
         },
@@ -461,6 +462,7 @@ describe("App Center", () => {
           id: "community-search",
           kind: "registry",
           required: false,
+          enabled: true,
           status: "unavailable",
           entry_count: 0,
           error: "registry timed out",
@@ -516,6 +518,95 @@ describe("App Center", () => {
     expect(screen.getByText("context-only-v1")).toBeDefined();
     expect(screen.getByText("a".repeat(12))).toBeDefined();
     expect(screen.getByText("Not verified")).toBeDefined();
+  });
+
+  it("lets users disable and re-enable configured skill sources", async () => {
+    let sourceEnabled = true;
+    let revision = 7;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        url.endsWith("/api/skill-market/sources/anthropic-official")
+        && init?.method === "PATCH"
+      ) {
+        sourceEnabled = JSON.parse(String(init.body)).enabled;
+        revision += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            source_id: "anthropic-official",
+            enabled: sourceEnabled,
+            revision,
+          }),
+        } as Response;
+      }
+      if (url.endsWith("/api/skill-market")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...marketState,
+            revision,
+            sources: [
+              {
+                id: "anthropic-official",
+                kind: "github",
+                required: false,
+                enabled: sourceEnabled,
+                status: sourceEnabled ? "available" : "disabled",
+                entry_count: sourceEnabled ? 1 : 0,
+              },
+            ],
+            items: sourceEnabled ? [marketState.items[1]] : [],
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => skillState,
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppCenter
+        isOpen
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="en"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Discover Skills" }));
+    const disable = await screen.findByRole("switch", {
+      name: "Disable source anthropic-official",
+    });
+    expect(disable.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(disable);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/skill-market\/sources\/anthropic-official$/),
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ enabled: false, expected_revision: 7 }),
+      }),
+    ));
+    const enable = await screen.findByRole("switch", {
+      name: "Enable source anthropic-official",
+    });
+    expect(enable.getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByText("Meeting Brief")).toBeNull();
+
+    fireEvent.click(enable);
+    await screen.findByRole("switch", {
+      name: "Disable source anthropic-official",
+    });
+    expect(await screen.findByText("Meeting Brief")).toBeDefined();
   });
 
   it("quarantines external skills and confirms digest-bound authorization or revocation", async () => {

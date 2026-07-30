@@ -75,6 +75,7 @@ class SkillCatalogSourceStatus:
     source_id: str
     kind: str
     required: bool
+    enabled: bool
     status: str
     entry_count: int
     error: str | None = None
@@ -84,6 +85,7 @@ class SkillCatalogSourceStatus:
             "id": self.source_id,
             "kind": self.kind,
             "required": self.required,
+            "enabled": self.enabled,
             "status": self.status,
             "entry_count": self.entry_count,
         }
@@ -123,13 +125,43 @@ class SkillCatalog:
                 raise ValueError("Skill catalog provider required must be a boolean")
             seen_source_ids.add(source_id)
 
-    def list_snapshot(self) -> SkillCatalogSnapshot:
+    @property
+    def source_ids(self) -> tuple[str, ...]:
+        return tuple(provider.source_id for provider in self.providers)
+
+    def list_snapshot(
+        self,
+        *,
+        source_enabled: Mapping[str, bool] | None = None,
+    ) -> SkillCatalogSnapshot:
         entries: list[SkillMarketEntry] = []
         statuses: list[SkillCatalogSourceStatus] = []
         seen_market_ids: dict[str, str] = {}
         seen_catalog_ids: dict[str, str] = {}
 
         for provider in self.providers:
+            enabled = (
+                source_enabled.get(provider.source_id, True)
+                if source_enabled is not None
+                else True
+            )
+            if not isinstance(enabled, bool):
+                raise ValueError(
+                    f"Skill catalog source preference for '{provider.source_id}' "
+                    "must be a boolean"
+                )
+            if not enabled:
+                statuses.append(
+                    SkillCatalogSourceStatus(
+                        source_id=provider.source_id,
+                        kind=provider.kind,
+                        required=provider.required,
+                        enabled=False,
+                        status="disabled",
+                        entry_count=0,
+                    )
+                )
+                continue
             try:
                 provider_entries = sorted(
                     provider.list_entries(),
@@ -160,6 +192,7 @@ class SkillCatalog:
                         source_id=provider.source_id,
                         kind=provider.kind,
                         required=False,
+                        enabled=True,
                         status="unavailable",
                         entry_count=0,
                         error=message,
@@ -172,6 +205,7 @@ class SkillCatalog:
                     source_id=provider.source_id,
                     kind=provider.kind,
                     required=provider.required,
+                    enabled=True,
                     status="available",
                     entry_count=len(provider_entries),
                 )
@@ -195,11 +229,20 @@ class SkillCatalog:
 
         return SkillCatalogSnapshot(tuple(entries), tuple(statuses))
 
-    def list_entries(self) -> list[SkillMarketEntry]:
-        return list(self.list_snapshot().entries)
+    def list_entries(
+        self,
+        *,
+        source_enabled: Mapping[str, bool] | None = None,
+    ) -> list[SkillMarketEntry]:
+        return list(self.list_snapshot(source_enabled=source_enabled).entries)
 
-    def get(self, market_id: str) -> SkillMarketEntry:
-        for entry in self.list_snapshot().entries:
+    def get(
+        self,
+        market_id: str,
+        *,
+        source_enabled: Mapping[str, bool] | None = None,
+    ) -> SkillMarketEntry:
+        for entry in self.list_snapshot(source_enabled=source_enabled).entries:
             if entry.market_id == market_id:
                 return entry
         raise KeyError(market_id)

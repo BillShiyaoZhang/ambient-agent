@@ -53,7 +53,7 @@ Ambient applies additional package constraints:
 
 Skill Market and App Center are separate views:
 
-- `GET /api/skill-market` lists installable packages, versions, summaries, sources, trust class, and digests;
+- `GET /api/skill-market` lists installable packages, versions, summaries, source toggle state, trust class, and digests; `PATCH /api/skill-market/sources/{source_id}` changes a workspace source preference using the current Skill-registry revision as its CAS condition;
 - `POST /api/skills/install` installs the current Market version by `market_id` and also performs an explicit update; `PATCH /api/skills/{catalog_id}` changes the enabled state of a trusted or already-authorized installation, `PATCH /api/skills/{catalog_id}/authorization` grants, changes, or revokes external context injection, and `DELETE /api/skills/{catalog_id}` uninstalls;
 - `GET /api/app-store` remains the launcher and layout for installed Apps, Skills, and executable capabilities; it is not a remote Market index.
 
@@ -111,6 +111,15 @@ Installed snapshots continue to work when the Market is temporarily unavailable.
 | Future registry/search | Disabled by default | Discovery metadata only, or conversion into the immutable snapshot above | Rank, downloads, platform review, and upstream scans are advisory signals only |
 
 The minimum Provider contract is a stable `source_id`, `kind`, `required`, `list_entries()`, and bounded errors. The Catalog owns deterministic ordering, cross-source `market_id/catalog_id` conflict detection, and failure isolation. A required-source failure fails the Catalog request. An optional failure appears as `unavailable` in `GET /api/skill-market.sources` while other sources remain discoverable and installed snapshots remain usable. The same ID from two healthy sources fails the whole merge; Provider order never silently wins.
+
+Every configured source has a workspace-level `enabled` preference that defaults to `true`, including bundled, local, and GitHub sources. App Center always shows every configured source and lets the user toggle each one:
+
+- a newly configured source with no stored preference is enabled automatically, so additive Providers do not disappear because of migration defaults;
+- a disabled source is not asked for `list_entries()`, so it performs no network or local-Market read. The API returns the source with `status = "disabled"` and `enabled = false`, but returns none of its candidate entries;
+- disabling affects discovery and new install/update requests only. Existing content-addressed snapshots, approvals, and active Runs do not change;
+- installing a `market_id` from a disabled source fails even when the install API is called directly;
+- preferences live in a control-plane table in `.ambient/skills.db` and share the Skill-registry revision with installation and authorization mutations, preventing silent toggle/install overwrites;
+- a source toggle is not trust, authorization, a network grant, or the installed Skill enabled bit. Re-enabling only restores discovery; an external Skill still installs quarantined and requires digest-bound approval.
 
 GitHub configuration version is `1`, and both Provider and entry data are administrator-controlled. Every entry declares:
 
@@ -249,6 +258,7 @@ User-context facts actually produced while using a Skill, such as a `Task`, `Eve
 | Body names a missing Tool or unapproved adapter | Existing interaction/failure semantics apply; never pretend success |
 | Skill is mistaken for an executable or UI item | App Center opens details only; execution and UI generation remain existing Capability/App behavior |
 | An optional Catalog source is unavailable | Installed Skills continue to work; that source is `unavailable` and other sources still return |
+| The user disables a Catalog source | Do not call the Provider, return no candidates, and reject installs from it; installed snapshots keep working |
 | The same ID appears in multiple sources | Fail the Catalog merge until the administrator removes the ambiguity |
 | GitHub commit/hash mismatch or redirect | Reject the candidate; only a verified cache for the same expected hash may be used |
 | Upstream package includes scripts/references/assets | Mark incompatible and forbid installation; executable behavior uses Capability/Plugin/Widget |
@@ -260,6 +270,7 @@ Install, update, enable/disable, and uninstall are serialized and committed atom
 - Manifest V2, Capability Ontology, Tool Gateway, Capability actions, and the Durable Run protocol remain unchanged;
 - existing `CapabilityManifest.kind = "skill"` items retain their executable-capability meaning and `skill:` IDs; Instruction Skills use `agent-skill:` IDs, and the two are never silently reinterpreted;
 - an old workspace without Skill installation tables or snapshots means “no Skills installed”; migration is additive and does not alter Apps, Capabilities, layout, or the KG. Existing bundled records acquire loader-derived `trusted + implicit`; every legacy external/local record is disabled and quarantined so a historical `enabled` bit cannot become an authorization grant;
+- an old workspace without the source-preference table treats every current and future source as enabled; only an explicit stored `enabled = false` disables one;
 - a new Run explicitly starts with `skill_selection_state = pending`, which becomes `pinned | pinned_none` after routing; only a legacy checkpoint missing both marker and snapshot resumes as `pinned_none`, so it cannot gain a subsequently installed Skill; an unknown marker, missing pinned snapshot, or any contradictory combination fails closed;
 - existing App Center items and layout fields remain readable; an Instruction Skill is a backward-compatible `details` launch mode and does not change Capability action/UI behavior;
 - the Capability Ontology and Widget grant schema remain unchanged. `agent.context.inject` is a Skill control-plane decision and deliberately does not create a second executable-grant vocabulary;

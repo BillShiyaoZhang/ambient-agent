@@ -542,6 +542,7 @@ async def no_store_control_plane_responses(request: Request, call_next):
     path = request.url.path
     if (
         path == "/api/skill-market"
+        or path.startswith("/api/skill-market/")
         or path == "/api/skills"
         or path.startswith("/api/skills/")
         or path == "/api/chat/commands"
@@ -1015,6 +1016,13 @@ class SkillInstallRequest(BaseModel):
     expected_revision: int | None = Field(default=None, ge=0)
 
 
+class SkillCatalogSourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    expected_revision: int = Field(ge=0)
+
+
 class SkillEnabledUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1400,11 +1408,29 @@ def get_skill_market(request: Request, response: Response):
         _raise_skill_api_error(exc)
 
 
+@app.patch("/api/skill-market/sources/{source_id}")
+def set_skill_catalog_source_enabled(
+    source_id: str,
+    data: SkillCatalogSourceUpdate,
+    request: Request,
+    response: Response,
+):
+    _require_skill_market_host(request, response)
+    try:
+        return skill_manager.set_source_enabled(
+            source_id,
+            data.enabled,
+            expected_revision=data.expected_revision,
+        )
+    except Exception as exc:
+        _raise_skill_api_error(exc)
+
+
 @app.post("/api/skills/install")
 def install_skill(data: SkillInstallRequest, request: Request, response: Response):
     _require_skill_market_host(request, response)
     try:
-        entry = skill_manager.market.get(data.market_id)
+        entry = skill_manager.get_market_entry(data.market_id)
         if app_store.get_capability(entry.catalog_id) is not None:
             raise SkillStoreError(
                 f"Catalog id '{entry.catalog_id}' is already used by an executable capability"

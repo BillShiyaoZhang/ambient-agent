@@ -58,6 +58,7 @@ def test_skill_market_api_lifecycle_and_installed_catalog_projection(
                 "id": "bundled",
                 "kind": "bundled",
                 "required": True,
+                "enabled": True,
                 "status": "available",
                 "entry_count": 1,
             }
@@ -123,6 +124,59 @@ def test_skill_market_api_lifecycle_and_installed_catalog_projection(
         )
         assert removed.status_code == 200
         assert removed.json()["revision"] == 3
+
+
+def test_skill_market_source_toggle_api_defaults_on_and_persists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    manager = SkillManager(workspace)
+    monkeypatch.setattr(main_module, "skill_manager", manager)
+    monkeypatch.setattr(main_module.app_store, "providers", [manager])
+
+    with TestClient(
+        main_module.app,
+        client=("127.0.0.1", 50_000),
+    ) as client:
+        disabled = client.patch(
+            "/api/skill-market/sources/bundled",
+            json={"enabled": False, "expected_revision": 0},
+        )
+        assert disabled.status_code == 200
+        assert disabled.headers["cache-control"] == "no-store"
+        assert disabled.json() == {
+            "source_id": "bundled",
+            "enabled": False,
+            "revision": 1,
+        }
+
+        listing = client.get("/api/skill-market").json()
+        assert listing["items"] == []
+        assert listing["sources"][0]["enabled"] is False
+        assert listing["sources"][0]["status"] == "disabled"
+
+        hidden_install = client.post(
+            "/api/skills/install",
+            json={
+                "market_id": "ambient-agent/daily-planning",
+                "expected_revision": 1,
+            },
+        )
+        assert hidden_install.status_code == 404
+
+        enabled = client.patch(
+            "/api/skill-market/sources/bundled",
+            json={"enabled": True, "expected_revision": 1},
+        )
+        assert enabled.status_code == 200
+        assert enabled.json()["revision"] == 2
+        assert client.get("/api/skill-market").json()["items"][0]["market_id"] == (
+            "ambient-agent/daily-planning"
+        )
+
+    reopened = SkillManager(workspace)
+    assert reopened.list_market()["sources"][0]["enabled"] is True
 
 
 def test_external_skill_authorization_api_is_trusted_host_digest_and_revision_bound(

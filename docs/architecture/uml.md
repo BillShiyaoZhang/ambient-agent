@@ -225,9 +225,9 @@ classDiagram
         +list_entries() SkillMarketEntry[]
     }
     class SkillCatalog {
-        +list_snapshot() SkillCatalogSnapshot
-        +list_entries() SkillMarketEntry[]
-        +get(market_id) SkillMarketEntry
+        +list_snapshot(source_enabled) SkillCatalogSnapshot
+        +list_entries(source_enabled) SkillMarketEntry[]
+        +get(market_id, source_enabled) SkillMarketEntry
     }
     class SkillMarket {
         +list_entries() SkillMarketEntry[]
@@ -240,10 +240,13 @@ classDiagram
     class SkillManager {
         +list_market()
         +install(market_id)
+        +set_source_enabled(source_id, enabled, expected_revision)
         +set_authorization(catalog_id, policy, digest)
     }
     class SkillStore {
         +install(record, skill_content, market_content)
+        +list_source_preferences()
+        +set_source_enabled(source_id, enabled, expected_revision)
         +set_authorization(...)
     }
 
@@ -262,6 +265,11 @@ GitHub commit/hash、registry badge 或上游扫描都不会产生 Ambient trust
 `agent.context.inject` 通道。`scripts/`、`references/`、`assets/` 和依赖不进入
 这个 Runtime；未来可执行扩展必须转成 Capability/Plugin/Widget，继续经过各自
 的 sandbox、grant、approval 和 audit。
+
+来源开关是 `SkillStore` 中的 workspace 控制面偏好，缺省为开启，并与 Skill
+registry 共用 CAS revision。关闭来源后 `SkillCatalog` 不调用对应 Provider，
+但仍在 source status 中保留它以便 UI 重新开启；已安装 snapshot 与授权不变。
+开关不是 Provider trust 或 Skill grant，也不写入 ontology/KG。
 
 ## 6. 事件与恢复边界
 

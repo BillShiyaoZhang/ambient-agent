@@ -111,6 +111,9 @@ class SkillManager:
     def revision(self) -> int:
         return self.store.revision()
 
+    def _source_preferences(self) -> dict[str, bool]:
+        return self.store.list_source_preferences()
+
     def list_market(self) -> dict[str, Any]:
         revision, installed_skills = self.store.list_with_revision(
             verify_packages=False
@@ -119,7 +122,9 @@ class SkillManager:
             item.market_id: item for item in installed_skills
         }
         items: list[dict[str, Any]] = []
-        catalog_snapshot = self.catalog.list_snapshot()
+        catalog_snapshot = self.catalog.list_snapshot(
+            source_enabled=self._source_preferences()
+        )
         for entry in catalog_snapshot.entries:
             self._validate_ontology_refs(entry)
             installed = installed_by_market.get(entry.market_id)
@@ -182,8 +187,34 @@ class SkillManager:
     def list_market_items(self) -> list[dict[str, Any]]:
         return self.list_market()["items"]
 
+    def get_market_entry(self, market_id: str) -> SkillMarketEntry:
+        return self.catalog.get(
+            market_id,
+            source_enabled=self._source_preferences(),
+        )
+
+    def set_source_enabled(
+        self,
+        source_id: str,
+        enabled: bool,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        if source_id not in self.catalog.source_ids:
+            raise KeyError(source_id)
+        revision = self.store.set_source_enabled(
+            source_id,
+            enabled,
+            expected_revision=expected_revision,
+        )
+        return {
+            "source_id": source_id,
+            "enabled": enabled,
+            "revision": revision,
+        }
+
     def install(self, market_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
-        entry = self.catalog.get(market_id)
+        entry = self.get_market_entry(market_id)
         if entry.compatibility_status != "compatible":
             raise SkillMarketError(
                 f"Skill '{entry.market_id}' is incompatible with "

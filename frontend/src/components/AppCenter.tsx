@@ -55,11 +55,13 @@ import {
   installSkill,
   loadSkillMarket,
   setSkillAuthorization,
+  setSkillCatalogSourceEnabled,
   setSkillEnabled,
   uninstallSkill,
   type MarketSkill,
   type SkillActivationPolicy,
   type SkillAuthorization,
+  type SkillCatalogSource,
   type SkillMarket,
   type SkillSurface,
 } from "../services/skills";
@@ -635,6 +637,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketError, setMarketError] = useState("");
   const [skillBusyId, setSkillBusyId] = useState<string | null>(null);
+  const [sourceBusyId, setSourceBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterKind>("all");
@@ -980,6 +983,45 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       setNotice(installError instanceof Error ? installError.message : String(installError));
     } finally {
       setSkillBusyId(null);
+    }
+  };
+
+  const toggleMarketSource = async (source: SkillCatalogSource) => {
+    if (market?.revision === undefined) {
+      setNotice(
+        isZh
+          ? "来源设置缺少目录版本，请刷新后重试。"
+          : "The source setting is missing a catalog revision. Refresh and try again.",
+      );
+      return;
+    }
+    const enabled = source.enabled === false;
+    setSourceBusyId(source.id);
+    setNotice("");
+    try {
+      await setSkillCatalogSourceEnabled(
+        API_BASE,
+        source.id,
+        enabled,
+        market.revision,
+      );
+      await fetchMarket();
+      setNotice(
+        enabled
+          ? (isZh
+            ? `来源“${source.id}”已开启。`
+            : `Source ${source.id} is enabled.`)
+          : (isZh
+            ? `来源“${source.id}”已关闭；已安装技能不受影响。`
+            : `Source ${source.id} is disabled. Installed skills are unaffected.`),
+      );
+    } catch (updateError) {
+      await Promise.allSettled([fetchMarket()]);
+      setNotice(
+        updateError instanceof Error ? updateError.message : String(updateError),
+      );
+    } finally {
+      setSourceBusyId(null);
     }
   };
 
@@ -1366,12 +1408,73 @@ export const AppCenter: React.FC<AppCenterProps> = ({
               <p>{marketError}</p>
               <button onClick={fetchMarket}>{isZh ? "重试" : "Try again"}</button>
             </div>
-          ) : filteredMarketSkills.length === 0 ? (
-            <div className="app-center-state"><Search size={30} /><h2>{isZh ? "没有找到技能" : "No skills found"}</h2><p>{isZh ? "试试更短的关键词。" : "Try a shorter search term."}</p></div>
           ) : (
             <div className="app-center-market-layout">
+              {(market?.sources ?? []).length > 0 && (
+                <section
+                  className="app-center-market-sources"
+                  aria-labelledby="skill-market-sources-title"
+                >
+                  <header>
+                    <div>
+                      <h2 id="skill-market-sources-title">
+                        {isZh ? "技能来源" : "Skill sources"}
+                      </h2>
+                      <p>
+                        {isZh
+                          ? "选择发现页要读取的来源；关闭不会卸载已安装技能。"
+                          : "Choose which sources Discovery reads. Disabling one does not uninstall skills."}
+                      </p>
+                    </div>
+                  </header>
+                  <div className="app-center-market-source-list">
+                    {(market?.sources ?? []).map((source) => {
+                      const enabled = source.enabled !== false;
+                      const busy = sourceBusyId === source.id;
+                      return (
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={enabled}
+                          aria-label={`${enabled ? "Disable" : "Enable"} source ${source.id}`}
+                          className="app-center-market-source"
+                          disabled={busy}
+                          key={source.id}
+                          onClick={() => void toggleMarketSource(source)}
+                        >
+                          <span className="app-center-market-source-copy">
+                            <strong>{source.id}</strong>
+                            <span>
+                              {source.kind}
+                              {" · "}
+                              {source.status === "disabled"
+                                ? (isZh ? "已关闭" : "Disabled")
+                                : source.status === "unavailable"
+                                  ? (isZh ? "不可用" : "Unavailable")
+                                  : (isZh
+                                    ? `${source.entry_count} 个技能`
+                                    : `${source.entry_count} skills`)}
+                            </span>
+                          </span>
+                          <span
+                            className={`app-center-market-source-switch ${enabled ? "is-on" : ""}`}
+                            aria-hidden="true"
+                          >
+                            {busy
+                              ? <LoaderCircle className="animate-spin" size={12} />
+                              : <span />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
               {(market?.sources ?? [])
-                .filter((source) => source.status === "unavailable")
+                .filter(
+                  (source) =>
+                    source.enabled !== false && source.status === "unavailable",
+                )
                 .map((source) => (
                   <div
                     className="app-center-market-source-warning"
@@ -1386,17 +1489,29 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                     </p>
                   </div>
                 ))}
-              <div className="app-center-market-grid">
-                {filteredMarketSkills.map((skill) => (
-                  <MarketSkillCard
-                    key={skill.market_id}
-                    skill={skill}
-                    busy={skillBusyId === `market:${skill.market_id}`}
-                    isZh={isZh}
-                    onInstall={() => void installMarketSkill(skill)}
-                  />
-                ))}
-              </div>
+              {filteredMarketSkills.length === 0 ? (
+                <div className="app-center-state app-center-market-empty">
+                  <Search size={30} />
+                  <h2>{isZh ? "没有找到技能" : "No skills found"}</h2>
+                  <p>
+                    {isZh
+                      ? "可以开启上方来源，或尝试更短的关键词。"
+                      : "Enable a source above or try a shorter search term."}
+                  </p>
+                </div>
+              ) : (
+                <div className="app-center-market-grid">
+                  {filteredMarketSkills.map((skill) => (
+                    <MarketSkillCard
+                      key={skill.market_id}
+                      skill={skill}
+                      busy={skillBusyId === `market:${skill.market_id}`}
+                      isZh={isZh}
+                      onInstall={() => void installMarketSkill(skill)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )
         ) : loading && !store ? (

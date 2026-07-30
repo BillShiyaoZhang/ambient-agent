@@ -37,7 +37,8 @@ export interface SkillCatalogSource {
   id: string;
   kind: string;
   required: boolean;
-  status: "available" | "unavailable";
+  enabled?: boolean;
+  status: "available" | "unavailable" | "disabled";
   entry_count: number;
   error?: string;
 }
@@ -108,6 +109,29 @@ export async function loadSkillMarket(apiBase: string): Promise<SkillMarket> {
     throw new Error("Invalid skill market response");
   }
   return result;
+}
+
+export function setSkillCatalogSourceEnabled(
+  apiBase: string,
+  sourceId: string,
+  enabled: boolean,
+  expectedRevision: number,
+) {
+  return jsonRequest<{
+    source_id: string;
+    enabled: boolean;
+    revision: number;
+  }>(
+    `${apiBase}/api/skill-market/sources/${encodeURIComponent(sourceId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled,
+        expected_revision: expectedRevision,
+      }),
+    },
+  );
 }
 
 export function installSkill(

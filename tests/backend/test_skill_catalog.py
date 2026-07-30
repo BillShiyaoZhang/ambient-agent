@@ -14,7 +14,7 @@ from backend.skill_catalog import (
 )
 from backend.skill_manager import SkillManager
 from backend.skill_market import SkillMarket, SkillMarketError
-from backend.skill_store import SkillVersionConflict
+from backend.skill_store import SkillRevisionConflict, SkillVersionConflict
 
 
 def _skill_bytes(name: str, body: str = "Follow the pinned procedure.") -> bytes:
@@ -118,6 +118,7 @@ def test_catalog_aggregates_bundled_and_legacy_local_market(tmp_path: Path) -> N
             "id": "bundled",
             "kind": "bundled",
             "required": True,
+            "enabled": True,
             "status": "available",
             "entry_count": 1,
         },
@@ -125,6 +126,7 @@ def test_catalog_aggregates_bundled_and_legacy_local_market(tmp_path: Path) -> N
             "id": "local-admin",
             "kind": "local",
             "required": False,
+            "enabled": True,
             "status": "available",
             "entry_count": 1,
         },
@@ -157,6 +159,7 @@ def test_catalog_isolates_optional_provider_failure_but_fails_duplicate_ids(
         "id": "community-search",
         "kind": "registry",
         "required": False,
+        "enabled": True,
         "status": "unavailable",
         "entry_count": 0,
         "error": "registry is offline",
@@ -176,6 +179,113 @@ def test_catalog_isolates_optional_provider_failure_but_fails_duplicate_ids(
     )
     with pytest.raises(SkillMarketError, match="Duplicate market_id across catalog sources"):
         duplicate_catalog.list_entries()
+
+
+def test_source_preferences_default_enabled_persist_and_skip_provider_reads(
+    tmp_path: Path,
+) -> None:
+    content = _skill_bytes("remote-review")
+    delegate = _github_provider(tmp_path, content)
+
+    class CountingProvider:
+        source_id = delegate.source_id
+        kind = delegate.kind
+        required = delegate.required
+        calls = 0
+
+        def list_entries(self):
+            self.calls += 1
+            return delegate.list_entries()
+
+    provider = CountingProvider()
+    workspace = tmp_path / "workspace"
+    manager = SkillManager(
+        workspace,
+        catalog=SkillCatalog([provider]),
+    )
+
+    initial = manager.list_market()
+    assert initial["sources"][0]["enabled"] is True
+    assert initial["sources"][0]["status"] == "available"
+    assert len(initial["items"]) == 1
+    assert provider.calls == 1
+
+    disabled = manager.set_source_enabled(
+        "anthropic-official",
+        False,
+        expected_revision=0,
+    )
+    assert disabled == {
+        "source_id": "anthropic-official",
+        "enabled": False,
+        "revision": 1,
+    }
+    listing = manager.list_market()
+    assert listing["sources"] == [
+        {
+            "id": "anthropic-official",
+            "kind": "github",
+            "required": False,
+            "enabled": False,
+            "status": "disabled",
+            "entry_count": 0,
+        }
+    ]
+    assert listing["items"] == []
+    assert provider.calls == 1
+    with pytest.raises(KeyError):
+        manager.install("github-anthropics-skills/remote-review")
+
+    reopened = SkillManager(
+        workspace,
+        catalog=SkillCatalog([provider]),
+    )
+    assert reopened.list_market()["sources"][0]["enabled"] is False
+    assert provider.calls == 1
+    assert reopened.set_source_enabled(
+        "anthropic-official",
+        True,
+        expected_revision=1,
+    ) == {
+        "source_id": "anthropic-official",
+        "enabled": True,
+        "revision": 2,
+    }
+    assert len(reopened.list_market()["items"]) == 1
+    assert provider.calls == 2
+
+
+def test_source_preference_rejects_unknown_source_and_stale_revision(
+    tmp_path: Path,
+) -> None:
+    manager = SkillManager(tmp_path / "workspace")
+
+    with pytest.raises(KeyError):
+        manager.set_source_enabled(
+            "missing-source",
+            False,
+            expected_revision=0,
+        )
+    manager.set_source_enabled("bundled", False, expected_revision=0)
+    with pytest.raises(SkillRevisionConflict):
+        manager.set_source_enabled("bundled", True, expected_revision=0)
+
+
+def test_disabling_source_does_not_remove_installed_snapshot(tmp_path: Path) -> None:
+    manager = SkillManager(tmp_path / "workspace")
+    installed = manager.install(
+        "ambient-agent/daily-planning",
+        expected_revision=0,
+    )
+
+    manager.set_source_enabled("bundled", False, expected_revision=1)
+
+    assert manager.list_market()["items"] == []
+    installed_items = manager.list_catalog_items()
+    assert [item["catalog_id"] for item in installed_items] == [
+        installed["catalog_id"]
+    ]
+    assert installed_items[0]["available"] is True
 
 
 def test_github_provider_verifies_pin_exposes_origin_and_uses_verified_cache(

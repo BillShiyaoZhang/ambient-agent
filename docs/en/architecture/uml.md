@@ -229,9 +229,9 @@ classDiagram
         +list_entries() SkillMarketEntry[]
     }
     class SkillCatalog {
-        +list_snapshot() SkillCatalogSnapshot
-        +list_entries() SkillMarketEntry[]
-        +get(market_id) SkillMarketEntry
+        +list_snapshot(source_enabled) SkillCatalogSnapshot
+        +list_entries(source_enabled) SkillMarketEntry[]
+        +get(market_id, source_enabled) SkillMarketEntry
     }
     class SkillMarket {
         +list_entries() SkillMarketEntry[]
@@ -244,10 +244,13 @@ classDiagram
     class SkillManager {
         +list_market()
         +install(market_id)
+        +set_source_enabled(source_id, enabled, expected_revision)
         +set_authorization(catalog_id, policy, digest)
     }
     class SkillStore {
         +install(record, skill_content, market_content)
+        +list_source_preferences()
+        +set_source_enabled(source_id, enabled, expected_revision)
         +set_authorization(...)
     }
 
@@ -268,6 +271,13 @@ external Skill, and reuses digest/revision-bound `agent.context.inject`.
 `scripts/`, `references/`, `assets/`, and dependencies do not enter this
 Runtime. A future executable extension must become a Capability, Plugin, or
 Widget and pass its own sandbox, grant, approval, and audit path.
+
+A source toggle is a workspace control-plane preference in `SkillStore`,
+defaults to enabled, and shares the Skill-registry CAS revision. When disabled,
+`SkillCatalog` does not invoke that Provider but keeps it in source status so
+the UI can re-enable it. Installed snapshots and approvals do not change. The
+toggle is neither Provider trust nor a Skill grant and never enters the
+ontology/KG.
 
 ## 6. Event and recovery boundaries
 
