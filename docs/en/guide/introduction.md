@@ -12,13 +12,13 @@ A normal chat interface works well for one-off answers but poorly for tasks that
 - **App workspace**: Windows can float, maximize, snap, resize, switch, and use layout presets. The backend persists the Canvas V3 configuration.
 - **Dynamic Widgets**: A Widget uses Manifest V2 and a `controller.js` file that exports a React component. Create/modify flows approve a schema + capability proposal before staging, verification, and atomic publication.
 - **Shared graph data**: Widgets and the Agent read and write user-context facts in the canonical Neo4j knowledge graph through ontology-validated Graph APIs.
-- **Model and tool integrations**: Providers, default models, and per-session models are configured in the UI. The Agent can reach external capabilities through the Tool Gateway, MCP, or OpenCode.
+- **Model and tool integrations**: Providers, default models, and per-session models are configured in the UI. The Agent reaches external capabilities through the Tool Gateway or MCP, while Widget generation can use OpenCode or Codex.
 - **Audit and confirmation**: LLM requests are written to the workspace audit log. Backend policy, interactions, and persistent effect records govern effectful flows.
 - **Least-authority grants**: A Widget receives only Graph, network, file, or installed-capability grants approved during schema alignment, and the backend reauthorizes every operation.
 
 ## Boundaries to understand
 
-- `SandboxWidget` is a component name, not a strong sandbox for untrusted JavaScript. Widget controllers execute in the page JavaScript realm and should only load trusted workspace code.
+- A Widget Controller executes by default only inside a `sandbox="allow-scripts"` opaque-origin iframe served by the separate `widget-frame` service; neither the trusted React Host nor the Backend evaluates Controller source. A browser sandbox is not a VM, so the Controller is still treated as untrusted code and every Graph, network, file, or installed-capability operation must pass Backend authorization.
 - WebSockets carry chat projections, graph subscriptions, and Run events. The current code has no user identity, device pairing, or conflict-merge protocol, so this documentation does not present it as a complete multi-user or multi-device collaboration system.
 - Whether a local model is “offline” depends on the configured provider and tools. Cloud models, MCP, and Widget network requests still create external traffic.
 

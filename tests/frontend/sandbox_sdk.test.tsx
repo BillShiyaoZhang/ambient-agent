@@ -17,7 +17,7 @@ class RuntimeSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
   sent: string[] = [];
 
   constructor(readonly url: string) {
@@ -28,9 +28,13 @@ class RuntimeSocket {
     this.sent.push(message);
   }
 
-  close() {
+  closeWith(code: number) {
     this.readyState = RuntimeSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code } as CloseEvent);
+  }
+
+  close() {
+    this.closeWith(1000);
   }
 
   open() {
@@ -75,7 +79,7 @@ describe("SandboxWidget SDK boundary", () => {
     vi.stubGlobal("WebSocket", RuntimeSocket);
     vi.stubGlobal("fetch", vi.fn());
     vi.spyOn(wsService, "registerPersistentMessage");
-    vi.spyOn(wsService, "sendMessage").mockImplementation(() => {});
+    vi.spyOn(wsService, "sendMessage").mockImplementation(() => true);
     vi.spyOn(runService, "start");
   });
 
@@ -130,6 +134,26 @@ describe("SandboxWidget SDK boundary", () => {
       content: "open tasks",
     });
     expect(runService.start).not.toHaveBeenCalled();
+  });
+
+  it("bounds legacy pixel-runtime reconnects and offers an explicit retry", () => {
+    render(<SandboxWidget widget={privilegedWidget} />);
+    act(() => vi.runOnlyPendingTimers());
+
+    for (const delay of [500, 1_000, 2_000, 4_000, 8_000]) {
+      act(() => {
+        RuntimeSocket.instances.at(-1)!.closeWith(1006);
+        vi.advanceTimersByTime(delay);
+      });
+    }
+    act(() => RuntimeSocket.instances.at(-1)!.closeWith(1006));
+    expect(RuntimeSocket.instances).toHaveLength(6);
+
+    const retry = document.querySelector("button");
+    expect(retry?.textContent).toContain("Retry Widget Runtime");
+    act(() => retry?.click());
+    act(() => vi.runOnlyPendingTimers());
+    expect(RuntimeSocket.instances).toHaveLength(7);
   });
 
   it("never sends manifest revision, grant digest, capability scopes, or source", () => {

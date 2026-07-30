@@ -44,6 +44,34 @@ describe("AuditLogPanel Component", () => {
       expect(screen.getByText(/llama3/)).toBeDefined();
       expect(screen.getByText(/Show me weather/)).toBeDefined();
     });
+
+    const disclosure = screen.getByRole("button", { name: /llama3.*Show me weather/i });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(disclosure);
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("surfaces an audit request failure and lets the user retry", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("backend offline"))
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(mockLogs),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Audit log request failed: backend offline",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/llama3/)).toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(errorLog).toHaveBeenCalledOnce();
+    errorLog.mockRestore();
   });
 
   it("keeps the redacted privacy map separate from raw audit payloads", async () => {
@@ -128,7 +156,7 @@ describe("AuditLogPanel Component", () => {
     expect(screen.getByText("业务 Provider 原文")).toBeDefined();
     expect(screen.getByRole("searchbox", { name: "搜索图谱" })).toBeDefined();
     expect(screen.getByRole("button", { name: "刷新数据地图" })).toBeDefined();
-    expect(screen.getAllByRole("button", { name: "关闭审计日志" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "关闭审计日志" })).toHaveLength(1);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 

@@ -153,7 +153,7 @@ A mature market is integrated through a new Provider adapter, never by embedding
 
 The repository ships a **disabled-by-default** Anthropic official-source
 configuration at
-[`backend/catalogs/anthropic.json`](../../backend/catalogs/anthropic.json).
+[`backend/catalogs/anthropic.json`](https://github.com/BillShiyaoZhang/ambient-agent/blob/main/backend/catalogs/anthropic.json).
 Host development can set
 `SKILL_CATALOG_CONFIG=backend/catalogs/anthropic.json`; Docker can set
 `SKILL_CATALOG_CONFIG=/app/backend/catalogs/anthropic.json`. It pins an exact

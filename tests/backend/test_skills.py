@@ -427,9 +427,7 @@ def test_jit_selection_includes_only_relevant_enabled_skills_and_returns_pinned_
 
     snapshots = manager.select_for_context("Please plan my day around three meetings.")
 
-    assert [snapshot["catalog_id"] for snapshot in snapshots] == [
-        "agent-skill:test:daily-planning"
-    ]
+    assert [snapshot["catalog_id"] for snapshot in snapshots] == ["agent-skill:test:daily-planning"]
     snapshot = snapshots[0]
     assert {"catalog_id", "name", "title", "version", "digest", "instructions"} <= set(snapshot)
     assert snapshot["instructions"] == "# Plan\n\nMake a realistic time-blocked plan."

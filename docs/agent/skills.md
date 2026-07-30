@@ -152,7 +152,7 @@ Catalog 来源身份和安装信任必须分开显示：
 接入成熟市场时先实现新的 Provider adapter，不把其权限模型、安装命令或执行器嵌入 Ambient。`skills.sh` 适合作为未来的搜索与审计信号来源，但结果仍须解析为固定 commit/hash 的 standalone snapshot；无法得到不可变 revision 或完整文件清单时只能展示，不能安装。需要 scripts、MCP、网络、文件或 UI 的条目应转成 Capability/Plugin/Widget，并分别走其 sandbox 和 grant 通道，不能扩展 `agent.context.inject`。
 
 仓库随附一个**默认关闭**的 Anthropic 官方来源配置：
-[`backend/catalogs/anthropic.json`](../../backend/catalogs/anthropic.json)。Host
+[`backend/catalogs/anthropic.json`](https://github.com/BillShiyaoZhang/ambient-agent/blob/main/backend/catalogs/anthropic.json)。Host
 开发可设置 `SKILL_CATALOG_CONFIG=backend/catalogs/anthropic.json`，Docker 可设置
 `SKILL_CATALOG_CONFIG=/app/backend/catalogs/anthropic.json`。该配置固定到
 `anthropics/skills` 的精确 commit，并且只收录该 revision 下目录中唯一文件为

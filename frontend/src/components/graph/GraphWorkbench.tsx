@@ -13,6 +13,7 @@ import {
   type GraphExplorerPayload,
 } from "../../lib/graphVisualization";
 import { dataMapToGraph, workflowToGraph } from "../../lib/graphScenes";
+import { getApiBaseUrl } from "../../services/apiBase";
 import { SystemDialog, SystemIconButton } from "../system/SystemUI";
 import { GraphExplorer } from "./GraphExplorer";
 import "./GraphWorkbench.css";
@@ -26,7 +27,7 @@ interface GraphWorkbenchProps {
   onClose: () => void;
 }
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = getApiBaseUrl();
 
 function revealSceneTab(tab: HTMLElement): void {
   const container = tab.parentElement;

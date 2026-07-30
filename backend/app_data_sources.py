@@ -10,7 +10,7 @@ import socket
 import tempfile
 import threading
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -56,7 +56,7 @@ class AppDataSourceError(RuntimeError):
         }
 
 
-async def _ensure_public_hostname(hostname: str) -> None:
+async def _ensure_public_hostname(hostname: str) -> tuple[str, ...]:
     try:
         addresses = await asyncio.to_thread(
             socket.getaddrinfo,
@@ -81,6 +81,12 @@ async def _ensure_public_hostname(hostname: str) -> None:
             "Use a public HTTPS API origin; localhost, private networks, and metadata endpoints are blocked.",
             details={"hostname": hostname},
         )
+    return tuple(
+        sorted(
+            resolved,
+            key=lambda address: (ipaddress.ip_address(address).version, address),
+        )
+    )
 
 
 class AppRuntimeDiagnostics:
@@ -142,7 +148,10 @@ class AppDataSourceGateway:
         workspace_dir: str | Path,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        public_host_resolver: Callable[[str], Awaitable[None] | None] = _ensure_public_hostname,
+        public_host_resolver: Callable[
+            [str],
+            Awaitable[Sequence[str] | None] | Sequence[str] | None,
+        ] = _ensure_public_hostname,
     ) -> None:
         self.app_manager = app_manager
         self.transport = transport
@@ -167,10 +176,45 @@ class AppDataSourceGateway:
             }
         )
 
-    async def _resolve(self, hostname: str) -> None:
+    async def _resolve(self, hostname: str) -> tuple[str, ...] | None:
         outcome = self.public_host_resolver(hostname)
         if inspect.isawaitable(outcome):
-            await outcome
+            outcome = await outcome
+        if outcome is None:
+            # Explicitly injected transports/resolvers (primarily tests) can
+            # own the connection boundary themselves.
+            return None
+        if isinstance(outcome, str):
+            outcome = (outcome,)
+        addresses: list[str] = []
+        for raw_address in outcome:
+            try:
+                address = str(ipaddress.ip_address(raw_address))
+            except ValueError as exc:
+                raise AppDataSourceError(
+                    "data_source_dns_failed",
+                    f"Unable to resolve data-source host '{hostname}'",
+                    "Check the manifest base_url and the container DNS/network configuration.",
+                    status_code=502,
+                    details={"hostname": hostname},
+                ) from exc
+            if not ipaddress.ip_address(address).is_global:
+                raise AppDataSourceError(
+                    "data_source_private_destination",
+                    "The data-source hostname resolves to a non-public address",
+                    "Use a public HTTPS API origin; localhost, private networks, and metadata endpoints are blocked.",
+                    details={"hostname": hostname},
+                )
+            addresses.append(address)
+        if not addresses:
+            raise AppDataSourceError(
+                "data_source_dns_failed",
+                f"Unable to resolve data-source host '{hostname}'",
+                "Check the manifest base_url and the container DNS/network configuration.",
+                status_code=502,
+                details={"hostname": hostname},
+            )
+        return tuple(sorted(set(addresses), key=lambda address: (ipaddress.ip_address(address).version, address)))
 
     @staticmethod
     def _validate_query(value: Any) -> dict[str, Any]:
@@ -259,9 +303,26 @@ class AppDataSourceGateway:
                         "Send a smaller request or use a dedicated backend capability.",
                     )
 
-            hostname = httpx.URL(source["base_url"]).host
-            await self._resolve(hostname)
+            base_url = httpx.URL(source["base_url"])
+            hostname = base_url.host
+            resolved_addresses = await self._resolve(hostname)
             url = f"{source['base_url']}{path}"
+            request_url: str | httpx.URL = url
+            request_headers: dict[str, str] | None = None
+            request_extensions: dict[str, Any] | None = None
+            if resolved_addresses:
+                # Connect to an address from the validated DNS snapshot while
+                # preserving HTTP Host routing and TLS verification for the
+                # declared hostname. This closes the DNS-rebinding gap between
+                # policy validation and the actual socket connection.
+                pinned_address = resolved_addresses[0]
+                parsed_request_url = httpx.URL(url)
+                request_url = parsed_request_url.copy_with(host=pinned_address)
+                host_header = hostname
+                if base_url.port is not None and base_url.port != 443:
+                    host_header = f"{host_header}:{base_url.port}"
+                request_headers = {"Host": host_header}
+                request_extensions = {"sni_hostname": hostname}
             timeout = httpx.Timeout(_REQUEST_TIMEOUT_SECONDS)
             async with httpx.AsyncClient(
                 transport=self.transport,
@@ -270,7 +331,12 @@ class AppDataSourceGateway:
                 trust_env=False,
             ) as client:
                 async with client.stream(
-                    method, url, params=query, json=body if method == "POST" else None
+                    method,
+                    request_url,
+                    params=query,
+                    json=body if method == "POST" else None,
+                    headers=request_headers,
+                    extensions=request_extensions,
                 ) as response:
                     if response.is_redirect:
                         raise AppDataSourceError(

@@ -42,6 +42,13 @@ def test_websocket_graph_subscription(tmp_path, monkeypatch):
     # The mutation path is a durable Run, so the test must exercise the same
     # application lifespan that starts and stops its coordinator.
     with TestClient(app) as client:
+        assert (
+            client.post(
+                "/api/sessions",
+                json={"id": "sync-sess-1", "title": "Graph sync", "language": "en"},
+            ).status_code
+            == 200
+        )
         with client.websocket_connect("/ws/chat?session_id=sync-sess-1") as websocket:
             active_list = websocket.receive_json()
             assert active_list["type"] == "active_sessions_list"

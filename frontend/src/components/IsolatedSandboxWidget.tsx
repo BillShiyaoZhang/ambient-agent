@@ -15,6 +15,11 @@ import {
   WidgetStorageBroker,
   type WidgetStorageRequest,
 } from "../services/widgetStorage";
+import { apiUrl, webSocketUrl } from "../services/apiBase";
+import {
+  MAX_SOCKET_RECONNECT_ATTEMPTS,
+  socketReconnectDelay,
+} from "../services/socketReconnect";
 
 const CLIENT_RUNTIME_PROTOCOL = "ambient-widget-client-v1";
 const CLIENT_RUNTIME_PROTOCOL_VERSION = 1;
@@ -72,22 +77,10 @@ interface ClientRuntimeSession {
   bootstrap: RuntimeBootstrap | null;
 }
 
-const apiBase = () => {
-  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (configured) {
-    return new URL(configured, window.location.origin)
-      .toString()
-      .replace(/\/+$/, "");
-  }
-  return `${window.location.protocol}//${window.location.hostname}:8000`;
-};
-
 const runtimeWebSocketUrl = (appId: string) => {
-  const url = new URL(
-    `${apiBase()}/ws/widgets/${encodeURIComponent(appId)}/client-runtime`,
+  return webSocketUrl(
+    `/ws/widgets/${encodeURIComponent(appId)}/client-runtime`,
   );
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -241,7 +234,17 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
   );
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
   const [failure, setFailure] = useState<RuntimeFailure | null>(null);
+  const [hostMessageError, setHostMessageError] = useState<string | null>(null);
   const [status, setStatus] = useState<"connecting" | "ready" | "closed">("connecting");
+  const [sessionGeneration, setSessionGeneration] = useState(0);
+  const reconnectAttemptRef = useRef(0);
+
+  const retryRuntime = useCallback(() => {
+    reconnectAttemptRef.current = 0;
+    setFailure(null);
+    setStatus("connecting");
+    setSessionGeneration((generation) => generation + 1);
+  }, []);
 
   const isCurrentSession = useCallback(
     (session: ClientRuntimeSession) =>
@@ -319,10 +322,15 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       return;
     }
     if (message.event === "send_message" && typeof message.text === "string") {
-      wsService.sendMessage({
+      const delivered = wsService.sendMessage({
         sender: "user",
         content: message.text.slice(0, MAX_HOST_MESSAGE_LENGTH),
       });
+      setHostMessageError(delivered
+        ? null
+        : (presentationContextRef.current.locale.startsWith("zh")
+            ? "消息尚未发送。请恢复 Ambient 连接后在聊天中重试。"
+            : "Message not sent. Restore the Ambient connection and retry in chat."));
     }
   }, [widget.id]);
 
@@ -347,6 +355,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     if (!session.portReady || !session.initialized) return;
     if (value.type === "ready") {
       session.ready = true;
+      reconnectAttemptRef.current = 0;
       if (session.handshakeTimer !== null) {
         window.clearTimeout(session.handshakeTimer);
         session.handshakeTimer = null;
@@ -503,6 +512,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     setFailure(null);
     setStatus("connecting");
     const abortController = new AbortController();
+    let reconnectTimer: number | null = null;
 
     const handleServerMessage = (value: unknown) => {
       if (!isCurrentSession(session) || !isRecord(value)) return;
@@ -556,7 +566,9 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     const start = async () => {
       try {
         const response = await fetch(
-          `${apiBase()}/api/apps/${encodeURIComponent(widget.id)}/client-runtime-ticket`,
+          apiUrl(
+            `/api/apps/${encodeURIComponent(widget.id)}/client-runtime-ticket`,
+          ),
           {
             method: "POST",
             signal: abortController.signal,
@@ -632,6 +644,23 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
             type: "session_invalidated",
             reason: reason.slice(0, 4096),
           });
+          if (event?.code === 1000 || session.closingReason) return;
+          if (reconnectAttemptRef.current >= MAX_SOCKET_RECONNECT_ATTEMPTS) {
+            setFailure({
+              code: "widget_runtime_unavailable",
+              message: "Widget Runtime connection could not be restored",
+              classification: "operator",
+            });
+            return;
+          }
+          reconnectAttemptRef.current += 1;
+          setFailure(null);
+          setStatus("connecting");
+          reconnectTimer = window.setTimeout(() => {
+            if (isCurrentSession(session)) {
+              setSessionGeneration((generation) => generation + 1);
+            }
+          }, socketReconnectDelay(reconnectAttemptRef.current));
         };
       } catch (error) {
         if (
@@ -650,6 +679,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
             : "Widget Runtime ticket request failed",
           classification: "operator",
         });
+        setStatus("closed");
       }
     };
 
@@ -660,6 +690,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     return () => {
       session.disposed = true;
       window.clearTimeout(startTimer);
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       if (session.handshakeTimer !== null) {
         window.clearTimeout(session.handshakeTimer);
         session.handshakeTimer = null;
@@ -695,6 +726,7 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     widget.grants_digest,
     widget.id,
     widget.manifest_revision,
+    sessionGeneration,
   ]);
 
   useEffect(() => {
@@ -806,6 +838,23 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
             {failure.code}
             {failure.classification ? ` · ${failure.classification}` : ""}
           </span>
+          {status === "closed" && failure.classification === "operator" && (
+            <button
+              type="button"
+              className="mt-3 rounded-md border border-red-300/35 px-2 py-1 text-[11px] hover:bg-red-100/10"
+              onClick={retryRuntime}
+            >
+              {presentationContext.locale.startsWith("zh") ? "重试 Widget Runtime" : "Retry Widget Runtime"}
+            </button>
+          )}
+        </div>
+      )}
+      {hostMessageError && (
+        <div
+          className="absolute right-3 bottom-3 left-3 rounded-lg border border-red-400/30 bg-red-950/90 p-2 text-[11px] text-red-200"
+          role="alert"
+        >
+          {hostMessageError}
         </div>
       )}
     </div>

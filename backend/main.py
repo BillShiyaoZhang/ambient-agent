@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -23,7 +24,8 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
@@ -55,6 +57,7 @@ from backend.client_widget_runtime import (
     ClientWidgetRuntimeTicketError,
     ClientWidgetRuntimeTicketStore,
     LockedClientWidgetRuntimeConnection,
+    allowed_client_runtime_origins,
     client_runtime_frame_url,
     client_runtime_origin,
 )
@@ -68,7 +71,13 @@ from backend.coding_agent_acp import (
     cleanup_orphaned_coding_agent_staging,
     recover_interrupted_coding_agent_promotions,
 )
-from backend.run_service import ACTIVE_STATUSES, AgentRunState, RunCoordinator, RunStore
+from backend.run_service import (
+    ACTIVE_STATUSES,
+    ActiveSessionRunsError,
+    AgentRunState,
+    RunCoordinator,
+    RunStore,
+)
 from backend.run_live import RunLiveBroker
 from backend.session_title import is_placeholder_title, sanitize_title
 from backend.skill_catalog import build_skill_catalog
@@ -84,7 +93,12 @@ from backend.skill_store import (
     SkillStoreError,
     SkillTrustedAuthorizationImmutableError,
 )
-from backend.workspace_storage import WorkspaceStorage, migrate_old_data
+from backend.workspace_storage import (
+    WorkspaceStorage,
+    WorkspaceStorageCorruptionError,
+    migrate_old_data,
+    validate_session_id,
+)
 from backend.widget_runtime import (
     WidgetRuntimeBinding,
     WidgetRuntimeGateway,
@@ -92,9 +106,15 @@ from backend.widget_runtime import (
 )
 from backend.widget_runtime_smoke import WidgetRuntimeSmokeTester
 
+logger = logging.getLogger(__name__)
+
 # Global registry of active WebSockets mapping session_id -> Set[WebSocket]
 active_websockets: dict[str, set[WebSocket]] = {}
 legacy_run_projection_websockets: set[WebSocket] = set()
+deleting_chat_sessions: set[str] = set()
+MAX_CHAT_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024
+MAX_CHAT_CONTENT_BYTES = 256 * 1024
+MAX_CHAT_SENDER_LENGTH = 64
 
 # Set of active session IDs currently running generation tasks
 active_running_sessions: set[str] = set()
@@ -113,6 +133,21 @@ async def _accept_websocket_safely(websocket: WebSocket) -> bool:
             return False
         raise
     return True
+
+
+async def _accept_trusted_browser_websocket(websocket: WebSocket) -> bool:
+    """Accept native clients and browser clients from the Frontend allowlist."""
+
+    if websocket.headers.get("origin"):
+        try:
+            client_runtime_origin(websocket.headers)
+        except ClientWidgetRuntimeTicketError:
+            try:
+                await websocket.close(code=CLIENT_WIDGET_RUNTIME_POLICY_VIOLATION)
+            except Exception:
+                pass
+            return False
+    return await _accept_websocket_safely(websocket)
 
 
 async def send_to_session(session_id: str, data: Any):
@@ -473,6 +508,12 @@ async def lifespan(app: FastAPI):
         active_running_sessions.clear()
         active_running_sessions.update(_active_chat_session_ids())
         db_storage.cleanup_audit_logs()
+        # Validate persistent control-plane state before reporting startup as
+        # complete. Corrupt files must fail closed instead of being replaced
+        # with empty defaults by the first UI mutation.
+        llm_config_store.get_settings()
+        coding_agent_config_store.get_settings()
+        app_store.get_state()
         try:
             recover_interrupted_coding_agent_promotions(app_manager.apps_dir)
         except (OSError, ValueError):
@@ -524,10 +565,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
 
-# Allow CORS for local dev
+
+@app.exception_handler(WorkspaceStorageCorruptionError)
+async def workspace_storage_corruption_handler(
+    _request: Request,
+    _exc: WorkspaceStorageCorruptionError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "code": "workspace_state_corrupt",
+                "message": "Persisted workspace state could not be read safely; the original file was preserved",
+            }
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# Browser access is limited to the same explicit Frontend allowlist used by
+# client Widget Runtime tickets. Native same-machine clients do not use CORS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(allowed_client_runtime_origins()),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -684,13 +744,31 @@ def get_data_map(
 
 
 class SessionCreate(BaseModel):
-    id: str
-    title: str
-    language: str = "zh"
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    language: str = Field(default="zh", min_length=2, max_length=16)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        return validate_session_id(value)
 
 
 class SessionUpdateLanguage(BaseModel):
-    language: str
+    language: str = Field(min_length=2, max_length=16)
+
+
+def _require_valid_session_id(value: str) -> str:
+    try:
+        return validate_session_id(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_session_id",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 class ProviderCreateRequest(BaseModel):
@@ -752,6 +830,7 @@ async def create_session(data: SessionCreate, session: WorkspaceStorage = Depend
 async def update_session_language(
     session_id: str, data: SessionUpdateLanguage, session: WorkspaceStorage = Depends(get_db)
 ):
+    session_id = _require_valid_session_id(session_id)
     db_sess = session.get(ChatSession, session_id)
     if not db_sess:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -763,6 +842,7 @@ async def update_session_language(
 
 @app.put("/api/sessions/{session_id}/model")
 async def update_session_model(session_id: str, data: ModelSelection, session: WorkspaceStorage = Depends(get_db)):
+    session_id = _require_valid_session_id(session_id)
     try:
         llm_config_store.resolve(data)
     except LLMConfigError as exc:
@@ -780,6 +860,7 @@ async def update_session_model(session_id: str, data: ModelSelection, session: W
 
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, session: WorkspaceStorage = Depends(get_db)):
+    session_id = _require_valid_session_id(session_id)
     return session.get_messages(session_id)
 
 
@@ -971,10 +1052,79 @@ async def update_llm_settings(data: LLMSettingsUpdateRequest):
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, session: WorkspaceStorage = Depends(get_db)):
-    success = session.delete_session(session_id)
-    if success:
-        return {"status": "ok"}
-    return {"status": "error", "message": "Session not found"}
+    session_id = _require_valid_session_id(session_id)
+    try:
+        run_ids = run_store.session_runs_for_purge(session_id)
+    except ActiveSessionRunsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "session_has_active_runs",
+                "message": "Cancel or resolve active tasks before deleting this conversation",
+                "run_ids": exc.run_ids,
+            },
+        ) from exc
+
+    deleting_chat_sessions.add(session_id)
+    try:
+        sockets = list(active_websockets.pop(session_id, set()))
+        for websocket in sockets:
+            legacy_run_projection_websockets.discard(websocket)
+            try:
+                await websocket.close(code=1000)
+            except Exception:
+                pass
+        active_running_sessions.discard(session_id)
+
+        try:
+            removed_run_ids = run_store.purge_session(session_id)
+        except ActiveSessionRunsError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "session_has_active_runs",
+                    "message": "A task started while the conversation was being deleted; cancel it and retry",
+                    "run_ids": exc.run_ids,
+                },
+            ) from exc
+        try:
+            removed_audit_logs = session.delete_audit_logs_for_session(session_id, run_ids=removed_run_ids)
+        except OSError as exc:
+            logger.exception("Session Run purge completed but Audit Log cleanup failed")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "session_delete_incomplete",
+                    "message": "Conversation deletion is incomplete; retry to remove its Audit Logs and session file",
+                    "removed": {"session": False, "runs": len(removed_run_ids), "audit_logs": 0},
+                },
+            ) from exc
+        try:
+            removed_session = session.delete_session(session_id)
+        except OSError as exc:
+            logger.exception("Session Run and Audit Log purge completed but session unlink failed")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "session_delete_incomplete",
+                    "message": "Conversation deletion is incomplete; retry to remove its session file",
+                    "removed": {
+                        "session": False,
+                        "runs": len(removed_run_ids),
+                        "audit_logs": removed_audit_logs,
+                    },
+                },
+            ) from exc
+        return {
+            "status": "ok",
+            "removed": {
+                "session": removed_session,
+                "runs": len(removed_run_ids),
+                "audit_logs": removed_audit_logs,
+            },
+        }
+    finally:
+        deleting_chat_sessions.discard(session_id)
 
 
 # --- Canvas Config REST endpoints ---
@@ -1225,7 +1375,7 @@ async def stop_runtime(runtime_id: str):
 
 @app.websocket("/ws/runs")
 async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_epoch: str | None = None):
-    if not await _accept_websocket_safely(websocket):
+    if not await _accept_trusted_browser_websocket(websocket):
         return
     sequence = max(0, after_sequence)
     stream = run_store.stream_info()
@@ -1264,9 +1414,7 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_e
             events = run_store.events_after(sequence)
             for event in events:
                 sequence = max(sequence, int(event["sequence"]))
-                await websocket.send_json(
-                    {"type": "run_event", "event": _public_run_payload(event)}
-                )
+                await websocket.send_json({"type": "run_event", "event": _public_run_payload(event)})
             idle_ticks += 1
             if idle_ticks >= 40:
                 await websocket.send_json(
@@ -1282,7 +1430,15 @@ async def websocket_runs(websocket: WebSocket, after_sequence: int = 0, stream_e
 async def websocket_run_live(websocket: WebSocket, session_id: str):
     """Session-scoped, non-replayable progress lane for active Runs."""
 
-    if not await _accept_websocket_safely(websocket):
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError:
+        try:
+            await websocket.close(code=CLIENT_WIDGET_RUNTIME_PROTOCOL_ERROR)
+        except Exception:
+            pass
+        return
+    if not await _accept_trusted_browser_websocket(websocket):
         return
     queue = run_live_broker.subscribe(session_id)
     try:
@@ -1432,9 +1588,7 @@ def install_skill(data: SkillInstallRequest, request: Request, response: Respons
     try:
         entry = skill_manager.get_market_entry(data.market_id)
         if app_store.get_capability(entry.catalog_id) is not None:
-            raise SkillStoreError(
-                f"Catalog id '{entry.catalog_id}' is already used by an executable capability"
-            )
+            raise SkillStoreError(f"Catalog id '{entry.catalog_id}' is already used by an executable capability")
         return skill_manager.install(data.market_id, expected_revision=data.expected_revision)
     except Exception as exc:
         _raise_skill_api_error(exc)
@@ -1793,11 +1947,27 @@ async def delete_app(app_id: str):
 
 
 class GraphMutateRequest(BaseModel):
-    actions: list[dict[str, Any]]
-    session_id: str = "graph-api"
-    idempotency_key: str | None = None
-    manifest_revision: str | None = None
-    grants_digest: str | None = None
+    actions: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+    session_id: str = Field(default="graph-api", min_length=1, max_length=200)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+    manifest_revision: str | None = Field(default=None, min_length=1, max_length=256)
+    grants_digest: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("actions")
+    @classmethod
+    def validate_actions_size(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (OverflowError, RecursionError, TypeError, ValueError) as exc:
+            raise ValueError("Graph mutation actions must be finite JSON values") from exc
+        if len(encoded) > 1024 * 1024:
+            raise ValueError("Graph mutation actions exceed the 1 MiB limit")
+        return value
 
 
 async def _send_graph_subscription_payload(target: Any, payload: dict[str, Any]) -> None:
@@ -1896,7 +2066,10 @@ async def _run_approved_graph_mutation(
                     expected_run_version=current["version"],
                 )
         if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError(f"Durable graph Run {run['id']} did not finish in 30s")
+            # The durable Run continues independently of this HTTP/RPC wait.
+            # Preserve its identity so callers poll instead of retrying an
+            # unkeyed mutation that may still commit.
+            return {**current, "_wait_timed_out": True}
         await asyncio.sleep(0.01)
 
 
@@ -1909,13 +2082,48 @@ async def mutate_graph(data: GraphMutateRequest):
             idempotency_key=data.idempotency_key,
             title="Graph mutation",
         )
+        if completed.get("_wait_timed_out"):
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "pending",
+                    "run_id": completed["id"],
+                    "poll_url": f"/api/runs/{completed['id']}",
+                    "message": "Graph mutation is still running; poll the durable Run for its terminal result",
+                },
+                headers={"Cache-Control": "no-store"},
+            )
         if completed["status"] != "succeeded":
             error = completed.get("error") or {}
-            return {
-                "status": "error",
-                "run_id": completed["id"],
-                "message": error.get("message", completed["status"]),
-            }
+            error_code = str(error.get("code") or "")
+            if completed["status"] == "failed" and error_code in {"ValueError", "invalid_graph_mutation"}:
+                state = completed.get("state") if isinstance(completed.get("state"), dict) else {}
+                if state.get("phase") == "graph_preflight":
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "invalid_graph_mutation",
+                            "message": str(error.get("message") or "Graph mutation is invalid"),
+                            "run_id": completed["id"],
+                        },
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "graph_mutation_conflict",
+                        "message": str(error.get("message") or "Graph changed before the mutation committed"),
+                        "run_id": completed["id"],
+                    },
+                )
+            status_code = 409 if completed["status"] == "cancelled" else 503
+            raise HTTPException(
+                status_code=status_code,
+                detail={
+                    "code": f"graph_mutation_{completed['status']}",
+                    "message": "Graph mutation did not complete",
+                    "run_id": completed["id"],
+                },
+            )
         mutation = completed.get("result") or {}
         # Broadcast changes to all websocket subscribers
         from backend.graph_subscription import subscription_manager
@@ -1931,8 +2139,22 @@ async def mutate_graph(data: GraphMutateRequest):
             "ticket_id": mutation["ticket_id"],
             "actions": mutation["actions"],
         }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_graph_mutation", "message": str(exc)},
+        ) from exc
+    except Exception as exc:
+        logger.exception("Graph mutation endpoint failed")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "graph_mutation_unavailable",
+                "message": "Graph mutation is temporarily unavailable",
+            },
+        ) from exc
 
 
 @app.post("/api/apps/{app_id}/graph/mutate")
@@ -2025,6 +2247,12 @@ async def _handle_widget_runtime_rpc(
             idempotency_key=(f"widget:{binding.app_id}:{binding.session_id}:{runtime_request_id}"),
             title=f"{binding.app_id} Graph mutation",
         )
+        if completed.get("_wait_timed_out"):
+            return {
+                "status": "pending",
+                "run_id": completed["id"],
+                "message": "Graph mutation is still running",
+            }
         if completed["status"] != "succeeded":
             error = completed.get("error") or {}
             raise RuntimeError(error.get("message", completed["status"]))
@@ -2246,7 +2474,7 @@ async def websocket_widget_runtime(
     locale: str = "en-US",
     reduced_motion: bool = False,
 ):
-    if not await _accept_websocket_safely(websocket):
+    if not await _accept_trusted_browser_websocket(websocket):
         return
 
     binding: WidgetRuntimeBinding | None = None
@@ -2347,11 +2575,37 @@ async def websocket_chat(
     projection: str = "legacy",
     session: WorkspaceStorage = Depends(get_db),
 ):
-    if not await _accept_websocket_safely(websocket):
-        return
-
     if not session_id:
         session_id = "default-session"
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError:
+        try:
+            await websocket.close(code=CLIENT_WIDGET_RUNTIME_PROTOCOL_ERROR)
+        except Exception:
+            pass
+        return
+    if session_id in deleting_chat_sessions or session.get(ChatSession, session_id) is None:
+        # A WebSocket must never be able to resurrect a deleted conversation.
+        # Reject before accept so stale clients do not register in the active
+        # socket map during the DELETE await window.
+        try:
+            await websocket.close(code=4404)
+        except Exception:
+            pass
+        return
+    if not await _accept_trusted_browser_websocket(websocket):
+        return
+
+    # Recheck after the handshake await: DELETE may have started after the
+    # pre-accept check, and its socket snapshot must remain complete.
+    db_session_obj = session.get(ChatSession, session_id)
+    if session_id in deleting_chat_sessions or db_session_obj is None:
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
+        return
 
     # Register websocket session mapping
     if session_id not in active_websockets:
@@ -2359,13 +2613,6 @@ async def websocket_chat(
     active_websockets[session_id].add(websocket)
     if projection != "commands_only":
         legacy_run_projection_websockets.add(websocket)
-
-    # Ensure session exists in DB
-    db_session_obj = session.get(ChatSession, session_id)
-    if not db_session_obj:
-        db_session_obj = ChatSession(id=session_id, title="Active Chat")
-        session.add(db_session_obj)
-        session.commit()
 
     async def update_session_title(content: str) -> None:
         """Name a new session deterministically without an out-of-band model task."""
@@ -2381,11 +2628,32 @@ async def websocket_chat(
         session.commit()
         await broadcast_global({"type": "session_title_updated", "session_id": session_id, "title": title})
 
-    async def submit_user_message(content_str: str, sender_str: str) -> dict[str, Any] | None:
+    async def submit_user_message(content_str: Any, sender_str: Any) -> dict[str, Any] | None:
         """Persist the command and enqueue the scheduler-owned workflow."""
 
+        if not isinstance(content_str, str):
+            await websocket.send_json(
+                {"type": "error", "code": "invalid_message_content", "message": "Message content must be text"}
+            )
+            return None
         if not content_str.strip():
-            await send_to_session(session_id, {"type": "error", "message": "Message content must not be empty"})
+            await websocket.send_json(
+                {"type": "error", "code": "invalid_message_content", "message": "Message content must not be empty"}
+            )
+            return None
+        if len(content_str.encode("utf-8")) > MAX_CHAT_CONTENT_BYTES:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "message_too_large",
+                    "message": f"Message content exceeds {MAX_CHAT_CONTENT_BYTES // 1024} KiB",
+                }
+            )
+            return None
+        if not isinstance(sender_str, str) or not sender_str or len(sender_str) > MAX_CHAT_SENDER_LENGTH:
+            await websocket.send_json(
+                {"type": "error", "code": "invalid_message_sender", "message": "Message sender is invalid"}
+            )
             return None
 
         user_msg = ChatMessage(session_id=session_id, role="user", sender=sender_str, content=content_str)
@@ -2655,8 +2923,47 @@ async def websocket_chat(
     try:
         while True:
             # Receive message from user client
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message must be valid JSON"}
+                )
+                continue
+            if not isinstance(data, dict):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message must be a JSON object"}
+                )
+                continue
+            try:
+                encoded_size = len(
+                    json.dumps(
+                        data,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+            except (OverflowError, RecursionError, TypeError, ValueError):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message must contain finite JSON values"}
+                )
+                continue
+            if encoded_size > MAX_CHAT_WEBSOCKET_MESSAGE_BYTES:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "message_too_large",
+                        "message": f"Message envelope exceeds {MAX_CHAT_WEBSOCKET_MESSAGE_BYTES // (1024 * 1024)} MiB",
+                    }
+                )
+                continue
             msg_type = data.get("type")
+            if msg_type is not None and not isinstance(msg_type, str):
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_message", "message": "Message type must be text"}
+                )
+                continue
 
             if msg_type == "backend_permission_response":
                 request_id = data.get("request_id")
@@ -2717,6 +3024,8 @@ async def websocket_chat(
                 from backend.graph_subscription import subscription_manager
 
                 try:
+                    if not isinstance(query, dict):
+                        raise ValueError("Graph subscription query must be a JSON object")
                     if not data.get("manifest_revision") or not data.get("grants_digest"):
                         raise CapabilityDenied(
                             "capability_snapshot_required",
@@ -2745,6 +3054,17 @@ async def websocket_chat(
                 except CapabilityDenied as exc:
                     await websocket.send_json(
                         {"type": "graph_subscription_error", "subscription_id": sub_id, "error": exc.to_dict()}
+                    )
+                except ValueError as exc:
+                    await websocket.send_json(
+                        {
+                            "type": "graph_subscription_error",
+                            "subscription_id": sub_id,
+                            "error": {
+                                "code": "graph_subscription_invalid",
+                                "message": str(exc),
+                            },
+                        }
                     )
             elif msg_type == "graph_unsubscribe":
                 sub_id = data.get("subscription_id")
@@ -2814,10 +3134,18 @@ async def websocket_chat(
                             "pinned": True,
                         },
                     )
-            else:
+            elif msg_type is None:
                 sender = data.get("sender", "user")
                 content = data.get("content", "")
                 await submit_user_message(content, sender)
+            else:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "unsupported_message_type",
+                        "message": f"Unsupported message type: {msg_type}",
+                    }
+                )
 
     except WebSocketDisconnect:
         pass

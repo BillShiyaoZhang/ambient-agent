@@ -1,4 +1,11 @@
 import type { RunEvent as GeneratedRunEvent } from "../types/run-events.generated";
+import { getApiBaseUrl, webSocketUrl } from "./apiBase";
+import {
+  isNormalSocketClose,
+  MAX_SOCKET_RECONNECT_ATTEMPTS,
+  socketReconnectDelay,
+  type SocketConnectionState,
+} from "./socketReconnect";
 
 export type RunStatus =
   | "queued"
@@ -60,8 +67,10 @@ export interface AmbientRun {
     [key: string]: unknown;
   } | null;
   error?: {
+    code?: string;
     message?: string;
     type?: string;
+    retryable?: boolean;
     effect_state?: "none" | "committed" | "unknown";
     reconciliation?: string;
   } | null;
@@ -122,7 +131,7 @@ export interface RuntimeSnapshot {
   endpoint?: string;
 }
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = getApiBaseUrl();
 
 const RUN_SEQUENCE_KEY = "ambient_run_sequence";
 const RUN_STREAM_EPOCH_KEY = "ambient_run_stream_epoch";
@@ -221,6 +230,8 @@ export class RunService {
   private listeners = new Set<(event: RunEvent) => void>();
   private cursor = loadRunStreamCursor();
   private reconnectTimer: number | null = null;
+  private reconnectAttempt = 0;
+  private connectionState: SocketConnectionState = "disconnected";
   private seenEventIds = new Set<string>();
   private seenEventIdOrder: string[] = [];
   private replayingFromStart = false;
@@ -231,6 +242,14 @@ export class RunService {
   private correlationProjectionDirty = new Set<string>();
   private correlationRetryAttempts = new Map<string, number>();
   private correlationRetryTimers = new Map<string, number>();
+
+  private setConnectionState(state: SocketConnectionState): void {
+    if (state === this.connectionState) return;
+    this.connectionState = state;
+    window.dispatchEvent(new CustomEvent("ambient_run_stream_status", {
+      detail: { state },
+    }));
+  }
 
   private correlationEventName(correlation: NonNullable<AmbientRun["correlation"]>): string | null {
     const projectionType = correlation.projection_type;
@@ -337,12 +356,22 @@ export class RunService {
     window.dispatchEvent(new CustomEvent(`ambient_run_stream_${type}`, { detail }));
   }
 
-  private scheduleReconnect(delay = 1000): void {
+  private scheduleReconnect(delay = 0): void {
     if (this.listeners.size === 0 || this.reconnectTimer !== null) return;
+    this.setConnectionState("retrying");
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
+  }
+
+  private scheduleSocketReconnect(): void {
+    if (this.reconnectAttempt >= MAX_SOCKET_RECONNECT_ATTEMPTS) {
+      this.setConnectionState("unavailable");
+      return;
+    }
+    this.reconnectAttempt += 1;
+    this.scheduleReconnect(socketReconnectDelay(this.reconnectAttempt));
   }
 
   private restartStream(delay = 0): void {
@@ -463,7 +492,6 @@ export class RunService {
 
   connect(): void {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
-    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     if (!this.cursor.stream_epoch && this.cursor.sequence > 0) {
       // A sequence-only cursor cannot prove that the server still owns the
       // same database. Replay once from zero so a reset sequence cannot remain
@@ -478,10 +506,16 @@ export class RunService {
       after_sequence: String(this.cursor.sequence),
     });
     if (this.cursor.stream_epoch) params.set("stream_epoch", this.cursor.stream_epoch);
+    this.setConnectionState(this.reconnectAttempt > 0 ? "retrying" : "connecting");
     const socket = new WebSocket(
-      `${scheme}://${window.location.hostname}:8000/ws/runs?${params}`
+      webSocketUrl(`/ws/runs?${params}`, API_BASE),
     );
     this.socket = socket;
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
+      this.reconnectAttempt = 0;
+      this.setConnectionState("connected");
+    };
     socket.onmessage = (message) => {
       let parsed: unknown;
       try {
@@ -498,10 +532,37 @@ export class RunService {
       const event = normalizeRunEvent(candidate);
       if (event) this.handleRunEvent(event);
     };
-    socket.onclose = () => {
-      if (this.socket === socket) this.socket = null;
-      this.scheduleReconnect();
+    socket.onclose = (event) => {
+      if (this.socket !== socket) return;
+      this.socket = null;
+      if (isNormalSocketClose(event)) {
+        this.setConnectionState("disconnected");
+        return;
+      }
+      this.scheduleSocketReconnect();
     };
+  }
+
+  getConnectionState(): SocketConnectionState {
+    return this.connectionState;
+  }
+
+  retryConnection(): boolean {
+    if (
+      this.listeners.size === 0
+      || this.connectionState === "connected"
+      || this.connectionState === "connecting"
+    ) return false;
+
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const staleSocket = this.socket;
+    this.socket = null;
+    if (staleSocket && staleSocket.readyState < WebSocket.CLOSING) staleSocket.close();
+    this.reconnectAttempt = 0;
+    this.setConnectionState("connecting");
+    this.connect();
+    return true;
   }
 
   subscribe(listener: (event: RunEvent) => void): () => void {

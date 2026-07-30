@@ -83,11 +83,7 @@ class ContextManager:
         """
 
         limits = budget or ContextBudget.defaults()
-        messages = [
-            message
-            for message in self.db.get_messages(session_id)
-            if message_allows_prompt_reuse(message)
-        ]
+        messages = [message for message in self.db.get_messages(session_id) if message_allows_prompt_reuse(message)]
         omitted = messages[: max(0, len(messages) - limits.max_messages)]
         if not omitted or max_summary_chars <= 0:
             return None
@@ -139,11 +135,7 @@ class ContextManager:
             raise ValueError("Context budget must be positive")
 
         # 1. Fetch messages for the session sorted by timestamp.
-        messages = [
-            message
-            for message in self.db.get_messages(session_id)
-            if message_allows_prompt_reuse(message)
-        ]
+        messages = [message for message in self.db.get_messages(session_id) if message_allows_prompt_reuse(message)]
 
         # 2. Select artifact references deterministically. Callers may narrow
         # this list for just-in-time retrieval; the fallback remains bounded.

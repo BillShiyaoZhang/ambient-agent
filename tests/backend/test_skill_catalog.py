@@ -152,9 +152,7 @@ def test_catalog_isolates_optional_provider_failure_but_fails_duplicate_ids(
     )
 
     listing = manager.list_market()
-    assert [item["market_id"] for item in listing["items"]] == [
-        "ambient-agent/daily-planning"
-    ]
+    assert [item["market_id"] for item in listing["items"]] == ["ambient-agent/daily-planning"]
     assert listing["sources"][1] == {
         "id": "community-search",
         "kind": "registry",
@@ -282,9 +280,7 @@ def test_disabling_source_does_not_remove_installed_snapshot(tmp_path: Path) -> 
 
     assert manager.list_market()["items"] == []
     installed_items = manager.list_catalog_items()
-    assert [item["catalog_id"] for item in installed_items] == [
-        installed["catalog_id"]
-    ]
+    assert [item["catalog_id"] for item in installed_items] == [installed["catalog_id"]]
     assert installed_items[0]["available"] is True
 
 
@@ -303,8 +299,7 @@ def test_github_provider_verifies_pin_exposes_origin_and_uses_verified_cache(
 
     assert entry.version == "a" * 40
     assert fetched_urls == [
-        "https://raw.githubusercontent.com/anthropics/skills/"
-        f"{'a' * 40}/skills/remote-review/SKILL.md"
+        f"https://raw.githubusercontent.com/anthropics/skills/{'a' * 40}/skills/remote-review/SKILL.md"
     ]
     item = entry.as_market_item()
     assert item["provenance"]["verified"] is False
@@ -312,10 +307,7 @@ def test_github_provider_verifies_pin_exposes_origin_and_uses_verified_cache(
     assert item["catalog_source"] == {
         "id": "anthropic-official",
         "kind": "github",
-        "source_uri": (
-            "https://github.com/anthropics/skills/tree/"
-            f"{'a' * 40}/skills/remote-review"
-        ),
+        "source_uri": (f"https://github.com/anthropics/skills/tree/{'a' * 40}/skills/remote-review"),
         "source_revision": "a" * 40,
         "upstream_hash": _sha256(content),
         "update_strategy": "content_hash",
@@ -505,27 +497,17 @@ def test_catalog_config_loads_only_declared_github_providers(tmp_path: Path) -> 
 def test_shipped_anthropic_catalog_is_immutable_and_standalone(
     tmp_path: Path,
 ) -> None:
-    config_path = (
-        Path(__file__).parents[2]
-        / "backend"
-        / "catalogs"
-        / "anthropic.json"
-    )
+    config_path = Path(__file__).parents[2] / "backend" / "catalogs" / "anthropic.json"
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     entry = raw["providers"][0]["entries"][0]
 
     assert entry["repository"] == "anthropics/skills"
     assert entry["commit"] == "b29e7cf65e5cb78a5ac33d582270551bc74a14eb"
-    assert entry["sha256"] == (
-        "sha256:2e47d78846faeea4a56e9809c5270008"
-        "7a15a2155a3f293a3efbaded81398ef4"
-    )
+    assert entry["sha256"] == ("sha256:2e47d78846faeea4a56e9809c52700087a15a2155a3f293a3efbaded81398ef4")
     assert entry["files"] == ["SKILL.md"]
     providers = load_skill_catalog_config(
         config_path,
         cache_dir=tmp_path / "cache",
         fetcher=lambda _url: b"",
     )
-    assert [provider.source_id for provider in providers] == [
-        "anthropic-official"
-    ]
+    assert [provider.source_id for provider in providers] == ["anthropic-official"]

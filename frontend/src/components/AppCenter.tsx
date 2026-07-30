@@ -51,6 +51,7 @@ import {
   X,
 } from "lucide-react";
 import wsService from "../services/websocket";
+import { getApiBaseUrl } from "../services/apiBase";
 import {
   installSkill,
   loadSkillMarket,
@@ -143,6 +144,8 @@ interface AppCenterProps {
   onRunFullscreen: (id: string) => void;
   onRunCreated?: (run: { id: string }) => void;
   onAppUpdated?: (id: string) => void | Promise<void>;
+  onOpenChat?: () => void;
+  onConfigureModels?: () => void;
   language?: "zh" | "en";
   headerActions?: React.ReactNode;
 }
@@ -158,7 +161,7 @@ type AppEditorState = {
   tags: string;
 };
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = getApiBaseUrl();
 const FALLBACK_ACCENTS = ["#7c5cff", "#12b8a6", "#f59e58", "#e85d9e", "#4f8cff", "#76b852"];
 
 function accentFor(item: CatalogItem): string {
@@ -625,6 +628,8 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   onRunFullscreen,
   onRunCreated,
   onAppUpdated,
+  onOpenChat,
+  onConfigureModels,
   language = "zh",
   headerActions,
 }) => {
@@ -873,6 +878,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
 
   const activateItem = (item: CatalogItem) => {
     setMenu(null);
+    setActionError("");
     if (isInstructionSkill(item)) {
       setDetailsId(item.catalog_id);
       return;
@@ -921,7 +927,17 @@ export const AppCenter: React.FC<AppCenterProps> = ({
 
   const requestGeneration = (item: CatalogItem) => {
     if (isInstructionSkill(item)) return;
-    wsService.sendMessage({ type: "generate_capability_ui", catalog_id: item.catalog_id });
+    const delivered = wsService.sendMessage({
+      type: "generate_capability_ui",
+      catalog_id: item.catalog_id,
+    });
+    if (!delivered) {
+      setActionError(isZh
+        ? "界面生成请求尚未发送。请恢复 Ambient 连接后重试。"
+        : "Interface generation was not requested. Restore the Ambient connection and try again.");
+      return;
+    }
+    setActionError("");
     setStore((current) => current ? {
       ...current,
       items: current.items.map((candidate) =>
@@ -1436,7 +1452,9 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                           type="button"
                           role="switch"
                           aria-checked={enabled}
-                          aria-label={`${enabled ? "Disable" : "Enable"} source ${source.id}`}
+                          aria-label={isZh
+                            ? `${enabled ? "关闭" : "开启"}来源 ${source.id}`
+                            : `${enabled ? "Disable" : "Enable"} source ${source.id}`}
                           className="app-center-market-source"
                           disabled={busy}
                           key={source.id}
@@ -1518,6 +1536,38 @@ export const AppCenter: React.FC<AppCenterProps> = ({
           <div className="app-center-state"><LoaderCircle className="animate-spin" size={28} /><p>{isZh ? "正在整理你的应用…" : "Organizing your apps…"}</p></div>
         ) : error ? (
           <div className="app-center-state"><AlertCircle size={30} /><h2>{isZh ? "目录暂时不可用" : "Catalog unavailable"}</h2><p>{error}</p><button onClick={fetchStore}>{isZh ? "重试" : "Try again"}</button></div>
+        ) : !isSearching && (store?.items?.length ?? 0) === 0 ? (
+          <div className="app-center-state app-center-first-use">
+            <Sparkles size={30} />
+            <h2>{isZh ? "还没有安装应用或技能" : "No apps or skills installed yet"}</h2>
+            <p>
+              {isZh
+                ? "先发现一个技能，或打开对话让 Ambient 为你创建第一个 App。"
+                : "Discover a skill, or open chat and ask Ambient to create your first app."}
+            </p>
+            <div className="app-center-first-use-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setSection("discover");
+                  setQuery("");
+                  setPage(0);
+                }}
+              >
+                {isZh ? "发现技能" : "Discover Skills"}
+              </button>
+              {onOpenChat && (
+                <button type="button" onClick={onOpenChat}>
+                  {isZh ? "打开对话" : "Open chat"}
+                </button>
+              )}
+              {onConfigureModels && (
+                <button type="button" onClick={onConfigureModels}>
+                  {isZh ? "配置模型" : "Configure models"}
+                </button>
+              )}
+            </div>
+          </div>
         ) : pageEntries.length === 0 ? (
           <div className="app-center-state"><Search size={30} /><h2>{isZh ? "没有找到结果" : "No results found"}</h2><p>{isZh ? "试试更短的关键词或其他类型。" : "Try a shorter term or a different type."}</p></div>
         ) : isSearching ? (
@@ -1649,6 +1699,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
               )}
             </dl>
             {detailsItem.tags.length > 0 && <div className="app-center-tags">{detailsItem.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+            {actionError && <p className="app-center-action-error" role="alert">{actionError}</p>}
             {detailsIsInstructionSkill ? (
               <div className="app-center-installed-skill">
                 {detailsSkillAuthorization?.external ? (
@@ -1827,7 +1878,6 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                     )}
                   </label>
                 ))}
-                {actionError && <p className="app-center-action-error">{actionError}</p>}
                 <button className="app-center-primary" onClick={() => void submitAction(detailsItem, selectedAction)} disabled={actionSubmitting}>{actionSubmitting ? <LoaderCircle className="animate-spin" size={17} /> : <Play size={17} />}{isZh ? "后台运行" : "Run in background"}</button>
                 <button className="app-center-secondary" onClick={() => requestGeneration(detailsItem)}>{isZh ? "生成可视化界面" : "Generate visual interface"}</button>
               </div>

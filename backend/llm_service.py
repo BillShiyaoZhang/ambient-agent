@@ -211,7 +211,10 @@ async def generate_agent_response(
     model: str = "",
     session: Session = None,
     user_message: str | None = None,
+    session_id: str | None = None,
 ) -> str:
+    """Compatibility helper; callers should pass session_id for deletable audit linkage."""
+
     if messages is None:
         messages = (
             [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_message}]
@@ -221,7 +224,13 @@ async def generate_agent_response(
     response_data = await call_llm_api(provider, model, messages)
     response_text = response_data if isinstance(response_data, str) else response_data.get("content", "")
     prompt_str = json.dumps(messages, ensure_ascii=False, default=str)
-    audit_log = LLMAuditLog(provider=provider, model=model, prompt=prompt_str, response=response_text)
+    audit_log = LLMAuditLog(
+        provider=provider,
+        model=model,
+        prompt=prompt_str,
+        response=response_text,
+        session_id=session_id,
+    )
     session.add(audit_log)
     session.commit()
     session.refresh(audit_log)

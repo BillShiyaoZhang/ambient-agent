@@ -47,6 +47,4 @@ def _validate_identity(catalog_id: str, skill_digest: str) -> None:
     if not isinstance(catalog_id, str) or not catalog_id or len(catalog_id) > 192:
         raise ValueError("catalog_id must be a non-empty string of at most 192 characters")
     if not isinstance(skill_digest, str) or _DIGEST_PATTERN.fullmatch(skill_digest) is None:
-        raise ValueError(
-            "skill_digest must use the form sha256:<64 lowercase hex characters>"
-        )
+        raise ValueError("skill_digest must use the form sha256:<64 lowercase hex characters>")

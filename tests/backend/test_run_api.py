@@ -220,9 +220,7 @@ def test_public_run_payload_redacts_pinned_skill_instructions(tmp_path, monkeypa
     # Internal reducers still receive the full self-contained replay snapshot.
     assert "PRIVATE SKILL BODY" in store.get_run(run["id"])["state"]["data"]["active_skills"][0]["instructions"]
 
-    public_event = main_module._public_run_payload(
-        {"payload": {"state": state.model_dump(mode="json")}}
-    )
+    public_event = main_module._public_run_payload({"payload": {"state": state.model_dump(mode="json")}})
     assert "PRIVATE SKILL BODY" not in str(public_event)
 
 

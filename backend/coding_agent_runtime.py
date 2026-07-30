@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
+import tarfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -25,7 +28,27 @@ AuthState = Literal["not_required", "signed_out", "starting", "waiting", "signed
 ModelMode = Literal["native", "shared_binding", "hybrid", "none"]
 ACPTransport = Literal["native", "bridge"]
 
-_INSTALL_SCRIPT_LIMIT = 2 * 1024 * 1024
+_CODEX_VERSION = "0.145.0"
+_CODEX_RELEASE_TAG = f"rust-v{_CODEX_VERSION}"
+_CODEX_ARCHIVE_LIMIT = 160 * 1024 * 1024
+_CODEX_RELEASES = {
+    ("darwin", "arm64"): (
+        "aarch64-apple-darwin",
+        "072a30a65f05666735889ef0f60b56db186adbdde9d5c5cc1a64be0b598530fe",
+    ),
+    ("darwin", "x86_64"): (
+        "x86_64-apple-darwin",
+        "4216d7a40aa49d74b65fab93d2a86d2e25a902482b827dbdb3f357777b09fadf",
+    ),
+    ("linux", "arm64"): (
+        "aarch64-unknown-linux-musl",
+        "d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227",
+    ),
+    ("linux", "x86_64"): (
+        "x86_64-unknown-linux-musl",
+        "bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a",
+    ),
+}
 _OUTPUT_LIMIT = 64 * 1024
 _APP_SERVER_OUTPUT_LIMIT = 1024 * 1024
 _APP_SERVER_TIMEOUT = 15.0
@@ -636,37 +659,71 @@ class CodingAgentRuntime:
         install_dir = staging / "bin"
         install_dir.mkdir(mode=0o700)
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                response = await client.get("https://chatgpt.com/codex/install.sh")
-                response.raise_for_status()
-                script = response.content
-            if not script or len(script) > _INSTALL_SCRIPT_LIMIT:
-                raise CodingAgentRuntimeError("Codex installer response was empty or too large", code="install_failed")
-            environment = self.process_environment("codex")
-            environment.update(
-                {
-                    "CODEX_NON_INTERACTIVE": "1",
-                    "CODEX_INSTALL_DIR": str(install_dir),
-                }
-            )
-            proc = await asyncio.create_subprocess_exec(
-                "/bin/sh",
-                "-s",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=environment,
-                start_new_session=os.name != "nt",
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(script), timeout=180.0)
-            if proc.returncode != 0:
-                detail = _clean_output(stdout[-_OUTPUT_LIMIT:])
-                raise CodingAgentRuntimeError(f"Codex installation failed: {detail}", code="install_failed")
+            system = platform.system().lower()
+            machine = platform.machine().lower()
+            if machine in {"amd64", "x64"}:
+                machine = "x86_64"
+            elif machine in {"aarch64", "arm64"}:
+                machine = "arm64"
+            release = _CODEX_RELEASES.get((system, machine))
+            if release is None:
+                raise CodingAgentRuntimeError(
+                    f"Codex managed installation does not support {system}/{machine}",
+                    code="install_unsupported",
+                )
+            target, expected_sha256 = release
+            asset_name = f"codex-{target}.tar.gz"
+            asset_url = f"https://github.com/openai/codex/releases/download/{_CODEX_RELEASE_TAG}/{asset_name}"
+            archive_path = staging / asset_name
+            digest = hashlib.sha256()
+            size = 0
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                async with client.stream("GET", asset_url) as response:
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if content_length and int(content_length) > _CODEX_ARCHIVE_LIMIT:
+                        raise CodingAgentRuntimeError("Codex release asset is too large", code="install_failed")
+                    with archive_path.open("xb") as archive_file:
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > _CODEX_ARCHIVE_LIMIT:
+                                raise CodingAgentRuntimeError("Codex release asset is too large", code="install_failed")
+                            digest.update(chunk)
+                            archive_file.write(chunk)
+            if size == 0:
+                raise CodingAgentRuntimeError("Codex release asset was empty", code="install_failed")
+            if digest.hexdigest() != expected_sha256:
+                raise CodingAgentRuntimeError(
+                    "Codex release checksum verification failed",
+                    code="install_failed",
+                )
+
             binary = install_dir / "codex"
-            if not binary.is_file():
-                raise CodingAgentRuntimeError("Codex installer did not create the CLI binary", code="install_failed")
+            expected_member = f"codex-{target}"
+            try:
+                with tarfile.open(archive_path, mode="r:gz") as archive:
+                    member = archive.getmember(expected_member)
+                    if not member.isfile() or member.size > _CODEX_ARCHIVE_LIMIT:
+                        raise CodingAgentRuntimeError(
+                            "Codex release did not contain the expected CLI binary",
+                            code="install_failed",
+                        )
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise CodingAgentRuntimeError(
+                            "Codex release did not contain the expected CLI binary",
+                            code="install_failed",
+                        )
+                    with source, binary.open("xb") as destination_file:
+                        shutil.copyfileobj(source, destination_file)
+            except (KeyError, tarfile.TarError, OSError) as exc:
+                raise CodingAgentRuntimeError(
+                    "Codex release archive was invalid",
+                    code="install_failed",
+                ) from exc
+            binary.chmod(0o700)
             code, version = await self._run_probe([str(binary), "--version"], agent_id="codex")
-            if code != 0:
+            if code != 0 or _CODEX_VERSION not in version.split():
                 raise CodingAgentRuntimeError(f"Installed Codex failed validation: {version}", code="install_failed")
             destination = agent_root / "bin"
             if destination.exists():

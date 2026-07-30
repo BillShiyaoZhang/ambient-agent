@@ -614,6 +614,31 @@
   padding-left: 15px;
 }
 
+.graph-explorer-coverage-fields {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+}
+
+.graph-explorer-coverage-fields > div {
+  display: grid;
+  gap: 2px;
+}
+
+.graph-explorer-coverage-fields dt {
+  color: var(--graph-muted);
+  font-size: 8px;
+  text-transform: none;
+}
+
+.graph-explorer-coverage-fields dd {
+  margin: 0;
+}
+
+.graph-explorer-coverage-values {
+  margin-top: 2px !important;
+}
+
 .graph-explorer-edge-picker {
   display: grid;
   gap: 5px;

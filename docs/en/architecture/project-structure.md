@@ -16,13 +16,13 @@ ambient-agent/
 │       ├── lib/           # Pure window-state and message-merging logic
 │       ├── services/      # HTTP, WebSocket, Run, LLM, theme, and i18n clients
 │       └── types/         # Run event types generated from the backend contract
-├── widget-runtime/        # Zero-network Chromium supervisor and isolated Controller renderer
+├── widget-runtime/        # Browser Frame service and zero-network Chromium rollback Runtime
 ├── docs/                  # Docsify docs; Chinese at root, English under docs/en/
 ├── scripts/               # Contract generation, UML/docs/Widget checks, evaluation
 ├── tests/backend/         # Pytest backend tests
 ├── tests/frontend/        # Vitest + Testing Library frontend tests
 ├── workspace/             # Local runtime data, ignored by Git
-├── docker-compose.yml     # Local Neo4j + backend + frontend + widget-runtime orchestration
+├── docker-compose.yml     # Local Neo4j + backend + frontend + both Widget Runtime paths
 └── pyproject.toml         # Python versions, dependencies, and Ruff configuration
 ```
 
@@ -40,12 +40,13 @@ ambient-agent/
 | `backend/capabilities/policy.py` | Default-deny unified App capability authorizer |
 | `backend/capabilities/catalog.py` | Structured system capability projections for each Agent role |
 | `backend/capabilities/files.py` | `app://data/` file adapter with path and atomic-write boundaries |
-| `backend/graph_db.py` | SQLite storage for schemas, nodes, edges, effects, and mutation history |
+| `backend/graph_db.py` | Graph contract plus the explicit SQLite test/migration adapter; production uses `neo4j_graph_db.py` |
 | `backend/schema_*` | Produces schema + capability alignment proposals and verifies that staging cannot expand the approved contract |
 | `backend/app_manager.py` | Artifact I/O and safe paths under `workspace/apps/<app-id>/` |
 | `backend/app_store.py` | Unified catalog and layout for apps, skills, and MCP capabilities |
 | `backend/coding_agent_acp.py` | Generates Widgets through ACP in isolated staging, then verifies and promotes artifacts |
-| `backend/widget_runtime.py` | Runtime sessions, Unix-socket protocol, frame/input proxying, and capability-RPC identity binding |
+| `backend/client_widget_runtime.py` | One-time tickets, WebSocket bootstrap, and capability-RPC identity binding for the default iframe Widget |
+| `backend/widget_runtime.py` | Unix-socket, frame, and input protocol for the legacy pixel rollback and generation smoke test |
 | `backend/llm_config.py` | Provider profiles, credentials, model catalog, and default/session selections |
 | `backend/workspace_storage.py` | Workspace file storage for session messages, Canvas, and audit logs |
 
@@ -57,7 +58,8 @@ ambient-agent/
 | `AppWorkspace.tsx` | Desktop chrome, window move/resize/snap/maximize, and responsive modes |
 | `AppCenter.tsx` | Unified capability catalog, search, folders, ordering, and UI generation entry point |
 | `TaskDrawer.tsx` | Run history, pending interactions, and runtime controls |
-| `SandboxWidget.tsx` | Widget Runtime frame player; normalizes input/viewport and never loads or executes a Controller |
+| `SandboxWidget.tsx` | Selects the default `IsolatedSandboxWidget` or explicit `PixelSandboxWidget` rollback implementation |
+| `IsolatedSandboxWidget.tsx` | Obtains a one-time ticket, opens the client-runtime channel, and hosts the opaque-origin iframe |
 | `services/runs.ts` | Run REST client, versioned event stream, and cursor recovery after disconnects |
 | `lib/windowManager.ts` | Canvas V3 migration, normalized window coordinates, and layout algorithms |
 
@@ -79,13 +81,13 @@ workspace/
 
 `workspace/` is local state and must not be committed. The deployed canonical ontology and context graph live in Neo4j; App-private runtime data lives under `workspace/apps/<app-id>/data/`. The new version does not load V1 Apps or old three-file Widgets; migration explicitly repeats schema/capability alignment and publishes Manifest V2.
 
-`widget-runtime` never mounts `workspace/`. The Backend sends verified Controller contents and an artifact digest over the Unix socket; the shared named volume holds only the socket inode, never Apps or credentials.
+`widget-runtime` never mounts `workspace/`. On the default iframe path, the Backend sends the verified Controller and artifact digest to the trusted Host over a ticket-authenticated client-runtime WebSocket; the Host transfers them to the opaque-origin Frame over an authenticated MessagePort. The Unix socket is used only by the legacy pixel rollback and generation smoke test. Its shared named volume holds only the socket inode, never Apps or credentials.
 
 ## Common change entry points
 
 - Add or modify an API: update the relevant architecture/API docs and tests first, then change `backend/main.py` and the service layer.
 - Change Agent behavior: consider `IntentPlan`, durable phases, and the Run event contract together.
-- Change the Widget API: update `SandboxWidget.tsx`, backend enforcement, both SDK language pages, and tests.
+- Change the Widget API: update `IsolatedSandboxWidget.tsx`, the Frame Runtime, backend enforcement, both SDK language pages, and tests; update `PixelSandboxWidget.tsx` as well when the rollback protocol changes.
 - Change Widget external authority: update the Capability Ontology and security architecture first, then add policy/contract tests; never add route-local exceptions.
 - Change a core class or model: update both UML language pages and run `scripts/verify_uml.py`.
 - Change documentation pages: the Chinese path and its English path under `docs/en/` must correspond exactly; run `scripts/verify_docs.py`.

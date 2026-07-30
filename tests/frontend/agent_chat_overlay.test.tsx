@@ -29,6 +29,55 @@ describe("AgentChatOverlay", () => {
     Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   });
 
+  it("moves keyboard focus to the named composer when the chat opens", () => {
+    const view = render(
+      <AgentChatOverlay {...commonProps} open={false} messages={[]} />,
+    );
+    expect(screen.queryByRole("textbox")).toBeNull();
+
+    view.rerender(<AgentChatOverlay {...commonProps} open messages={[]} />);
+    const composer = screen.getByRole("textbox", {
+      name: "Message Ambient… Type / for commands",
+    });
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it("explains an exhausted command connection and lets the user retry", () => {
+    const onRetryConnection = vi.fn();
+    render(<AgentChatOverlay
+      {...commonProps}
+      messages={[]}
+      isConnected={false}
+      connectionState="unavailable"
+      onRetryConnection={onRetryConnection}
+    />);
+
+    expect(screen.getByText("Connection unavailable")).toBeDefined();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Responses and new messages stay on this device until the connection returns.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry connection" }));
+    expect(onRetryConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a composed message when the connection races closed during send", () => {
+    const onSendMessage = vi.fn(() => false);
+    render(<AgentChatOverlay
+      {...commonProps}
+      messages={[]}
+      onSendMessage={onSendMessage}
+    />);
+
+    const composer = screen.getByRole("textbox", {
+      name: "Message Ambient… Type / for commands",
+    }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSendMessage).toHaveBeenCalledWith("Keep this draft");
+    expect(composer.value).toBe("Keep this draft");
+  });
+
   it("applies and remembers desktop size presets", () => {
     render(<AgentChatOverlay
       {...commonProps}
@@ -69,6 +118,22 @@ describe("AgentChatOverlay", () => {
     );
     expect(stylesheet).toMatch(/\.chat-history-delete\s*\{[^}]*width:\s*28px[^}]*min-width:\s*28px/);
     expect(stylesheet).toMatch(/\.chat-history-list\s*\{[^}]*overflow-x:\s*hidden/);
+  });
+
+  it("prevents deleting a conversation while it still has active tasks", () => {
+    render(<AgentChatOverlay
+      {...commonProps}
+      messages={[]}
+      sessions={[{ id: "session-one", title: "Session One" }]}
+      activeSessionId="session-one"
+      runningSessions={["session-one"]}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat history" }));
+    const deleteButton = screen.getByRole("button", {
+      name: "Finish or cancel active tasks before deleting Session One",
+    }) as HTMLButtonElement;
+    expect(deleteButton.disabled).toBe(true);
   });
 
   it("restores the preferred size after a temporary viewport clamp", () => {

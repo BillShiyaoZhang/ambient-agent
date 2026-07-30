@@ -381,6 +381,35 @@ function DetailRows({ details }: { details: Record<string, unknown> | undefined 
   );
 }
 
+function CoverageValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    return (
+      <ul className="graph-explorer-coverage-values">
+        {value.map((item, index) => (
+          <li key={`${graphDetailText(item)}:${index}`}>
+            <CoverageValue value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  if (typeof value === "object" && value !== null) {
+    return (
+      <dl className="graph-explorer-coverage-fields">
+        {Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, item]) => (
+            <div key={key}>
+              <dt>{key.replaceAll("_", " ")}</dt>
+              <dd><CoverageValue value={item} /></dd>
+            </div>
+          ))}
+      </dl>
+    );
+  }
+  return <span>{graphDetailText(value)}</span>;
+}
+
 function GraphExplorerInner({
   dataset,
   className,
@@ -985,13 +1014,13 @@ function GraphExplorerInner({
               {dataset.metadata.coverage && (
                 <div>
                   <strong>{copy.coverage}</strong>
-                  <span>{graphDetailText(dataset.metadata.coverage)}</span>
+                  <CoverageValue value={dataset.metadata.coverage} />
                 </div>
               )}
               {dataset.metadata.semantics && (
                 <div>
                   <strong>{copy.semantics}</strong>
-                  <span>{graphDetailText(dataset.metadata.semantics)}</span>
+                  <CoverageValue value={dataset.metadata.semantics} />
                 </div>
               )}
               {dataset.metadata.blindSpots && dataset.metadata.blindSpots.length > 0 && (

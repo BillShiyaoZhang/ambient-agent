@@ -14,9 +14,7 @@ from backend.router_context import RouterContext
 
 
 def test_parser_preserves_order_prefix_and_escaped_literal_command() -> None:
-    parsed = parse_slash_commands(
-        r"先读取上下文 /app planner 修复按钮并保留文字 \/query /ask 解释修改"
-    )
+    parsed = parse_slash_commands(r"先读取上下文 /app planner 修复按钮并保留文字 \/query /ask 解释修改")
 
     assert [(item.name, item.arguments) for item in parsed] == [
         ("ask", {"instruction": "先读取上下文"}),
@@ -26,9 +24,10 @@ def test_parser_preserves_order_prefix_and_escaped_literal_command() -> None:
 
 
 def test_multiple_explicit_skill_ids_are_extracted() -> None:
-    assert explicit_skill_ids(
-        "/skill daily-planning 安排今天 /skill review-notes 检查风险"
-    ) == ["daily-planning", "review-notes"]
+    assert explicit_skill_ids("/skill daily-planning 安排今天 /skill review-notes 检查风险") == [
+        "daily-planning",
+        "review-notes",
+    ]
 
 
 def test_catalog_returns_every_dynamic_id_choice() -> None:
@@ -61,16 +60,12 @@ def test_catalog_returns_every_dynamic_id_choice() -> None:
         "mutate",
         "skill",
     ]
-    app_argument = next(
-        command for command in catalog["commands"] if command["name"] == "app"
-    )["arguments"][0]
+    app_argument = next(command for command in catalog["commands"] if command["name"] == "app")["arguments"][0]
     assert {option["value"] for option in app_argument["options"]} == {
         "planner",
         "calendar",
     }
-    skill_argument = next(
-        command for command in catalog["commands"] if command["name"] == "skill"
-    )["arguments"][0]
+    skill_argument = next(command for command in catalog["commands"] if command["name"] == "skill")["arguments"][0]
     assert [option["value"] for option in skill_argument["options"]] == [
         "agent-skill:daily",
         "agent-skill:review",
@@ -109,32 +104,42 @@ async def test_query_and_mutation_commands_are_constrained_then_compiled(
         side_effect=[
             {
                 "content": "",
-                "tool_calls": [{
-                    "function": {
-                        "name": "classify_intent",
-                        "arguments": json.dumps({
-                            "kind": "graph_query",
-                            "query": {"type": "Task", "properties": {"status": "pending"}},
-                        }),
-                    },
-                }],
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": json.dumps(
+                                {
+                                    "kind": "graph_query",
+                                    "query": {"type": "Task", "properties": {"status": "pending"}},
+                                }
+                            ),
+                        },
+                    }
+                ],
             },
             {
                 "content": "",
-                "tool_calls": [{
-                    "function": {
-                        "name": "classify_intent",
-                        "arguments": json.dumps({
-                            "kind": "graph_mutation",
-                            "actions": [{
-                                "action": "create_node",
-                                "id": "task-1",
-                                "type": "Task",
-                                "properties": {"title": "ship"},
-                            }],
-                        }),
-                    },
-                }],
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "classify_intent",
+                            "arguments": json.dumps(
+                                {
+                                    "kind": "graph_mutation",
+                                    "actions": [
+                                        {
+                                            "action": "create_node",
+                                            "id": "task-1",
+                                            "type": "Task",
+                                            "properties": {"title": "ship"},
+                                        }
+                                    ],
+                                }
+                            ),
+                        },
+                    }
+                ],
             },
         ]
     )

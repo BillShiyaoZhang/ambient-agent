@@ -115,16 +115,10 @@ class SkillManager:
         return self.store.list_source_preferences()
 
     def list_market(self) -> dict[str, Any]:
-        revision, installed_skills = self.store.list_with_revision(
-            verify_packages=False
-        )
-        installed_by_market = {
-            item.market_id: item for item in installed_skills
-        }
+        revision, installed_skills = self.store.list_with_revision(verify_packages=False)
+        installed_by_market = {item.market_id: item for item in installed_skills}
         items: list[dict[str, Any]] = []
-        catalog_snapshot = self.catalog.list_snapshot(
-            source_enabled=self._source_preferences()
-        )
+        catalog_snapshot = self.catalog.list_snapshot(source_enabled=self._source_preferences())
         for entry in catalog_snapshot.entries:
             self._validate_ontology_refs(entry)
             installed = installed_by_market.get(entry.market_id)
@@ -143,8 +137,7 @@ class SkillManager:
                 ):
                     item["install_state"] = (
                         "integrity_conflict"
-                        if installed_source.get("source_revision")
-                        == entry.source_revision
+                        if installed_source.get("source_revision") == entry.source_revision
                         else "update_available"
                     )
                 else:
@@ -178,9 +171,7 @@ class SkillManager:
         return {
             "version": 1,
             "revision": revision,
-            "sources": [
-                source.as_dict() for source in catalog_snapshot.sources
-            ],
+            "sources": [source.as_dict() for source in catalog_snapshot.sources],
             "items": items,
         }
 
@@ -216,10 +207,7 @@ class SkillManager:
     def install(self, market_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         entry = self.get_market_entry(market_id)
         if entry.compatibility_status != "compatible":
-            raise SkillMarketError(
-                f"Skill '{entry.market_id}' is incompatible with "
-                f"{entry.compatibility_profile}"
-            )
+            raise SkillMarketError(f"Skill '{entry.market_id}' is incompatible with {entry.compatibility_profile}")
         self._validate_ontology_refs(entry)
         installed = self.store.install(
             entry.as_install_record(),
@@ -292,9 +280,7 @@ class SkillManager:
     def list_catalog_items(self) -> list[dict[str, Any]]:
         """CapabilityProvider contract: only installed records, never market-only entries."""
         result: list[dict[str, Any]] = []
-        revision, installed_skills = self.store.list_with_revision(
-            verify_packages=False
-        )
+        revision, installed_skills = self.store.list_with_revision(verify_packages=False)
         for installed in installed_skills:
             available = _package_is_available(self.store, installed)
             result.append(
@@ -361,11 +347,7 @@ class SkillManager:
             catalog_id = snapshot.get("catalog_id")
             digest = snapshot.get("digest")
             authorization = snapshot.get("authorization")
-            if (
-                not isinstance(catalog_id, str)
-                or not isinstance(digest, str)
-                or not isinstance(authorization, Mapping)
-            ):
+            if not isinstance(catalog_id, str) or not isinstance(digest, str) or not isinstance(authorization, Mapping):
                 raise SkillAuthorizationRequiredError(str(catalog_id or "unknown"))
             # Verify the bytes first, then reread the live registry decision.
             # The second read is the admission linearization point: a revoke,
@@ -381,8 +363,7 @@ class SkillManager:
                 or installed.authorization_state != "authorized"
                 or installed.digest != digest
                 or installed.authorized_digest != digest
-                or installed.activation_policy
-                != authorization.get("activation_policy")
+                or installed.activation_policy != authorization.get("activation_policy")
             ):
                 raise SkillAuthorizationRequiredError(catalog_id)
 
@@ -404,9 +385,7 @@ class SkillManager:
         if not isinstance(text, str):
             raise TypeError("Skill selection text must be a string")
         if len(text) > MAX_SELECTION_TEXT_CHARS:
-            raise SkillContextBudgetError(
-                f"Skill selection text exceeds {MAX_SELECTION_TEXT_CHARS} characters"
-            )
+            raise SkillContextBudgetError(f"Skill selection text exceeds {MAX_SELECTION_TEXT_CHARS} characters")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_SELECTED_SKILLS:
             raise ValueError(f"limit must be between 1 and {MAX_SELECTED_SKILLS}")
         if (
@@ -414,18 +393,13 @@ class SkillManager:
             or isinstance(max_instructions_chars, bool)
             or not 0 <= max_instructions_chars <= MAX_SNAPSHOT_INSTRUCTIONS_CHARS
         ):
-            raise ValueError(
-                f"max_instructions_chars must be between 0 and {MAX_SNAPSHOT_INSTRUCTIONS_CHARS}"
-            )
+            raise ValueError(f"max_instructions_chars must be between 0 and {MAX_SNAPSHOT_INSTRUCTIONS_CHARS}")
         if (
             not isinstance(max_total_instructions_chars, int)
             or isinstance(max_total_instructions_chars, bool)
             or not 0 <= max_total_instructions_chars <= MAX_TOTAL_INSTRUCTIONS_CHARS
         ):
-            raise ValueError(
-                "max_total_instructions_chars must be between 0 and "
-                f"{MAX_TOTAL_INSTRUCTIONS_CHARS}"
-            )
+            raise ValueError(f"max_total_instructions_chars must be between 0 and {MAX_TOTAL_INSTRUCTIONS_CHARS}")
         if isinstance(explicit_names, (str, bytes)):
             raise TypeError("explicit_names must be an iterable of names, not a string")
 
@@ -439,9 +413,7 @@ class SkillManager:
         slash_match = _EXPLICIT_SKILL_PATTERN.match(text)
         if slash_match:
             normalized_explicit.append(slash_match.group(1).casefold())
-        explicit_rank = {
-            name: index for index, name in enumerate(dict.fromkeys(normalized_explicit))
-        }
+        explicit_rank = {name: index for index, name in enumerate(dict.fromkeys(normalized_explicit))}
 
         normalized_text = " ".join(text.casefold().split())
         query_terms = _meaningful_terms(text)
@@ -516,9 +488,7 @@ class SkillManager:
                 continue
             if total_instructions + instructions_length > max_total_instructions_chars:
                 if explicit_rank:
-                    raise SkillContextBudgetError(
-                        "Explicit skill selection exceeds the total instruction budget"
-                    )
+                    raise SkillContextBudgetError("Explicit skill selection exceeds the total instruction budget")
                 continue
             record = installed.record
             grant_digest = compute_skill_grant_digest(
@@ -580,9 +550,7 @@ class SkillManager:
             raise TypeError("snapshots must be an iterable of snapshot objects")
         values = list(snapshots)
         if len(values) > MAX_SELECTED_SKILLS:
-            raise SkillContextBudgetError(
-                f"At most {MAX_SELECTED_SKILLS} skills may be rendered at once"
-            )
+            raise SkillContextBudgetError(f"At most {MAX_SELECTED_SKILLS} skills may be rendered at once")
 
         rendered_skills: list[str] = []
         total_instructions = 0
@@ -600,9 +568,7 @@ class SkillManager:
             if not isinstance(instructions, str):
                 raise ValueError(f"Skill snapshot '{catalog_id}' instructions must be a string")
             if len(instructions) > MAX_SNAPSHOT_INSTRUCTIONS_CHARS:
-                raise SkillContextBudgetError(
-                    f"Skill snapshot '{catalog_id}' exceeds the per-skill instruction budget"
-                )
+                raise SkillContextBudgetError(f"Skill snapshot '{catalog_id}' exceeds the per-skill instruction budget")
             total_instructions += len(instructions)
             if total_instructions > MAX_TOTAL_INSTRUCTIONS_CHARS:
                 raise SkillContextBudgetError("Skill snapshots exceed the total instruction budget")
@@ -647,9 +613,7 @@ class SkillManager:
         )
         rendered = "\n\n".join((security_boundary, *rendered_skills, "[END INSTALLED SKILL CONTEXT]"))
         if len(rendered) > MAX_RENDERED_CONTEXT_CHARS:
-            raise SkillContextBudgetError(
-                f"Rendered skill context exceeds {MAX_RENDERED_CONTEXT_CHARS} characters"
-            )
+            raise SkillContextBudgetError(f"Rendered skill context exceeds {MAX_RENDERED_CONTEXT_CHARS} characters")
         return rendered
 
     def _selection_score(
@@ -671,14 +635,8 @@ class SkillManager:
         if explicit_matches:
             return 10_000 - min(explicit_matches)
 
-        triggers = [
-            value
-            for value in record.get("triggers") or []
-            if isinstance(value, str) and value
-        ]
-        trigger_matches = [
-            trigger for trigger in triggers if _phrase_in_text(trigger.casefold(), normalized_text)
-        ]
+        triggers = [value for value in record.get("triggers") or [] if isinstance(value, str) and value]
+        trigger_matches = [trigger for trigger in triggers if _phrase_in_text(trigger.casefold(), normalized_text)]
         if trigger_matches:
             return 7_000 + max(len(trigger) for trigger in trigger_matches)
 
@@ -694,11 +652,7 @@ class SkillManager:
             (
                 installed.name.replace("-", " "),
                 installed.title,
-                " ".join(
-                    value
-                    for value in record.get("tags") or []
-                    if isinstance(value, str)
-                ),
+                " ".join(value for value in record.get("tags") or [] if isinstance(value, str)),
             )
         )
         identity_terms = _meaningful_terms(identity_source)
@@ -735,16 +689,10 @@ class SkillManager:
         ontology_refs = list(record.get("ontology_refs") or [])
         enabled = installed.enabled
         authorization = _authorization_metadata(installed)
-        available = (
-            enabled
-            and package_available
-            and installed.authorization_state in {"trusted", "authorized"}
-        )
+        available = enabled and package_available and installed.authorization_state in {"trusted", "authorized"}
         if registry_revision is None:
             registry_revision = (
-                installed.registry_revision
-                if installed.registry_revision is not None
-                else self.store.revision()
+                installed.registry_revision if installed.registry_revision is not None else self.store.revision()
             )
         return {
             "catalog_id": installed.catalog_id,

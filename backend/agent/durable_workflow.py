@@ -308,9 +308,7 @@ class DurableAgentWorkflow:
                     # Audit contexts use bare SHA-256 values. The durable
                     # checkpoint retains the algorithm-qualified digest.
                     artifact_hashes[catalog_id] = (
-                        digest.removeprefix("sha256:")
-                        if digest.startswith("sha256:")
-                        else digest
+                        digest.removeprefix("sha256:") if digest.startswith("sha256:") else digest
                     )
         return RunContext(
             run_id=str(run["id"]),
@@ -425,9 +423,7 @@ class DurableAgentWorkflow:
             ) from exc
         except (SkillContextBudgetError, ValueError, TypeError) as exc:
             raise WorkflowError("Skill context selection failed validation", code="invalid_skill_context") from exc
-        state.data["skill_selection_state"] = (
-            "pinned" if state.data["active_skills"] else "pinned_none"
-        )
+        state.data["skill_selection_state"] = "pinned" if state.data["active_skills"] else "pinned_none"
         self._active_skill_prompt_channels(state)
 
     async def _emit_live(
@@ -1062,9 +1058,7 @@ class DurableAgentWorkflow:
                 run_context=self._run_context(run, state),
                 context_summary=context_summary,
                 artifact_ids=[
-                    str(ref.get("id"))
-                    for ref in state.artifact_refs
-                    if isinstance(ref, dict) and ref.get("id")
+                    str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")
                 ],
                 tool_loop_budget=self._model_budget(state),
                 capability_catalog=self.capability_catalog_factory(),
@@ -1119,9 +1113,7 @@ class DurableAgentWorkflow:
         language = str(state.data.get("language") or "zh")
         remaining_model_turns = state.budget.max_model_turns - state.budget.model_turns
         skill_prompt_channels = self._active_skill_prompt_channels(state)
-        external_skill_sandbox = bool(
-            skill_prompt_channels.untrusted_user_guidance
-        )
+        external_skill_sandbox = bool(skill_prompt_channels.untrusted_user_guidance)
 
         def require_live_external_skill_grant() -> None:
             if not external_skill_sandbox:
@@ -1132,9 +1124,7 @@ class DurableAgentWorkflow:
                     code="skill_runtime_unavailable",
                 )
             try:
-                self.skill_manager.require_current_external_authorizations(
-                    state.data.get("active_skills", [])
-                )
+                self.skill_manager.require_current_external_authorizations(state.data.get("active_skills", []))
             except SkillAuthorizationRequiredError as exc:
                 raise WorkflowError(
                     "External Skill authorization changed before context injection",
@@ -1155,15 +1145,12 @@ class DurableAgentWorkflow:
                     "The Skill authorization registry is unavailable",
                     code="skill_registry_unavailable",
                 ) from exc
+
         if external_skill_sandbox:
             # Reject stale checkpoints early, then repeat this same check at
             # the actual provider-admission boundary below.
             require_live_external_skill_grant()
-        context_summary = (
-            None
-            if external_skill_sandbox
-            else self._ensure_context_summary(state, storage)
-        )
+        context_summary = None if external_skill_sandbox else self._ensure_context_summary(state, storage)
         orchestrator = AgentOrchestrator(
             db_session=storage,
             app_manager=self.app_manager,
@@ -1173,11 +1160,7 @@ class DurableAgentWorkflow:
             artifact_ids=(
                 []
                 if external_skill_sandbox
-                else [
-                    str(ref.get("id"))
-                    for ref in state.artifact_refs
-                    if isinstance(ref, dict) and ref.get("id")
-                ]
+                else [str(ref.get("id")) for ref in state.artifact_refs if isinstance(ref, dict) and ref.get("id")]
             ),
             tool_loop_budget=self._model_budget(
                 state,
@@ -1186,11 +1169,7 @@ class DurableAgentWorkflow:
             ),
             capability_catalog=self.capability_catalog_factory(),
             skill_prompt_channels=skill_prompt_channels,
-            pre_model_call_guard=(
-                require_live_external_skill_grant
-                if external_skill_sandbox
-                else None
-            ),
+            pre_model_call_guard=(require_live_external_skill_grant if external_skill_sandbox else None),
         )
 
         async def on_update(payload: Any) -> None:
@@ -1206,10 +1185,7 @@ class DurableAgentWorkflow:
         raw_content = str((run.get("input") or {}).get("content") or "")
         converse_content = (
             intent.instruction
-            if intent.instruction and (
-                return_to_multi
-                or intent.rationale == "explicit slash command"
-            )
+            if intent.instruction and (return_to_multi or intent.rationale == "explicit slash command")
             else raw_content
         )
         message, widget = await orchestrator._handle_converse(
@@ -1227,11 +1203,7 @@ class DurableAgentWorkflow:
                 state,
                 content=message.content,
                 result=result,
-                artifacts=(
-                    [{"type": "app", "id": widget.get("id")}]
-                    if widget
-                    else []
-                ),
+                artifacts=([{"type": "app", "id": widget.get("id")}] if widget else []),
             )
         # Mark the persisted projection with its originating Run so a recovered
         # step can detect it. Older storage implementations are tolerated.
@@ -1269,7 +1241,10 @@ class DurableAgentWorkflow:
 
     async def _phase_graph_preflight(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         intent = self._current_intent(state)
-        normalized = self.graph_db.preflight_actions(intent.actions)
+        try:
+            normalized = self.graph_db.preflight_actions(intent.actions)
+        except ValueError as exc:
+            raise WorkflowError(str(exc), code="invalid_graph_mutation") from exc
         state.data["graph_actions"] = normalized
         summary = AgentOrchestrator._summarize_actions(normalized, str(state.data.get("language") or "zh"))
         await self._emit(

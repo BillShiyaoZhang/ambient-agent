@@ -9,11 +9,13 @@ interface AppPermissionModalProps {
     value: any;
   } | null;
   onResolve: (approved: boolean) => void;
+  deliveryNotice?: React.ReactNode;
 }
 
 export const AppPermissionModal: React.FC<AppPermissionModalProps> = ({
   pendingRequest,
   onResolve,
+  deliveryNotice,
 }) => {
   const isMcp = pendingRequest?.permission_type === "mcp_spawn";
 
@@ -39,6 +41,7 @@ export const AppPermissionModal: React.FC<AppPermissionModalProps> = ({
             <>URL: {pendingRequest.value?.agent_url}</>
           )}
         </div>
+        {deliveryNotice}
         <div className="system-dialog-actions">
           <button
             onClick={() => onResolve(false)}

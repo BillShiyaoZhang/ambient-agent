@@ -28,8 +28,7 @@ def parse_semver(value: str) -> SemanticVersion:
         raise ValueError("Skill version must be a valid semantic version")
     prerelease = tuple(match.group(4).split(".")) if match.group(4) else None
     if prerelease and any(
-        identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
-        for identifier in prerelease
+        identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0") for identifier in prerelease
     ):
         raise ValueError("Numeric semantic-version prerelease identifiers cannot have leading zeroes")
     build = tuple(match.group(5).split(".")) if match.group(5) else None

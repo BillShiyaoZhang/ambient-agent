@@ -87,9 +87,7 @@ def test_skill_market_api_lifecycle_and_installed_catalog_projection(
 
         catalog = client.get("/api/app-store").json()
         skill_item = next(
-            item
-            for item in catalog["items"]
-            if item["catalog_id"] == "agent-skill:ambient-agent:daily-planning"
+            item for item in catalog["items"] if item["catalog_id"] == "agent-skill:ambient-agent:daily-planning"
         )
         assert skill_item["skill"]["enabled"] is True
         assert skill_item["skill"]["authorization"]["state"] == "trusted"
@@ -106,10 +104,7 @@ def test_skill_market_api_lifecycle_and_installed_catalog_projection(
         )
         assert trusted_revoke.status_code == 409
         assert trusted_revoke.headers["cache-control"] == "no-store"
-        assert (
-            trusted_revoke.json()["detail"]["code"]
-            == "skill_trusted_authorization_immutable"
-        )
+        assert trusted_revoke.json()["detail"]["code"] == "skill_trusted_authorization_immutable"
 
         disabled = client.patch(
             "/api/skills/agent-skill:ambient-agent:daily-planning",
@@ -171,9 +166,7 @@ def test_skill_market_source_toggle_api_defaults_on_and_persists(
         )
         assert enabled.status_code == 200
         assert enabled.json()["revision"] == 2
-        assert client.get("/api/skill-market").json()["items"][0]["market_id"] == (
-            "ambient-agent/daily-planning"
-        )
+        assert client.get("/api/skill-market").json()["items"][0]["market_id"] == ("ambient-agent/daily-planning")
 
     reopened = SkillManager(workspace)
     assert reopened.list_market()["sources"][0]["enabled"] is True

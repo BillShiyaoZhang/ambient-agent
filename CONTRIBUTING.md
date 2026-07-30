@@ -77,7 +77,7 @@ git remote -v
 
 用 VS Code 打开项目目录，按下 `Cmd+Shift+P`（Windows/Linux 上是 `Ctrl+Shift+P`），选择 **`Dev Containers: Reopen in Container`**。
 
-容器启动后，Python 3.11、Node.js 22、`uv`、以及所有前后端依赖将**自动安装完毕**，无需任何手动操作。
+容器启动后，Python 3.11、Node.js 22.18、`uv`、以及所有前后端依赖将**自动安装完毕**，无需任何手动操作。
 
 ### 第 5 步：从最新的 main 创建新分支
 
@@ -116,11 +116,15 @@ uv run ruff check . --fix
 
 # 后端：运行单元测试
 PYTHONPATH=. uv run pytest
+uv run python scripts/generate_run_event_types.py --check
+uv run python scripts/verify_uml.py
+uv run python scripts/verify_docs.py
 
-# 前端：进入 frontend 目录运行
-cd frontend
-npm run lint
-npm run test
+# 前端与 Widget Runtime
+npm --prefix frontend run lint
+npm --prefix frontend run test
+npm --prefix frontend run build
+npm --prefix widget-runtime test
 ```
 
 所有检查必须通过，否则 PR 会被 CI 自动拒绝。
@@ -195,7 +199,7 @@ git push origin feature/your-feature-name
 
 ## Review 流程
 
-1. 提交 PR 后，GitHub Actions 会自动运行 CI 检查（约 1 分钟）
+1. 提交 PR 后，GitHub Actions 会自动运行后端、前端、Widget Runtime 与生产 Compose 检查
 2. CI 全绿后，维护者会进行代码 Review
 3. Review 意见会以评论形式反馈，请根据意见修改并 Push 新提交
 4. 获得 **1 名维护者 Approve** 且 CI 通过后，PR 将被合并到 `main`

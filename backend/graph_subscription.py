@@ -7,6 +7,9 @@ from backend.graph_query_engine import execute_graph_query
 
 logger = logging.getLogger("graph_subscription")
 
+MAX_SUBSCRIPTIONS_PER_TARGET = 32
+MAX_SUBSCRIPTION_ID_LENGTH = 200
+
 
 class SubscriptionManager:
     def __init__(self):
@@ -26,17 +29,29 @@ class SubscriptionManager:
         manifest_revision: str | None = None,
         grants_digest: str | None = None,
     ) -> dict:
+        if (
+            not isinstance(subscription_id, str)
+            or not subscription_id
+            or len(subscription_id) > MAX_SUBSCRIPTION_ID_LENGTH
+        ):
+            raise ValueError("Graph subscription id must be between 1 and 200 characters")
+        if not isinstance(query, dict):
+            raise ValueError("Graph subscription query must be a JSON object")
+        # Validate and seed before mutating subscription state, so a malformed
+        # query cannot consume one of the bounded slots.
+        res = execute_graph_query(query, db)
         if websocket not in self.active_subscriptions:
             self.active_subscriptions[websocket] = {}
-        self.active_subscriptions[websocket][subscription_id] = {
+        subscriptions = self.active_subscriptions[websocket]
+        if subscription_id not in subscriptions and len(subscriptions) >= MAX_SUBSCRIPTIONS_PER_TARGET:
+            raise ValueError(f"Graph subscription limit of {MAX_SUBSCRIPTIONS_PER_TARGET} reached")
+        subscriptions[subscription_id] = {
             "query": query,
             "app_id": app_id,
             "manifest_revision": manifest_revision,
             "grants_digest": grants_digest,
         }
 
-        # Execute immediately and return initial data to seed
-        res = execute_graph_query(query, db)
         res_json = json.dumps(res, sort_keys=True)
         self.last_results[(websocket, subscription_id)] = res_json
         return res

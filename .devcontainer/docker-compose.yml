@@ -3,6 +3,8 @@ services:
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.17.18}
     command: sleep infinity
     init: true
     working_dir: /workspaces/ambient-agent

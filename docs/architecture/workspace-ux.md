@@ -106,7 +106,7 @@ Popovers 支持 Escape、外部点击和焦点返回。审批对话框是 blocki
 
 - 主题偏好为 `system`、`light` 或 `dark`；默认 `system` 并跟随操作系统实时变化。
 - 宿主和标准 `ambient.components` 使用有效主题；自定义 Widget 的硬编码颜色不会自动改写。
-- Widget 通过同一 Runtime session 接收 `{ theme, locale, reducedMotion }` 展示上下文；主题或语言变化不重建 Chromium BrowserContext。
+- Widget 通过同一 Runtime session 接收 `{ theme, locale, reducedMotion }` 展示上下文；主题或语言变化不重建默认 iframe。pixel 回滚模式也会复用现有 Chromium BrowserContext。
 - 控件具有 accessible name、可见焦点和至少 40 px 点击区域；移动端至少 44 px。
 - 浅色主题的宿主 tooltip 使用浅色 surface 与深色文字，不能出现与主题割裂的黑色背景框。
 - 聊天历史行的删除图标使用紧凑的 28 px 视觉按钮，并只在行 hover、focus-within 或当前项中显示，避免挤占可截断标题的主列；其 accessible name 保持完整。

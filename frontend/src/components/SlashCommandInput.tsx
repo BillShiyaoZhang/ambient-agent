@@ -17,6 +17,7 @@ interface SlashCommandInputProps {
   language: "zh" | "en";
   apiBase?: string;
   catalog?: SlashCommandCatalog;
+  autoFocus?: boolean;
 }
 
 function firstEnabledIndex(suggestions: SlashSuggestion[]): number {
@@ -47,6 +48,7 @@ export const SlashCommandInput: React.FC<SlashCommandInputProps> = ({
   language,
   apiBase,
   catalog: catalogOverride,
+  autoFocus = false,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [catalog, setCatalog] = useState(
@@ -177,6 +179,7 @@ export const SlashCommandInput: React.FC<SlashCommandInputProps> = ({
       ) : null}
       <textarea
         ref={textareaRef}
+        autoFocus={autoFocus}
         value={value}
         onChange={(event) => {
           onChange(event.target.value);
@@ -225,6 +228,7 @@ export const SlashCommandInput: React.FC<SlashCommandInputProps> = ({
           }
         }}
         placeholder={placeholder}
+        aria-label={placeholder}
         rows={1}
         disabled={disabled}
         aria-autocomplete="list"

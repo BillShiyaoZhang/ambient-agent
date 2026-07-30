@@ -22,9 +22,7 @@ from backend.skill_authorization import (
 _BUNDLED_SOURCE_PREFIX = "bundled://ambient-agent/"
 _BUNDLED_CATALOG_PREFIX = "agent-skill:ambient-agent:"
 _LOCAL_SOURCE_PREFIX = "local-market://"
-_AUTHORIZATION_FIELDS = frozenset(
-    {"state", "activation_policy", "digest", "grant_digest", "principal_id"}
-)
+_AUTHORIZATION_FIELDS = frozenset({"state", "activation_policy", "digest", "grant_digest", "principal_id"})
 _AUTHORIZATION_STATES = frozenset({"trusted", "authorized"})
 _ACTIVATION_POLICIES = frozenset({"explicit_only", "implicit"})
 
@@ -70,23 +68,15 @@ def build_skill_prompt_channels(
 
     trusted_context = render_context(trusted) if trusted else None
     external_context = render_context(untrusted) if untrusted else None
-    if trusted and (
-        not isinstance(trusted_context, str) or not trusted_context.strip()
-    ):
+    if trusted and (not isinstance(trusted_context, str) or not trusted_context.strip()):
         raise SkillSandboxError("Trusted Skill renderer returned an empty context")
-    if untrusted and (
-        not isinstance(external_context, str) or not external_context.strip()
-    ):
+    if untrusted and (not isinstance(external_context, str) or not external_context.strip()):
         raise SkillSandboxError("External Skill renderer returned an empty context")
-    external_provenance = tuple(
-        _external_skill_audit_metadata(snapshot) for snapshot in untrusted
-    )
+    external_provenance = tuple(_external_skill_audit_metadata(snapshot) for snapshot in untrusted)
     return SkillPromptChannels(
         trusted_system_guidance=trusted_context or None,
         untrusted_user_guidance=(
-            _untrusted_guidance_envelope(external_context, external_provenance)
-            if external_context
-            else None
+            _untrusted_guidance_envelope(external_context, external_provenance) if external_context else None
         ),
         external_skill_provenance=external_provenance,
     )
@@ -104,19 +94,13 @@ def _snapshot_channel(snapshot: Mapping[str, Any]) -> str:
         _validate_bundled_identity(catalog_id=catalog_id, name=name, source=source)
         return "trusted"
     if trust is None or authorization is None:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' has an incomplete trust decision"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an incomplete trust decision")
     if trust not in {"bundled", "local"}:
         raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an unknown trust class")
     if not isinstance(authorization, Mapping):
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' authorization must be an object"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' authorization must be an object")
     if set(authorization) != _AUTHORIZATION_FIELDS:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' authorization has an invalid shape"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' authorization has an invalid shape")
 
     state = authorization.get("state")
     activation_policy = authorization.get("activation_policy")
@@ -124,17 +108,11 @@ def _snapshot_channel(snapshot: Mapping[str, Any]) -> str:
     grant_digest = authorization.get("grant_digest")
     principal_id = authorization.get("principal_id")
     if state not in _AUTHORIZATION_STATES:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' has an invalid authorization state"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an invalid authorization state")
     if activation_policy not in _ACTIVATION_POLICIES:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' has an invalid activation policy"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an invalid activation policy")
     if authorization_digest != digest:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' authorization is stale"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' authorization is stale")
     try:
         expected_grant_digest = compute_skill_grant_digest(
             catalog_id,
@@ -143,45 +121,26 @@ def _snapshot_channel(snapshot: Mapping[str, Any]) -> str:
         )
         expected_principal_id = skill_principal_id(catalog_id, digest)
     except ValueError as exc:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' has an invalid authorization identity"
-        ) from exc
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an invalid authorization identity") from exc
     if grant_digest != expected_grant_digest:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' has an invalid grant digest"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an invalid grant digest")
     if principal_id != expected_principal_id:
-        raise SkillSandboxError(
-            f"Skill snapshot '{catalog_id}' has an invalid authorization principal"
-        )
+        raise SkillSandboxError(f"Skill snapshot '{catalog_id}' has an invalid authorization principal")
 
     if trust == "bundled":
         if state != "trusted":
-            raise SkillSandboxError(
-                f"Bundled Skill snapshot '{catalog_id}' is not trusted"
-            )
+            raise SkillSandboxError(f"Bundled Skill snapshot '{catalog_id}' is not trusted")
         if activation_policy != "implicit":
-            raise SkillSandboxError(
-                f"Bundled Skill snapshot '{catalog_id}' must use implicit activation"
-            )
+            raise SkillSandboxError(f"Bundled Skill snapshot '{catalog_id}' must use implicit activation")
         _validate_bundled_identity(catalog_id=catalog_id, name=name, source=source)
         return "trusted"
 
     if state != "authorized":
-        raise SkillSandboxError(
-            f"External Skill snapshot '{catalog_id}' is not authorized"
-        )
-    if (
-        not source.startswith(_LOCAL_SOURCE_PREFIX)
-        or len(source) == len(_LOCAL_SOURCE_PREFIX)
-    ):
-        raise SkillSandboxError(
-            f"External Skill snapshot '{catalog_id}' has an invalid source"
-        )
+        raise SkillSandboxError(f"External Skill snapshot '{catalog_id}' is not authorized")
+    if not source.startswith(_LOCAL_SOURCE_PREFIX) or len(source) == len(_LOCAL_SOURCE_PREFIX):
+        raise SkillSandboxError(f"External Skill snapshot '{catalog_id}' has an invalid source")
     if catalog_id.startswith(_BUNDLED_CATALOG_PREFIX):
-        raise SkillSandboxError(
-            f"External Skill snapshot '{catalog_id}' claims the bundled namespace"
-        )
+        raise SkillSandboxError(f"External Skill snapshot '{catalog_id}' claims the bundled namespace")
     return "untrusted"
 
 
@@ -189,9 +148,7 @@ def _validate_bundled_identity(*, catalog_id: str, name: str, source: str) -> No
     expected_catalog_id = f"{_BUNDLED_CATALOG_PREFIX}{name}"
     expected_source = f"{_BUNDLED_SOURCE_PREFIX}{name}"
     if catalog_id != expected_catalog_id or source != expected_source:
-        raise SkillSandboxError(
-            f"Bundled Skill snapshot '{catalog_id}' has contradictory provenance"
-        )
+        raise SkillSandboxError(f"Bundled Skill snapshot '{catalog_id}' has contradictory provenance")
 
 
 def _required_string(
@@ -242,9 +199,5 @@ def _external_skill_audit_metadata(
         "digest": snapshot["digest"],
         "grant_digest": authorization["grant_digest"],
         "principal_id": authorization["principal_id"],
-        "version": (
-            str(snapshot["version"])
-            if snapshot.get("version") is not None
-            else None
-        ),
+        "version": (str(snapshot["version"]) if snapshot.get("version") is not None else None),
     }

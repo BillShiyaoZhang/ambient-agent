@@ -66,6 +66,59 @@ async def test_gateway_uses_manifest_source_and_returns_json(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_gateway_pins_validated_dns_address_and_preserves_tls_identity(tmp_path, monkeypatch):
+    manager = _manager_with_source(tmp_path, monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "8.8.8.8"
+        assert request.headers["host"] == "api.open-meteo.com"
+        assert request.extensions["sni_hostname"] == "api.open-meteo.com"
+        return httpx.Response(200, json={"temperature": 28})
+
+    async def public_host(_hostname: str) -> tuple[str, ...]:
+        return ("8.8.8.8",)
+
+    gateway = AppDataSourceGateway(
+        manager,
+        tmp_path,
+        transport=httpx.MockTransport(handler),
+        public_host_resolver=public_host,
+    )
+
+    result = await gateway.request(
+        "weather-app",
+        "forecast",
+        {"path": "/v1/forecast", "method": "GET"},
+    )
+
+    assert result == {"temperature": 28}
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_private_address_from_injected_resolver(tmp_path, monkeypatch):
+    manager = _manager_with_source(tmp_path, monkeypatch)
+
+    async def private_host(_hostname: str) -> tuple[str, ...]:
+        return ("127.0.0.1",)
+
+    gateway = AppDataSourceGateway(
+        manager,
+        tmp_path,
+        transport=httpx.MockTransport(lambda _request: pytest.fail("network request must not run")),
+        public_host_resolver=private_host,
+    )
+
+    with pytest.raises(AppDataSourceError) as failure:
+        await gateway.request(
+            "weather-app",
+            "forecast",
+            {"path": "/v1/forecast", "method": "GET"},
+        )
+
+    assert failure.value.code == "data_source_private_destination"
+
+
+@pytest.mark.asyncio
 async def test_gateway_failure_is_actionable_and_available_to_the_next_agent_run(tmp_path, monkeypatch):
     manager = _manager_with_source(tmp_path, monkeypatch)
     gateway = AppDataSourceGateway(manager, tmp_path)

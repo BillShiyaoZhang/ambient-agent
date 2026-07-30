@@ -332,6 +332,17 @@ class LLMConfigStore:
             self._write_json(self.secrets_path, {}, secret=True)
         else:
             os.chmod(self.secrets_path, 0o600)
+        # A damaged registry or credential file must fail startup before a
+        # later settings mutation can overwrite the only recoverable copy.
+        self._profiles()
+        self._load_secrets()
+        try:
+            LLMDefaults.model_validate(self._load_config().get("settings", {}))
+        except ValidationError as exc:
+            raise LLMConfigError(
+                "Persisted LLM settings are invalid",
+                code="llm_config_corrupt",
+            ) from exc
 
     @staticmethod
     def _empty_config() -> dict[str, Any]:
@@ -370,6 +381,16 @@ class LLMConfigStore:
                     or (provider_id, model.get("id")) in selected_models
                 ]
         config["version"] = _CONFIG_VERSION
+        # Migration must never rewrite a malformed source into a partly
+        # normalized file before startup rejects it.
+        self._validated_profiles(config)
+        try:
+            LLMDefaults.model_validate(config.get("settings", {}))
+        except ValidationError as exc:
+            raise LLMConfigError(
+                "Persisted LLM settings are invalid",
+                code="llm_config_corrupt",
+            ) from exc
         self._write_json(self.config_path, config, secret=False)
 
     @staticmethod
@@ -394,28 +415,76 @@ class LLMConfigStore:
     def _load_config(self) -> dict[str, Any]:
         try:
             data = json.loads(self.config_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else self._empty_config()
-        except (OSError, json.JSONDecodeError):
-            return self._empty_config()
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise LLMConfigError(
+                "Persisted LLM configuration cannot be read",
+                code="llm_config_corrupt",
+            ) from exc
+        if not isinstance(data, dict):
+            raise LLMConfigError(
+                "Persisted LLM configuration must be a JSON object",
+                code="llm_config_corrupt",
+            )
+        return data
 
     def _load_secrets(self) -> dict[str, str]:
         try:
             data = json.loads(self.secrets_path.read_text(encoding="utf-8"))
-            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise LLMConfigError(
+                "Persisted LLM credentials cannot be read",
+                code="llm_secrets_corrupt",
+            ) from exc
+        if not isinstance(data, dict):
+            raise LLMConfigError(
+                "Persisted LLM credentials must be a JSON object",
+                code="llm_secrets_corrupt",
+            )
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in data.items()):
+            raise LLMConfigError(
+                "Persisted LLM credential names and values must be strings",
+                code="llm_secrets_corrupt",
+            )
+        return data
 
     def catalog(self) -> list[dict[str, Any]]:
         return [{k: v for k, v in item.items() if k != "litellm_prefix"} for item in PROVIDER_CATALOG]
 
-    def _profiles(self) -> list[ProviderProfile]:
-        profiles = []
-        for raw in self._load_config().get("providers", []):
+    @staticmethod
+    def _validated_profiles(config: dict[str, Any]) -> list[ProviderProfile]:
+        profiles: list[ProviderProfile] = []
+        raw_profiles = config.get("providers", [])
+        if not isinstance(raw_profiles, list):
+            raise LLMConfigError(
+                "Persisted LLM providers must be a JSON array",
+                code="llm_config_corrupt",
+            )
+        provider_ids: set[str] = set()
+        for raw in raw_profiles:
             try:
-                profiles.append(ProviderProfile.model_validate(raw))
-            except Exception:
-                continue
+                profile = ProviderProfile.model_validate(raw)
+            except ValidationError as exc:
+                raise LLMConfigError(
+                    "Persisted LLM provider configuration is invalid",
+                    code="llm_config_corrupt",
+                ) from exc
+            if profile.id in provider_ids:
+                raise LLMConfigError(
+                    f"Persisted LLM provider id is duplicated: {profile.id}",
+                    code="llm_config_corrupt",
+                )
+            provider_ids.add(profile.id)
+            model_ids = [model.id for model in profile.models]
+            if len(model_ids) != len(set(model_ids)):
+                raise LLMConfigError(
+                    f"Persisted LLM model id is duplicated for provider {profile.id}",
+                    code="llm_config_corrupt",
+                )
+            profiles.append(profile)
         return profiles
+
+    def _profiles(self) -> list[ProviderProfile]:
+        return self._validated_profiles(self._load_config())
 
     def get_provider(self, provider_id: str) -> ProviderProfile:
         profile = next((item for item in self._profiles() if item.id == provider_id), None)

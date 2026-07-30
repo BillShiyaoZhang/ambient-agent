@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   chatConnect: vi.fn(),
   chatDisconnect: vi.fn(),
-  chatSend: vi.fn(),
+  chatRetry: vi.fn(),
+  runConnectionRetry: vi.fn(),
+  liveConnectionRetry: vi.fn(),
+  chatSend: vi.fn(() => true),
+  connectionListeners: new Set<(state: string) => void>(),
   runListeners: new Set<(event: Record<string, unknown>) => void>(),
   liveListeners: new Set<(event: Record<string, unknown>) => void>(),
   liveResetListeners: new Set<() => void>(),
@@ -17,6 +21,12 @@ vi.mock("../../frontend/src/services/websocket", () => ({
     disconnect: harness.chatDisconnect,
     isConnected: vi.fn(() => true),
     sendMessage: harness.chatSend,
+    retry: harness.chatRetry,
+    subscribeStatus: vi.fn((listener: (state: string) => void) => {
+      harness.connectionListeners.add(listener);
+      listener("connected");
+      return () => harness.connectionListeners.delete(listener);
+    }),
     registerPersistentMessage: vi.fn(),
     unregisterPersistentMessage: vi.fn(),
   },
@@ -35,6 +45,7 @@ vi.mock("../../frontend/src/services/runs", () => ({
     retry: vi.fn(),
     resolve: vi.fn(),
     stopRuntime: vi.fn(),
+    retryConnection: harness.runConnectionRetry,
   },
 }));
 
@@ -43,6 +54,7 @@ vi.mock("../../frontend/src/services/runLive", async (importOriginal) => {
   return {
     ...actual,
     runLiveService: {
+      retryConnection: harness.liveConnectionRetry,
       subscribe: vi.fn((
         _sessionId: string,
         listener: (event: Record<string, unknown>) => void,
@@ -119,6 +131,9 @@ describe("canonical RunEvent chat projection", () => {
     harness.runListeners.clear();
     harness.liveListeners.clear();
     harness.liveResetListeners.clear();
+    harness.connectionListeners.clear();
+    harness.chatSend.mockReset();
+    harness.chatSend.mockReturnValue(true);
     localStorage.clear();
     sessionStorage.clear();
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
@@ -162,6 +177,80 @@ describe("canonical RunEvent chat projection", () => {
 
     expect(await screen.findByText("Projected exactly once")).toBeDefined();
     expect(screen.queryByText("Must not leak across sessions")).toBeNull();
+  });
+
+  it("surfaces a failed durable run stream and retries both Ambient connections", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("ambient_run_stream_status", {
+        detail: { state: "unavailable" },
+      }));
+    });
+
+    expect(screen.getByText("连接不可用")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "重试连接" }));
+    expect(harness.chatRetry).toHaveBeenCalledOnce();
+    expect(harness.runConnectionRetry).toHaveBeenCalledOnce();
+    expect(harness.liveConnectionRetry).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the active conversation and explains a rejected deletion", async () => {
+    vi.mocked(global.fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/sessions/session-one") && init?.method === "DELETE") {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code: "session_has_active_runs",
+              message: "Cancel or resolve active tasks before deleting this conversation",
+            },
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/api/sessions")) {
+        return response([{ id: "session-one", title: "Session One", language: "zh" }]);
+      }
+      if (url.includes("/messages")) return response([]);
+      if (url.endsWith("/api/canvas")) {
+        return response({ version: 3, open_app_ids: [], active_app_id: null, windows: {} });
+      }
+      if (url.endsWith("/api/llm/catalog") || url.endsWith("/api/llm/providers")) return response([]);
+      if (url.endsWith("/api/llm/settings")) {
+        return response({ default_model: null, fast_model: null });
+      }
+      return response({});
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+    fireEvent.click(screen.getByRole("button", { name: "聊天历史" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除 Session One" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("请先取消或处理仍在运行的任务");
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenLastCalledWith(
+      expect.stringContaining("/ws/chat"),
+      "session-one",
+      expect.any(Function),
+    ));
+    expect(screen.getAllByText("Session One").length).toBeGreaterThan(0);
+  });
+
+  it("localizes the destructive conversation confirmation", async () => {
+    const confirmDelete = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<App />);
+
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+    fireEvent.click(screen.getByRole("button", { name: "聊天历史" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除 Session One" }));
+
+    expect(confirmDelete).toHaveBeenCalledWith("确定要删除这个对话吗？");
   });
 
   it("creates only one default session under React StrictMode", async () => {
@@ -313,6 +402,12 @@ describe("canonical RunEvent chat projection", () => {
 
     expect(await screen.findByText("确认开发计划")).toBeDefined();
     expect(screen.queryByText("App 开发计划确认")).toBeNull();
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "批准计划" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByText("确认开发计划")).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: "批准计划" }));
     expect(harness.chatSend).toHaveBeenCalledWith({
       type: "plan_approval_response",
@@ -320,6 +415,68 @@ describe("canonical RunEvent chat projection", () => {
       approved: true,
       plan: "生成天气概览与逐小时预报。",
       feedback: "",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 / 调整" }));
+    const planDialog = await screen.findByRole("dialog", { name: "App 开发计划确认" });
+    const approvePlan = within(planDialog).getByRole("button", {
+      name: "确认计划并开始开发 (Approve)",
+    });
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(approvePlan);
+    expect((await within(planDialog).findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByRole("dialog", { name: "App 开发计划确认" })).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(true);
+    fireEvent.click(approvePlan);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "App 开发计划确认" })).toBeNull();
+    });
+  });
+
+  it("keeps verification repair choices pending until their command is delivered", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "打开聊天" }));
+
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "verification_approval_request", {
+          type: "verification_approval_request",
+          request_id: "interaction-verification",
+          app_id: "weather-app",
+          report: "The staged app needs one repair.",
+          allowed_actions: ["rework_code"],
+          options: [],
+        }),
+      ));
+    });
+
+    expect(await screen.findByText("选择验证修复方式")).toBeDefined();
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "修复代码" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByText("选择验证修复方式")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
+    const verificationDialog = await screen.findByRole("dialog", { name: "Schema 校验未完全对齐" });
+    const repair = within(verificationDialog).getByRole("button", { name: "智能修复代码 (Auto-Fix)" });
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(repair);
+    expect((await within(verificationDialog).findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByRole("dialog", { name: "Schema 校验未完全对齐" })).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(true);
+    fireEvent.click(repair);
+    expect(harness.chatSend).toHaveBeenLastCalledWith({
+      type: "verification_approval_response",
+      request_id: "interaction-verification",
+      approved: "rework_code",
+      feedback: "",
+      approved_options: [],
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Schema 校验未完全对齐" })).toBeNull();
     });
   });
 
@@ -381,6 +538,12 @@ describe("canonical RunEvent chat projection", () => {
     fireEvent.change(entityId, { target: { value: "Release" } });
     expect((approve as HTMLButtonElement).disabled).toBe(false);
 
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(approve);
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByRole("dialog", { name: "Schema 与能力授权对齐" })).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(true);
     fireEvent.click(approve);
     expect(harness.chatSend).toHaveBeenCalledWith({
       type: "schema_approval_response",
@@ -394,9 +557,12 @@ describe("canonical RunEvent chat projection", () => {
       }),
       feedback: "",
     });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Schema 与能力授权对齐" })).toBeNull();
+    });
   });
 
-  it("keeps sensitive tool permission requests in a blocking dialog", async () => {
+  it("keeps a sensitive permission pending when its response cannot be delivered", async () => {
     render(<App />);
     await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
 
@@ -413,6 +579,44 @@ describe("canonical RunEvent chat projection", () => {
 
     expect(await screen.findByText("OpenCode 授权请求")).toBeDefined();
     expect(screen.getByText("npm publish")).toBeDefined();
-    expect(screen.getByRole("button", { name: "允许 (Allow)" })).toBeDefined();
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "允许 (Allow)" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByText("OpenCode 授权请求")).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "允许 (Allow)" }));
+    await waitFor(() => expect(screen.queryByText("OpenCode 授权请求")).toBeNull());
+  });
+
+  it("keeps a backend permission pending when its response cannot be delivered", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    const handleProjection = harness.chatConnect.mock.calls.at(-1)?.[2] as
+      | ((data: Record<string, unknown>) => void)
+      | undefined;
+    expect(handleProjection).toBeDefined();
+
+    act(() => {
+      handleProjection?.({
+        type: "backend_permission_request",
+        request_id: "backend-permission-one",
+        app_id: "weather-app",
+        permission_type: "external_agent",
+        value: { agent_url: "https://agent.example.test" },
+      });
+    });
+    expect(await screen.findByText("后端服务授权请求 (weather-app)")).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "允许 (Allow)" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("响应尚未发送");
+    expect(screen.getByText("后端服务授权请求 (weather-app)")).toBeDefined();
+
+    harness.chatSend.mockReturnValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "允许 (Allow)" }));
+    await waitFor(() => {
+      expect(screen.queryByText("后端服务授权请求 (weather-app)")).toBeNull();
+    });
   });
 });

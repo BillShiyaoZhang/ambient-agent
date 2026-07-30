@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-const { list, get, runtimes, resolve, reconcile, subscribe, emitRunEvent } = vi.hoisted(() => {
+const { list, get, runtimes, resolve, reconcile, retry, subscribe, emitRunEvent } = vi.hoisted(() => {
   let listener: ((event: { run_id: string }) => void) | null = null;
   return {
     list: vi.fn(),
@@ -10,6 +10,7 @@ const { list, get, runtimes, resolve, reconcile, subscribe, emitRunEvent } = vi.
     runtimes: vi.fn(),
     resolve: vi.fn(),
     reconcile: vi.fn(),
+    retry: vi.fn(),
     subscribe: vi.fn((nextListener: (event: { run_id: string }) => void) => {
       listener = nextListener;
       return () => {
@@ -29,7 +30,7 @@ vi.mock("../../frontend/src/services/runs", () => ({
     reconcile,
     subscribe,
     cancel: vi.fn(),
-    retry: vi.fn(),
+    retry,
     stopRuntime: vi.fn(),
   },
 }));
@@ -214,6 +215,7 @@ describe("TaskDrawer", () => {
     render(<TaskDrawer open language="en" onClose={() => {}} />);
     fireEvent.click(screen.getByText("Attention"));
     fireEvent.click(await screen.findByText("Send mail"));
+    await screen.findByRole("button", { name: "Back to task list" });
 
     expect(screen.queryByRole("button", { name: "Execution graph" })).toBeNull();
   });
@@ -225,6 +227,35 @@ describe("TaskDrawer", () => {
     expect(runtimes).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Runtimes"));
     expect(await screen.findByText("internal:agent")).toBeDefined();
+  });
+
+  it("explains a terminal non-retryable failure without exposing a Retry action or raw JSON", async () => {
+    const failedRun = {
+      ...waitingRun,
+      status: "failed",
+      summary: "Active time exhausted",
+      interactions: [],
+      error: {
+        code: "budget_exhausted",
+        message: "Active time exhausted",
+        retryable: false,
+        effect_state: "none",
+      },
+    };
+    list.mockResolvedValue([failedRun]);
+    get.mockResolvedValue(failedRun);
+    const onClose = vi.fn();
+
+    render(<TaskDrawer open language="zh" onClose={onClose} />);
+    fireEvent.click(screen.getByText("历史"));
+    fireEvent.click(await screen.findByText("Send mail"));
+
+    expect(await screen.findByText("任务已达到运行预算上限")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    expect(screen.queryByText(/"retryable"/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "关闭任务中心" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
   });
 
   it("coalesces a replay burst into one lightweight refresh without loading runtimes", async () => {

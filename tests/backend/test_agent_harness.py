@@ -56,9 +56,7 @@ async def test_agent_orchestrator_reuses_injected_graph_adapter(monkeypatch: pyt
     graph_db.routing_snapshot.assert_called_once_with(5)
     router_context = route.await_args.args[1]
     assert router_context.graph_snapshot.type_counts == {"Task": 2}
-    assert router_context.session_recent == [
-        {"role": "user", "content": "safe history"}
-    ]
+    assert router_context.session_recent == [{"role": "user", "content": "safe history"}]
 
 
 @pytest.mark.asyncio
@@ -278,9 +276,7 @@ async def test_agent_orchestrator_conversational(monkeypatch):
         app_manager=app_manager,
         graph_db=graph_db,
         skill_prompt_channels=SkillPromptChannels(
-            trusted_system_guidance=(
-                "[INSTALLED SKILL CONTEXT]\nUse the pinned daily-planning procedure."
-            )
+            trusted_system_guidance=("[INSTALLED SKILL CONTEXT]\nUse the pinned daily-planning procedure.")
         ),
     )
 
@@ -298,9 +294,7 @@ async def test_agent_orchestrator_conversational(monkeypatch):
     assert len(system_messages) == 1
     assert "You are Ambient Agent" in system_messages[0]["content"]
     assert "Use the pinned daily-planning procedure." in system_messages[0]["content"]
-    assert mock_provider.generate.await_args.kwargs["tool_context"]["scopes"] == {
-        "workspace:read"
-    }
+    assert mock_provider.generate.await_args.kwargs["tool_context"]["scopes"] == {"workspace:read"}
 
 
 @pytest.mark.asyncio
@@ -333,9 +327,7 @@ async def test_external_skill_guidance_uses_separate_untrusted_user_channel(
                     "catalog_id": "agent-skill:test:review",
                     "digest": f"sha256:{'1' * 64}",
                     "grant_digest": f"sha256:{'2' * 64}",
-                    "principal_id": (
-                        f"agent-skill:test:review@sha256:{'1' * 64}"
-                    ),
+                    "principal_id": (f"agent-skill:test:review@sha256:{'1' * 64}"),
                     "version": "1.0.0",
                 },
             ),
@@ -351,14 +343,8 @@ async def test_external_skill_guidance_uses_separate_untrusted_user_channel(
     )
 
     generated = mock_provider.generate.await_args.kwargs
-    system_text = "\n".join(
-        message["content"] for message in generated["messages"] if message["role"] == "system"
-    )
-    external_messages = [
-        message
-        for message in generated["messages"]
-        if "EXTERNAL_SECRET_BODY" in message["content"]
-    ]
+    system_text = "\n".join(message["content"] for message in generated["messages"] if message["role"] == "system")
+    external_messages = [message for message in generated["messages"] if "EXTERNAL_SECRET_BODY" in message["content"]]
     assert "EXTERNAL_SECRET_BODY" not in system_text
     assert external_messages == [
         {
@@ -374,9 +360,7 @@ async def test_external_skill_guidance_uses_separate_untrusted_user_channel(
     assert generated["tool_context"] is None
     authorization_guard.assert_called_once_with()
     assert "no tools, workspace access" in system_text
-    user_messages = [
-        message for message in generated["messages"] if message["role"] == "user"
-    ]
+    user_messages = [message for message in generated["messages"] if message["role"] == "user"]
     assert user_messages[-1]["content"] == "help"
     assert agent_message.context_policy == "display_only"
     assert agent_message.provenance == {
@@ -387,9 +371,7 @@ async def test_external_skill_guidance_uses_separate_untrusted_user_channel(
                 "catalog_id": "agent-skill:test:review",
                 "digest": f"sha256:{'1' * 64}",
                 "grant_digest": f"sha256:{'2' * 64}",
-                "principal_id": (
-                    f"agent-skill:test:review@sha256:{'1' * 64}"
-                ),
+                "principal_id": (f"agent-skill:test:review@sha256:{'1' * 64}"),
                 "version": "1.0.0",
             }
         ],
@@ -411,9 +393,7 @@ async def test_external_skill_sandbox_excludes_history_summary_and_app_artifacts
         MagicMock(role="agent", content="OLD_PRIVATE_REPLY"),
     ]
     app_manager = MagicMock()
-    app_manager.get_app_files.side_effect = AssertionError(
-        "external Skill sandbox must not load App artifacts"
-    )
+    app_manager.get_app_files.side_effect = AssertionError("external Skill sandbox must not load App artifacts")
     orchestrator = AgentOrchestrator(
         db_session=db_session,
         app_manager=app_manager,
@@ -447,9 +427,7 @@ async def test_external_skill_sandbox_excludes_history_summary_and_app_artifacts
     assert "private-app" not in prompt
     assert generated["tools"] == []
     assert generated["tool_context"] is None
-    user_messages = [
-        message for message in generated["messages"] if message["role"] == "user"
-    ]
+    user_messages = [message for message in generated["messages"] if message["role"] == "user"]
     assert len(user_messages) == 2
     assert user_messages[-1] == {"role": "user", "content": "CURRENT_REQUEST"}
     app_manager.get_app_files.assert_not_called()

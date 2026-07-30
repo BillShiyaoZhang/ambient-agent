@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { SystemDialog, SystemIconButton, SystemPopover } from "../../frontend/src/components/system/SystemUI";
+import {
+  SystemDialog,
+  SystemDrawer,
+  SystemIconButton,
+  SystemPopover,
+} from "../../frontend/src/components/system/SystemUI";
 
 describe("System UI primitives", () => {
   it("gives icon-only controls a visible tooltip contract", () => {
@@ -51,5 +56,22 @@ describe("System UI primitives", () => {
     render(<SystemDialog open title="Details" onClose={close}>Details</SystemDialog>);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("unmounts a closed drawer so hidden interactive content cannot leak into navigation", () => {
+    const view = render(
+      <SystemDrawer open label="Tasks" onClose={() => {}}>
+        <button>Hidden graph node</button>
+      </SystemDrawer>,
+    );
+    expect(screen.getByRole("button", { name: "Hidden graph node" })).toBeDefined();
+
+    view.rerender(
+      <SystemDrawer open={false} label="Tasks" onClose={() => {}}>
+        <button>Hidden graph node</button>
+      </SystemDrawer>,
+    );
+    expect(screen.queryByRole("button", { name: "Hidden graph node" })).toBeNull();
+    expect(document.body.textContent).not.toContain("Hidden graph node");
   });
 });

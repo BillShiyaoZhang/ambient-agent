@@ -71,6 +71,34 @@ const explorationDataset: GraphDataset = {
 };
 
 describe("GraphExplorer", () => {
+  it("renders coverage metadata as readable localized fields instead of JSON", () => {
+    render(
+      <GraphExplorer
+        language="zh"
+        dataset={{
+          ...explorationDataset,
+          metadata: {
+            ...explorationDataset.metadata,
+            coverage: {
+              "证据数": 2,
+              "插桩范围": ["保留的 LLM 调用元数据", "当前 App Manifest 声明"],
+            },
+            semantics: {
+              "已观察": "来自审计窗口中的聚合证据。",
+              "未知": "插桩覆盖之外的可能数据流。",
+            },
+          },
+        }}
+      />,
+    );
+
+    const coverage = screen.getByRole("region", { name: "图谱覆盖范围" });
+    expect(within(coverage).getByText("证据数")).toBeDefined();
+    expect(within(coverage).getByText("保留的 LLM 调用元数据")).toBeDefined();
+    expect(within(coverage).getByText("已观察")).toBeDefined();
+    expect(coverage.textContent).not.toContain('{"证据数"');
+  });
+
   it("pans the viewport when the primary pointer drags the blank canvas", async () => {
     const { container } = render(<GraphExplorer dataset={explorationDataset} />);
 

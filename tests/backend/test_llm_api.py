@@ -100,6 +100,13 @@ def test_unconfigured_websocket_run_returns_actionable_error(tmp_path, monkeypat
     session_id = f"needs-model-{uuid4().hex}"
 
     with TestClient(main_module.app) as client:
+        assert (
+            client.post(
+                "/api/sessions",
+                json={"id": session_id, "title": "Needs model", "language": "en"},
+            ).status_code
+            == 200
+        )
         with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
             assert websocket.receive_json()["type"] == "active_sessions_list"
             websocket.send_json({"sender": "user", "content": "hello"})

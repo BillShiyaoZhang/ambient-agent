@@ -11,8 +11,9 @@ class MockWebSocket {
 
   url: string;
   readyState = MockWebSocket.OPEN;
+  onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
@@ -20,8 +21,12 @@ class MockWebSocket {
   }
 
   close(): void {
+    this.closeWith(1000);
+  }
+
+  closeWith(code: number): void {
     this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code } as CloseEvent);
   }
 
   emit(value: unknown): void {
@@ -133,6 +138,62 @@ describe("RunService event stream", () => {
     const url = new URL(MockWebSocket.instances[0].url);
     expect(url.searchParams.get("stream_epoch")).toBe("epoch-stable");
     expect(url.searchParams.get("after_sequence")).toBe("7");
+    unsubscribe();
+  });
+
+  it("does not reconnect a normally closed durable event stream", () => {
+    const service = new RunService();
+    const unsubscribe = service.subscribe(() => {});
+    const socket = MockWebSocket.instances[0];
+    socket.onopen?.();
+    socket.closeWith(1000);
+
+    vi.advanceTimersByTime(60_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(service.getConnectionState()).toBe("disconnected");
+    unsubscribe();
+  });
+
+  it("bounds abnormal durable-stream reconnects with exponential backoff", () => {
+    const service = new RunService();
+    const unsubscribe = service.subscribe(() => {});
+    MockWebSocket.instances[0].onopen?.();
+
+    const delays = [500, 1_000, 2_000, 4_000, 8_000];
+    for (const [index, delay] of delays.entries()) {
+      MockWebSocket.instances[index].closeWith(1006);
+      vi.advanceTimersByTime(delay - 1);
+      expect(MockWebSocket.instances).toHaveLength(index + 1);
+      vi.advanceTimersByTime(1);
+      expect(MockWebSocket.instances).toHaveLength(index + 2);
+    }
+    MockWebSocket.instances.at(-1)!.closeWith(1006);
+    vi.advanceTimersByTime(60_000);
+
+    expect(MockWebSocket.instances).toHaveLength(6);
+    expect(service.getConnectionState()).toBe("unavailable");
+    unsubscribe();
+  });
+
+  it("lets the user explicitly recover an exhausted durable event stream", () => {
+    const service = new RunService();
+    const unsubscribe = service.subscribe(() => {});
+    MockWebSocket.instances[0].onopen?.();
+
+    for (const delay of [500, 1_000, 2_000, 4_000, 8_000]) {
+      MockWebSocket.instances.at(-1)!.closeWith(1006);
+      vi.advanceTimersByTime(delay);
+    }
+    MockWebSocket.instances.at(-1)!.closeWith(1006);
+    expect(service.getConnectionState()).toBe("unavailable");
+
+    expect(service.retryConnection()).toBe(true);
+    expect(MockWebSocket.instances).toHaveLength(7);
+    expect(service.getConnectionState()).toBe("connecting");
+
+    MockWebSocket.instances.at(-1)!.onopen?.();
+    expect(service.getConnectionState()).toBe("connected");
+    expect(service.retryConnection()).toBe(false);
     unsubscribe();
   });
 

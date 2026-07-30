@@ -24,7 +24,11 @@ async def test_generates_sanitizes_and_persists_llm_session_title(tmp_path):
 
     assert title == "规划上海周末旅行"
     assert storage.get(ChatSession, "session-1").title == title
-    assert storage.get_audit_logs()[0].stage == "session_title"
+    [audit_log] = storage.get_audit_logs()
+    assert audit_log.stage == "session_title"
+    assert audit_log.session_id == "session-1"
+    assert storage.delete_audit_logs_for_session("session-1") == 1
+    assert storage.get_audit_logs() == []
 
 
 @pytest.mark.asyncio

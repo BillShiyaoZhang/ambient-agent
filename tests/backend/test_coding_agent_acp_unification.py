@@ -208,5 +208,6 @@ def test_backend_image_pins_the_codex_acp_bridge():
     dockerfile = (root / "backend" / "Dockerfile").read_text(encoding="utf-8")
 
     assert "AS coding-agent-acp" in dockerfile
-    assert "@agentclientprotocol/codex-acp@1.1.7" in dockerfile
+    assert "coding-agent-acp/package-lock.json" in dockerfile
+    assert "npm ci --omit=dev --ignore-scripts" in dockerfile
     assert "COPY --from=coding-agent-acp /opt/coding-agent-acp /opt/coding-agent-acp" in dockerfile

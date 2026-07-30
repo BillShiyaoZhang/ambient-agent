@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileClock, Network, RotateCw, X } from "lucide-react";
 import { dataMapToGraph } from "../lib/graphScenes";
+import { apiUrl } from "../services/apiBase";
 import { DeferredGraphExplorer } from "./graph/DeferredGraph";
 import { SystemDrawer, SystemIconButton } from "./system/SystemUI";
 import "./AuditLogPanel.css";
@@ -26,6 +27,7 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, language, 
   const isZh = language === "zh";
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [logError, setLogError] = useState<AuditRequestError | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [view, setView] = useState<"log" | "map">("log");
   const [dataMapPayload, setDataMapPayload] = useState<Record<string, unknown> | null>(null);
@@ -36,15 +38,20 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, language, 
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
+    setLogError(null);
     try {
-      const port = 8000;
-      const response = await fetch(`http://${window.location.hostname}:${port}/api/audit-logs`);
-      if (response.ok) {
-        const data = await response.json();
-        setLogs(data);
+      const response = await fetch(apiUrl("/api/audit-logs"));
+      if (!response.ok) {
+        setLogError({ status: response.status });
+        return;
       }
+      const data = await response.json();
+      setLogs(data);
     } catch (error) {
       console.error("Error fetching audit logs:", error);
+      setLogError({
+        detail: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setLoading(false);
     }
@@ -56,7 +63,7 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, language, 
     setMapLoading(true);
     setMapError(null);
     try {
-      const response = await fetch(`http://${window.location.hostname}:8000/api/data-map`);
+      const response = await fetch(apiUrl("/api/data-map"));
       if (!response.ok) {
         if (generation === mapRequestGeneration.current) {
           setMapError({ status: response.status });
@@ -179,11 +186,25 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, language, 
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {logError && (
+            <div className="audit-log-error" role="alert">
+              <span>
+                {`${isZh ? "审计日志请求失败" : "Audit log request failed"}${logError.status !== undefined
+                  ? ` (${logError.status})`
+                  : logError.detail
+                    ? `: ${logError.detail}`
+                    : ""}`}
+              </span>
+              <button type="button" onClick={() => void fetchLogs()}>
+                {isZh ? "重试" : "Try again"}
+              </button>
+            </div>
+          )}
           {loading && logs.length === 0 ? (
             <div className="h-48 flex items-center justify-center text-sm text-white/30">
               {isZh ? "正在加载日志…" : "Loading logs..."}
             </div>
-          ) : logs.length === 0 ? (
+          ) : logs.length === 0 && !logError ? (
             <div className="h-48 flex flex-col items-center justify-center text-center text-sm text-white/30 border border-dashed border-white/5 rounded-xl p-4">
               {isZh ? "暂未记录数据传输。" : "No data transfers recorded yet."}
             </div>
@@ -194,9 +215,12 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, language, 
                 className="border border-white/5 bg-white/[0.01] rounded-xl overflow-hidden"
               >
                 {/* Collapsed Header Summary */}
-                <div
+                <button
+                  type="button"
                   onClick={() => setExpandedId(expandedId === log.id ? null : log.id)}
-                  className="p-4 flex items-center justify-between cursor-pointer hover:bg-white/[0.03] transition-colors"
+                  className="audit-log-toggle p-4 flex items-center justify-between cursor-pointer hover:bg-white/[0.03] transition-colors"
+                  aria-expanded={expandedId === log.id}
+                  aria-controls={`audit-log-details-${log.id}`}
                 >
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
@@ -231,11 +255,11 @@ export const AuditLogPanel: React.FC<AuditLogPanelProps> = ({ isOpen, language, 
                       />
                     </svg>
                   </div>
-                </div>
+                </button>
 
                 {/* Expanded Details */}
                 {expandedId === log.id && (
-                  <div className="p-4 border-t border-white/5 bg-black/20 space-y-3 text-xs">
+                  <div id={`audit-log-details-${log.id}`} className="p-4 border-t border-white/5 bg-black/20 space-y-3 text-xs">
                     <div>
                       <div className="font-semibold text-white/40 mb-1">
                         {isZh ? "发送的提示词载荷：" : "PROMPT SEND PAYLOAD:"}

@@ -58,9 +58,7 @@ class SkillVersionConflict(SkillStoreError):
         self.version = version
         self.installed_digest = installed_digest
         self.candidate_digest = candidate_digest
-        super().__init__(
-            f"Skill '{catalog_id}' version '{version}' is already pinned to a different digest"
-        )
+        super().__init__(f"Skill '{catalog_id}' version '{version}' is already pinned to a different digest")
 
 
 class SkillDowngradeConflict(SkillStoreError):
@@ -91,10 +89,7 @@ class SkillAuthorizationDigestMismatch(SkillStoreError):
         self.catalog_id = catalog_id
         self.expected_digest = expected_digest
         self.actual_digest = actual_digest
-        super().__init__(
-            f"Skill '{catalog_id}' digest changed: expected '{expected_digest}', "
-            f"found '{actual_digest}'"
-        )
+        super().__init__(f"Skill '{catalog_id}' digest changed: expected '{expected_digest}', found '{actual_digest}'")
 
 
 class SkillTrustedAuthorizationImmutableError(SkillStoreError):
@@ -102,10 +97,7 @@ class SkillTrustedAuthorizationImmutableError(SkillStoreError):
 
     def __init__(self, catalog_id: str):
         self.catalog_id = catalog_id
-        super().__init__(
-            f"Skill '{catalog_id}' has loader-derived bundled trust; use enabled state "
-            "to disable it"
-        )
+        super().__init__(f"Skill '{catalog_id}' has loader-derived bundled trust; use enabled state to disable it")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,10 +248,7 @@ class SkillStore:
         record is disabled and quarantined, even if it used to be enabled.
         """
 
-        columns = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(skill_installations)").fetchall()
-        }
+        columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(skill_installations)").fetchall()}
         definitions = {
             "authorization_state": "TEXT NOT NULL DEFAULT 'quarantined'",
             "activation_policy": "TEXT NOT NULL DEFAULT 'none'",
@@ -267,15 +256,11 @@ class SkillStore:
         }
         missing = [name for name in definitions if name not in columns]
         for name in missing:
-            connection.execute(
-                f"ALTER TABLE skill_installations ADD COLUMN {name} {definitions[name]}"
-            )
+            connection.execute(f"ALTER TABLE skill_installations ADD COLUMN {name} {definitions[name]}")
         if not missing:
             return
 
-        rows = connection.execute(
-            "SELECT catalog_id, digest, record_json FROM skill_installations"
-        ).fetchall()
+        rows = connection.execute("SELECT catalog_id, digest, record_json FROM skill_installations").fetchall()
         migrated_at = datetime.now(UTC).isoformat()
         for row in rows:
             try:
@@ -316,7 +301,11 @@ class SkillStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             if expected_revision is not None:
-                if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+                if (
+                    not isinstance(expected_revision, int)
+                    or isinstance(expected_revision, bool)
+                    or expected_revision < 0
+                ):
                     raise ValueError("expected_revision must be a non-negative integer")
                 actual = self._revision(connection)
                 if actual != expected_revision:
@@ -331,18 +320,14 @@ class SkillStore:
 
     @staticmethod
     def _revision(connection: sqlite3.Connection) -> int:
-        row = connection.execute(
-            "SELECT revision FROM skill_registry_meta WHERE singleton = 1"
-        ).fetchone()
+        row = connection.execute("SELECT revision FROM skill_registry_meta WHERE singleton = 1").fetchone()
         if row is None or not isinstance(row["revision"], int) or row["revision"] < 0:
             raise SkillStoreCorruptionError("Skill registry revision state is missing or invalid")
         return int(row["revision"])
 
     @staticmethod
     def _increment_revision(connection: sqlite3.Connection) -> int:
-        connection.execute(
-            "UPDATE skill_registry_meta SET revision = revision + 1 WHERE singleton = 1"
-        )
+        connection.execute("UPDATE skill_registry_meta SET revision = revision + 1 WHERE singleton = 1")
         return SkillStore._revision(connection)
 
     def revision(self) -> int:
@@ -375,9 +360,7 @@ class SkillStore:
                 or _SOURCE_ID_PATTERN.fullmatch(source_id) is None
                 or enabled not in (0, 1)
             ):
-                raise SkillStoreCorruptionError(
-                    "Skill catalog source preference is malformed"
-                )
+                raise SkillStoreCorruptionError("Skill catalog source preference is malformed")
             preferences[source_id] = bool(enabled)
         return preferences
 
@@ -390,10 +373,7 @@ class SkillStore:
     ) -> int:
         """Persist an explicit disable while keeping enabled as the default."""
 
-        if (
-            not isinstance(source_id, str)
-            or _SOURCE_ID_PATTERN.fullmatch(source_id) is None
-        ):
+        if not isinstance(source_id, str) or _SOURCE_ID_PATTERN.fullmatch(source_id) is None:
             raise ValueError("source_id must be a lowercase hyphenated name")
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be a boolean")
@@ -478,9 +458,8 @@ class SkillStore:
                     existing.record,
                     normalized_record,
                 )
-                content_hash_governed = (
-                    _record_uses_content_hash(existing.record)
-                    or _record_uses_content_hash(normalized_record)
+                content_hash_governed = _record_uses_content_hash(existing.record) or _record_uses_content_hash(
+                    normalized_record
                 )
                 if content_hash_governed and not content_hash_update:
                     raise SkillVersionConflict(
@@ -639,13 +618,9 @@ class SkillStore:
         """
 
         if activation_policy not in SKILL_ACTIVATION_POLICIES:
-            raise ValueError(
-                "activation_policy must be one of: none, explicit_only, implicit"
-            )
+            raise ValueError("activation_policy must be one of: none, explicit_only, implicit")
         if not isinstance(expected_digest, str) or _DIGEST_PATTERN.fullmatch(expected_digest) is None:
-            raise ValueError(
-                "expected_digest must use the form sha256:<64 lowercase hex characters>"
-            )
+            raise ValueError("expected_digest must use the form sha256:<64 lowercase hex characters>")
         now = datetime.now(UTC).isoformat()
         with self._transaction(expected_revision=expected_revision) as connection:
             row = connection.execute(
@@ -805,19 +780,14 @@ class SkillStore:
         try:
             connection.execute("BEGIN")
             revision = self._revision(connection)
-            rows = connection.execute(
-                "SELECT * FROM skill_installations ORDER BY catalog_id"
-            ).fetchall()
+            rows = connection.execute("SELECT * FROM skill_installations ORDER BY catalog_id").fetchall()
             connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
-        installed = [
-            self._row_to_installed(row, registry_revision=revision)
-            for row in rows
-        ]
+        installed = [self._row_to_installed(row, registry_revision=revision) for row in rows]
         if verify_packages:
             for item in installed:
                 self._verify_installed_package(item)
@@ -884,21 +854,10 @@ class SkillStore:
                 raise ValueError("Content-addressed Skill source metadata is missing")
             source_revision = source.get("source_revision")
             upstream_hash = source.get("upstream_hash")
-            if (
-                not isinstance(source_revision, str)
-                or not source_revision
-                or normalized["version"] != source_revision
-            ):
-                raise ValueError(
-                    "Content-addressed Skill version must equal source_revision"
-                )
-            if (
-                not isinstance(upstream_hash, str)
-                or _DIGEST_PATTERN.fullmatch(upstream_hash) is None
-            ):
-                raise ValueError(
-                    "Content-addressed Skill upstream_hash must be a SHA-256 digest"
-                )
+            if not isinstance(source_revision, str) or not source_revision or normalized["version"] != source_revision:
+                raise ValueError("Content-addressed Skill version must equal source_revision")
+            if not isinstance(upstream_hash, str) or _DIGEST_PATTERN.fullmatch(upstream_hash) is None:
+                raise ValueError("Content-addressed Skill upstream_hash must be a SHA-256 digest")
         else:
             parse_semver(normalized["version"])
 
@@ -920,13 +879,9 @@ class SkillStore:
         try:
             record = json.loads(row["record_json"])
         except (TypeError, json.JSONDecodeError) as exc:
-            raise SkillStoreCorruptionError(
-                f"Installed skill '{row['catalog_id']}' has invalid JSON state"
-            ) from exc
+            raise SkillStoreCorruptionError(f"Installed skill '{row['catalog_id']}' has invalid JSON state") from exc
         if not isinstance(record, dict):
-            raise SkillStoreCorruptionError(
-                f"Installed skill '{row['catalog_id']}' JSON state must be an object"
-            )
+            raise SkillStoreCorruptionError(f"Installed skill '{row['catalog_id']}' JSON state must be an object")
         expected = {
             "catalog_id": row["catalog_id"],
             "market_id": row["market_id"],
@@ -941,33 +896,20 @@ class SkillStore:
                     f"Installed skill '{row['catalog_id']}' has inconsistent field '{field}'"
                 )
         if row["enabled"] not in (0, 1):
-            raise SkillStoreCorruptionError(
-                f"Installed skill '{row['catalog_id']}' has invalid enabled state"
-            )
+            raise SkillStoreCorruptionError(f"Installed skill '{row['catalog_id']}' has invalid enabled state")
         authorization_state = row["authorization_state"]
         activation_policy = row["activation_policy"]
         authorized_digest = row["authorized_digest"]
         if authorization_state not in SKILL_AUTHORIZATION_STATES:
-            raise SkillStoreCorruptionError(
-                f"Installed skill '{row['catalog_id']}' has invalid authorization state"
-            )
+            raise SkillStoreCorruptionError(f"Installed skill '{row['catalog_id']}' has invalid authorization state")
         if activation_policy not in SKILL_ACTIVATION_POLICIES:
-            raise SkillStoreCorruptionError(
-                f"Installed skill '{row['catalog_id']}' has invalid activation policy"
-            )
+            raise SkillStoreCorruptionError(f"Installed skill '{row['catalog_id']}' has invalid activation policy")
         if authorized_digest is not None and (
-            not isinstance(authorized_digest, str)
-            or _DIGEST_PATTERN.fullmatch(authorized_digest) is None
+            not isinstance(authorized_digest, str) or _DIGEST_PATTERN.fullmatch(authorized_digest) is None
         ):
-            raise SkillStoreCorruptionError(
-                f"Installed skill '{row['catalog_id']}' has invalid authorized digest"
-            )
+            raise SkillStoreCorruptionError(f"Installed skill '{row['catalog_id']}' has invalid authorized digest")
         if authorization_state == "quarantined":
-            valid_authorization = (
-                activation_policy == "none"
-                and authorized_digest is None
-                and row["enabled"] == 0
-            )
+            valid_authorization = activation_policy == "none" and authorized_digest is None and row["enabled"] == 0
         elif authorization_state == "trusted":
             valid_authorization = (
                 _record_has_bundled_trust(record)
@@ -1058,6 +1000,7 @@ class SkillStore:
                 f"Installed package digest mismatch: expected {expected_digest}, found {actual_digest}"
             )
 
+
 def _canonical_json(value: dict[str, Any]) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -1117,10 +1060,7 @@ def _is_content_hash_update(
 
 def _record_uses_content_hash(record: dict[str, Any]) -> bool:
     source = record.get("catalog_source")
-    return (
-        isinstance(source, dict)
-        and source.get("update_strategy") == "content_hash"
-    )
+    return isinstance(source, dict) and source.get("update_strategy") == "content_hash"
 
 
 def _write_and_sync(path: Path, content: bytes) -> None:

@@ -56,6 +56,34 @@ function formatDuration(run: AmbientRunSummary): string {
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+const RUN_ERROR_TITLES: Record<string, { zh: string; en: string }> = {
+  budget_exhausted: {
+    zh: "任务已达到运行预算上限",
+    en: "The task reached its execution budget",
+  },
+  verification_failed: { zh: "任务验证未通过", en: "Task verification failed" },
+  widget_verification_failed: { zh: "App 验证未通过", en: "App verification failed" },
+  llm_configuration_required: { zh: "尚未配置可用模型", en: "No model is configured" },
+  llm_timeout: { zh: "模型响应超时", en: "The model request timed out" },
+  llm_rate_limited: { zh: "模型请求过于频繁", en: "The model rate limit was reached" },
+  coding_agent_not_installed: { zh: "尚未安装编码 Agent", en: "The coding agent is not installed" },
+  runtime_rpc_unavailable: { zh: "后台运行时暂时不可用", en: "The background runtime is unavailable" },
+  widget_runtime_unavailable: { zh: "App 运行时暂时不可用", en: "The app runtime is unavailable" },
+};
+
+function runErrorPresentation(
+  error: NonNullable<AmbientRun["error"]>,
+  language: "zh" | "en",
+) {
+  const title = error.code ? RUN_ERROR_TITLES[error.code]?.[language] : undefined;
+  return {
+    title: title ?? (language === "zh" ? "任务执行失败" : "Task execution failed"),
+    message: error.message,
+    code: error.code ?? error.type,
+    retryable: error.retryable,
+  };
+}
+
 export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSource }: TaskDrawerProps) {
   const isZh = language === "zh";
   const [runs, setRuns] = useState<AmbientRunSummary[]>([]);
@@ -197,6 +225,9 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
     return [...groups.entries()];
   }, [visible]);
   const hasDurableWorkflow = isDurableWorkflowRun(selected);
+  const selectedError = selected?.error
+    ? runErrorPresentation(selected.error, language)
+    : null;
 
   const perform = async (operation: () => Promise<unknown>) => {
     try {
@@ -270,8 +301,20 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
         {selected && (
           <section className="task-run-detail">
             <header>
-              <button onClick={() => { setSelected(null); setSelectedId(null); setDetailView("overview"); }}>←</button>
+              <SystemIconButton
+                label={isZh ? "返回任务列表" : "Back to task list"}
+                onClick={() => { setSelected(null); setSelectedId(null); setDetailView("overview"); }}
+              >
+                ←
+              </SystemIconButton>
               <div><h3>{selected.action_title}</h3><small>{selected.status} · {formatDuration(selected)}</small></div>
+              <SystemIconButton
+                className="task-detail-close"
+                label={isZh ? "关闭任务中心" : "Close Task Center"}
+                onClick={onClose}
+              >
+                <X size={17} />
+              </SystemIconButton>
             </header>
             <nav className="task-detail-tabs" aria-label={isZh ? "运行详情视图" : "Run detail views"}>
               <button
@@ -316,11 +359,31 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
                 ))}
                 {selected.result !== undefined && selected.result !== null && <><h4>{isZh ? "结果" : "Result"}</h4><pre>{JSON.stringify(selected.result, null, 2)}</pre></>}
                 {(selected.artifacts || []).length > 0 && <><h4>{isZh ? "产物" : "Artifacts"}</h4><pre>{JSON.stringify(selected.artifacts, null, 2)}</pre></>}
-                {selected.error && <><h4>{isZh ? "错误" : "Error"}</h4><pre>{JSON.stringify(selected.error, null, 2)}</pre></>}
+                {selectedError && (
+                  <>
+                    <h4>{isZh ? "错误" : "Error"}</h4>
+                    <div className="task-run-error" role="alert">
+                      <strong>{selectedError.title}</strong>
+                      {selectedError.message && <p>{selectedError.message}</p>}
+                      {selectedError.code && <code>{selectedError.code}</code>}
+                      {selectedError.retryable === false && (
+                        <small>
+                          {isZh
+                            ? "此失败不可直接重试，请调整配置或输入后重新发起任务。"
+                            : "This failure cannot be retried directly. Adjust the configuration or input, then start a new task."}
+                        </small>
+                      )}
+                    </div>
+                  </>
+                )}
                 <h4>{isZh ? "输入" : "Input"}</h4><pre>{JSON.stringify(selected.input, null, 2)}</pre>
                 <footer>
                   {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button onClick={() => perform(() => runService.cancel(selected.id))}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
-                  {["failed", "cancelled"].includes(selected.status) && !["unknown", "committed"].includes(selected.error?.effect_state || "") ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button> : null}
+                  {["failed", "cancelled"].includes(selected.status)
+                    && selected.error?.retryable !== false
+                    && !["unknown", "committed"].includes(selected.error?.effect_state || "")
+                    ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button>
+                    : null}
                   {selected.status === "needs_attention" ? <>
                     <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"))}>{isZh ? "确认未执行" : "Not committed"}</button>
                     <button onClick={() => perform(() => runService.reconcile(selected.id, "compensated"))}>{isZh ? "确认已补偿" : "Compensated"}</button>

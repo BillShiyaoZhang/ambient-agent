@@ -11,12 +11,13 @@ export interface MutationPreviewData {
 
 export interface MutationPreviewProps {
   preview: MutationPreviewData | null;
+  deliveryError?: string | null;
   onRollback: (ticketId: string) => void;
   onPin: (ticketId: string) => void;
   onDismiss: (ticketId: string) => void;
 }
 
-export function MutationPreview({ preview, onRollback, onPin, onDismiss }: MutationPreviewProps) {
+export function MutationPreview({ preview, deliveryError, onRollback, onPin, onDismiss }: MutationPreviewProps) {
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
   useEffect(() => {
@@ -73,6 +74,11 @@ export function MutationPreview({ preview, onRollback, onPin, onDismiss }: Mutat
           ✕
         </button>
       </div>
+      {deliveryError && (
+        <p className="mt-2 text-[11px] leading-relaxed text-rose-300" role="alert">
+          {deliveryError}
+        </p>
+      )}
     </SystemToast>
   );
 }

@@ -178,6 +178,8 @@
 .app-center-state h2 { margin: 8px 0 0; color: var(--text-primary); font-size: 17px; }
 .app-center-state p { max-width: 380px; margin: 0; font-size: 12px; }
 .app-center-state button { min-height: var(--system-control-size); margin-top: 8px; padding: 0 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); color: var(--text-primary); background: var(--control-hover); cursor: pointer; }
+.app-center-first-use-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.app-center-first-use-actions button:first-child { color: white; border-color: transparent; background: var(--accent); }
 
 .app-center-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 2px 0 22px; }
 .app-center-pagination > button { display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 50%; color: rgba(255,255,255,.5); background: transparent; cursor: pointer; }

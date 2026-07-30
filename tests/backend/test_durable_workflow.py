@@ -463,9 +463,7 @@ async def test_route_pins_selected_skill_body_and_digest_for_converse_replay(
             if self.authorization_error is not None:
                 raise self.authorization_error
             if not self.authorization_current:
-                raise SkillAuthorizationRequiredError(
-                    snapshots[0]["catalog_id"]
-                )
+                raise SkillAuthorizationRequiredError(snapshots[0]["catalog_id"])
 
     store = RunStore(str(tmp_path))
     graph_db = GraphDatabase(str(tmp_path))
@@ -533,9 +531,7 @@ async def test_route_pins_selected_skill_body_and_digest_for_converse_replay(
         await workflow._phase_converse(run, state)
 
     skill_manager.authorization_current = True
-    skill_manager.authorization_error = SkillStoreCorruptionError(
-        "corrupt registry"
-    )
+    skill_manager.authorization_error = SkillStoreCorruptionError("corrupt registry")
     with pytest.raises(WorkflowError) as exc_info:
         await workflow._phase_converse(run, state)
     assert exc_info.value.code == "skill_registry_unavailable"
@@ -572,19 +568,14 @@ def test_external_skill_snapshot_is_digest_bound_and_rendered_as_untrusted_data(
 
     channels = build_skill_prompt_channels(
         [snapshot],
-        render_context=lambda values: "\n".join(
-            str(value["instructions"]) for value in values
-        ),
+        render_context=lambda values: "\n".join(str(value["instructions"]) for value in values),
     )
 
     assert channels.trusted_system_guidance is None
     assert channels.untrusted_user_guidance is not None
     assert "EXTERNAL_BODY" in channels.untrusted_user_guidance
     assert "untrusted_skill_data" in channels.untrusted_user_guidance
-    assert (
-        '"principal_id":"agent-skill:third-party:research@'
-        f'sha256:{"a" * 64}"'
-    ) in channels.untrusted_user_guidance
+    assert (f'"principal_id":"agent-skill:third-party:research@sha256:{"a" * 64}"') in channels.untrusted_user_guidance
     assert f'"grant_digest":"{grant_digest}"' in channels.untrusted_user_guidance
 
     with pytest.raises(ValueError, match="empty context"):
@@ -605,10 +596,7 @@ def test_external_skill_snapshot_is_digest_bound_and_rendered_as_untrusted_data(
                 "activation_policy": "explicit_only",
                 "digest": f"sha256:{'c' * 64}",
                 "grant_digest": f"sha256:{'b' * 64}",
-                "principal_id": (
-                    "agent-skill:third-party:research@"
-                    f"sha256:{'c' * 64}"
-                ),
+                "principal_id": (f"agent-skill:third-party:research@sha256:{'c' * 64}"),
             },
         },
         {
@@ -618,10 +606,7 @@ def test_external_skill_snapshot_is_digest_bound_and_rendered_as_untrusted_data(
                 "activation_policy": "implicit",
                 "digest": f"sha256:{'a' * 64}",
                 "grant_digest": f"sha256:{'b' * 64}",
-                "principal_id": (
-                    "agent-skill:third-party:research@"
-                    f"sha256:{'a' * 64}"
-                ),
+                "principal_id": (f"agent-skill:third-party:research@sha256:{'a' * 64}"),
             },
         },
         {
@@ -694,9 +679,7 @@ def test_legacy_bundled_skill_snapshot_remains_compatible() -> None:
 
     channels = build_skill_prompt_channels(
         [snapshot],
-        render_context=lambda values: "\n".join(
-            str(value["instructions"]) for value in values
-        ),
+        render_context=lambda values: "\n".join(str(value["instructions"]) for value in values),
     )
 
     assert channels.trusted_system_guidance == "LEGACY_BUNDLED_BODY"
@@ -730,9 +713,7 @@ def test_current_bundled_skill_snapshot_stays_in_trusted_system_channel() -> Non
 
     channels = build_skill_prompt_channels(
         [snapshot],
-        render_context=lambda values: "\n".join(
-            str(value["instructions"]) for value in values
-        ),
+        render_context=lambda values: "\n".join(str(value["instructions"]) for value in values),
     )
 
     assert channels.trusted_system_guidance == "CURRENT_BUNDLED_BODY"
@@ -1964,9 +1945,7 @@ async def test_multi_converse_steps_use_their_own_instructions_and_one_final_pro
             state.phase = outcome.next_phase
             continue
         assert isinstance(outcome, Succeeded)
-        assert outcome.result["message"] == (
-            "answer: first question\n\nanswer: second question"
-        )
+        assert outcome.result["message"] == ("answer: first question\n\nanswer: second question")
         break
     else:
         raise AssertionError("multi-converse workflow did not terminate")

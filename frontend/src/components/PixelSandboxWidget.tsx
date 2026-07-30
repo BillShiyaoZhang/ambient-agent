@@ -3,6 +3,12 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { Widget } from "./DashboardCanvas";
 import wsService from "../services/websocket";
 import type { ThemeSnapshot } from "../services/theme";
+import { webSocketUrl } from "../services/apiBase";
+import {
+  isTerminalSocketClose,
+  MAX_SOCKET_RECONNECT_ATTEMPTS,
+  socketReconnectDelay,
+} from "../services/socketReconnect";
 
 export interface WidgetPresentationContext {
   theme: ThemeSnapshot;
@@ -51,7 +57,6 @@ const runtimeWebSocketUrl = (
   viewport: Viewport,
   presentationContext: WidgetPresentationContext,
 ) => {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const params = new URLSearchParams({
     width: String(viewport.width),
     height: String(viewport.height),
@@ -61,7 +66,9 @@ const runtimeWebSocketUrl = (
     locale: presentationContext.locale,
     reduced_motion: String(presentationContext.reduced_motion),
   });
-  return `${protocol}//${window.location.hostname}:8000/ws/widgets/${encodeURIComponent(appId)}/runtime?${params}`;
+  return webSocketUrl(
+    `/ws/widgets/${encodeURIComponent(appId)}/runtime?${params}`,
+  );
 };
 
 const pointerButton = (button: number) => {
@@ -116,7 +123,15 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
   });
   const [frame, setFrame] = useState<RuntimeFrame | null>(null);
   const [failure, setFailure] = useState<RuntimeFailure | null>(null);
+  const [hostMessageError, setHostMessageError] = useState<string | null>(null);
   const [status, setStatus] = useState<"connecting" | "ready" | "closed">("connecting");
+  const [connectionGeneration, setConnectionGeneration] = useState(0);
+
+  const retryRuntime = useCallback(() => {
+    setFailure(null);
+    setStatus("connecting");
+    setConnectionGeneration((generation) => generation + 1);
+  }, []);
 
   const send = useCallback((message: Record<string, unknown>) => {
     const socket = socketRef.current;
@@ -215,7 +230,12 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
             hostCallbacksRef.current.onMinimize?.(widget.id);
           }
           if (message.event === "send_message" && typeof message.text === "string") {
-            wsService.sendMessage({ sender: "user", content: message.text });
+            const delivered = wsService.sendMessage({ sender: "user", content: message.text });
+            setHostMessageError(delivered
+              ? null
+              : (presentationContextRef.current.locale.startsWith("zh")
+                  ? "消息尚未发送。请恢复 Ambient 连接后在聊天中重试。"
+                  : "Message not sent. Restore the Ambient connection and retry in chat."));
           }
         }
       };
@@ -226,13 +246,21 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
           classification: "operator",
         });
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         setStatus("closed");
         if (socketRef.current === socket) socketRef.current = null;
-        if (!disposed) {
-          reconnectAttempt += 1;
-          scheduleConnect(Math.min(250 * (2 ** (reconnectAttempt - 1)), 4_000));
+        if (disposed || isTerminalSocketClose(event)) return;
+        if (reconnectAttempt >= MAX_SOCKET_RECONNECT_ATTEMPTS) {
+          setFailure({
+            code: "widget_runtime_unavailable",
+            message: "Widget Runtime connection could not be restored",
+            classification: "operator",
+          });
+          return;
         }
+        reconnectAttempt += 1;
+        setStatus("connecting");
+        scheduleConnect(socketReconnectDelay(reconnectAttempt));
       };
     };
     scheduleConnect = (delayMs) => {
@@ -265,6 +293,7 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
     widget.grants_digest,
     widget.id,
     widget.manifest_revision,
+    connectionGeneration,
   ]);
 
   useEffect(() => {
@@ -434,6 +463,23 @@ export const PixelSandboxWidget: React.FC<SandboxWidgetProps> = ({
             {failure.code}
             {failure.classification ? ` · ${failure.classification}` : ""}
           </span>
+          {status === "closed" && failure.classification === "operator" && (
+            <button
+              type="button"
+              className="mt-3 rounded-md border border-red-300/35 px-2 py-1 text-[11px] hover:bg-red-100/10"
+              onClick={retryRuntime}
+            >
+              {presentationContext.locale.startsWith("zh") ? "重试 Widget Runtime" : "Retry Widget Runtime"}
+            </button>
+          )}
+        </div>
+      )}
+      {hostMessageError && (
+        <div
+          className="absolute right-3 bottom-3 left-3 rounded-lg border border-red-400/30 bg-red-950/90 p-2 text-[11px] text-red-200"
+          role="alert"
+        >
+          {hostMessageError}
         </div>
       )}
     </div>

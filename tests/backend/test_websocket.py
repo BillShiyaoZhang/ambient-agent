@@ -3,8 +3,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from backend.main import _accept_websocket_safely, app, app_manager, get_db, run_live_broker
+from backend.models import ChatSession
 from backend.workspace_storage import WorkspaceStorage
 
 
@@ -35,6 +37,8 @@ def test_websocket_chat_flow(test_session, monkeypatch):
 
     app.dependency_overrides[get_db] = override_get_db
     session_id = f"websocket-chat-{uuid4().hex}"
+    test_session.add(ChatSession(id=session_id, title="WebSocket chat"))
+    test_session.commit()
 
     with TestClient(app) as client:
         with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
@@ -62,6 +66,69 @@ async def test_aborted_or_duplicate_websocket_handshake_is_ignored_without_asgi_
             )
 
     assert await _accept_websocket_safely(StaleHandshake()) is False
+
+
+def test_browser_websocket_rejects_untrusted_origin():
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as denied:
+            with client.websocket_connect(
+                "/ws/run-live?session_id=origin-check",
+                headers={"origin": "https://attacker.example"},
+            ):
+                pass
+
+    assert denied.value.code == 4403
+
+
+def test_chat_websocket_rejects_session_path_escape(tmp_path):
+    storage = WorkspaceStorage(str(tmp_path / "workspace"))
+
+    def override_get_db():
+        yield storage
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app) as client:
+            with pytest.raises(WebSocketDisconnect) as denied:
+                with client.websocket_connect("/ws/chat?session_id=..%2Fescaped"):
+                    pass
+    finally:
+        app.dependency_overrides.clear()
+
+    assert denied.value.code == 4400
+    assert not (tmp_path / "workspace" / "escaped.json").exists()
+
+
+def test_chat_websocket_rejects_malformed_and_oversized_messages_without_disconnecting(test_session):
+    def override_get_db():
+        yield test_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    test_session.add(ChatSession(id="protocol-bounds", title="Protocol bounds"))
+    test_session.commit()
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws/chat?session_id=protocol-bounds") as websocket:
+                assert websocket.receive_json()["type"] == "active_sessions_list"
+
+                websocket.send_json(["not", "an", "object"])
+                assert websocket.receive_json()["code"] == "invalid_message"
+
+                websocket.send_json({"sender": "user", "content": ["not text"]})
+                assert websocket.receive_json()["code"] == "invalid_message_content"
+
+                websocket.send_json({"type": "unknown-control-message"})
+                assert websocket.receive_json()["code"] == "unsupported_message_type"
+
+                websocket.send_json({"sender": "user", "content": "x" * (256 * 1024 + 1)})
+                assert websocket.receive_json()["code"] == "message_too_large"
+
+                websocket.send_json({"sender": "user", "content": ""})
+                assert websocket.receive_json()["code"] == "invalid_message_content"
+    finally:
+        app.dependency_overrides.clear()
+
+    assert test_session.get_messages("protocol-bounds") == []
 
 
 def test_websocket_run_live_projects_only_the_subscribed_session():
@@ -111,6 +178,8 @@ def test_websocket_converse_rejects_unverified_inline_widget(test_session, monke
 
     app.dependency_overrides[get_db] = override_get_db
     session_id = f"websocket-inline-widget-{uuid4().hex}"
+    test_session.add(ChatSession(id=session_id, title="Inline widget"))
+    test_session.commit()
 
     with TestClient(app) as client:
         with client.websocket_connect(f"/ws/chat?session_id={session_id}") as websocket:
@@ -127,3 +196,30 @@ def test_websocket_converse_rejects_unverified_inline_widget(test_session, monke
 
     assert not (Path(test_session.apps_dir) / "weather-card").exists()
     app.dependency_overrides.clear()
+
+
+def test_chat_websocket_cannot_create_a_missing_or_deleting_session(test_session):
+    from backend import main
+
+    def override_get_db():
+        yield test_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app) as client:
+            with pytest.raises(WebSocketDisconnect) as missing:
+                with client.websocket_connect("/ws/chat?session_id=missing-session"):
+                    pass
+            assert missing.value.code == 4404
+            assert test_session.get(ChatSession, "missing-session") is None
+
+            test_session.add(ChatSession(id="deleting-session", title="Deleting"))
+            test_session.commit()
+            main.deleting_chat_sessions.add("deleting-session")
+            with pytest.raises(WebSocketDisconnect) as deleting:
+                with client.websocket_connect("/ws/chat?session_id=deleting-session"):
+                    pass
+            assert deleting.value.code == 4404
+    finally:
+        main.deleting_chat_sessions.discard("deleting-session")
+        app.dependency_overrides.clear()

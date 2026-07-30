@@ -47,6 +47,7 @@ from backend.router_context import RouterContext
 
 logger = logging.getLogger("agent.router")
 
+
 def _default_context_sections() -> list[str]:
     return ["widgets", "graph_counts", "history"]
 
@@ -160,11 +161,7 @@ class IntentRouter:
         capability_catalog: SystemCapabilityCatalog | None,
     ) -> IntentPlan:
         plans: list[IntentPlan] = []
-        app_by_id = {
-            str(item.get("id")): item
-            for item in context.app_manifests
-            if item.get("id")
-        }
+        app_by_id = {str(item.get("id")): item for item in context.app_manifests if item.get("id")}
         for command in commands:
             instruction = command.arguments.get("instruction", "").strip()
             if command.name == "ask":
@@ -221,9 +218,7 @@ class IntentRouter:
                         confidence=1.0,
                         rationale="explicit slash command references an unknown app",
                         clarification_message=(
-                            "请选择一个已安装的 App ID。"
-                            if language == "zh"
-                            else "Choose an installed App ID."
+                            "请选择一个已安装的 App ID。" if language == "zh" else "Choose an installed App ID."
                         ),
                         clarification_options=options,
                     )
@@ -233,11 +228,8 @@ class IntentRouter:
                         confidence=1.0,
                         rationale="explicit slash command",
                         app_id=app_id,
-                        instruction=instruction or (
-                            "检查并说明这个 App。"
-                            if language == "zh"
-                            else "Inspect and explain this App."
-                        ),
+                        instruction=instruction
+                        or ("检查并说明这个 App。" if language == "zh" else "Inspect and explain this App."),
                     )
                 )
                 continue
@@ -284,11 +276,7 @@ class IntentRouter:
                 )
                 continue
 
-            expected_kind = (
-                IntentKind.GRAPH_QUERY
-                if command.name == "query"
-                else IntentKind.GRAPH_MUTATION
-            )
+            expected_kind = IntentKind.GRAPH_QUERY if command.name == "query" else IntentKind.GRAPH_MUTATION
             if not instruction:
                 return cls._slash_clarification(
                     (
@@ -321,14 +309,8 @@ class IntentRouter:
             if (
                 plan is None
                 or plan.kind != expected_kind
-                or (
-                    expected_kind == IntentKind.GRAPH_QUERY
-                    and not isinstance(plan.query, dict)
-                )
-                or (
-                    expected_kind == IntentKind.GRAPH_MUTATION
-                    and not plan.actions
-                )
+                or (expected_kind == IntentKind.GRAPH_QUERY and not isinstance(plan.query, dict))
+                or (expected_kind == IntentKind.GRAPH_MUTATION and not plan.actions)
             ):
                 return cls._slash_clarification(
                     (

@@ -195,9 +195,17 @@ export function SystemDrawer({
 }: SystemDrawerProps) {
   const drawerRef = useRef<HTMLElement>(null);
   useDialogFocus(open, drawerRef, false, onClose);
+  if (!open) return null;
   return (
-    <div className={`system-layer system-drawer-layer ${open ? "is-open" : ""}`} aria-hidden={!open}>
-      <button type="button" className="system-scrim" onClick={onClose} tabIndex={open ? 0 : -1} aria-label={closeLabel ?? `Close ${label}`} />
+    <div className="system-layer system-drawer-layer is-open">
+      <button
+        type="button"
+        className="system-scrim"
+        onClick={onClose}
+        tabIndex={-1}
+        aria-hidden="true"
+        aria-label={closeLabel ?? `Close ${label}`}
+      />
       <aside ref={drawerRef} className={`system-drawer is-${side} ${className}`.trim()} role="dialog" aria-modal="true" aria-label={label} tabIndex={-1}>
         {children}
       </aside>

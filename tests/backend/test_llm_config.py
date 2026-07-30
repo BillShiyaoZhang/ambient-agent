@@ -4,6 +4,7 @@ import stat
 import pytest
 
 from backend.llm_config import (
+    LLMConfigError,
     LLMConfigStore,
     LLMConfigurationRequired,
     ModelSelection,
@@ -225,3 +226,82 @@ def test_patch_omitted_credential_keeps_it_and_clear_removes_it(tmp_path):
     assert "api_key" not in store.resolve(ModelSelection(provider_id="p", model_id="m")).credentials
     data = json.loads((tmp_path / "llm" / "secrets.json").read_text(encoding="utf-8"))
     assert data == {}
+
+
+def test_corrupt_llm_config_fails_closed_without_overwrite(tmp_path):
+    llm_dir = tmp_path / "llm"
+    llm_dir.mkdir()
+    config_path = llm_dir / "config.json"
+    config_path.write_text('{"providers":[', encoding="utf-8")
+
+    with pytest.raises(LLMConfigError) as failure:
+        LLMConfigStore(str(tmp_path))
+
+    assert failure.value.code == "llm_config_corrupt"
+    assert config_path.read_text(encoding="utf-8") == '{"providers":['
+
+
+def test_corrupt_llm_secrets_fail_closed_without_overwrite(tmp_path):
+    LLMConfigStore(str(tmp_path))
+    secrets_path = tmp_path / "llm" / "secrets.json"
+    secrets_path.write_text('{"provider:key":', encoding="utf-8")
+
+    with pytest.raises(LLMConfigError) as failure:
+        LLMConfigStore(str(tmp_path))
+
+    assert failure.value.code == "llm_secrets_corrupt"
+    assert secrets_path.read_text(encoding="utf-8") == '{"provider:key":'
+
+
+def test_invalid_legacy_llm_config_is_not_rewritten_during_migration(tmp_path):
+    llm_dir = tmp_path / "llm"
+    llm_dir.mkdir()
+    config_path = llm_dir / "config.json"
+    original = json.dumps(
+        {
+            "version": 1,
+            "providers": [{"id": "../invalid", "name": "Invalid", "preset": "openai"}],
+            "settings": {"default_model": None, "fast_model": None},
+        },
+        separators=(",", ":"),
+    )
+    config_path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(LLMConfigError) as failure:
+        LLMConfigStore(str(tmp_path))
+
+    assert failure.value.code == "llm_config_corrupt"
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_llm_config_rejects_ambiguous_duplicates_and_non_string_secrets(tmp_path):
+    store = LLMConfigStore(str(tmp_path))
+    profile = {
+        "id": "duplicate",
+        "name": "Duplicate",
+        "preset": "openai",
+        "models": [{"id": "same"}],
+    }
+    config_path = tmp_path / "llm" / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "providers": [profile, profile],
+                "settings": {"default_model": None, "fast_model": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(LLMConfigError) as duplicate_failure:
+        LLMConfigStore(str(tmp_path))
+    assert duplicate_failure.value.code == "llm_config_corrupt"
+
+    config_path.write_text(json.dumps(store._empty_config()), encoding="utf-8")
+    secrets_path = tmp_path / "llm" / "secrets.json"
+    original_secrets = '{"provider:api_key":123}'
+    secrets_path.write_text(original_secrets, encoding="utf-8")
+    with pytest.raises(LLMConfigError) as secret_failure:
+        LLMConfigStore(str(tmp_path))
+    assert secret_failure.value.code == "llm_secrets_corrupt"
+    assert secrets_path.read_text(encoding="utf-8") == original_secrets

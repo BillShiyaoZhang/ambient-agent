@@ -206,9 +206,9 @@ class SystemCapabilityCatalog:
                     "version": str(item.get("version") or "")[:64],
                     "provider": str(item.get("provider") or "")[:120],
                     "tags": sorted({str(tag)[:80] for tag in item.get("tags") or ()})[:20],
-                    "ontology_refs": sorted(
-                        {str(entity_id)[:120] for entity_id in item.get("ontology_refs") or ()}
-                    )[:100],
+                    "ontology_refs": sorted({str(entity_id)[:120] for entity_id in item.get("ontology_refs") or ()})[
+                        :100
+                    ],
                     "enabled": bool(item.get("enabled", True)),
                     "available": bool(item.get("available", True)),
                     "digest": str(item.get("digest") or "")[:80],

@@ -28,6 +28,8 @@
 .runtime-list button,.task-source-link,.task-run-detail footer button,.task-interaction button { display: inline-flex; align-items: center; gap: 5px; padding: 7px 9px; border: 1px solid var(--glass-border); border-radius: 9px; color: var(--text-secondary); background: var(--control-hover); cursor: pointer; font-size: 10px; }
 .task-run-detail { position: absolute; inset: 0; z-index: 2; overflow-y: auto; padding: 18px; color: var(--text-primary); background: var(--surface-panel-solid); }
 .task-run-detail > header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+.task-run-detail > header > div { flex: 1; min-width: 0; }
+.task-run-detail > header .task-detail-close { margin-left: auto; }
 .task-run-detail > header h3 { font-size: 15px; }
 .task-run-detail > header small { color: var(--text-muted); font-size: 10px; }
 .task-detail-tabs { display: flex; gap: 5px; margin: -7px 0 15px; padding: 3px; border: 1px solid var(--glass-border); border-radius: 11px; background: color-mix(in srgb,var(--workspace-bg-solid),transparent 45%); }
@@ -38,6 +40,10 @@
 .task-source-link { margin: 13px 0; }
 .task-run-detail h4 { margin: 18px 0 7px; color: var(--text-muted); font-size: 10px; text-transform: uppercase; }
 .task-run-detail pre,.task-interaction pre { max-height: 260px; overflow: auto; padding: 11px; border: 1px solid var(--glass-border); border-radius: 11px; color: var(--text-secondary); background: rgba(0,0,0,.12); font: 10px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+.task-run-error { display: grid; gap: 5px; padding: 11px; border: 1px solid color-mix(in srgb,var(--danger),transparent 70%); border-radius: 11px; background: var(--danger-soft); }
+.task-run-error strong { color: var(--danger); font-size: 11px; }
+.task-run-error p { color: var(--text-secondary); font-size: 10px; line-height: 1.45; }
+.task-run-error code,.task-run-error small { color: var(--text-muted); font-size: 9px; overflow-wrap: anywhere; }
 .task-interaction { margin: 14px 0; padding: 12px; border: 1px solid rgba(245,158,11,.25); border-radius: 13px; background: rgba(245,158,11,.06); }
 .task-interaction strong { font-size: 11px; }
 .task-interaction > div { display: flex; justify-content: flex-end; gap: 7px; }

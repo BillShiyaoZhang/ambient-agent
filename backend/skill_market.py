@@ -13,12 +13,8 @@ from backend.skill_version import parse_semver
 
 BUNDLED_SKILL_MARKET_DIR = Path(__file__).with_name("bundled_skills")
 
-_MARKET_ID_PATTERN = re.compile(
-    r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?$"
-)
-_CATALOG_ID_PATTERN = re.compile(
-    r"^agent-skill:([a-z0-9]+(?:-[a-z0-9]+)*):([a-z0-9]+(?:-[a-z0-9]+)*)$"
-)
+_MARKET_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?$")
+_CATALOG_ID_PATTERN = re.compile(r"^agent-skill:([a-z0-9]+(?:-[a-z0-9]+)*):([a-z0-9]+(?:-[a-z0-9]+)*)$")
 _ONTOLOGY_REF_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _ACCENT_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _MARKET_FIELDS = {
@@ -146,15 +142,9 @@ class SkillMarket:
         # Trust is a loader property, never a publisher-controlled manifest
         # claim. Conservative path equality means an alias of the bundled
         # directory is treated as an unverified local Market.
-        self._is_bundled_market = (
-            self.market_dir == BUNDLED_SKILL_MARKET_DIR.expanduser().absolute()
-        )
-        self.source_id = source_id or (
-            "bundled" if self._is_bundled_market else "local"
-        )
-        self.kind = kind or (
-            "bundled" if self._is_bundled_market else "local"
-        )
+        self._is_bundled_market = self.market_dir == BUNDLED_SKILL_MARKET_DIR.expanduser().absolute()
+        self.source_id = source_id or ("bundled" if self._is_bundled_market else "local")
+        self.kind = kind or ("bundled" if self._is_bundled_market else "local")
         self.required = required
 
     def list_entries(self) -> list[SkillMarketEntry]:
@@ -194,9 +184,7 @@ class SkillMarket:
             raise SkillMarketError(f"Unable to inspect skill market entry: {entry_dir}") from exc
         names = {child.name for child in children}
         if names != {"SKILL.md", "market.json"}:
-            raise SkillMarketError(
-                f"Skill market entry '{entry_dir.name}' must contain only SKILL.md and market.json"
-            )
+            raise SkillMarketError(f"Skill market entry '{entry_dir.name}' must contain only SKILL.md and market.json")
         if any(child.is_symlink() or not child.is_file() for child in children):
             raise SkillMarketError(f"Skill market entry contains an unsafe file: {entry_dir}")
 
@@ -234,13 +222,9 @@ class SkillMarket:
         catalog_id = _required_string(raw, "catalog_id", 192)
         catalog_match = _CATALOG_ID_PATTERN.fullmatch(catalog_id)
         if catalog_match is None or catalog_match.group(2) != manifest.name:
-            raise SkillMarketError(
-                "catalog_id must have form agent-skill:<namespace>:<SKILL.md name>"
-            )
+            raise SkillMarketError("catalog_id must have form agent-skill:<namespace>:<SKILL.md name>")
         if not self._is_bundled_market and catalog_match.group(1) == "ambient-agent":
-            raise SkillMarketError(
-                "External Skill markets cannot publish into the reserved ambient-agent namespace"
-            )
+            raise SkillMarketError("External Skill markets cannot publish into the reserved ambient-agent namespace")
         if "/" in market_id and catalog_match.group(1) != market_id.split("/", 1)[0]:
             raise SkillMarketError("market_id and catalog_id namespaces must match")
 
@@ -353,9 +337,7 @@ def _string_list(
     if not isinstance(value, list):
         raise SkillMarketError(f"market.json field '{key}' must be an array of strings")
     if not min_items <= len(value) <= max_items:
-        raise SkillMarketError(
-            f"market.json field '{key}' must contain between {min_items} and {max_items} items"
-        )
+        raise SkillMarketError(f"market.json field '{key}' must contain between {min_items} and {max_items} items")
     normalized: list[str] = []
     seen: set[str] = set()
     for item in value:

@@ -72,8 +72,24 @@ import {
   type ModelSelection,
   type ProviderPreset,
 } from "./services/llm";
+import { getApiBaseUrl, webSocketUrl } from "./services/apiBase";
+import type { SocketConnectionState } from "./services/socketReconnect";
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = getApiBaseUrl();
+
+function combinedConnectionState(
+  commandState: SocketConnectionState,
+  runState: SocketConnectionState | null,
+  runLiveState: SocketConnectionState | null,
+): SocketConnectionState {
+  const states = [commandState, runState, runLiveState]
+    .filter((state): state is SocketConnectionState => state !== null);
+  if (states.includes("unavailable")) return "unavailable";
+  if (states.includes("retrying")) return "retrying";
+  if (states.includes("connecting")) return "connecting";
+  if (states.includes("disconnected")) return "disconnected";
+  return "connected";
+}
 
 function mergeBootstrapWidgets(current: Widget[], snapshots: Widget[]): Widget[] {
   if (snapshots.length === 0) return current;
@@ -113,6 +129,36 @@ function localizedLLMError(code: string, language: "zh" | "en"): string {
   return pair[language === "zh" ? 0 : 1];
 }
 
+function CommandDeliveryNotice({
+  connectionState,
+  error,
+  language,
+  onRetry,
+}: {
+  connectionState: SocketConnectionState;
+  error: string | null;
+  language: "zh" | "en";
+  onRetry: () => void;
+}) {
+  if (connectionState === "connected" && !error) return null;
+  const isZh = language === "zh";
+  const statusMessage = connectionState === "retrying"
+    ? (isZh ? "正在重新连接。响应尚未发送，请在连接恢复后重试。" : "Reconnecting. Your response has not been sent; retry after the connection returns.")
+    : connectionState === "connecting"
+      ? (isZh ? "正在连接。响应尚未发送，请稍候重试。" : "Connecting. Your response has not been sent; try again shortly.")
+      : (isZh ? "Ambient 连接不可用。响应仍保留在这里，请恢复连接后重试。" : "The Ambient connection is unavailable. Your response remains here; reconnect and try again.");
+  return (
+    <div className="system-delivery-notice" role={error ? "alert" : "status"}>
+      <span>{error ?? statusMessage}</span>
+      {connectionState !== "connected" ? (
+        <button type="button" onClick={onRetry}>
+          {isZh ? "重试连接" : "Retry connection"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -132,7 +178,17 @@ function App() {
     },
   });
   const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  const [commandConnectionState, setCommandConnectionState] = useState<SocketConnectionState>("disconnected");
+  const [runConnectionState, setRunConnectionState] = useState<SocketConnectionState | null>(null);
+  const [runLiveConnectionState, setRunLiveConnectionState] = useState<SocketConnectionState | null>(null);
+  const [commandDeliveryError, setCommandDeliveryError] = useState<string | null>(null);
+  const [sessionActionError, setSessionActionError] = useState<string | null>(null);
+  const connectionState = combinedConnectionState(
+    commandConnectionState,
+    runConnectionState,
+    runLiveConnectionState,
+  );
+  const isConnected = connectionState === "connected";
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [isChatOpen, setIsChatOpen] = useState(false);
   const chatOpenRef = useRef(false);
@@ -225,7 +281,25 @@ function App() {
   const [isGraphOpen, setIsGraphOpen] = useState(false);
   const [isTaskDrawerOpen, setIsTaskDrawerOpen] = useState(false);
   const [taskCounts, setTaskCounts] = useState({ active: 0, attention: 0 });
-  
+
+  const retryCommandConnection = useCallback(() => {
+    wsService.retry();
+    runService.retryConnection();
+    runLiveService.retryConnection();
+  }, []);
+
+  const sendCommand = useCallback((message: Record<string, unknown>): boolean => {
+    const delivered = wsService.sendMessage(message);
+    if (!delivered) {
+      setCommandDeliveryError(language === "zh"
+        ? "响应尚未发送。请求仍保留，请确认连接恢复后重试。"
+        : "Response not sent. Your request is still here; retry after the connection returns.");
+      return false;
+    }
+    setCommandDeliveryError(null);
+    return true;
+  }, [language]);
+
   interface PermissionRequest {
     request_id: string;
     tool_call: string;
@@ -236,21 +310,21 @@ function App() {
 
   const handleResolvePermission = (approved: boolean) => {
     if (!pendingPermission) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "permission_response",
       request_id: pendingPermission.request_id,
       approved: approved
-    });
+    })) return;
     setPendingPermission(null);
   };
 
   const handleResolveBackendPermission = (approved: boolean) => {
     if (!pendingBackendPermission) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "backend_permission_response",
       request_id: pendingBackendPermission.request_id,
       approved: approved
-    });
+    })) return;
     setPendingBackendPermission(null);
   };
 
@@ -335,25 +409,25 @@ function App() {
 
   const handleResolveSchemaRequest = (approved: boolean | "refine" | "rework_plan", feedbackText?: string) => {
     if (!pendingSchemaRequest) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "schema_approval_response",
       request_id: pendingSchemaRequest.request_id,
       approved: approved,
       proposal: editedProposal || pendingSchemaRequest.proposal,
       feedback: feedbackText || ""
-    });
+    })) return;
     setPendingSchemaRequest(null);
   };
 
   const handleResolveVerificationRequest = (approved: "approve" | "rework_code" | "rework_schema" | "rework_plan", feedbackText?: string, approvedOptions?: Array<{ node_type: string; property_name: string }>) => {
     if (!pendingVerificationRequest) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "verification_approval_response",
       request_id: pendingVerificationRequest.request_id,
       approved: approved,
       feedback: feedbackText || "",
       approved_options: approvedOptions || []
-    });
+    })) return;
     setPendingVerificationRequest(null);
   };
 
@@ -369,46 +443,44 @@ function App() {
 
   const handleResolvePlanRequest = (approved: boolean | "refine", feedbackText?: string) => {
     if (!pendingPlanRequest) return;
-    wsService.sendMessage({
+    if (!sendCommand({
       type: "plan_approval_response",
       request_id: pendingPlanRequest.request_id,
       approved: approved,
       plan: pendingPlanRequest.plan,
       feedback: feedbackText || ""
-    });
+    })) return;
     setPendingPlanRequest(null);
   };
 
   const handleResolveRunInteraction = (
     interaction: RunInteractionState,
     action: RunInteractionAction,
-  ) => {
+  ): boolean => {
     const payload = interaction.payload;
     if (interaction.kind === "plan_approval") {
-      wsService.sendMessage({
+      return sendCommand({
         type: "plan_approval_response",
         request_id: interaction.id,
         approved: action === "approve",
         plan: String(payload.plan || ""),
         feedback: "",
       });
-      return;
     }
     if (interaction.kind === "schema_approval") {
-      wsService.sendMessage({
+      return sendCommand({
         type: "schema_approval_response",
         request_id: interaction.id,
         approved: action === "approve",
         proposal: payload.proposal,
         feedback: "",
       });
-      return;
     }
     if (
       interaction.kind === "verification_approval"
       && ["rework_code", "rework_schema", "rework_plan"].includes(action)
     ) {
-      wsService.sendMessage({
+      return sendCommand({
         type: "verification_approval_response",
         request_id: interaction.id,
         approved: action,
@@ -416,10 +488,12 @@ function App() {
         approved_options: [],
       });
     }
+    return false;
   };
 
   const handleInspectRunInteraction = (interaction: RunInteractionState) => {
     if (interaction.status !== "pending") return;
+    setCommandDeliveryError(null);
     const payload = interaction.payload;
     if (interaction.kind === "plan_approval") {
       setPendingPlanRequest(payload as unknown as PlanApprovalRequest);
@@ -604,16 +678,26 @@ function App() {
   };
 
   useEffect(() => {
+    const unsubscribeConnectionStatus = wsService.subscribeStatus(setCommandConnectionState);
+    const handleRunStreamStatus = (event: Event) => {
+      const state = (event as CustomEvent<{ state?: unknown }>).detail?.state;
+      if (
+        state === "disconnected"
+        || state === "connecting"
+        || state === "connected"
+        || state === "retrying"
+        || state === "unavailable"
+      ) {
+        setRunConnectionState(state);
+      }
+    };
+    window.addEventListener("ambient_run_stream_status", handleRunStreamStatus);
     fetchSessions();
     void refreshLLMConfiguration();
 
-    // Check connection state every second
-    const interval = setInterval(() => {
-      setIsConnected(wsService.isConnected());
-    }, 1000);
-
     return () => {
-      clearInterval(interval);
+      unsubscribeConnectionStatus();
+      window.removeEventListener("ambient_run_stream_status", handleRunStreamStatus);
       wsService.disconnect();
     };
     // Session bootstrap is intentionally mount-only; subsequent refreshes are explicit.
@@ -740,8 +824,10 @@ function App() {
       } else if (typeof data.type === "string" && data.type.startsWith("capability_ui_generation_")) {
         window.dispatchEvent(new CustomEvent("app-store-refresh", { detail: data }));
       } else if (data.type === "permission_request") {
+        setCommandDeliveryError(null);
         setPendingPermission(data);
       } else if (data.type === "backend_permission_request") {
+        setCommandDeliveryError(null);
         setPendingBackendPermission(data);
       } else if (data.type === "active_sessions_list") {
         setRunningSessions(data.active_session_ids);
@@ -785,7 +871,7 @@ function App() {
 
     // /ws/chat is now the command/control socket. Durable reducer output is
     // projected from the canonical replayable /ws/runs stream below.
-    const wsUrl = `ws://${window.location.hostname}:8000/ws/chat?projection=commands_only`;
+    const wsUrl = webSocketUrl("/ws/chat?projection=commands_only", API_BASE);
     wsService.connect(wsUrl, activeSessionId, handleProjection);
     const projectedTypes = new Set([
       "reply",
@@ -804,6 +890,7 @@ function App() {
         liveBatcher.clear();
         setChatProjection((current) => clearLiveStreams(current));
       },
+      setRunLiveConnectionState,
     );
     const unsubscribeRunEvents = runService.subscribe((event) => {
       if (event.session_id !== activeSessionId) return;
@@ -849,24 +936,52 @@ function App() {
   };
 
   const handleDeleteSession = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this conversation?")) return;
+    if (!window.confirm(language === "zh" ? "确定要删除这个对话吗？" : "Are you sure you want to delete this conversation?")) return;
+    setSessionActionError(null);
+    const deletingActiveSession = activeSessionId === id;
+    let deleted = false;
+    if (deletingActiveSession) {
+      // Cancel any queued reconnect before DELETE. Otherwise /ws/chat could
+      // recreate the session while the request is still in flight.
+      wsService.disconnect();
+      localStorage.removeItem("last_active_session");
+      setActiveSessionId(null);
+    }
     try {
       const res = await fetch(`${API_BASE}/api/sessions/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        // If we deleted the active session, clear selection to force fallback
-        if (activeSessionId === id) {
-          localStorage.removeItem("last_active_session");
-          setActiveSessionId(null);
-        }
-        fetchSessions();
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null) as {
+          detail?: string | { code?: string; message?: string };
+        } | null;
+        const detail = payload?.detail;
+        const code = typeof detail === "object" ? detail.code : null;
+        const serverMessage = typeof detail === "string" ? detail : detail?.message;
+        setSessionActionError(code === "session_has_active_runs"
+          ? (language === "zh"
+              ? "请先取消或处理仍在运行的任务，再删除这个对话。"
+              : "Cancel or resolve active tasks before deleting this conversation.")
+          : (serverMessage || (language === "zh"
+              ? `无法删除对话（HTTP ${res.status}）。请重试。`
+              : `Unable to delete the conversation (HTTP ${res.status}). Try again.`)));
+        return;
       }
+      deleted = true;
+      fetchSessions();
     } catch (err) {
       console.error("Error deleting session:", err);
+      setSessionActionError(language === "zh"
+        ? "删除请求未完成。对话仍然保留，请检查连接后重试。"
+        : "The delete request did not complete. The conversation is still here; check the connection and retry.");
+    } finally {
+      if (!deleted && deletingActiveSession) {
+        localStorage.setItem("last_active_session", id);
+        setActiveSessionId(id);
+      }
     }
   };
 
   const handleSendMessage = (text: string) => {
-    wsService.sendMessage({
+    return sendCommand({
       sender: "user",
       content: text,
     });
@@ -1006,6 +1121,11 @@ function App() {
       onRunFullscreen={handleOpenApp}
       onRunCreated={() => setIsTaskDrawerOpen(true)}
       onAppUpdated={handleAppUpdated}
+      onOpenChat={() => handleChatOpenChange(true)}
+      onConfigureModels={() => {
+        setIsLLMSettingsOpen(true);
+        void refreshLLMConfiguration();
+      }}
       language={language}
       headerActions={<div className="app-center-system-actions" aria-label={language === "zh" ? "系统设置" : "System settings"}>
         <SystemIconButton label={language === "zh" ? "任务中心" : "Task Center"} onClick={() => setIsTaskDrawerOpen(true)}><ListTodo size={17} />{taskCounts.active + taskCounts.attention > 0 ? <span className="system-action-badge">{Math.min(taskCounts.active + taskCounts.attention, 99)}</span> : null}</SystemIconButton>
@@ -1073,9 +1193,13 @@ function App() {
         activeSessionId={activeSessionId}
         runningSessions={runningSessions}
         isConnected={isConnected}
+        connectionState={connectionState}
+        deliveryError={commandDeliveryError}
+        sessionError={sessionActionError}
         language={language}
         onOpenChange={handleChatOpenChange}
         onSendMessage={handleSendMessage}
+        onRetryConnection={retryCommandConnection}
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         onDeleteSession={handleDeleteSession}
@@ -1144,11 +1268,12 @@ function App() {
       {/* 🧮 Mutation preview / rollback */}
       <MutationPreview
         preview={mutationPreview}
+        deliveryError={commandDeliveryError}
         onRollback={(ticketId) => {
-          wsService.sendMessage({ type: "rollback_mutation", ticket_id: ticketId });
+          sendCommand({ type: "rollback_mutation", ticket_id: ticketId });
         }}
         onPin={(ticketId) => {
-          wsService.sendMessage({ type: "pin_mutation_history", ticket_id: ticketId });
+          sendCommand({ type: "pin_mutation_history", ticket_id: ticketId });
         }}
         onDismiss={(ticketId) => {
           setMutationPreview((curr) => (curr && curr.ticket_id === ticketId ? null : curr));
@@ -1163,6 +1288,12 @@ function App() {
               <span className="system-dialog-code-label">【{language === "zh" ? "类型" : "Type"}: {pendingPermission.tool_call}】</span>
               {pendingPermission.details}
             </div>
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
             <div className="system-dialog-actions">
               <button
                 onClick={() => handleResolvePermission(false)}
@@ -1185,6 +1316,12 @@ function App() {
       <AppPermissionModal
         pendingRequest={pendingBackendPermission}
         onResolve={handleResolveBackendPermission}
+        deliveryNotice={<CommandDeliveryNotice
+          connectionState={connectionState}
+          error={commandDeliveryError}
+          language={language}
+          onRetry={retryCommandConnection}
+        />}
       />
 
 
@@ -1501,6 +1638,13 @@ function App() {
               />
             </div>
 
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
+
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
               <button
@@ -1578,6 +1722,13 @@ function App() {
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-cyan-500 resize-none font-sans"
               />
             </div>
+
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
 
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">
@@ -1679,6 +1830,13 @@ function App() {
                 className="bg-black/40 border border-white/10 px-3 py-2 rounded-lg text-xs text-white placeholder-slate-500 w-full min-h-[60px] focus:outline-none focus:border-red-500 resize-none font-sans"
               />
             </div>
+
+            <CommandDeliveryNotice
+              connectionState={connectionState}
+              error={commandDeliveryError}
+              language={language}
+              onRetry={retryCommandConnection}
+            />
 
             {/* Bottom Actions */}
             <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/10 font-medium">

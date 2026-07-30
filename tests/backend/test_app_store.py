@@ -4,7 +4,12 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 from backend.main import app
 from backend.app_manager import AppManager
-from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
+from backend.app_store import (
+    AppStoreCorruptionError,
+    AppStoreService,
+    CapabilityManifest,
+    LayoutConflictError,
+)
 
 
 @pytest.fixture
@@ -112,6 +117,28 @@ def test_generated_ui_id_is_stable_and_safe(app_store):
     assert first == second
     assert first.endswith("-ui-adfb4ac8")
     assert first == first.lower()
+
+
+def test_corrupt_registry_fails_closed_without_overwrite(app_store):
+    service, _ = app_store
+    service.capabilities_path.parent.mkdir(parents=True, exist_ok=True)
+    service.capabilities_path.write_text('{"capabilities":[', encoding="utf-8")
+
+    with pytest.raises(AppStoreCorruptionError):
+        service.register_capability(capability())
+
+    assert service.capabilities_path.read_text(encoding="utf-8") == '{"capabilities":['
+
+
+def test_corrupt_layout_fails_closed_without_normalization_overwrite(app_store):
+    service, _ = app_store
+    service.layout_path.parent.mkdir(parents=True, exist_ok=True)
+    service.layout_path.write_text('{"root":[', encoding="utf-8")
+
+    with pytest.raises(AppStoreCorruptionError):
+        service.get_state()
+
+    assert service.layout_path.read_text(encoding="utf-8") == '{"root":['
 
 
 def test_app_store_api_registration_and_revision_conflict(app_store, monkeypatch):

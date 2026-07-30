@@ -22,6 +22,10 @@ class LayoutConflictError(RuntimeError):
         self.current = current
 
 
+class AppStoreCorruptionError(RuntimeError):
+    """Persisted launcher state exists but cannot be read safely."""
+
+
 class CapabilityInvocation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -239,12 +243,16 @@ class AppStoreService:
 
     @staticmethod
     def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+        if not path.exists():
+            return default
         try:
             with path.open(encoding="utf-8") as file:
                 data = json.load(file)
-            return data if isinstance(data, dict) else default
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return default
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AppStoreCorruptionError(f"Unable to read persisted App Store state: {path.name}") from exc
+        if not isinstance(data, dict):
+            raise AppStoreCorruptionError(f"Persisted App Store state must be a JSON object: {path.name}")
+        return data
 
     def _write_json_atomic(self, path: Path, data: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

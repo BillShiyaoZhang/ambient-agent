@@ -174,9 +174,7 @@ class AgentOrchestrator:
 
         from backend.agent.prompts.manager import PromptManager
 
-        external_skill_sandbox = bool(
-            self.skill_prompt_channels.untrusted_user_guidance
-        )
+        external_skill_sandbox = bool(self.skill_prompt_channels.untrusted_user_guidance)
         system_prompt = PromptManager().get_prompt(
             "agent_system.md",
             language=language,
@@ -189,10 +187,7 @@ class AgentOrchestrator:
         if self.skill_prompt_channels.trusted_system_guidance:
             # Keep one system message so the core policy remains visibly ahead
             # of trusted, installed procedural guidance.
-            system_prompt = (
-                f"{system_prompt}\n\n"
-                f"{self.skill_prompt_channels.trusted_system_guidance}"
-            )
+            system_prompt = f"{system_prompt}\n\n{self.skill_prompt_channels.trusted_system_guidance}"
         if external_skill_sandbox:
             system_prompt = (
                 f"{system_prompt}\n\n"
@@ -205,11 +200,7 @@ class AgentOrchestrator:
             # Use the in-flight request directly so neither older chat turns
             # nor artifact references can enter this semantic sandbox.
             bounded_content = content[:8_000]
-            messages = (
-                [{"role": "user", "content": bounded_content}]
-                if bounded_content
-                else []
-            )
+            messages = [{"role": "user", "content": bounded_content}] if bounded_content else []
         else:
             messages = self.context_manager.build_llm_prompt(
                 session_id,
@@ -287,16 +278,11 @@ class AgentOrchestrator:
             role="agent",
             sender="agent",
             content=raw_response,
-            context_policy=(
-                "display_only" if external_skill_sandbox else "reusable"
-            ),
+            context_policy=("display_only" if external_skill_sandbox else "reusable"),
             provenance=(
                 {
                     "kind": "external_skill_output",
-                    "skills": [
-                        dict(item)
-                        for item in self.skill_prompt_channels.external_skill_provenance
-                    ],
+                    "skills": [dict(item) for item in self.skill_prompt_channels.external_skill_provenance],
                 }
                 if external_skill_sandbox
                 else None

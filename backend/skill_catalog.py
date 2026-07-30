@@ -112,10 +112,7 @@ class SkillCatalog:
             source_id = getattr(provider, "source_id", None)
             kind = getattr(provider, "kind", None)
             required = getattr(provider, "required", None)
-            if (
-                not isinstance(source_id, str)
-                or _SOURCE_ID_PATTERN.fullmatch(source_id) is None
-            ):
+            if not isinstance(source_id, str) or _SOURCE_ID_PATTERN.fullmatch(source_id) is None:
                 raise ValueError("Skill catalog provider source_id is invalid")
             if source_id in seen_source_ids:
                 raise ValueError(f"Duplicate skill catalog source_id: {source_id}")
@@ -140,16 +137,9 @@ class SkillCatalog:
         seen_catalog_ids: dict[str, str] = {}
 
         for provider in self.providers:
-            enabled = (
-                source_enabled.get(provider.source_id, True)
-                if source_enabled is not None
-                else True
-            )
+            enabled = source_enabled.get(provider.source_id, True) if source_enabled is not None else True
             if not isinstance(enabled, bool):
-                raise ValueError(
-                    f"Skill catalog source preference for '{provider.source_id}' "
-                    "must be a boolean"
-                )
+                raise ValueError(f"Skill catalog source preference for '{provider.source_id}' must be a boolean")
             if not enabled:
                 statuses.append(
                     SkillCatalogSourceStatus(
@@ -169,23 +159,16 @@ class SkillCatalog:
                 )
                 for entry in provider_entries:
                     if not isinstance(entry, SkillMarketEntry):
+                        raise SkillMarketError(f"Catalog source '{provider.source_id}' returned an invalid entry")
+                    if entry.catalog_source_id != provider.source_id or entry.catalog_source_kind != provider.kind:
                         raise SkillMarketError(
-                            f"Catalog source '{provider.source_id}' returned an invalid entry"
-                        )
-                    if (
-                        entry.catalog_source_id != provider.source_id
-                        or entry.catalog_source_kind != provider.kind
-                    ):
-                        raise SkillMarketError(
-                            f"Catalog source '{provider.source_id}' returned an entry "
-                            "with mismatched source identity"
+                            f"Catalog source '{provider.source_id}' returned an entry with mismatched source identity"
                         )
             except Exception as exc:
                 message = _bounded_error(exc)
                 if provider.required:
                     raise SkillMarketError(
-                        f"Required catalog source '{provider.source_id}' is unavailable: "
-                        f"{message}"
+                        f"Required catalog source '{provider.source_id}' is unavailable: {message}"
                     ) from exc
                 statuses.append(
                     SkillCatalogSourceStatus(
@@ -263,9 +246,7 @@ class GitHubSkillCatalogProvider:
         fetcher: Callable[[str], bytes] | None = None,
     ):
         if _SOURCE_ID_PATTERN.fullmatch(source_id) is None:
-            raise SkillMarketError(
-                "GitHub catalog source id must be a lowercase hyphenated name"
-            )
+            raise SkillMarketError("GitHub catalog source id must be a lowercase hyphenated name")
         if not isinstance(required, bool):
             raise SkillMarketError("GitHub catalog required must be a boolean")
         if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
@@ -277,10 +258,7 @@ class GitHubSkillCatalogProvider:
         self.required = required
         self.cache_dir = Path(cache_dir).expanduser().absolute()
         self._ensure_cache_dir()
-        self._entries = tuple(
-            _validate_github_entry(entry, index=index)
-            for index, entry in enumerate(entries)
-        )
+        self._entries = tuple(_validate_github_entry(entry, index=index) for index, entry in enumerate(entries))
         self._fetcher = fetcher or _fetch_github_bytes
 
     def list_entries(self) -> list[SkillMarketEntry]:
@@ -298,9 +276,7 @@ class GitHubSkillCatalogProvider:
         try:
             manifest = SkillManifest.from_bytes(skill_content, expected_name=name)
         except SkillManifestError as exc:
-            raise SkillMarketError(
-                f"Invalid pinned SKILL.md for '{repository}/{path}': {exc}"
-            ) from exc
+            raise SkillMarketError(f"Invalid pinned SKILL.md for '{repository}/{path}': {exc}") from exc
 
         namespace = raw["namespace"]
         version = commit
@@ -374,8 +350,7 @@ class GitHubSkillCatalogProvider:
             content = self._fetcher(url)
         except Exception as exc:
             raise SkillMarketError(
-                f"Unable to fetch pinned GitHub Skill from source '{self.source_id}': "
-                f"{_bounded_error(exc)}"
+                f"Unable to fetch pinned GitHub Skill from source '{self.source_id}': {_bounded_error(exc)}"
             ) from exc
         _verify_upstream_content(content, expected_hash)
         self._write_cache(cache_path, content)
@@ -389,35 +364,21 @@ class GitHubSkillCatalogProvider:
 
     def _ensure_cache_dir(self) -> None:
         self._validate_cache_components()
-        if self.cache_dir.exists() and (
-            self.cache_dir.is_symlink() or not self.cache_dir.is_dir()
-        ):
-            raise SkillMarketError(
-                f"GitHub Skill cache must be a real directory: {self.cache_dir}"
-            )
+        if self.cache_dir.exists() and (self.cache_dir.is_symlink() or not self.cache_dir.is_dir()):
+            raise SkillMarketError(f"GitHub Skill cache must be a real directory: {self.cache_dir}")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._validate_cache_components()
         if not self.cache_dir.is_dir():
-            raise SkillMarketError(
-                f"GitHub Skill cache must be a real directory: {self.cache_dir}"
-            )
+            raise SkillMarketError(f"GitHub Skill cache must be a real directory: {self.cache_dir}")
 
     def _validate_cache_components(self) -> None:
         for component in (self.cache_dir, *self.cache_dir.parents):
             if component.is_symlink():
-                raise SkillMarketError(
-                    "GitHub Skill cache path contains a symbolic link: "
-                    f"{component}"
-                )
+                raise SkillMarketError(f"GitHub Skill cache path contains a symbolic link: {component}")
 
     def _read_verified_cache(self, path: Path, expected_hash: str) -> bytes:
         parent = path.parent
-        if (
-            parent.is_symlink()
-            or not parent.is_dir()
-            or path.is_symlink()
-            or not path.is_file()
-        ):
+        if parent.is_symlink() or not parent.is_dir() or path.is_symlink() or not path.is_file():
             raise SkillMarketError(f"GitHub Skill cache entry is unsafe: {path}")
         try:
             children = list(parent.iterdir())
@@ -463,9 +424,7 @@ def load_skill_catalog_config(
     except OSError as exc:
         raise SkillMarketError(f"Unable to read Skill catalog config: {path}") from exc
     if len(content) > MAX_SKILL_CATALOG_CONFIG_BYTES:
-        raise SkillMarketError(
-            f"Skill catalog config exceeds {MAX_SKILL_CATALOG_CONFIG_BYTES} bytes"
-        )
+        raise SkillMarketError(f"Skill catalog config exceeds {MAX_SKILL_CATALOG_CONFIG_BYTES} bytes")
     try:
         raw = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -489,9 +448,7 @@ def load_skill_catalog_config(
             raise SkillMarketError(f"Skill catalog provider {index} must be an object")
         unknown_provider = sorted(set(provider) - _PROVIDER_FIELDS)
         if unknown_provider:
-            raise SkillMarketError(
-                f"Unsupported Skill catalog provider field: {unknown_provider[0]}"
-            )
+            raise SkillMarketError(f"Unsupported Skill catalog provider field: {unknown_provider[0]}")
         source_id = _required_string(provider, "id", 80, "catalog provider")
         if source_id in seen_ids:
             raise SkillMarketError(f"Duplicate Skill catalog provider id: {source_id}")
@@ -567,9 +524,7 @@ def _validate_github_entry(
         raise SkillMarketError("GitHub repository must have form owner/repository")
     commit = _required_string(raw, "commit", 40, "GitHub catalog entry")
     if _COMMIT_PATTERN.fullmatch(commit) is None:
-        raise SkillMarketError(
-            "GitHub Skill source must use a 40-character lowercase commit"
-        )
+        raise SkillMarketError("GitHub Skill source must use a 40-character lowercase commit")
     path = _required_string(raw, "path", 512, "GitHub catalog entry")
     parsed_path = PurePosixPath(path)
     if (
@@ -577,10 +532,7 @@ def _validate_github_entry(
         or path.endswith("/")
         or parsed_path.as_posix() != path
         or any(part in {"", ".", ".."} for part in parsed_path.parts)
-        or any(
-            _GITHUB_PATH_SEGMENT_PATTERN.fullmatch(part) is None
-            for part in parsed_path.parts
-        )
+        or any(_GITHUB_PATH_SEGMENT_PATTERN.fullmatch(part) is None for part in parsed_path.parts)
         or "\\" in path
     ):
         raise SkillMarketError("GitHub Skill path must be a normalized relative path")
@@ -589,14 +541,9 @@ def _validate_github_entry(
         raise SkillMarketError("GitHub Skill sha256 must be sha256:<64 lowercase hex>")
     files = raw.get("files")
     if files != ["SKILL.md"]:
-        raise SkillMarketError(
-            "GitHub context-only Skill entries may contain only SKILL.md"
-        )
+        raise SkillMarketError("GitHub context-only Skill entries may contain only SKILL.md")
     namespace = _required_string(raw, "namespace", 64, "GitHub catalog entry")
-    if (
-        _NAMESPACE_PATTERN.fullmatch(namespace) is None
-        or namespace == "ambient-agent"
-    ):
+    if _NAMESPACE_PATTERN.fullmatch(namespace) is None or namespace == "ambient-agent":
         raise SkillMarketError("GitHub Skill namespace is invalid or reserved")
     title = _required_string(raw, "title", 120, "GitHub catalog entry")
     provider = _required_string(raw, "provider", 120, "GitHub catalog entry")
@@ -675,26 +622,16 @@ def _string_list(
     value = raw.get(key)
     if not isinstance(value, list) or not min_items <= len(value) <= max_items:
         raise SkillMarketError(
-            f"GitHub catalog entry field '{key}' must contain between "
-            f"{min_items} and {max_items} strings"
+            f"GitHub catalog entry field '{key}' must contain between {min_items} and {max_items} strings"
         )
     result: list[str] = []
     seen: set[str] = set()
     for item in value:
-        if (
-            not isinstance(item, str)
-            or not item
-            or item != item.strip()
-            or len(item) > max_chars
-        ):
-            raise SkillMarketError(
-                f"GitHub catalog entry field '{key}' contains an invalid string"
-            )
+        if not isinstance(item, str) or not item or item != item.strip() or len(item) > max_chars:
+            raise SkillMarketError(f"GitHub catalog entry field '{key}' contains an invalid string")
         folded = item.casefold()
         if folded in seen:
-            raise SkillMarketError(
-                f"GitHub catalog entry field '{key}' contains a duplicate"
-            )
+            raise SkillMarketError(f"GitHub catalog entry field '{key}' contains a duplicate")
         seen.add(folded)
         result.append(item)
     return tuple(result)
@@ -712,30 +649,20 @@ def _fetch_github_bytes(url: str) -> bytes:
                 if response.is_redirect:
                     raise SkillMarketError("GitHub Skill fetch refused a redirect")
                 if response.status_code != 200:
-                    raise SkillMarketError(
-                        f"GitHub Skill fetch returned HTTP {response.status_code}"
-                    )
+                    raise SkillMarketError(f"GitHub Skill fetch returned HTTP {response.status_code}")
                 declared_length = response.headers.get("content-length")
                 if declared_length is not None:
                     try:
                         if int(declared_length) > MAX_SKILL_FILE_BYTES:
-                            raise SkillMarketError(
-                                "Pinned GitHub SKILL.md exceeds "
-                                f"{MAX_SKILL_FILE_BYTES} bytes"
-                            )
+                            raise SkillMarketError(f"Pinned GitHub SKILL.md exceeds {MAX_SKILL_FILE_BYTES} bytes")
                     except ValueError as exc:
-                        raise SkillMarketError(
-                            "GitHub Skill response has an invalid content length"
-                        ) from exc
+                        raise SkillMarketError("GitHub Skill response has an invalid content length") from exc
                 chunks: list[bytes] = []
                 received = 0
                 for chunk in response.iter_bytes():
                     received += len(chunk)
                     if received > MAX_SKILL_FILE_BYTES:
-                        raise SkillMarketError(
-                            "Pinned GitHub SKILL.md exceeds "
-                            f"{MAX_SKILL_FILE_BYTES} bytes"
-                        )
+                        raise SkillMarketError(f"Pinned GitHub SKILL.md exceeds {MAX_SKILL_FILE_BYTES} bytes")
                     chunks.append(chunk)
     except httpx.HTTPError as exc:
         raise SkillMarketError(f"GitHub request failed: {exc.__class__.__name__}") from exc
@@ -746,14 +673,10 @@ def _verify_upstream_content(content: bytes, expected_hash: str) -> None:
     if not isinstance(content, bytes):
         raise SkillMarketError("GitHub Skill fetcher must return bytes")
     if len(content) > MAX_SKILL_FILE_BYTES:
-        raise SkillMarketError(
-            f"Pinned GitHub SKILL.md exceeds {MAX_SKILL_FILE_BYTES} bytes"
-        )
+        raise SkillMarketError(f"Pinned GitHub SKILL.md exceeds {MAX_SKILL_FILE_BYTES} bytes")
     actual = _sha256(content)
     if actual != expected_hash:
-        raise SkillMarketError(
-            f"Pinned GitHub SKILL.md hash mismatch: expected {expected_hash}, found {actual}"
-        )
+        raise SkillMarketError(f"Pinned GitHub SKILL.md hash mismatch: expected {expected_hash}, found {actual}")
 
 
 def _sha256(content: bytes) -> str:

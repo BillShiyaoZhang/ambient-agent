@@ -2,13 +2,13 @@
 
 ## Prerequisites
 
-- Docker Desktop; or local Python 3.11–3.13, `uv`, Node.js, and npm.
+- Docker Desktop with Compose v2; or local Python 3.11–3.13, `uv`, Node.js 22.18+ on the 22.x line or 24.11+, and npm.
 - VS Code with the Dev Containers extension when using the development container.
 
 ## Option 1: Docker Compose (Recommended)
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/BillShiyaoZhang/ambient-agent.git
 cd ambient-agent
 cp .env.example .env
 docker compose up --build -d
@@ -59,17 +59,52 @@ When upgrading, inspect the existing `.env`: an explicit
 to `4` unless the Runtime's 768MiB memory and 192-PID limits were raised and
 load-tested at the same time.
 
-`VITE_WIDGET_UI_TRANSPORT` is embedded in the frontend build output.
-`VITE_API_BASE_URL` currently controls only the isolated Widget client-runtime
-ticket/socket address; the main workspace API still uses port `8000` on the
-browser's current hostname. After changing either build variable, run
+`VITE_WIDGET_UI_TRANSPORT` and `VITE_API_BASE_URL` are embedded in the frontend
+build output. The latter controls the HTTP and WebSocket Backend base for both
+the main workspace and isolated Widget client runtime. When blank, it retains
+the page protocol and hostname and uses port `8000`; it may instead be an
+absolute `http(s)` URL or a path prefix relative to the current origin, and
+HTTPS automatically derives WSS. After changing either build variable, run
 `docker compose up --build -d` instead of only restarting the container.
 
-Docker Compose also starts Neo4j for the canonical knowledge graph; its Browser is available at `http://localhost:7474`. Change `NEO4J_PASSWORD` before exposing the stack beyond local development. To import an existing `workspace/graph.db`, set `GRAPH_MIGRATE_SQLITE=1` for one startup and then set it back to `0`.
+Whenever the Frontend origin seen by the browser changes, or the Frontend and
+Backend are cross-origin, add that Frontend origin to
+`AMBIENT_FRONTEND_ORIGINS`. Use the exact scheme, host, and port with no path;
+separate multiple origins with commas. `VITE_API_BASE_URL` only changes the
+client connection address—it does not allow that origin through the Backend's
+CORS or WebSocket Origin checks. For example, when the local Frontend at
+`http://localhost:5173` connects to `http://localhost:8000`:
+
+```dotenv
+VITE_API_BASE_URL=http://localhost:8000
+AMBIENT_FRONTEND_ORIGINS=http://localhost:5173
+```
+
+Rebuild the Frontend after changing `VITE_API_BASE_URL`, and restart the
+Backend after changing `AMBIENT_FRONTEND_ORIGINS`.
+
+Docker Compose also starts Neo4j for the canonical knowledge graph; its
+Browser is available at `http://localhost:7474`. The default Neo4j credential
+is only for a trusted-local stack. Changing `NEO4J_PASSWORD` does not add
+Backend authentication and is not a reason to expose the stack. To import an
+existing `workspace/graph.db`, set `GRAPH_MIGRATE_SQLITE=1` for one startup and
+then set it back to `0`.
 
 `.env` contains process-level settings such as coding-agent commands and timeouts. Configure LLM providers, credentials, default models, and the OpenCode/Codex choice in the app's “Models & Providers” UI. Provider credentials are stored in the Git-ignored `workspace/llm/secrets.json`, not in `.env`.
 
-Coding-agent CLIs are not all preinstalled in the image. Open “Models & Providers” to install Codex on demand; binaries and native credentials persist in the `coding_agent_data` volume. After installation, select “Sign in with ChatGPT,” open the device-code page, and enter the one-time code. The UI then loads the models available to the signed-in Codex account dynamically. Removing the volume removes both the managed CLI and its container login state. Both the production image and Dev Container pin and preinstall the Codex ACP bridge; when running the backend directly on a host, install `@agentclientprotocol/codex-acp` and point `CODEX_ACP_COMMAND` at its executable command. Rebuild the Dev Container after changing bridge configuration; restarting alone does not refresh image layers.
+Coding-agent CLIs are not all preinstalled in the image. The production image
+and Dev Container include pinned OpenCode 1.17.18; `OPENCODE_VERSION` is a
+build argument, so changing it requires an image rebuild. Open “Models &
+Providers” to install Codex on demand; binaries and native credentials persist
+in the `coding_agent_data` volume. After installation, select “Sign in with
+ChatGPT,” open the device-code page, and enter the one-time code. The UI then
+loads the models available to the signed-in Codex account dynamically.
+Removing the volume removes both the managed CLI and its container login
+state. Both the production image and Dev Container pin and preinstall the
+Codex ACP bridge; when running the backend directly on a host, install
+`@agentclientprotocol/codex-acp` and point `CODEX_ACP_COMMAND` at its executable
+command. Rebuild the Dev Container after changing bridge configuration;
+restarting alone does not refresh image layers.
 
 Provider connections and credentials remain centralized, while model bindings are scoped to each consumer. Ambient uses primary and fast roles; OpenCode inherits the Ambient primary model by default or selects a dedicated provider model; Codex uses its own native login and optional native model and never receives Ambient provider credentials.
 

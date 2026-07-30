@@ -152,6 +152,14 @@ class RunVersionConflict(ValueError):
     """Raised when a command targets an obsolete durable Run version."""
 
 
+class ActiveSessionRunsError(RuntimeError):
+    """A session cannot be purged while one of its durable Runs is active."""
+
+    def __init__(self, run_ids: list[str]):
+        super().__init__("Session has active durable Runs")
+        self.run_ids = run_ids
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -2380,6 +2388,60 @@ class RunStore:
                 (owner_id,),
             ).fetchone()[0]
         return bool(count)
+
+    @staticmethod
+    def _session_run_rows(connection: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
+        return connection.execute(
+            """
+            WITH RECURSIVE session_runs(id) AS (
+                SELECT id FROM runs
+                WHERE source_id=? AND (source_type='chat' OR adapter_type='internal_agent')
+                UNION
+                SELECT child.id FROM runs AS child
+                JOIN session_runs AS parent
+                  ON child.parent_run_id=parent.id OR child.retry_of=parent.id
+            )
+            SELECT runs.id, runs.status FROM runs
+            JOIN session_runs ON session_runs.id=runs.id
+            """,
+            (session_id,),
+        ).fetchall()
+
+    def session_runs_for_purge(self, session_id: str) -> set[str]:
+        """Return the session Run closure, refusing uncertain/active work."""
+
+        with self._connect() as connection:
+            rows = self._session_run_rows(connection, session_id)
+        active_ids = sorted(str(row["id"]) for row in rows if row["status"] in ACTIVE_STATUSES)
+        if active_ids:
+            raise ActiveSessionRunsError(active_ids)
+        return {str(row["id"]) for row in rows}
+
+    def purge_session(self, session_id: str) -> set[str]:
+        """Delete terminal session Runs and their dependent rows atomically."""
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = self._session_run_rows(connection, session_id)
+            active_ids = sorted(str(row["id"]) for row in rows if row["status"] in ACTIVE_STATUSES)
+            if active_ids:
+                raise ActiveSessionRunsError(active_ids)
+            run_ids = {str(row["id"]) for row in rows}
+            connection.execute(
+                """
+                WITH RECURSIVE session_runs(id) AS (
+                    SELECT id FROM runs
+                    WHERE source_id=? AND (source_type='chat' OR adapter_type='internal_agent')
+                    UNION
+                    SELECT child.id FROM runs AS child
+                    JOIN session_runs AS parent
+                      ON child.parent_run_id=parent.id OR child.retry_of=parent.id
+                )
+                DELETE FROM runs WHERE id IN (SELECT id FROM session_runs)
+                """,
+                (session_id,),
+            )
+        return run_ids
 
     def cleanup_events(self, days: int | None = None) -> int:
         if days is None:

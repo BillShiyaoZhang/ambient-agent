@@ -1,10 +1,14 @@
 import asyncio
+import hashlib
+import io
+import tarfile
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import backend.main as main_module
+import backend.coding_agent_runtime as coding_agent_runtime_module
 from backend.coding_agent import CodingAgentConfigStore
 from backend.coding_agent_runtime import CodingAgentRuntime
 from backend.codex_service import _codex_environment, _codex_prompt, run_codex_agent
@@ -79,6 +83,117 @@ async def test_runtime_reports_latest_install_failure(tmp_path, monkeypatch):
 
     assert status["install_state"] == "failed"
     assert status["install_operation"]["error"] == "installer unavailable"
+
+
+@pytest.mark.asyncio
+async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, monkeypatch):
+    target = "x86_64-unknown-linux-musl"
+    binary_payload = b"#!/bin/sh\necho 'codex-cli 0.145.0'\n"
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        member = tarfile.TarInfo(f"codex-{target}")
+        member.size = len(binary_payload)
+        member.mode = 0o755
+        archive.addfile(member, io.BytesIO(binary_payload))
+    archive_payload = archive_buffer.getvalue()
+
+    class FakeResponse:
+        headers = {"content-length": str(len(archive_payload))}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield archive_payload
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, method, url):
+            assert method == "GET"
+            assert url == (
+                "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-x86_64-unknown-linux-musl.tar.gz"
+            )
+            return FakeStream()
+
+    monkeypatch.setattr(coding_agent_runtime_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(coding_agent_runtime_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        coding_agent_runtime_module,
+        "_CODEX_RELEASES",
+        {("linux", "x86_64"): (target, hashlib.sha256(archive_payload).hexdigest())},
+    )
+    monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", FakeClient)
+    runtime = CodingAgentRuntime(tmp_path / "workspace")
+
+    await runtime._install_codex("verified-release")
+
+    binary = runtime.managed_command("codex")
+    assert binary.read_bytes() == binary_payload
+    assert binary.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_managed_codex_install_rejects_a_release_checksum_mismatch(tmp_path, monkeypatch):
+    archive_payload = b"not-the-pinned-release"
+
+    class FakeResponse:
+        headers = {"content-length": str(len(archive_payload))}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield archive_payload
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, _method, _url):
+            return FakeStream()
+
+    monkeypatch.setattr(coding_agent_runtime_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(coding_agent_runtime_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        coding_agent_runtime_module,
+        "_CODEX_RELEASES",
+        {("linux", "x86_64"): ("x86_64-unknown-linux-musl", "0" * 64)},
+    )
+    monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", FakeClient)
+    runtime = CodingAgentRuntime(tmp_path / "workspace")
+
+    with pytest.raises(Exception, match="checksum verification failed"):
+        await runtime._install_codex("tampered-release")
+
+    assert not runtime.managed_command("codex").exists()
 
 
 def test_coding_agent_api_lists_and_rejects_unready_selection(tmp_path, monkeypatch):

@@ -63,9 +63,7 @@ def test_chat_command_catalog_includes_all_installed_app_ids(isolate_apps_dir):
         "mutate",
         "skill",
     ]
-    app_argument = next(
-        item for item in catalog["commands"] if item["name"] == "app"
-    )["arguments"][0]
+    app_argument = next(item for item in catalog["commands"] if item["name"] == "app")["arguments"][0]
     assert {option["value"] for option in app_argument["options"]} == {
         "planner",
         "calendar",
@@ -106,7 +104,10 @@ def test_patch_app_updates_only_user_manageable_properties():
     assert stored["id"] == "planner"
     assert stored["js"] == "console.log('plan')"
     assert stored["schema_refs"] == ["Task"]
-    assert next(item for item in store_response.json()["items"] if item["catalog_id"] == "app:planner")["title"] == "Day Planner"
+    assert (
+        next(item for item in store_response.json()["items"] if item["catalog_id"] == "app:planner")["title"]
+        == "Day Planner"
+    )
 
 
 def test_patch_app_rejects_empty_unknown_and_invalid_updates():

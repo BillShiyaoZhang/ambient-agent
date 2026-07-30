@@ -120,7 +120,7 @@ Popovers support Escape, outside press, and focus return. Approval dialogs are b
 
 - Theme preference is `system`, `light`, or `dark`. `system` is the default and follows live OS changes.
 - The host and standard `ambient.components` follow the effective theme. Hard-coded custom Widget colors are not rewritten.
-- Widgets receive `{ theme, locale, reducedMotion }` presentation context over the same Runtime session; theme or language changes do not recreate the Chromium BrowserContext.
+- Widgets receive `{ theme, locale, reducedMotion }` presentation context over the same Runtime session; theme or language changes do not recreate the default iframe. Pixel rollback likewise reuses its existing Chromium BrowserContext.
 - Controls have accessible names, visible focus, and at least 40 px hit targets; mobile uses at least 44 px.
 - Host tooltips use a light surface with dark text in the light theme; they must not render as a theme-breaking black box.
 - Chat-history rows use a compact 28 px visual delete button that is shown only on row hover, focus-within, or the active row, preserving the truncatable title column; its accessible name remains complete.

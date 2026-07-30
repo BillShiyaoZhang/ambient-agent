@@ -171,6 +171,7 @@ const externalInstructionSkill = {
 describe("App Center", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(wsService.sendMessage).mockReturnValue(true);
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(state) })
@@ -198,6 +199,43 @@ describe("App Center", () => {
     fireEvent.change(screen.getByLabelText("Search apps"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
     expect(screen.getByText("No results found")).toBeDefined();
+  });
+
+  it("guides a first-time user when nothing is installed", async () => {
+    const openChat = vi.fn();
+    const configureModels = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ ...state, items: [], root: [] }),
+      }),
+    );
+
+    render(
+      <AppCenter
+        isOpen
+        mode="home"
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        onOpenChat={openChat}
+        onConfigureModels={configureModels}
+        language="zh"
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "还没有安装应用或技能" }))
+      .toBeDefined();
+    expect(screen.getByRole("button", { name: "发现技能" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "打开对话" }));
+    fireEvent.click(screen.getByRole("button", { name: "配置模型" }));
+    expect(openChat).toHaveBeenCalledOnce();
+    expect(configureModels).toHaveBeenCalledOnce();
+    expect(screen.queryByText("没有找到结果")).toBeNull();
   });
 
   it("launches ready apps directly", async () => {
@@ -237,6 +275,31 @@ describe("App Center", () => {
       catalog_id: "mcp:acme:calendar",
     });
     expect(close).toHaveBeenCalled();
+  });
+
+  it("keeps UI generation pending and explains when the command connection is unavailable", async () => {
+    vi.mocked(wsService.sendMessage).mockReturnValueOnce(false);
+    const close = vi.fn();
+    render(
+      <AppCenter
+        isOpen
+        onClose={close}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="en"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Calendar Tools" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate interface" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Interface generation was not requested",
+    );
+    expect(screen.getByRole("button", { name: "Generate interface" })).toBeDefined();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it("opens details from the contextual management menu", async () => {
@@ -570,7 +633,7 @@ describe("App Center", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(
+    const view = render(
       <AppCenter
         isOpen
         onClose={vi.fn()}
@@ -607,6 +670,21 @@ describe("App Center", () => {
       name: "Disable source anthropic-official",
     });
     expect(await screen.findByText("Meeting Brief")).toBeDefined();
+
+    view.rerender(
+      <AppCenter
+        isOpen
+        onClose={vi.fn()}
+        pinnedWidgetIds={[]}
+        onPinWidget={vi.fn()}
+        onUnpinWidget={vi.fn()}
+        onRunFullscreen={vi.fn()}
+        language="zh"
+      />,
+    );
+    expect(await screen.findByRole("switch", {
+      name: "关闭来源 anthropic-official",
+    })).toBeDefined();
   });
 
   it("quarantines external skills and confirms digest-bound authorization or revocation", async () => {

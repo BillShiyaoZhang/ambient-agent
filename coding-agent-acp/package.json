@@ -1,0 +1,9 @@
+{
+  "name": "ambient-codex-acp-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lockfile-only production dependency boundary for the Codex ACP bridge.",
+  "dependencies": {
+    "@agentclientprotocol/codex-acp": "1.1.7"
+  }
+}

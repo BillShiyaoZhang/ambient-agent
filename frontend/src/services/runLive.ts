@@ -1,3 +1,11 @@
+import { webSocketUrl } from "./apiBase";
+import {
+  isNormalSocketClose,
+  MAX_SOCKET_RECONNECT_ATTEMPTS,
+  socketReconnectDelay,
+  type SocketConnectionState,
+} from "./socketReconnect";
+
 export type RunLiveEventKind = "assistant_message_delta" | "activity_delta" | "tool_progress";
 
 export interface RunLiveEvent {
@@ -103,25 +111,43 @@ export class RunLiveEventBatcher {
   }
 }
 
-class RunLiveService {
+export class RunLiveService {
   private socket: WebSocket | null = null;
   private reconnectTimer: number | null = null;
+  private reconnectAttempt = 0;
   private generation = 0;
+  private connectionState: SocketConnectionState = "disconnected";
+  private statusListener: ((state: SocketConnectionState) => void) | null = null;
+  private retryConnect: (() => void) | null = null;
+
+  private setConnectionState(state: SocketConnectionState): void {
+    if (state === this.connectionState) return;
+    this.connectionState = state;
+    this.statusListener?.(state);
+  }
 
   subscribe(
     sessionId: string,
     onEvent: (event: RunLiveEvent) => void,
     onReset: () => void,
+    onStatus?: (state: SocketConnectionState) => void,
   ): () => void {
     this.disconnect();
+    this.statusListener = onStatus ?? null;
+    this.reconnectAttempt = 0;
     const generation = ++this.generation;
     const connect = () => {
       if (generation !== this.generation) return;
-      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+      this.setConnectionState(this.reconnectAttempt > 0 ? "retrying" : "connecting");
       const socket = new WebSocket(
-        `${scheme}://${window.location.hostname}:8000/ws/run-live?session_id=${encodeURIComponent(sessionId)}`
+        webSocketUrl(`/ws/run-live?session_id=${encodeURIComponent(sessionId)}`),
       );
       this.socket = socket;
+      socket.onopen = () => {
+        if (this.socket !== socket || generation !== this.generation) return;
+        this.reconnectAttempt = 0;
+        this.setConnectionState("connected");
+      };
       socket.onmessage = (message) => {
         if (this.socket !== socket || generation !== this.generation) return;
         let payload: unknown;
@@ -135,16 +161,30 @@ class RunLiveService {
         const event = normalizeRunLiveEvent(frame.event, sessionId);
         if (event) onEvent(event);
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (this.socket !== socket || generation !== this.generation) return;
         this.socket = null;
         onReset();
-        this.reconnectTimer = window.setTimeout(connect, 1000);
+        if (isNormalSocketClose(event)) {
+          this.setConnectionState("disconnected");
+          return;
+        }
+        if (this.reconnectAttempt >= MAX_SOCKET_RECONNECT_ATTEMPTS) {
+          this.setConnectionState("unavailable");
+          return;
+        }
+        this.reconnectAttempt += 1;
+        this.setConnectionState("retrying");
+        this.reconnectTimer = window.setTimeout(
+          connect,
+          socketReconnectDelay(this.reconnectAttempt),
+        );
       };
       socket.onerror = () => {
         // onclose owns reset and reconnect so errors never duplicate state changes.
       };
     };
+    this.retryConnect = connect;
     connect();
     return () => {
       if (generation !== this.generation) return;
@@ -152,15 +192,40 @@ class RunLiveService {
     };
   }
 
+  getConnectionState(): SocketConnectionState {
+    return this.connectionState;
+  }
+
+  retryConnection(): boolean {
+    if (
+      !this.retryConnect
+      || this.connectionState === "connected"
+      || this.connectionState === "connecting"
+    ) return false;
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const staleSocket = this.socket;
+    this.socket = null;
+    staleSocket?.close();
+    this.reconnectAttempt = 0;
+    this.setConnectionState("connecting");
+    this.retryConnect();
+    return true;
+  }
+
   disconnect(): void {
     this.generation += 1;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.reconnectAttempt = 0;
     if (this.socket) {
       const socket = this.socket;
       this.socket = null;
       socket.close();
     }
+    this.setConnectionState("disconnected");
+    this.statusListener = null;
+    this.retryConnect = null;
   }
 }
 

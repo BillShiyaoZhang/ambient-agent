@@ -170,9 +170,7 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
 )
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SLASH_COMMAND_SPECS}
-_COMMAND_NAMES_PATTERN = "|".join(
-    re.escape(name) for name in sorted(_SPEC_BY_NAME, key=len, reverse=True)
-)
+_COMMAND_NAMES_PATTERN = "|".join(re.escape(name) for name in sorted(_SPEC_BY_NAME, key=len, reverse=True))
 _COMMAND_PATTERN = re.compile(
     rf"(?<![\\\S])/(?P<name>{_COMMAND_NAMES_PATTERN})(?=\s|$)",
     re.IGNORECASE,
@@ -209,9 +207,7 @@ def parse_slash_commands(content: str) -> list[ParsedSlashCommand]:
     if not matches:
         return []
     if len(matches) > MAX_SLASH_COMMANDS:
-        raise SlashCommandParseError(
-            f"At most {MAX_SLASH_COMMANDS} slash commands may be used in one message"
-        )
+        raise SlashCommandParseError(f"At most {MAX_SLASH_COMMANDS} slash commands may be used in one message")
 
     parsed: list[ParsedSlashCommand] = []
     prefix = _restore_escaped_slashes(content[: matches[0].start()].strip())
@@ -247,9 +243,7 @@ def parse_slash_commands(content: str) -> list[ParsedSlashCommand]:
             )
         )
     if len(parsed) > MAX_SLASH_COMMANDS:
-        raise SlashCommandParseError(
-            f"At most {MAX_SLASH_COMMANDS} slash commands may be used in one message"
-        )
+        raise SlashCommandParseError(f"At most {MAX_SLASH_COMMANDS} slash commands may be used in one message")
     return parsed
 
 
@@ -318,8 +312,5 @@ def build_slash_command_catalog(
     return {
         "version": 1,
         "max_commands": MAX_SLASH_COMMANDS,
-        "commands": [
-            spec.to_dict(option_sets=option_sets)
-            for spec in SLASH_COMMAND_SPECS
-        ],
+        "commands": [spec.to_dict(option_sets=option_sets) for spec in SLASH_COMMAND_SPECS],
     }
