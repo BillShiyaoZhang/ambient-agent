@@ -375,7 +375,9 @@ class AppStoreService:
                     "ui_app_id": bound_app_id,
                     "launch_mode": "ui" if ready else "actions",
                     "status": status,
-                    "app_spec": bound_manifest.app_spec.to_dict() if bound_manifest and bound_manifest.app_spec else None,
+                    "app_spec": bound_manifest.app_spec.to_dict()
+                    if bound_manifest and bound_manifest.app_spec
+                    else None,
                 }
             )
         return result
