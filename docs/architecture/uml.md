@@ -2,6 +2,32 @@
 
 本页描述 scheduler-owned chat、持久 reducer 和统一的副作用执行边界。图中的 Python 引用由 `scripts/verify_uml.py` 检查。
 
+App Manifest V2 的 `app_spec` 保存版本化用途类型及作者的功能实现声明；AppManager 的创建、读取与属性更新统一校验，AppStoreService 向应用中心投影目录与声明。类型目录是产品分类元数据，不属于 KG ontology，也不改变 CapabilityAuthorizer。契约见 [App 类型与功能标准](/architecture/app-types.md)。
+
+```mermaid
+classDiagram
+    class AppManifest {
+        +app_spec
+        +from_dict()
+        +to_dict()
+    }
+    class AppSpecification {
+        +spec_version
+        +types
+        +features
+        +to_dict()
+    }
+    class AppFeatureDeclaration {
+        +id
+        +status
+        +surfaces
+        +notes
+        +to_dict()
+    }
+    AppManifest o-- AppSpecification : optional declaration
+    AppSpecification *-- AppFeatureDeclaration : features
+```
+
 ## 1. 单一控制平面
 
 ```mermaid

@@ -1,5 +1,7 @@
 # Widget 与应用中心
 
+用户用途分类与已交付功能采用独立的 [App 类型与功能标准](/architecture/app-types.md)。Manifest V2 的可选 `app_spec` 与运行时授权 grants 分开；旧 App 保持未分类，新 App 使用共享目录声明多个类型、实现状态及数据/工具/UI surfaces。
+
 “Widget”是可在工作区渲染的 React UI；“App”是带持久 Manifest V2 和 Controller 的 Widget；“Capability”是应用中心中可调用、但不一定有 UI 的后端动作；“Instruction Skill”是按需注入 Agent turn 的 `SKILL.md` 说明。Skill、Capability 与 App 可以组合，但不能互相替代。App 只能通过批准的 capability grants 访问宿主或外部资源。
 
 ## 1. App 产物
@@ -86,7 +88,7 @@ flowchart LR
 
 生成 App 的图标支持右键或保持按压约 500 ms 打开管理菜单；指针移动超过容差、抬起或取消时不得误触发长按，成功打开菜单后不得继续启动 App。菜单提供查看详情、配置属性、重命名和卸载；键盘上下文菜单继续可用。
 
-`PATCH /api/apps/{app_id}` 只更新用户可管理的 Manifest 展示属性：`title`、`description`、`app_version` 和 `intents`。请求为 partial update，未知字段、空更新和不满足 Manifest V2 约束的值返回 `422`，不存在的 App 返回 `404`。重命名只修改 `title`；稳定的 App ID、目录、grant、schema reference 与 Controller 不变。配置成功后，应用中心和已打开窗口必须刷新为最新属性。
+`PATCH /api/apps/{app_id}` 更新用户可管理的 Manifest 展示属性：`title`、`description`、`app_version`、`intents` 和可选 `app_spec`。请求为 partial update，未知字段、空更新和不满足 Manifest V2 / App 类型标准约束的值返回 `422`，不存在的 App 返回 `404`。`app_spec: null` 清除分类；完整声明必须通过类型与功能关联校验。重命名只修改 `title`；稳定的 App ID、目录、grant、schema reference 与 Controller 不变。配置成功后，应用中心和已打开窗口必须刷新为最新属性。
 
 ## 5. 数据与能力边界
 

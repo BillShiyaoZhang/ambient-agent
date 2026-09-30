@@ -148,6 +148,7 @@ class AppManager:
         intents: Any = _UNSET,
         schema_refs: Any = _UNSET,
         capabilities: Any = _UNSET,
+        app_spec: Any = _UNSET,
     ) -> None:
         if not isinstance(js, str):
             raise TypeError("js must be a string")
@@ -185,6 +186,7 @@ class AppManager:
                 "intents": intents,
                 "schema_refs": schema_refs,
                 "capabilities": capabilities,
+                "app_spec": app_spec,
             }.items():
                 if value is not _UNSET:
                     manifest_data[field] = value
@@ -236,6 +238,7 @@ class AppManager:
         description: Any = _UNSET,
         app_version: Any = _UNSET,
         intents: Any = _UNSET,
+        app_spec: Any = _UNSET,
     ) -> dict[str, Any] | None:
         """Update user-manageable Manifest presentation fields atomically."""
 
@@ -252,6 +255,7 @@ class AppManager:
                 "description": description,
                 "app_version": app_version,
                 "intents": intents,
+                "app_spec": app_spec,
             }.items():
                 if value is not _UNSET:
                     manifest_data[field] = value

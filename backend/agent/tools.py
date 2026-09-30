@@ -448,6 +448,33 @@ def list_available_apps() -> list[str]:
 
 
 @registry.register(scopes={"workspace:read"})
+def list_app_types() -> dict[str, Any]:
+    """Return the App type and feature vocabulary for classification and discovery; declarations grant no authority."""
+    from backend.app_types import get_app_type_catalog
+
+    return get_app_type_catalog()
+
+
+@registry.register(scopes={"workspace:read"})
+def list_app_specs(app_id: str | None = None) -> list[dict[str, Any]]:
+    """Read App implementation declarations; use app_id for large workspaces and never treat planned features as available.
+    :param app_id: Optional App ID; use list_available_apps then read individual Apps to keep output bounded.
+    """
+    from backend.app_manager import AppManager
+
+    manager = AppManager()
+    if app_id is None:
+        apps = manager.list_apps()
+    else:
+        manifest = manager.get_manifest(app_id)
+        apps = [manifest.to_dict()] if manifest is not None else []
+    return [
+        {key: app[key] for key in ("id", "title", "description", "app_version", "app_spec") if key in app}
+        for app in apps
+    ]
+
+
+@registry.register(scopes={"workspace:read"})
 def query_graph(query_json: str) -> str:
     """Query the workspace graph with a declarative JSON query.
     :param query_json: The declarative graph query as JSON.

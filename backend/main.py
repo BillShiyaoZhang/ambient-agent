@@ -33,6 +33,7 @@ from backend.agent.slash_commands import build_slash_command_catalog
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
 from backend.app_manifest import ManifestValidationError
+from backend.app_types import get_app_type_catalog
 from backend.app_store import AppStoreService, CapabilityManifest, LayoutConflictError
 from backend.capabilities.files import AppFileError, AppFileGateway
 from backend.capabilities.catalog import SystemCapabilityCatalog
@@ -1710,6 +1711,12 @@ async def unregister_capability(catalog_id: str):
     raise HTTPException(status_code=404, detail="Capability not found")
 
 
+@app.get("/api/app-types")
+async def list_app_types():
+    """Return the shared, versioned user-purpose type and feature vocabulary."""
+    return get_app_type_catalog()
+
+
 @app.get("/api/apps")
 async def list_apps():
     return app_manager.list_apps()
@@ -1808,6 +1815,7 @@ class AppPropertiesUpdate(BaseModel):
     description: str | None = None
     app_version: str | None = None
     intents: list[str] | None = None
+    app_spec: dict[str, Any] | None = None
 
 
 @app.patch("/api/apps/{app_id}")

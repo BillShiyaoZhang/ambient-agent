@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.app_types import AppSpecification, AppSpecificationError, validate_app_spec
 from backend.capabilities.models import CapabilityGrant, grants_digest, normalize_grants
 
 APP_MANIFEST_VERSION = 2
@@ -54,6 +55,7 @@ _REQUIRED_FIELDS = {
     "capabilities",
 }
 _OPTIONAL_FIELDS = {
+    "app_spec",
     "backend_type",
     "mcp_server",
     "agent_url",
@@ -154,6 +156,7 @@ class AppManifest:
     backend_type: str = "code"
     mcp_server: dict[str, Any] | None = None
     agent_url: str | None = None
+    app_spec: AppSpecification | None = None
 
     @classmethod
     def from_dict(cls, data: Any, *, expected_app_id: str) -> "AppManifest":
@@ -183,6 +186,11 @@ class AppManifest:
         except ValueError as exc:
             raise ManifestValidationError(f"capabilities: {exc!s}") from exc
 
+        try:
+            app_spec = validate_app_spec(data.get("app_spec"))
+        except AppSpecificationError as exc:
+            raise ManifestValidationError(str(exc)) from exc
+
         return cls(
             manifest_version=APP_MANIFEST_VERSION,
             id=app_id,
@@ -199,6 +207,7 @@ class AppManifest:
             backend_type=backend_type,
             mcp_server=mcp_server,
             agent_url=agent_url,
+            app_spec=app_spec,
         )
 
     @classmethod
@@ -231,6 +240,8 @@ class AppManifest:
             result["mcp_server"] = self.mcp_server
         if self.agent_url is not None:
             result["agent_url"] = self.agent_url
+        if self.app_spec is not None:
+            result["app_spec"] = self.app_spec.to_dict()
         return result
 
     @property

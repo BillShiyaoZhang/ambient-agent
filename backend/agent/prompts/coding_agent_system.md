@@ -15,7 +15,9 @@ The staging directory may contain only:
 
 Delete obsolete `index.html`, `style.css`, `layout.json`, `index.jsx`, metadata, and any other generated source. Never emit `<ambient-widget>` XML.
 
-Use the complete object under `[REQUIRED MANIFEST V2 TEMPLATE]` as the file shape. You may improve only `title`, `description`, `app_version`, and `intents`. `intents` must be an array of unique, non-empty strings; never objects. Keep `manifest_version`, `id`, `schema_refs`, and `capabilities` exactly as provided. Never copy Runtime Contract envelope fields such as `contract_version`, `catalog_version`, `app_id`, `schemas`, `grants_digest`, or `allowed_files` into `manifest.json`.
+Use the complete object under `[REQUIRED MANIFEST V2 TEMPLATE]` as the file shape. You may improve `title`, `description`, `app_version`, `intents`, and optional `app_spec`. `intents` must be an array of unique, non-empty strings; never objects. Keep `manifest_version`, `id`, `schema_refs`, and `capabilities` exactly as provided. Never copy Runtime Contract envelope fields such as `contract_version`, `catalog_version`, `app_id`, `schemas`, `grants_digest`, or `allowed_files` into `manifest.json`.
+
+Use `[APP TYPE STANDARD]` and `[APP TYPE DECLARATION RULES]` to classify the actual resulting implementation with `app_spec`. A new template may omit it until implementation is known. Preserve and adjust an existing declaration when modifying an App. Distinguish implemented, partial, and planned features, and list only surfaces actually provided. A grant alone proves no implemented feature. Type and feature coverage are author declarations, not verified behavior; they do not grant permissions, create callable tools, or change the approved schema. Do not claim certification or invent standard IDs.
 
 # Widget runtime
 

@@ -53,6 +53,13 @@ import {
 import wsService from "../services/websocket";
 import { getApiBaseUrl } from "../services/apiBase";
 import {
+  appFeatureViews,
+  appTypeSearchText,
+  appTypeTitle,
+  type AppSpec,
+  type AppTypeCatalog,
+} from "../services/appTypes";
+import {
   installSkill,
   loadSkillMarket,
   setSkillAuthorization,
@@ -100,6 +107,7 @@ export interface CatalogItem {
   surfaces?: SkillSurface[];
   actions?: CatalogAction[];
   status: CatalogStatus;
+  app_spec?: AppSpec | null;
   skill?: {
     enabled: boolean;
     digest: string;
@@ -132,6 +140,7 @@ interface AppStoreState {
   items: CatalogItem[];
   root: string[];
   folders: AppFolder[];
+  app_type_catalog?: AppTypeCatalog;
 }
 
 interface AppCenterProps {
@@ -159,6 +168,8 @@ type AppEditorState = {
   description: string;
   version: string;
   tags: string;
+  types: string[];
+  customType: string;
 };
 
 const API_BASE = getApiBaseUrl();
@@ -274,6 +285,46 @@ function AppIcon({ item, compact = false }: { item: CatalogItem; compact?: boole
       {item.status === "generating" && <LoaderCircle className="app-center-icon-spinner" size={20} />}
       {item.status === "needs_ui" && item.launch_mode !== "actions" && <Sparkles className="app-center-icon-badge" size={16} />}
     </div>
+  );
+}
+
+function AppDeclarations({ item, catalog, language }: { item: CatalogItem; catalog?: AppTypeCatalog; language: "zh" | "en" }) {
+  const isZh = language === "zh";
+  const spec = item.app_spec;
+  const statusTitles = {
+    implemented: isZh ? "已实现" : "Implemented",
+    partial: isZh ? "部分实现" : "Partial",
+    planned: isZh ? "计划中" : "Planned",
+    not_declared: isZh ? "未声明" : "Not declared",
+  };
+  const surfaceTitles = {
+    data: isZh ? "数据存储" : "Data storage",
+    tools: isZh ? "Agent 工具" : "Agent tools",
+    ui: isZh ? "可视化界面" : "Visual interface",
+  };
+  return (
+    <section className="app-center-declarations" aria-label={isZh ? "实现声明" : "Implementation declarations"}>
+      <h3>{isZh ? "实现声明" : "Implementation declarations"}</h3>
+      {spec?.types.length ? (
+        <>
+          <div className="app-center-type-tags">
+            {spec.types.map((id) => <span key={id} title={id}>{appTypeTitle(id, catalog, language)}</span>)}
+          </div>
+          <p>{isZh
+            ? "功能与交互方式由作者声明；未声明的功能不代表已实现。"
+            : "Features and interfaces are declared by the author. Undeclared features do not imply implementation."}</p>
+          <ul className="app-center-feature-list">
+            {appFeatureViews(spec, catalog, language).map((feature) => (
+              <li key={feature.id}>
+                <div><strong title={feature.id}>{feature.title}</strong><span className={`app-center-feature-status is-${feature.status}`}>{statusTitles[feature.status]}</span></div>
+                {feature.surfaces.length > 0 && <div className="app-center-feature-surfaces">{feature.surfaces.map((surface) => <span key={surface}>{surfaceTitles[surface]}</span>)}</div>}
+                {feature.notes && <p>{feature.notes}</p>}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : <p>{isZh ? "未分类" : "Unclassified"}</p>}
+    </section>
   );
 }
 
@@ -646,6 +697,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterKind>("all");
+  const [purposeFilter, setPurposeFilter] = useState("all");
   const [page, setPage] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
   const [detailsId, setDetailsId] = useState<string | null>(null);
@@ -738,17 +790,34 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     [store?.folders]
   );
 
+  const typeOptions = useMemo(() => [...new Set([
+    ...(store?.app_type_catalog?.types.map((type) => type.id) ?? []),
+    ...(store?.items ?? []).flatMap((item) => item.app_spec?.types ?? []),
+  ])], [store?.app_type_catalog, store?.items]);
+  const activePurposeFilter = purposeFilter === "all" || purposeFilter === "unclassified" || typeOptions.includes(purposeFilter)
+    ? purposeFilter
+    : "all";
+
+  useEffect(() => {
+    if (purposeFilter !== activePurposeFilter) {
+      setPurposeFilter(activePurposeFilter);
+      setPage(0);
+    }
+  }, [purposeFilter, activePurposeFilter]);
+
   const filteredItems = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase(language);
     return (store?.items ?? []).filter((item) => {
       if (filter !== "all" && item.kind !== filter) return false;
+      if (activePurposeFilter === "unclassified" && item.app_spec?.types.length) return false;
+      if (activePurposeFilter !== "all" && activePurposeFilter !== "unclassified" && !item.app_spec?.types.includes(activePurposeFilter)) return false;
       if (!normalized) return true;
-      return [item.title, item.description, item.provider, ...item.tags]
+      return [item.title, item.description, item.provider, ...item.tags, ...appTypeSearchText(item.app_spec, store?.app_type_catalog)]
         .join(" ")
         .toLocaleLowerCase(language)
         .includes(normalized);
     });
-  }, [store?.items, query, filter, language]);
+  }, [store?.items, store?.app_type_catalog, query, filter, activePurposeFilter, language]);
 
   const filteredMarketSkills = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase(language);
@@ -770,7 +839,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     );
   }, [language, market?.items, query]);
 
-  const isSearching = Boolean(query.trim()) || filter !== "all";
+  const isSearching = Boolean(query.trim()) || filter !== "all" || activePurposeFilter !== "all";
   const rootEntries = store?.root ?? [];
   const pageCount = Math.max(1, Math.ceil(rootEntries.length / pageCapacity));
   const pageEntries = isSearching
@@ -819,6 +888,8 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       description: item.description,
       version: item.version,
       tags: item.tags.join(", "),
+      types: [...(item.app_spec?.types ?? [])],
+      customType: "",
     });
   };
 
@@ -826,6 +897,23 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     if (!editor) return;
     const item = itemsById.get(editor.itemId);
     if (!item?.ui_app_id || item.kind !== "generated_app") return;
+    let nextSpec: AppSpec | null | undefined;
+    const typesChanged = JSON.stringify(item.app_spec?.types ?? []) !== JSON.stringify(editor.types);
+    if (editor.mode === "configure" && typesChanged) {
+      const orphaned = (item.app_spec?.features ?? []).filter((feature) => !editor.types.includes(feature.id.split(".")[0]));
+      if (orphaned.length || (!editor.types.length && item.app_spec?.features.length)) {
+        const featureIds = (orphaned.length ? orphaned : item.app_spec?.features ?? []).map((feature) => feature.id).join(", ");
+        setEditorError(isZh
+          ? `这些类型仍有关联的功能声明：${featureIds}。请先通过 Agent 调整功能声明，再移除类型。`
+          : `These types still have feature declarations: ${featureIds}. Ask the agent to update those declarations before removing the types.`);
+        return;
+      }
+      nextSpec = editor.types.length ? {
+        spec_version: item.app_spec?.spec_version ?? store?.app_type_catalog?.spec_version ?? 1,
+        types: editor.types,
+        features: item.app_spec?.features ?? [],
+      } : null;
+    }
     const intents = [...new Set(
       editor.tags
         .split(/[,\n]/)
@@ -838,6 +926,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
           description: editor.description.trim(),
           app_version: editor.version.trim(),
           intents,
+          ...(nextSpec !== undefined ? { app_spec: nextSpec } : {}),
         };
     setEditorSaving(true);
     setEditorError("");
@@ -860,6 +949,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
           description: payload.description ?? candidate.description,
           version: payload.app_version ?? candidate.version,
           tags: payload.intents ?? candidate.tags,
+          ...("app_spec" in payload ? { app_spec: payload.app_spec } : nextSpec !== undefined ? { app_spec: nextSpec } : {}),
         } : candidate),
       } : current);
       setEditor(null);
@@ -1316,6 +1406,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     { id: "skill", zh: "技能", en: "Skills" },
     { id: "mcp", zh: "MCP", en: "MCP" },
   ];
+  const editorTypeOptions = [...new Set([...typeOptions, ...(editor?.types ?? [])])];
 
   const renderEntry = (entryId: string, sortable: boolean) => {
     const item = itemsById.get(entryId);
@@ -1394,7 +1485,8 @@ export const AppCenter: React.FC<AppCenterProps> = ({
       </nav>
 
       {section === "installed" && (
-        <nav className="app-center-filters" aria-label={isZh ? "应用类型" : "App types"}>
+        <div className="app-center-filter-row">
+        <nav className="app-center-filters" aria-label={isZh ? "应用来源" : "Catalog sources"}>
           {filters.map((option) => (
             <button
               key={option.id}
@@ -1405,6 +1497,15 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             </button>
           ))}
         </nav>
+        <label className="app-center-purpose-filter">
+          <span>{isZh ? "应用用途" : "App purpose"}</span>
+          <select value={activePurposeFilter} onChange={(event) => { setPurposeFilter(event.target.value); setPage(0); }}>
+            <option value="all">{isZh ? "全部类型" : "All types"}</option>
+            <option value="unclassified">{isZh ? "未分类" : "Unclassified"}</option>
+            {typeOptions.map((id) => <option key={id} value={id}>{appTypeTitle(id, store?.app_type_catalog, language)}</option>)}
+          </select>
+        </label>
+        </div>
       )}
 
       {notice && (
@@ -1699,6 +1800,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
               )}
             </dl>
             {detailsItem.tags.length > 0 && <div className="app-center-tags">{detailsItem.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+            <AppDeclarations item={detailsItem} catalog={store?.app_type_catalog} language={language} />
             {actionError && <p className="app-center-action-error" role="alert">{actionError}</p>}
             {detailsIsInstructionSkill ? (
               <div className="app-center-installed-skill">
@@ -1924,7 +2026,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({
             : (isZh ? "配置应用属性" : "Configure app properties")}
           description={editor.mode === "rename"
             ? (isZh ? "只修改显示名称，稳定的 App ID 不会变化。" : "Only the display name changes; the stable App ID stays the same.")
-            : (isZh ? "修改应用描述、版本与用于搜索的标签。" : "Edit the description, version, and searchable tags.")}
+            : (isZh ? "修改应用描述、版本、用途类型与用于搜索的标签。" : "Edit the description, version, purpose types, and searchable tags.")}
           onClose={() => { if (!editorSaving) setEditor(null); }}
         >
           <form
@@ -1975,6 +2077,39 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                   />
                   <small>{isZh ? "标签用于应用中心搜索，不会改变 App 权限。" : "Tags improve App Center search and do not change permissions."}</small>
                 </label>
+                <fieldset className="app-center-type-editor">
+                  <legend>{isZh ? "应用类型" : "App types"}</legend>
+                  <div className="app-center-type-options">
+                    {editorTypeOptions.map((id) => (
+                      <label key={id} title={id}>
+                        <input type="checkbox" checked={editor.types.includes(id)} onChange={(event) => {
+                          const checked = event.target.checked;
+                          setEditor((current) => current ? { ...current, types: checked ? [...current.types, id] : current.types.filter((type) => type !== id) } : current);
+                          setEditorError("");
+                        }} />
+                        <span>{appTypeTitle(id, store?.app_type_catalog, language)}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <small>{isZh
+                    ? "可以选择多个用途；首个选择的类型是主要类型。功能声明保持不变，取消所有类型后显示为未分类。"
+                    : "Choose multiple purposes; the first selected type is primary. Feature declarations are preserved. Clearing all types marks the app unclassified."}</small>
+                  <div className="app-center-custom-type">
+                    <label>
+                      <span>{isZh ? "自定义类型 ID" : "Custom type ID"}</span>
+                      <input value={editor.customType} placeholder="custom:my-purpose" onChange={(event) => setEditor((current) => current ? { ...current, customType: event.target.value } : current)} />
+                    </label>
+                    <button type="button" className="system-button" onClick={() => {
+                      const id = editor.customType.trim();
+                      if (!/^custom:[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) {
+                        setEditorError(isZh ? "自定义类型格式应为 custom:namespace，使用小写字母、数字和连字符。" : "Use custom:namespace with lowercase letters, numbers, and hyphens.");
+                        return;
+                      }
+                      setEditor((current) => current ? { ...current, types: [...new Set([...current.types, id])], customType: "" } : current);
+                      setEditorError("");
+                    }}>{isZh ? "添加类型" : "Add type"}</button>
+                  </div>
+                </fieldset>
               </>
             )}
             {editorError && <p className="app-center-editor-error" role="alert">{editorError}</p>}

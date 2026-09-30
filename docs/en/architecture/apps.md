@@ -86,7 +86,9 @@ Items are `ready`, `needs_ui`, `generating`, or `unavailable`. Layout uses revis
 
 A generated App icon opens its management menu through right-click or a hold of about 500 ms. Movement beyond the gesture tolerance, pointer release, or cancellation must cancel the hold; a successful hold must not subsequently launch the App. The menu provides details, property configuration, rename, and uninstall actions, while the keyboard context-menu path remains available.
 
-`PATCH /api/apps/{app_id}` updates only user-manageable Manifest presentation properties: `title`, `description`, `app_version`, and `intents`. It is a partial update; unknown fields, empty updates, and values that violate Manifest V2 return `422`, while a missing App returns `404`. Rename changes `title` only. The stable App ID, directory, grants, schema references, and Controller remain unchanged. After a successful update, App Center and any open window refresh to the latest properties.
+`PATCH /api/apps/{app_id}` updates user-manageable Manifest properties: `title`, `description`, `app_version`, `intents`, and optional `app_spec` type and feature declarations. Null clears `app_spec`. It is a partial update; unknown fields, empty updates, and values that violate Manifest V2 return `422`, while a missing App returns `404`. Rename changes `title` only. The stable App ID, directory, grants, schema references, and Controller remain unchanged. After a successful update, App Center and any open window refresh to the latest properties.
+
+Purpose types such as calendar, tasks, and notes are independent of the App Center source kind. The shared backend catalogue supports type filtering and feature comparison across Apps, including Apps with multiple types. Details distinguish implemented, partial, planned, and undeclared features and describe coverage as author declarations. Classification neither grants capabilities nor certifies behavior. Legacy Apps remain unclassified. See [App Types and Feature Declarations](/en/architecture/app-types.md) for the versioned Manifest contract and generation rules.
 
 ## 5. Data and capability boundaries
 
