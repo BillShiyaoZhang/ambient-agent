@@ -10,6 +10,7 @@
   - [Workspace UX](/en/architecture/workspace-ux.md)
   - [Chat and Run Information Experience](/en/architecture/chat-run-ux.md)
   - [Widgets and App Center](/en/architecture/apps.md)
+  - [App Types and Features](/en/architecture/app-types.md)
   - [Durable Runs and Runtimes](/en/architecture/runs.md)
   - [Graph Database](/en/architecture/graph-db.md)
   - [Graph Data Visualization](/en/architecture/graph-visualization.md)

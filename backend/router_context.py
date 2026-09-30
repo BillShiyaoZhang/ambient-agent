@@ -92,6 +92,24 @@ class RouterContext:
                 for app in self.app_manifests:
                     title = app.get("title", app.get("id"))
                     lines.append(f"- ID: `{app.get('id', '?')}`, Title: {title}")
+                    app_spec = app.get("app_spec") or {}
+                    app_types = app_spec.get("types") or []
+                    lines.append(f"  App types: {', '.join(app_types) if app_types else 'unclassified'}")
+                    if app_types:
+                        lines.append(
+                            "  Declared features (author supplied; not verified; do not create callable tools):"
+                        )
+                        features = app_spec.get("features") or []
+                        if not features:
+                            lines.append("    (none declared)")
+                        for status in ("implemented", "partial", "planned"):
+                            matching = [feature for feature in features if feature.get("status") == status]
+                            if matching:
+                                feature_text = "; ".join(
+                                    f"{feature['id']} [{', '.join(feature.get('surfaces') or []) or 'none'}]"
+                                    for feature in matching
+                                )
+                                lines.append(f"    {status.capitalize()}: {feature_text}")
                     if app.get("description"):
                         lines.append(f"  Description: {app['description']}")
                     if app.get("intents"):

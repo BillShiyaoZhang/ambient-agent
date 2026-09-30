@@ -2,6 +2,32 @@
 
 This page documents scheduler-owned chat, the durable reducer, and unified side-effect execution boundaries. Python references in flowcharts are checked by `scripts/verify_uml.py`.
 
+Manifest V2 optionally stores an `app_spec` with versioned purpose types and author-declared functionality. AppManager validates creation and property updates; AppStoreService projects declarations and the shared vocabulary. These are product metadata, separate from the context ontology and authorization. See [App Types and Features](/en/architecture/app-types.md).
+
+```mermaid
+classDiagram
+    class AppManifest {
+        +app_spec
+        +from_dict()
+        +to_dict()
+    }
+    class AppSpecification {
+        +spec_version
+        +types
+        +features
+        +to_dict()
+    }
+    class AppFeatureDeclaration {
+        +id
+        +status
+        +surfaces
+        +notes
+        +to_dict()
+    }
+    AppManifest o-- AppSpecification : optional declaration
+    AppSpecification *-- AppFeatureDeclaration : features
+```
+
 ## 1. One control plane
 
 ```mermaid

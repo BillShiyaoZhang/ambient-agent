@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.app_manager import AppManager
+from backend.app_types import get_app_type_catalog
 
 
 _CAPABILITY_ID_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
@@ -188,6 +189,7 @@ class GeneratedAppProvider:
                 "version": app.get("app_version", "0.1.0"),
                 "provider": "Ambient Agent",
                 "tags": list(app.get("intents", [])),
+                "app_spec": app.get("app_spec"),
                 "icon": None,
                 "accent": None,
                 "ui_app_id": app["id"],
@@ -345,7 +347,8 @@ class AppStoreService:
             except ValueError:
                 continue
             bound_app_id = bindings.get(catalog_id)
-            ready = bool(bound_app_id and self.app_manager.get_manifest(bound_app_id))
+            bound_manifest = self.app_manager.get_manifest(bound_app_id) if bound_app_id else None
+            ready = bound_manifest is not None
             if bound_app_id and not ready:
                 bound_app_id = None
             # V1 keeps its historical status for API compatibility, but is still
@@ -372,6 +375,7 @@ class AppStoreService:
                     "ui_app_id": bound_app_id,
                     "launch_mode": "ui" if ready else "actions",
                     "status": status,
+                    "app_spec": bound_manifest.app_spec.to_dict() if bound_manifest and bound_manifest.app_spec else None,
                 }
             )
         return result
@@ -478,6 +482,7 @@ class AppStoreService:
                 "version": 1,
                 "revision": int(layout.get("revision", 0)),
                 "items": items,
+                "app_type_catalog": get_app_type_catalog(),
                 **normalized,
             }
             if normalized["root"] != layout.get("root") or normalized["folders"] != layout.get("folders"):

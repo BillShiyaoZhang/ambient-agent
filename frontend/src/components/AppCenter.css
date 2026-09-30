@@ -273,6 +273,35 @@
 .app-center-property-editor small { color: var(--text-tertiary); font-size: 9px; font-weight: 450; line-height: 1.45; }
 .app-center-editor-error { margin: 0; padding: 8px 10px; border-radius: 9px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
 
+.app-center-filter-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 14px; padding: 0 20px; }
+.app-center-filter-row .app-center-filters { margin-inline: 0; }
+.app-center-purpose-filter { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 11px; }
+.app-center-purpose-filter select { max-width: 230px; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: 10px; color: var(--text-primary); background: var(--surface-chrome); font: inherit; }
+.app-center-purpose-filter select option { color: var(--text-primary); background: var(--surface-dialog); }
+.app-center-declarations { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+.app-center-declarations h3 { margin: 0 0 10px; font-size: 12px; }
+.app-center-declarations > p { margin: 10px 0; color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.app-center-type-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.app-center-type-tags span { overflow-wrap: anywhere; padding: 5px 8px; border-radius: 8px; color: var(--accent); background: var(--accent-soft); font-size: 10px; }
+.app-center-feature-list { display: grid; gap: 8px; padding: 0; margin: 12px 0 0; list-style: none; }
+.app-center-feature-list li { padding: 10px; border: 1px solid var(--border-subtle); border-radius: 10px; }
+.app-center-feature-list li > div:first-child { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+.app-center-feature-list strong { overflow-wrap: anywhere; color: var(--text-secondary); font-size: 10px; font-weight: 600; }
+.app-center-feature-status { flex: none; color: var(--text-muted); font-size: 9px; }
+.app-center-feature-status.is-implemented { color: var(--success); }
+.app-center-feature-status.is-partial { color: var(--warning); }
+.app-center-feature-surfaces { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.app-center-feature-surfaces span { padding: 3px 5px; border-radius: 5px; color: var(--text-secondary); background: var(--control-hover); font-size: 8px; }
+.app-center-feature-list p { margin: 8px 0 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 9px; line-height: 1.5; }
+.app-center-type-editor { min-width: 0; padding: 12px; border: 1px solid var(--border-subtle); border-radius: 10px; }
+.app-center-type-editor legend { padding: 0 5px; color: var(--text-muted); font-size: 10px; font-weight: 650; }
+.app-center-type-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-bottom: 10px; }
+.app-center-type-options label { display: flex; align-items: start; gap: 7px; overflow-wrap: anywhere; }
+.app-center-type-options input[type="checkbox"] { flex: none; width: 14px; height: 14px; padding: 0; margin: 0; accent-color: var(--accent); }
+.app-center-custom-type { display: flex; align-items: end; gap: 8px; margin-top: 12px; }
+.app-center-custom-type label { flex: 1; min-width: 0; }
+.app-center-custom-type button { flex: none; }
+
 @media (max-width: 1099px) {
   .app-center-header { grid-template-columns: auto 1fr auto; gap: 10px 16px; padding-inline: 24px; }
   .app-center-brand { grid-column: 1; grid-row: 1; min-width: 0; }
@@ -298,7 +327,8 @@
   .app-center-header-actions { grid-column: 2; grid-row: 1; }
   .app-center-close { grid-column: 2; grid-row: 1; }
   .app-center-sections { position: sticky; top: calc(103px + env(safe-area-inset-top)); z-index: 4; margin-top: 0; background: color-mix(in srgb, var(--surface-chrome-solid), transparent 10%); backdrop-filter: blur(16px); }
-  .app-center-filters { position: sticky; top: calc(151px + env(safe-area-inset-top)); z-index: 4; margin-top: 0; background: color-mix(in srgb, var(--surface-chrome-solid), transparent 10%); backdrop-filter: blur(16px); }
+  .app-center-filter-row { position: sticky; top: calc(151px + env(safe-area-inset-top)); z-index: 4; padding: 6px 12px; background: color-mix(in srgb, var(--surface-chrome-solid), transparent 10%); backdrop-filter: blur(16px); }
+  .app-center-filters { margin-top: 0; }
   .app-center-content { display: block; overflow: visible; padding: 24px 14px 80px; }
   .app-center-content.is-market { overflow: visible; }
   .app-center-grid { grid-template-columns: repeat(3, minmax(78px, 1fr)); gap: 30px 8px; align-content: start; }

@@ -10,6 +10,7 @@
   - [工作区交互](/architecture/workspace-ux.md)
   - [Chat 与 Run 信息体验](/architecture/chat-run-ux.md)
   - [Widget 与应用中心](/architecture/apps.md)
+  - [App 类型与功能标准](/architecture/app-types.md)
   - [持久 Run 与 Runtime](/architecture/runs.md)
   - [图数据库](/architecture/graph-db.md)
   - [图数据可视化](/architecture/graph-visualization.md)

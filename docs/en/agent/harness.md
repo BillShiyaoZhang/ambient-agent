@@ -1,5 +1,7 @@
 # Agent Harness: One Durable Control Plane
 
+The read-only `list_app_types` tool supplies the common type vocabulary; `list_app_specs` returns installed Apps and their feature declarations. Both require `workspace:read` and create no callable action or authority. Router and Coding Agent share [App Types and Features](/en/architecture/app-types.md); planned features are unavailable for execution.
+
 Chat, capability, MCP, and remote-Agent actions are all lifecycle-managed by `RunStore + RunCoordinator`. A WebSocket only persists input, submits Runs, resolves interactions, and projects durable events to clients; it no longer creates or owns an agent execution task.
 
 ## 1. Component boundaries

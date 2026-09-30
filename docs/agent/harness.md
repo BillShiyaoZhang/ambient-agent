@@ -1,5 +1,7 @@
 # Agent Harness：单一持久控制平面
 
+App 类型目录通过只读 `list_app_types` tool 提供；`list_app_specs` 返回已安装 App 的类型和功能声明。二者使用 `workspace:read` scope，不创建可执行 action，也不改变权限。Router 与 Coding Agent 使用同一 [App 类型与功能标准](/architecture/app-types.md)；计划功能不能当作已可用工具。
+
 Chat、Capability、MCP 和远端 Agent action 都由 `RunStore + RunCoordinator` 管理生命周期。WebSocket 只负责持久化输入、提交 Run、resolve interaction 和把持久事件投影给客户端；它不再创建或持有 agent 执行 task。
 
 ## 1. 组件边界
