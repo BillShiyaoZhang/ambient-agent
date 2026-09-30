@@ -375,12 +375,21 @@ def test_github_provider_rejects_mutable_or_non_standalone_sources(
         ).list_entries()
 
 
-def test_github_provider_rejects_symlinked_cache_ancestor(tmp_path: Path) -> None:
+def test_github_provider_rejects_symlinked_cache_ancestor(tmp_path: Path, monkeypatch) -> None:
     content = _skill_bytes("remote-review")
     outside = tmp_path / "outside"
     outside.mkdir()
     linked = tmp_path / "linked"
-    linked.symlink_to(outside, target_is_directory=True)
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        # Simulate filesystem link metadata when Windows denies link creation;
+        # the same public constructor must still reject the linked ancestor.
+        linked.mkdir()
+        original = Path.is_symlink
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked or original(path))
 
     with pytest.raises(SkillMarketError, match="cache path contains a symbolic link"):
         GitHubSkillCatalogProvider(

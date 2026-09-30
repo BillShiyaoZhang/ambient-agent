@@ -2,6 +2,11 @@
 .github
 .devcontainer
 .venv
+.tmp-uv-cache
+.agents
+.codex
+.aws
+audit-*/
 .pytest_cache
 .ruff_cache
 .mypy_cache

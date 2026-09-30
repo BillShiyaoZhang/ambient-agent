@@ -27,6 +27,13 @@ class GraphMigrationError(RuntimeError):
     """Legacy graph data could not be migrated without risking data loss."""
 
 
+class GraphCompensationConflict(ValueError):
+    """A conditional reverse effect no longer owns the current graph state."""
+
+    def __init__(self, message: str):
+        super().__init__(f"Graph compensation conflict: {message}")
+
+
 class GraphDatabase:
     def __init__(self, workspace_dir: str | None = None):
         if not workspace_dir:
@@ -372,19 +379,23 @@ class GraphDatabase:
             raise ValueError("Ontology entity id must be a non-empty string")
         schema_id = schema_id.strip()
         properties = validate_property_definition(properties, entity_id=schema_id)
-        existing = self.get_schema(schema_id)
-        if existing is not None:
-            properties = self._merge_entity_properties(schema_id, existing["properties"], properties)
-            is_core = is_core or existing["is_core"]
         correspondences = validate_correspondences(equivalent_to, entity_id=schema_id)
         if data_scope != USER_CONTEXT_SCOPE:
             raise ValueError(f"Ontology entity '{schema_id}' has non-context data_scope '{data_scope}'")
         if subclass_of == schema_id:
             raise ValueError(f"Ontology entity '{schema_id}' cannot be its own parent")
-        if subclass_of is not None and subclass_of != "Thing" and self.get_schema(subclass_of) is None:
-            raise ValueError(f"Ontology entity '{schema_id}' references missing parent '{subclass_of}'")
         ontology_iri = ontology_iri or f"urn:ambient:ontology:{schema_id}"
         with self.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT properties,is_core FROM graph_schemas WHERE id=?", (schema_id,)).fetchone()
+            if existing is not None:
+                properties = self._merge_entity_properties(schema_id, json.loads(existing["properties"]), properties)
+                is_core = is_core or bool(existing["is_core"])
+            if (
+                subclass_of is not None
+                and conn.execute("SELECT id FROM graph_schemas WHERE id=?", (subclass_of,)).fetchone() is None
+            ):
+                raise ValueError(f"Ontology entity '{schema_id}' references missing parent '{subclass_of}'")
             conn.execute(
                 """
                 INSERT INTO graph_schemas (
@@ -530,37 +541,10 @@ class GraphDatabase:
     def create_node(
         self, node_id: str | None = None, node_type: str = "Generic", properties: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        if not node_id:
-            node_id = str(uuid.uuid4())
-
-        raw_properties = properties or {}
-
-        # 1. Namespace Extraction & Verification
-        namespace = raw_properties.get("namespace")
-        if not namespace and node_id.startswith("app:"):
-            # Auto-namespace based on app id
-            parts = node_id.split(":")
-            if len(parts) >= 2:
-                namespace = parts[1]
-                raw_properties["namespace"] = namespace
-
-        # 2. Schema Validation
-        validated_properties = self.validate_properties(node_type, raw_properties)
-
-        with self.get_conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO graph_nodes (id, type, properties, namespace, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    type=excluded.type,
-                    properties=excluded.properties,
-                    namespace=excluded.namespace
-                """,
-                (node_id, node_type, json.dumps(validated_properties), namespace, datetime.now(UTC).isoformat()),
-            )
-
-        return {"id": node_id, "type": node_type, "properties": validated_properties}
+        result = self.apply_actions_atomic(
+            [{"action": "create_node", "id": node_id, "type": node_type, "properties": properties}]
+        )["actions"][0]
+        return {key: result[key] for key in ("id", "type", "properties")}
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         with self.get_conn() as conn:
@@ -600,24 +584,10 @@ class GraphDatabase:
             ]
 
     def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
-        node = self.get_node(node_id)
-        if not node:
-            raise ValueError(f"Node with ID '{node_id}' does not exist.")
-
-        updated_props = dict(node["properties"])
-        updated_props.update(properties)
-
-        validated_props = self.validate_properties(node["type"], updated_props)
-
-        namespace = validated_props.get("namespace")
-
-        with self.get_conn() as conn:
-            conn.execute(
-                "UPDATE graph_nodes SET properties = ?, namespace = ? WHERE id = ?",
-                (json.dumps(validated_props), namespace, node_id),
-            )
-
-        return {"id": node_id, "type": node["type"], "properties": validated_props}
+        result = self.apply_actions_atomic(
+            [{"action": "update_node_property", "id": node_id, "properties": properties}]
+        )["actions"][0]
+        return {key: result[key] for key in ("id", "type", "properties")}
 
     def delete_node(self, node_id: str) -> bool:
         with self.get_conn() as conn:
@@ -632,27 +602,10 @@ class GraphDatabase:
     def create_edge(
         self, from_id: str, to_id: str, edge_type: str, properties: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        # Validate that both nodes exist
-        if not self.get_node(from_id):
-            raise ValueError(f"Source node '{from_id}' does not exist.")
-        if not self.get_node(to_id):
-            raise ValueError(f"Target node '{to_id}' does not exist.")
-
-        edge_properties = properties or {}
-
-        with self.get_conn() as conn:
-            # Upsert edge
-            conn.execute(
-                """
-                INSERT INTO graph_edges (from_id, to_id, type, properties, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(from_id, to_id, type) DO UPDATE SET
-                    properties=excluded.properties
-                """,
-                (from_id, to_id, edge_type, json.dumps(edge_properties), datetime.now(UTC).isoformat()),
-            )
-
-        return {"from_id": from_id, "to_id": to_id, "type": edge_type, "properties": edge_properties}
+        result = self.apply_actions_atomic(
+            [{"action": "create_edge", "from_id": from_id, "to_id": to_id, "type": edge_type, "properties": properties}]
+        )["actions"][0]
+        return {key: result[key] for key in ("from_id", "to_id", "type", "properties")}
 
     def get_edges(self, node_id: str) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
@@ -760,6 +713,70 @@ class GraphDatabase:
             properties,
         )
 
+    @staticmethod
+    def _semantic_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+        if record is None:
+            return None
+        return {key: record[key] for key in ("id", "from_id", "to_id", "type", "properties") if key in record}
+
+    @staticmethod
+    def _incident_from_conn(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "from_id": row["from_id"],
+                "to_id": row["to_id"],
+                "type": row["type"],
+                "properties": json.loads(row["properties"] or "{}"),
+            }
+            for row in conn.execute(
+                "SELECT from_id,to_id,type,properties FROM graph_edges WHERE from_id=? OR to_id=?", (node_id, node_id)
+            )
+        ]
+
+    @classmethod
+    def _read_compensation_guard(
+        cls, reference: dict[str, Any], node_reader: Any, edge_reader: Any, incident_reader: Any
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(reference, dict)
+            or reference.get("version") != 1
+            or any(not isinstance(reference.get(key), dict) for key in ("nodes", "edges", "incident_edges"))
+        ):
+            raise GraphCompensationConflict("missing or invalid committed-state evidence")
+        nodes = {node_id: cls._semantic_record(node_reader(node_id)) for node_id in reference["nodes"]}
+        edges = {}
+        for key in reference["edges"]:
+            parts = key.split("\x1f")
+            if len(parts) != 3:
+                raise GraphCompensationConflict("invalid edge evidence")
+            edges[key] = cls._semantic_record(edge_reader(*parts))
+        incidents = {
+            node_id: sorted(
+                (cls._semantic_record(edge) for edge in incident_reader(node_id)),
+                key=lambda item: (item["from_id"], item["to_id"], item["type"]),
+            )
+            for node_id in reference["incident_edges"]
+        }
+        return {"version": 1, "nodes": nodes, "edges": edges, "incident_edges": incidents}
+
+    @classmethod
+    def _capture_compensation_guard(
+        cls, actions: list[dict[str, Any]], node_reader: Any, edge_reader: Any, incident_reader: Any
+    ) -> dict[str, Any]:
+        nodes = {
+            action["id"]: None
+            for action in actions
+            if action["action"]
+            in {"create_node", "update_node_property", "replace_node", "restore_node", "delete_node"}
+        }
+        edges = {
+            f"{action['from_id']}\x1f{action['to_id']}\x1f{action['type']}": None
+            for action in actions
+            if action["action"] in {"create_edge", "delete_edge"}
+        }
+        reference = {"version": 1, "nodes": nodes, "edges": edges, "incident_edges": dict(nodes)}
+        return cls._read_compensation_guard(reference, node_reader, edge_reader, incident_reader)
+
     def apply_actions_atomic(
         self,
         actions: list[dict[str, Any]],
@@ -767,6 +784,7 @@ class GraphDatabase:
         session_id: str | None = None,
         ticket_id: str | None = None,
         idempotency_key: str | None = None,
+        expected_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate and commit a mutation batch, its undo data, and ticket atomically.
 
@@ -786,6 +804,8 @@ class GraphDatabase:
         now = datetime.now(UTC).isoformat()
         ticket_id = ticket_id or (f"tkt-{uuid.uuid4().hex[:12]}" if session_id else None)
         canonical_input = json.dumps(actions, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if expected_state is not None:
+            canonical_input += json.dumps(expected_state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         input_hash = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
 
         with self.get_conn() as conn:
@@ -799,6 +819,13 @@ class GraphDatabase:
                     if existing_effect["input_hash"] != input_hash:
                         raise ValueError("Graph idempotency key was reused with different actions")
                     return json.loads(existing_effect["result_json"])
+            readers = (
+                lambda node_id: self._node_from_conn(conn, node_id),
+                lambda *key: self._edge_from_conn(conn, *key),
+                lambda node_id: self._incident_from_conn(conn, node_id),
+            )
+            if expected_state is not None and self._read_compensation_guard(expected_state, *readers) != expected_state:
+                raise GraphCompensationConflict("nodes or edges changed after this effect committed")
             for raw_action in actions:
                 action = dict(raw_action)
                 kind = self._required_text(action, "action")
@@ -1030,6 +1057,7 @@ class GraphDatabase:
                 "actions": normalized,
                 "reverse_actions": reverse_actions,
                 "snapshot_before": snapshot_before,
+                "compensation_guard": self._capture_compensation_guard(normalized, *readers),
             }
             if idempotency_key:
                 conn.execute(
@@ -1244,7 +1272,16 @@ class GraphDatabase:
                 if existing_effect:
                     if existing_effect["input_hash"] != input_hash:
                         raise ValueError("Schema idempotency key was reused with a different proposal")
-                    return json.loads(existing_effect["result_json"])
+                    stored = json.loads(existing_effect["result_json"])
+                    if not stored.get("compensated"):
+                        return stored
+                    conn.execute("DELETE FROM graph_effects WHERE idempotency_key=?", (idempotency_key,))
+            available = {row["id"] for row in conn.execute("SELECT id FROM graph_schemas").fetchall()}
+            available.update(item["id"] for item in normalized["new_schemas"])
+            for item in normalized["new_schemas"]:
+                parent = item.get("subclass_of")
+                if parent is not None and parent not in available:
+                    raise ValueError(f"Ontology entity '{item['id']}' references missing parent '{parent}'")
             for item in normalized["new_schemas"]:
                 existing_schema = conn.execute("SELECT id FROM graph_schemas WHERE id=?", (item["id"],)).fetchone()
                 if existing_schema is not None:
@@ -1292,7 +1329,11 @@ class GraphDatabase:
                         now,
                     ),
                 )
-            effect_result = {"proposal": normalized, "snapshot": snapshot}
+            snapshot_after = {
+                schema_id: dict(conn.execute("SELECT * FROM graph_schemas WHERE id=?", (schema_id,)).fetchone())
+                for schema_id in snapshot
+            }
+            effect_result = {"proposal": normalized, "snapshot": snapshot, "snapshot_after": snapshot_after}
             if idempotency_key:
                 conn.execute(
                     "INSERT INTO graph_effects(idempotency_key,input_hash,result_json,created_at) VALUES(?,?,?,?)",
@@ -1306,12 +1347,46 @@ class GraphDatabase:
         *,
         idempotency_key: str | None = None,
     ) -> None:
-        """Restore schemas and invalidate the matching effect ledger atomically."""
+        """Conditionally restore schemas and retain a compensated ledger tombstone."""
 
         if not isinstance(snapshot, dict):
             raise ValueError("Schema snapshot must be an object")
         with self.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            effect = (
+                conn.execute(
+                    "SELECT result_json FROM graph_effects WHERE idempotency_key=?", (idempotency_key,)
+                ).fetchone()
+                if idempotency_key
+                else None
+            )
+            if effect is None:
+                raise GraphCompensationConflict("schema effect evidence is missing")
+            result = json.loads(effect["result_json"])
+            if result.get("snapshot") != snapshot or not isinstance(result.get("snapshot_after"), dict):
+                raise GraphCompensationConflict("schema effect evidence does not match the snapshot")
+            if result.get("compensated"):
+                return
+            removed_entities = {schema_id for schema_id, old in snapshot.items() if old is None}
+            for schema_id, after in result["snapshot_after"].items():
+                row = conn.execute("SELECT * FROM graph_schemas WHERE id=?", (schema_id,)).fetchone()
+                if row is None or dict(row) != after:
+                    raise GraphCompensationConflict(
+                        f"ontology entity '{schema_id}' changed after this effect committed"
+                    )
+                old = snapshot[schema_id]
+                removed_fields = set(json.loads(after["properties"] or "{}")) - (
+                    set(json.loads(old["properties"] or "{}")) if old else set()
+                )
+                records = conn.execute("SELECT properties FROM graph_nodes WHERE type=?", (schema_id,)).fetchall()
+                if any(
+                    old is None or removed_fields.intersection(json.loads(record["properties"] or "{}"))
+                    for record in records
+                ):
+                    raise GraphCompensationConflict(f"ontology entity '{schema_id}' or its added fields are in use")
+                children = conn.execute("SELECT id FROM graph_schemas WHERE subclass_of=?", (schema_id,)).fetchall()
+                if old is None and any(child["id"] not in removed_entities for child in children):
+                    raise GraphCompensationConflict(f"ontology entity '{schema_id}' has dependent entities")
             for schema_id, old in snapshot.items():
                 if old is None:
                     conn.execute("DELETE FROM graph_schemas WHERE id=?", (schema_id,))
@@ -1344,7 +1419,11 @@ class GraphDatabase:
                     ),
                 )
             if idempotency_key:
-                conn.execute("DELETE FROM graph_effects WHERE idempotency_key=?", (idempotency_key,))
+                result["compensated"] = True
+                conn.execute(
+                    "UPDATE graph_effects SET result_json=? WHERE idempotency_key=?",
+                    (json.dumps(result), idempotency_key),
+                )
 
     # Backwards compatibility mappings for tests or direct node/edge lookups
     @property

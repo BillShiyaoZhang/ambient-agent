@@ -1,5 +1,7 @@
 import json
+import os
 import stat
+import subprocess
 
 import pytest
 
@@ -155,7 +157,29 @@ def test_stored_secret_is_separated_redacted_and_mode_0600(tmp_path):
     secret_file = tmp_path / "llm" / "secrets.json"
     assert "sk-super-secret" not in config_text
     assert "sk-super-secret" in secret_file.read_text(encoding="utf-8")
-    assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
+    if os.name == "nt":
+        script = (
+            "$ErrorActionPreference='Stop'; $acl=Get-Acl -LiteralPath $env:AMBIENT_TEST_SECRET_PATH; "
+            "[pscustomobject]@{protected=$acl.AreAccessRulesProtected; rules=@($acl.Access | "
+            "ForEach-Object {[pscustomobject]@{sid=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; "
+            "rights=[int]$_.FileSystemRights; inherited=$_.IsInherited; type=[int]$_.AccessControlType}})} | ConvertTo-Json -Depth 4 -Compress"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            env={
+                **{key: value for key, value in os.environ.items() if key.lower() != "psmodulepath"},
+                "AMBIENT_TEST_SECRET_PATH": str(secret_file),
+            },
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        acl = json.loads(result.stdout)
+        assert acl["protected"] is True
+        assert acl["rules"] == [{"sid": "S-1-3-4", "rights": 2032127, "inherited": False, "type": 0}]
+    else:
+        assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
     assert public["credentials"]["api_key"] == {
         "source": "stored",
         "configured": True,

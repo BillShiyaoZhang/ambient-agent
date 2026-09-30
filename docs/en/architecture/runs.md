@@ -68,7 +68,11 @@ Claiming a Run increments `lease_epoch`. Every durable step commit must match bo
 - expired `restart_safe` work returns to `queued`;
 - manual work with an uncertain external effect enters `needs_attention`;
 - remote effects such as MCP tools and HTTP Agents cannot opt into `restart_safe` by manifest assertion alone; only read-only calls or adapters with enforceable idempotency/reconciliation protocols are auto-recoverable;
-- graceful shutdown cancels the scheduler, heartbeat, and active workers, waits
+- graceful shutdown sets a stop-scheduling flag before cancelling the scheduler,
+  heartbeat, and active workers. Background loops exit even if a wake races task
+  cancellation and lets one wait return; they cannot claim another Run. Startup
+  cannot restart the scheduler until shutdown completes; the next complete
+  lifespan resets the flag. It waits
   for every worker's cancellation cleanup to finish, and only then releases
   this worker's leases and closes downstream shared resources such as the
   Graph adapter; it does not run cancellation compensation or change live
@@ -83,6 +87,8 @@ Cancelling a queued or waiting Widget Run first persists a cleanup tombstone in 
 Runs with a `session_id` share a persistent FIFO lane. A later Run cannot be claimed while an earlier Run in that session is `running`, `waiting_user`, `cancel_requested`, or `needs_attention`. Runs from different sessions can execute concurrently.
 
 Interaction resolution uses `run_version` for optimistic concurrency. The response, closure of sibling interactions, Run requeue, and events are committed together. Duplicate or stale responses produce a conflict rather than waking an unknown coroutine.
+
+For a raw approval response that is not an object, the durable reducer approves only literal JSON boolean `true`. Strings such as `"false"` or `"true"`, numbers, and arrays cannot become approvals through truthiness. Structured objects continue to follow the interaction's declared `approved`/edit branch protocol.
 
 `internal_agent` Runs resolve to `queued`, allowing the scheduler to resume from the checkpoint. MCP tool/resource and Agent adapters use the same durable interaction semantics and do not depend on a WebSocket connection or global Future. Promise-compatible calls persist `projection_type + call_id` in Run `correlation`; resubmitting the same idempotency key returns the original Run rather than repeating the external action. When the canonical Run stream replays a correlated Run, the bundled frontend reads its durable terminal state and re-emits the response, so a backend restart cannot leave an already-submitted call's Promise permanently pending.
 
@@ -118,6 +124,18 @@ The frontend must not discard an envelope merely because its `type` is unknown. 
 Before insertion, RunStore recursively replaces conventional secret/token/password keys and bounds oversized strings and collections, setting `redacted` when it changes content. Scheduler startup removes terminal-Run events older than `RUN_EVENT_RETENTION_DAYS`, which defaults to 30 days.
 
 ## 5. Adapters and APIs
+
+### Conditional compensation
+
+`permission.approved` accepts only JSON boolean `true`; strings or numbers cannot grant permission. A failed permission write leaves an unclaimable `queued` Run with its grant intent and a sanitized error. The scheduler retries every five seconds, and startup recovery is idempotent. A durable approved grant is separate from subsequently cancelling execution; cancellation does not revoke an already approved permission.
+
+Cancellation of a schema-commit or App-promotion thread cannot prove that its external effect has stopped. Retain staging/checkpoint and effect-in-flight evidence and enter `needs_attention`; do not delete an artifact that may still be publishing or roll back its approved schema.
+
+Permission resolution first validates the pending interaction, waiting-user Run, and expected Run version in one SQLite transaction, then records a valid approval in a durable permission-grant outbox. The grant intent and interaction-resolved event commit together. A queued Run cannot be claimed until the grant is persisted and the outbox entry is complete; completion wakes the scheduler. Stale, cancelled, or duplicate resolutions have no grant side effect, and denial records no grant. Coordinator recovery idempotently persists pending intents left by a crash; failures retain the intent and a redacted error for retry. Grant identities come from the original interaction's App/command identity, never a replacement supplied in the response.
+
+Each atomic graph-saga effect records the committed state of its touched nodes and edges as `compensation_guard`, checkpointed with its reverse actions. Compensation checks the guard and applies every reverse action in one write transaction. If another task changed any resource, the entire compensation batch makes no writes; the Run retains its evidence and enters `needs_attention` for reconciliation. Concurrent commits to different fields are preserved instead of overwritten by a full old node snapshot. Replaying an already committed compensation returns its idempotent result without changing later writes. Legacy checkpoints without guards cannot be compensated automatically.
+
+The Widget-publication schema effect ledger retains both before and after snapshots. When file publication fails, restoration is allowed only while the current schemas still match this effect's after-state and a newly created entity is unused by records or other schemas. Concurrent schema growth or use of a new entity causes a conditional rollback conflict; both tasks' committed data remains available and the Run enters `needs_attention`. A Neo4j transaction write lock, excluded from KG queries, coordinates checking and updating; SQLite provides the same atomic check through `BEGIN IMMEDIATE`.
 
 - `internal_agent`: versioned reducer, claimed by the scheduler and committed with fencing.
 - `mcp_tool`: executes through a managed MCP stdio client.

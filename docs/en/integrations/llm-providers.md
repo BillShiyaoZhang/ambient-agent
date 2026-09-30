@@ -6,7 +6,10 @@ Ambient Agent uses a workspace-scoped Provider Registry for model connections. T
 ## Configuration and secrets
 
 - Non-secret configuration is stored in `workspace/llm/config.json`.
-- UI credentials are stored in `workspace/llm/secrets.json`. The file must use mode `0600`; REST
+- UI credentials are stored in `workspace/llm/secrets.json`: POSIX uses mode `0600`, while Windows
+  uses a protected DACL allowing only the file owner, with inheritance disabled. Temporary files
+  receive these permissions before secrets are written; replacements and existing files are secured
+  again. Permission failures abort saving rather than silently broadening access. REST
   responses expose only `configured` and a mask, never the secret value.
 - A credential may reference an environment variable. Only the variable name is persisted.
 - Multiple profiles may use the same preset, such as personal OpenAI and company Azure accounts.
@@ -15,6 +18,13 @@ A Provider Profile contains its id, display name, preset, connection fields, cre
 and models. A model is identified by `provider_id/model_id` and records API mode, tool use, vision,
 reasoning, context window, and verification state. Discovery prefers the live provider API and then
 LiteLLM metadata; manual model ids are always supported.
+
+Rediscovery merges by model ID without replacing existing API modes, manual display names,
+sources, or verified capabilities. Duplicate IDs yield one entry; existing models absent from
+discovery remain available to default and session references. The merge uses the latest saved
+configuration after the network request, preserving edits made while discovery was pending.
+If the provider connection, preset, enabled state, or credentials change during the request,
+the stale response and metadata are discarded and the current model list is returned.
 
 ### MiniMax regions
 

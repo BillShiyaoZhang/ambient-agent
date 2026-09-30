@@ -24,6 +24,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    services:
+      neo4j:
+        image: neo4j:5.26.0-community
+        env:
+          NEO4J_AUTH: neo4j/ambient-ci-local
+          NEO4J_server_memory_heap_initial__size: 128m
+          NEO4J_server_memory_heap_max__size: 256m
+          NEO4J_server_memory_pagecache_size: 64m
+        ports:
+          - 17687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p ambient-ci-local 'RETURN 1'"
+          --health-interval 10s --health-timeout 10s --health-retries 12
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -61,6 +75,13 @@ jobs:
 
       - name: Run Pytest Tests
         run: PYTHONPATH=. uv run pytest
+
+      - name: Run real Neo4j compensation and concurrency regressions
+        env:
+          AMBIENT_TEST_NEO4J_URI: bolt://127.0.0.1:17687
+          AMBIENT_TEST_NEO4J_PASSWORD: ambient-ci-local
+          AMBIENT_TEST_NEO4J_ISOLATED: '1'
+        run: PYTHONPATH=. uv run pytest tests/backend/test_graph_compensation.py
 
       - name: Run UML Contract Consistency Check
         run: uv run python scripts/verify_uml.py

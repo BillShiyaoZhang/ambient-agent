@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
 import io
+import sys
 import tarfile
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
 import backend.main as main_module
@@ -67,6 +69,25 @@ def test_codex_environment_excludes_ambient_provider_credentials(monkeypatch):
     assert runtime_environment["CODEX_ACCESS_TOKEN"] == "native-codex-token"
 
 
+def test_coding_runtime_preserves_required_windows_os_environment_without_provider_secrets(tmp_path, monkeypatch):
+    required = {
+        "SYSTEMROOT": "C:/Windows",
+        "SYSTEMDRIVE": "C:",
+        "COMSPEC": "C:/Windows/System32/cmd.exe",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "USERPROFILE": "C:/Users/Audit",
+        "WINDIR": "C:/Windows",
+    }
+    for key, value in required.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-inherit")
+    monkeypatch.setenv("AMBIENT_TEST_SECRET", "must-not-inherit-either")
+    environment = CodingAgentRuntime(tmp_path / "workspace").process_environment("codex")
+    assert {key: environment.get(key) for key in required} == required
+    assert "OPENAI_API_KEY" not in environment
+    assert "AMBIENT_TEST_SECRET" not in environment
+
+
 @pytest.mark.asyncio
 async def test_runtime_reports_latest_install_failure(tmp_path, monkeypatch):
     runtime = CodingAgentRuntime(tmp_path / "workspace")
@@ -83,6 +104,63 @@ async def test_runtime_reports_latest_install_failure(tmp_path, monkeypatch):
 
     assert status["install_state"] == "failed"
     assert status["install_operation"]["error"] == "installer unavailable"
+
+
+@pytest_asyncio.fixture
+async def real_probe_children(monkeypatch):
+    children = []
+    started = asyncio.Event()
+    spawn = asyncio.create_subprocess_exec
+
+    async def capture(*args, **kwargs):
+        child = await spawn(*args, **kwargs)
+        children.append(child)
+        started.set()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    yield children, started
+    for child in children:
+        if child.returncode is None:
+            child.kill()
+        child._transport.close()
+        await asyncio.wait_for(child.wait(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_runtime_probe_timeout_reaps_child_and_closes_stdio(tmp_path, real_probe_children):
+    children, _ = real_probe_children
+    result = await CodingAgentRuntime(tmp_path)._run_probe(
+        [sys.executable, "-c", "import time; time.sleep(30)"], agent_id="codex"
+    )
+    assert result == (1, "")
+    assert children[0].returncode is not None
+    assert children[0]._transport.is_closing()
+
+
+@pytest.mark.asyncio
+async def test_runtime_probe_cancel_reaps_child_and_preserves_cancellation(tmp_path, real_probe_children):
+    children, started = real_probe_children
+    task = asyncio.create_task(
+        CodingAgentRuntime(tmp_path)._run_probe([sys.executable, "-c", "import time; time.sleep(30)"], agent_id="codex")
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert children[0].returncode is not None
+    assert children[0]._transport.is_closing()
+
+
+@pytest.mark.asyncio
+async def test_runtime_probe_success_preserves_output_and_closes_stdio(tmp_path, real_probe_children):
+    children, _ = real_probe_children
+    result = await CodingAgentRuntime(tmp_path)._run_probe(
+        [sys.executable, "-c", "print('codex-cli test')"], agent_id="codex"
+    )
+    assert result == (0, "codex-cli test")
+    assert children[0].returncode == 0
+    assert children[0]._transport.is_closing()
 
 
 @pytest.mark.asyncio
@@ -139,12 +217,32 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
     )
     monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", FakeClient)
     runtime = CodingAgentRuntime(tmp_path / "workspace")
+    monkeypatch.setattr(runtime, "managed_command", lambda _agent_id: runtime.agent_root("codex") / "bin" / "codex")
+    verified_paths = []
+
+    async def probe_verified_binary(argv, *, agent_id):
+        assert agent_id == "codex"
+        assert argv[1:] == ["--version"]
+        assert Path(argv[0]).read_bytes() == binary_payload
+        verified_paths.append(Path(argv[0]))
+        return 0, "codex-cli 0.145.0"
+
+    chmod_calls = {}
+    original_chmod = Path.chmod
+
+    def record_chmod(path, mode, **kwargs):
+        chmod_calls[path] = mode
+        return original_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(runtime, "_run_probe", probe_verified_binary)
+    monkeypatch.setattr(Path, "chmod", record_chmod)
 
     await runtime._install_codex("verified-release")
 
     binary = runtime.managed_command("codex")
     assert binary.read_bytes() == binary_payload
-    assert binary.stat().st_mode & 0o777 == 0o700
+    assert len(verified_paths) == 1
+    assert chmod_calls[verified_paths[0]] == 0o700
 
 
 @pytest.mark.asyncio
@@ -305,6 +403,15 @@ async def test_legacy_codex_entrypoint_delegates_to_the_unified_acp_runner(tmp_p
 @pytest.mark.asyncio
 async def test_runtime_install_and_device_auth_lifecycle(tmp_path, monkeypatch):
     runtime = CodingAgentRuntime(tmp_path / "workspace")
+    monkeypatch.setattr(
+        runtime,
+        "command",
+        lambda _agent_id: (
+            [sys.executable, str(runtime.managed_command("codex"))]
+            if runtime.managed_command("codex").is_file()
+            else None
+        ),
+    )
 
     async def fake_install(operation_id):
         binary = runtime.managed_command("codex")
@@ -367,8 +474,8 @@ async def test_runtime_discovers_native_models_from_codex_app_server(tmp_path, m
         encoding="utf-8",
     )
     fake_codex.chmod(0o755)
-    monkeypatch.setenv("CODEX_COMMAND", str(fake_codex))
     runtime = CodingAgentRuntime(tmp_path / "workspace")
+    monkeypatch.setattr(runtime, "command", lambda _agent_id: [sys.executable, str(fake_codex)])
 
     catalog = await runtime.models("codex")
 

@@ -128,3 +128,24 @@ Popovers support Escape, outside press, and focus return. Approval dialogs are b
 - Normal text targets WCAG AA contrast, and focus is never represented by color alone.
 
 Core state migration and geometry algorithms live in `frontend/src/lib/windowManager.ts`; interactions live in `AppWorkspace.tsx`; coverage lives in `tests/frontend/window_manager.test.ts` and `workspace_ui.test.tsx`.
+
+## Action forms and theme lifecycle
+
+- App Center validates action inputs using JSON Schema types, required fields, enum, and nested properties/items. Array/object fields accept JSON text and parse it before submission; integers must be integral and numbers finite.
+- Enum choices retain their original JSON value and type, including booleans, numbers, null, and structured values. A string and number with the same visible text remain distinct.
+- Empty optional fields without an explicit default are omitted, especially empty numbers rather than null. Missing required fields, type mismatches, invalid JSON, or invalid enum choices display a field error locally and do not start a Run.
+- Explicit schema defaults retain their value and type. Nested required fields and array items receive the same validation; the backend remains authoritative.
+- Nullable boolean text fields accept JSON true/false/null and submit the corresponding boolean or null value.
+- The theme controller supports setup→cleanup→setup. Resubscribing reconnects its system-media listener and reads the current system theme; releasing the last subscription removes the listener, and repeated destroy is safe.
+- StrictMode effect replay cannot stop System theme or leak a listener from the initial render. Manual preferences continue to take precedence over system changes.
+
+## Build and download size
+
+- Production builds retain Vite's default 500 kB chunk warning threshold. Stable React runtime dependencies have a separate chunk; vendor grouping itself preserves component mounting, event subscriptions, and request timing.
+- AppWorkspace loads its JavaScript module only under the existing nonempty-canvas condition, with an accessible workspace loading status on first load. Shared styles remain in the entry, and App retains canvas, chat, and task state. The loaded view uses the existing window and Widget lifecycles, and the empty-canvas home does not download the view's code.
+- The deferred Graph Explorer and its exclusive dependencies remain on demand. Broad vendor grouping must not pull them into the initial download.
+- Validation compares both entry size and the HTML's complete static JavaScript dependency graph, including total gzip size, and confirms that graphs remain dynamic dependencies. Moving bytes while increasing the initial download is not an improvement.
+- Splitting should allow dependency caches to survive application changes. Acceptance requires the complete frontend suite, lint, TypeScript/production build, and a browser check of the production output's initial load and main entry points.
+- The lockfile pins compatible development, build, and test dependencies, and npm audit checks all dependencies: Vitest and its matching mocker require at least 4.1.11, the current nanoid 3.x line at least 3.3.18, and the current undici 7.x line at least 7.29.1. Security updates retain the original advisories and failing audit, update compatible ranges, run npm ci, and require a clean audit plus the complete frontend gates. The production frontend image serves the built static assets.
+- The lockfile retains cross-platform optional dependencies and proves portability with Windows installation and production Node22/Linux npm ci. The host platform cannot drop entries required by another platform.
+- Deferred-graph integration tests wait for the real module import after request state commits, then assert graph nodes and privacy isolation. Acceptance does not depend on a one-second load deadline under cold caches and concurrent builds.

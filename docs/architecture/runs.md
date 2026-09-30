@@ -68,7 +68,7 @@ Worker 领取 Run 时递增 `lease_epoch`。所有 durable step commit 都必须
 - `restart_safe` 的过期 `running` Run 回到 `queued`；
 - 不能确认外部副作用的 manual Run 进入 `needs_attention`；
 - MCP tool、HTTP Agent 等远端 effect 不接受 manifest 单方面的 `restart_safe` 声明；只有只读调用或具备可强制幂等/对账协议的 adapter 才能自动恢复；
-- graceful shutdown 会取消 scheduler、heartbeat 与 active worker，并等待每个 worker 的取消清理真正结束后，才同步释放本 worker 的 lease 并关闭下游 Graph 等共享资源；它不会执行取消补偿或修改 live effect，只有已经持久化为 `cancel_requested` 的命令才允许补偿；
+- graceful shutdown 首先设置停止调度标志，再取消 scheduler、heartbeat 与 active worker；即使 wake 与 task cancellation 竞争使一次 wait 返回，后台 loop 也必须退出，不能继续领取 Run。等待每个 worker 的取消清理真正结束后，才同步释放本 worker 的 lease 并关闭下游 Graph 等共享资源；它不会执行取消补偿或修改 live effect，只有已经持久化为 `cancel_requested` 的命令才允许补偿；停止尚未完成时不能重新启动 scheduler，下一次完整 lifespan 可以重置标志并恢复调度；
 - `waiting_user` 不占 worker slot，但 interaction 和 Run 都保留在数据库中。
 
 queued / waiting Widget Run 被取消时，先在 state/checkpoint 中持久化 cleanup tombstone 并进入不可 claim 状态；transaction 提交后才通过受约束的 staging 路径幂等删除 artifact，随后以第二个 transaction 清除 tombstone 并终结。重启会恢复任一清理窗口；无法确认清理成功则进入 `needs_attention`，且不能绕过 tombstone 直接 reconciliation。`needs_attention` 不能再被 cancel 命令直接改写为 `cancelled`。操作者必须调用持久化 reconciliation 命令，明确选择 `confirmed_not_committed`、`compensated` 或 `confirmed_committed`；前两者允许之后显式 retry，确认已提交的副作用会保持 retry blocked，避免重复动作。
@@ -78,6 +78,8 @@ queued / waiting Widget Run 被取消时，先在 state/checkpoint 中持久化 
 带 `session_id` 的 Run 使用持久 FIFO lane。同一 session 中，只要较早 Run 仍为 `running`、`waiting_user`、`cancel_requested` 或 `needs_attention`，后续 Run 就不能被 claim；不同 session 仍可并行。
 
 interaction resolve 使用 `run_version` 做乐观并发检查。响应、其他待处理 interaction 的关闭、Run 重新入队及 events 在一个 transaction 中完成；重复或迟到响应返回冲突，而不是唤醒未知协程。
+
+Durable reducer 对非 object 的原始审批响应只把 JSON boolean `true` 转换为批准；`"false"`、`"true"`、数字、数组等值不能通过 truthiness 获批。结构化 object 继续按该 interaction 已声明的 `approved`/edit 分支协议解析。
 
 `internal_agent` Run resolve 到 `queued`，由 scheduler 从 checkpoint 继续。MCP tool/resource 和 Agent adapter 使用相同的持久 interaction 语义，不依赖 WebSocket 连接或全局 Future。需要兼容 Promise response 的调用把 `projection_type + call_id` 作为 Run `correlation` 持久化；客户端重发同一 idempotency key 时得到原 Run，而不是重复外部动作。内置前端在 canonical Run stream 重放到关联 Run 时读取其持久终态并重新触发 response，因此后端重启不会把已提交调用的 Promise 永久挂起。
 
@@ -113,6 +115,18 @@ v1 envelope 的 `schema_version` 必须为 `1`；`sequence` 为正整数，`even
 RunStore 在入库前递归替换常见 secret/token/password 键、截断超限字符串/集合，并设置 `redacted`。Scheduler 启动时清理超过 `RUN_EVENT_RETENTION_DAYS` 的终态 Run events，默认 30 天。
 
 ## 5. Adapter 与 API
+
+### 条件补偿
+
+`permission.approved` 只接受 JSON boolean `true`；字符串或数字不能授予权限。权限落盘失败时 Run 保持不可 claim 的 `queued`，保留授权 intent 与脱敏错误；scheduler 每 5 秒重试，重启恢复也幂等。批准后持久授权与随后执行取消分开；取消执行不撤销用户已经批准的权限。
+
+Schema commit 或 App promotion 的线程取消不能证明外部效果已停止。此时保留 staging/checkpoint 和 effect-in-flight 证据，进入 `needs_attention`；不得删除仍可能正在发布的 artifact 或回滚其已批准 schema。
+
+权限审批在 SQLite 单事务中先验证 pending interaction、waiting_user Run 与 expected_run_version，再解析有效批准并保存 permission-grant durable outbox；授权意图与 interaction_resolved 一起提交。权限落盘且 outbox 标记完成前，queued Run 不能被 claim；成功后唤醒 scheduler。过期、已取消或重复审批不产生授权副作用，拒绝不记录授权。进程崩溃留下的 pending intent 在 coordinator 恢复时幂等落盘；失败保留 intent 和脱敏错误，以供重试。授权身份来自原 interaction 的 App/command identity，用户 response 不能替换该身份。
+
+Graph saga 的每个 atomic effect 记录被触及节点及边的提交后状态 `compensation_guard`，并与 reverse actions 一起进入 checkpoint。补偿在同一个写事务中先校验 guard，再执行全部 reverse actions；任何资源已被另一任务修改时，整个补偿 batch 不写入，Run 进入 `needs_attention` 并保留补偿证据，等待用户核对。不同字段上的并发提交也必须保留，不能用整节点旧快照覆盖。已经成功补偿的幂等重放直接返回原结果，不再次改动后来写入的数据。缺少 guard 的旧 checkpoint 不允许自动补偿。
+
+Widget 发布的 schema effect ledger 同时保存变更前与变更后快照。文件发布失败时，只有当前 schema 仍等于该 effect 的提交后状态，且待删除的新实体未被记录或其他 schema 使用，才允许恢复旧快照并失效 effect。并发 schema 增长或新实体已被使用会导致条件回滚冲突；Run 保留双方已提交数据并进入 `needs_attention`。Neo4j 使用不进入 KG 查询的事务写锁协调检查和更新，SQLite 通过 `BEGIN IMMEDIATE` 提供同样的原子条件检查。
 
 - `internal_agent`：版本化 reducer；由 scheduler 领取并 fenced commit。
 - `mcp_tool`：通过托管的 MCP stdio client 执行。

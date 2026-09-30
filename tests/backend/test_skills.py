@@ -80,6 +80,7 @@ def _write_market_skill(
             allowed_tools=allowed_tools,
         ),
         encoding="utf-8",
+        newline="",
     )
     payload = {
         "market_id": f"{namespace}/{name}",

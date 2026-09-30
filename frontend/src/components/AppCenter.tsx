@@ -79,15 +79,22 @@ import "./AppCenter.css";
 export type CatalogKind = "generated_app" | "skill" | "mcp";
 export type CatalogStatus = "ready" | "needs_ui" | "generating" | "unavailable";
 
+export interface ActionInputSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  required?: string[];
+  properties?: Record<string, ActionInputSchema>;
+  items?: ActionInputSchema;
+}
+
 export interface CatalogAction {
   id: string;
   title: string;
   description?: string;
-  input_schema: {
-    type?: string;
-    required?: string[];
-    properties?: Record<string, { type?: string; title?: string; description?: string; default?: unknown; enum?: unknown[] }>;
-  };
+  input_schema: ActionInputSchema;
   result_schema?: Record<string, unknown>;
   recovery?: "manual" | "restart_safe";
 }
@@ -174,6 +181,85 @@ type AppEditorState = {
 
 const API_BASE = getApiBaseUrl();
 const FALLBACK_ACCENTS = ["#7c5cff", "#12b8a6", "#f59e58", "#e85d9e", "#4f8cff", "#76b852"];
+
+function inputTypes(schema: ActionInputSchema): string[] {
+  return typeof schema.type === "string" ? [schema.type] : schema.type ?? [];
+}
+
+function jsonValueKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(jsonValueKey).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${jsonValueKey((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function initialActionInput(action: CatalogAction): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(action.input_schema.properties ?? {}).map(([key, schema]) => [
+    key,
+    "default" in schema ? schema.default
+      : inputTypes(schema).includes("boolean") && !schema.enum && action.input_schema.required?.includes(key)
+        ? false : undefined,
+  ]));
+}
+
+function validateActionValue(value: unknown, schema: ActionInputSchema, path: string, isZh: boolean): void {
+  const types = inputTypes(schema);
+  const matches = (type: string) => {
+    if (type === "null") return value === null;
+    if (type === "array") return Array.isArray(value);
+    if (type === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+    if (type === "integer") return typeof value === "number" && Number.isSafeInteger(value);
+    if (type === "number") return typeof value === "number" && Number.isFinite(value);
+    if (type === "string" || type === "boolean") return typeof value === type;
+    return true;
+  };
+  if (types.length && !types.some(matches)) {
+    throw new Error(isZh ? `${path} 必须为 ${types.join(" 或 ")}。` : `${path} must be ${types.join(" or ")}.`);
+  }
+  if (schema.enum && !schema.enum.some((choice) => jsonValueKey(choice) === jsonValueKey(value))) {
+    throw new Error(isZh ? `${path} 必须选择列表中的值。` : `${path} must be one of the listed values.`);
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    for (const key of schema.required ?? []) {
+      if (!Object.prototype.hasOwnProperty.call(object, key) || object[key] === undefined) {
+        throw new Error(isZh ? `${path}.${key} 为必填项。` : `${path}.${key} is required.`);
+      }
+    }
+    for (const [key, item] of Object.entries(object)) {
+      if (schema.properties?.[key]) validateActionValue(item, schema.properties[key], `${path}.${key}`, isZh);
+    }
+  }
+  if (Array.isArray(value) && schema.items) {
+    value.forEach((item, index) => validateActionValue(item, schema.items!, `${path}[${index}]`, isZh));
+  }
+}
+
+function normalizedActionInput(action: CatalogAction, input: Record<string, unknown>, isZh: boolean): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, schema] of Object.entries(action.input_schema.properties ?? {})) {
+    let value = input[key];
+    const path = schema.title || key;
+    if (value === undefined || (value === "" && !("default" in schema))) {
+      if (!action.input_schema.required?.includes(key)) continue;
+      throw new Error(isZh ? `${path} 为必填项。` : `${path} is required.`);
+    }
+    const types = inputTypes(schema);
+    if (typeof value === "string" && !schema.enum && !types.includes("string")) {
+      if (types.includes("array") || types.includes("object") || types.includes("boolean") || (types.includes("null") && value === "null")) {
+        try { value = JSON.parse(value); }
+        catch { throw new Error(isZh ? `${path} 必须为有效的 JSON。` : `${path} must be valid JSON.`); }
+      } else if (types.includes("number") || types.includes("integer")) {
+        value = value.trim() === "" ? Number.NaN : Number(value);
+      }
+    }
+    validateActionValue(value, schema, path, isZh);
+    result[key] = value;
+  }
+  validateActionValue(result, action.input_schema, isZh ? "输入" : "Input", isZh);
+  return result;
+}
 
 function accentFor(item: CatalogItem): string {
   if (item.accent) return item.accent;
@@ -980,24 +1066,20 @@ export const AppCenter: React.FC<AppCenterProps> = ({
     setDetailsId(item.catalog_id);
     const action = item.actions?.[0];
     setSelectedActionId(action?.id ?? null);
-    setActionInput(Object.fromEntries(Object.entries(action?.input_schema.properties || {}).map(([key, schema]) => [key, schema.default ?? (schema.type === "boolean" ? false : "")])));
+    setActionInput(action ? initialActionInput(action) : {});
   };
 
   const selectAction = (action: CatalogAction) => {
     setSelectedActionId(action.id);
     setActionError("");
-    setActionInput(Object.fromEntries(Object.entries(action.input_schema.properties || {}).map(([key, schema]) => [key, schema.default ?? (schema.type === "boolean" ? false : "")])));
+    setActionInput(initialActionInput(action));
   };
 
   const submitAction = async (item: CatalogItem, action: CatalogAction) => {
     setActionSubmitting(true);
     setActionError("");
     try {
-      const normalized = Object.fromEntries(Object.entries(actionInput).map(([key, value]) => {
-        const type = action.input_schema.properties?.[key]?.type;
-        if (type === "number" || type === "integer") return [key, value === "" ? null : Number(value)];
-        return [key, value];
-      }));
+      const normalized = normalizedActionInput(action, actionInput, isZh);
       const response = await fetch(`${API_BASE}/api/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1970,13 +2052,13 @@ export const AppCenter: React.FC<AppCenterProps> = ({
                   <label key={key}>
                     <span>{schema.title || key}{selectedAction.input_schema.required?.includes(key) ? " *" : ""}</span>
                     {schema.enum ? (
-                      <select value={String(actionInput[key] ?? "")} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.value }))}>
-                        <option value="">—</option>{schema.enum.map((value) => <option key={String(value)} value={String(value)}>{String(value)}</option>)}
+                      <select value={actionInput[key] === undefined ? "" : JSON.stringify(schema.enum.find((value) => jsonValueKey(value) === jsonValueKey(actionInput[key])))} onChange={(event) => setActionInput((current) => ({ ...current, [key]: schema.enum?.find((value) => JSON.stringify(value) === event.target.value) }))}>
+                        <option value="">—</option>{schema.enum.map((value) => <option key={jsonValueKey(value)} value={JSON.stringify(value)}>{typeof value === "string" ? value : JSON.stringify(value)}</option>)}
                       </select>
                     ) : schema.type === "boolean" ? (
                       <input type="checkbox" checked={Boolean(actionInput[key])} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.checked }))} />
                     ) : (
-                      <input type={schema.type === "number" || schema.type === "integer" ? "number" : "text"} value={String(actionInput[key] ?? "")} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.value }))} placeholder={schema.description} />
+                      <input type={schema.type === "number" || schema.type === "integer" ? "number" : "text"} value={actionInput[key] === undefined ? "" : typeof actionInput[key] === "string" ? actionInput[key] as string : JSON.stringify(actionInput[key])} onChange={(event) => setActionInput((current) => ({ ...current, [key]: event.target.value }))} placeholder={schema.description} />
                     )}
                   </label>
                 ))}

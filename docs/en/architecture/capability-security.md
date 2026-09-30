@@ -131,7 +131,7 @@ The user approves an exact value, not “trust this App.” Denial prevents code
 | SDK membrane | Construct only approved SDK methods and bind every request to the current `app_id` | Reduce discoverable surface and prevent the Controller from selecting another App identity |
 | Backend authorizer | Reload grants from the persistent manifest, validate operation/resource, then call the adapter | Distrust frontend, WebSocket payloads, and Controller declarations |
 
-Every parsing ambiguity is denied. Stable errors include `code`, `capability`, `operation`, and safe `details`; they never return secrets, absolute host paths, or unbounded upstream bodies. Allowed and denied outcomes are audited.
+Every parsing ambiguity is denied. Stable errors include `code`, `capability`, `operation`, and safe `details`; they never return secrets, absolute host paths, or unbounded upstream bodies. Audit covers the integrated Run effect, Tool Gateway, adapter, and LLM paths. `CapabilityAuthorizer`, App file operations, and Graph queries do not yet share a per-request allow/deny audit hook; existing logs are not a complete capability access ledger.
 
 ## 6. Resource boundaries
 
@@ -152,6 +152,8 @@ Every parsing ambiguity is denied. Stable errors include `code`, `capability`, `
 
 - `app://data/` is the only Widget file root. Manifest, controller, README, staging, sessions, Graph, and LLM credentials are never visible.
 - Paths are normalized POSIX-relative paths. Empty paths, absolute paths, `..`, NUL, symlinks, and nonmatching globs are rejected.
+- File patterns match from the `app://data/` root, never by suffix. `exports/report.txt` does not authorize `private/exports/report.txt`; a single `*` does not cross directories, while trailing `/**` authorizes descendants of that directory.
+- Listing first validates directory read authority, then filters every returned file against the current Manifest revision and grants digest. Recursive traversal must not disclose descendant filenames outside the read grant.
 - Writes use a temporary file, `fsync`, and atomic replacement. Delete removes only an exactly approved regular file.
 
 ### Installed capabilities
@@ -177,3 +179,4 @@ Tests must prove that:
 4. A Widget sees only its approved SDK surface and cannot use forbidden host globals.
 5. Agent capability guidance is generated from a structured catalog shared with the authorizer.
 6. Chinese and English docs, manifest/schema examples, the static verifier, SDK, and backend policy use identical category IDs.
+7. Native-browser regressions must complete and exit with CSP and all security assertions intact. On completion or failure, close the browser before the frame HTTP server so browser-held connections cannot block server teardown; run each test file with a finite timeout.

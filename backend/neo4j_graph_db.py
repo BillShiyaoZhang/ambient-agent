@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.graph_db import GraphDatabase
+from backend.graph_db import GraphCompensationConflict, GraphDatabase
 from backend.ontology import (
     ONTOLOGY_ID,
     ONTOLOGY_VERSION,
@@ -74,7 +74,18 @@ class Neo4jGraphDatabase(GraphDatabase):
 
     def _write(self, callback: Callable[..., Any], *args: Any) -> Any:
         with self.driver.session(database=self.database) as session:
-            return session.execute_write(callback, *args)
+
+            def guarded(tx: Any) -> Any:
+                if getattr(self, "_write_lock_ready", False):
+                    # The property increment takes a write lock before callbacks
+                    # read their conditional guards, including absent resources.
+                    tx.run(
+                        "MERGE (lock:GraphWriteLock {id: $id}) SET lock.revision = coalesce(lock.revision, 0) + 1",
+                        id=ONTOLOGY_ID,
+                    ).consume()
+                return callback(tx, *args)
+
+            return session.execute_write(guarded)
 
     @staticmethod
     def _bootstrap_entities(
@@ -96,6 +107,7 @@ class Neo4jGraphDatabase(GraphDatabase):
         return entities
 
     def load(self) -> None:
+        self._write_lock_ready = False
         constraints = (
             "CREATE CONSTRAINT ambient_ontology_id IF NOT EXISTS FOR (n:Ontology) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT ambient_entity_id IF NOT EXISTS FOR (n:OntologyEntity) REQUIRE n.id IS UNIQUE",
@@ -103,10 +115,12 @@ class Neo4jGraphDatabase(GraphDatabase):
             "CREATE CONSTRAINT ambient_effect_key IF NOT EXISTS FOR (n:GraphEffect) REQUIRE n.idempotency_key IS UNIQUE",
             "CREATE CONSTRAINT ambient_history_id IF NOT EXISTS FOR (n:GraphMutationHistory) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT ambient_migration_id IF NOT EXISTS FOR (n:GraphMigration) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT ambient_write_lock_id IF NOT EXISTS FOR (n:GraphWriteLock) REQUIRE n.id IS UNIQUE",
         )
         now = datetime.now(UTC).isoformat()
         for statement in constraints:
             self._write(lambda tx, query: tx.run(query).consume(), statement)
+        self._write_lock_ready = True
 
         def initialize(tx: Any) -> None:
             tx.run(
@@ -216,17 +230,11 @@ class Neo4jGraphDatabase(GraphDatabase):
     ) -> dict[str, Any]:
         schema_id = self._required_text({"id": schema_id}, "id")
         properties = validate_property_definition(properties, entity_id=schema_id)
-        existing = self.get_schema(schema_id)
-        if existing is not None:
-            properties = self._merge_entity_properties(schema_id, existing["properties"], properties)
-            is_core = is_core or existing["is_core"]
         correspondences = validate_correspondences(equivalent_to, entity_id=schema_id)
         if data_scope != USER_CONTEXT_SCOPE:
             raise ValueError(f"Ontology entity '{schema_id}' has non-context data_scope '{data_scope}'")
         if subclass_of == schema_id:
             raise ValueError(f"Ontology entity '{schema_id}' cannot be its own parent")
-        if subclass_of is not None and self.get_schema(subclass_of) is None:
-            raise ValueError(f"Ontology entity '{schema_id}' references missing parent '{subclass_of}'")
         ontology_iri = ontology_iri or f"urn:ambient:ontology:{schema_id}"
         schema = {
             "id": schema_id,
@@ -245,6 +253,14 @@ class Neo4jGraphDatabase(GraphDatabase):
         now = datetime.now(UTC).isoformat()
 
         def upsert(tx: Any) -> None:
+            existing = self._tx_full_schema(tx, schema_id)
+            merged = (
+                self._merge_entity_properties(schema_id, existing["properties"], properties) if existing else properties
+            )
+            schema["properties"] = merged
+            schema["is_core"] = is_core or bool(existing and existing["is_core"])
+            if subclass_of is not None and self._tx_get_schema(tx, subclass_of) is None:
+                raise ValueError(f"Ontology entity '{schema_id}' references missing parent '{subclass_of}'")
             tx.run(
                 """
                 MATCH (o:Ontology {id: $ontology_id})
@@ -272,7 +288,7 @@ class Neo4jGraphDatabase(GraphDatabase):
                 """,
                 ontology_id=ONTOLOGY_ID,
                 entity=schema,
-                properties_json=_json(properties),
+                properties_json=_json(merged),
                 now=now,
             ).consume()
 
@@ -405,24 +421,10 @@ class Neo4jGraphDatabase(GraphDatabase):
     def create_node(
         self, node_id: str | None = None, node_type: str = "Generic", properties: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        node_id = node_id or str(uuid.uuid4())
-        raw_properties = dict(properties or {})
-        if "namespace" not in raw_properties and node_id.startswith("app:"):
-            parts = node_id.split(":")
-            if len(parts) >= 2:
-                raw_properties["namespace"] = parts[1]
-        validated = self.validate_properties(node_type, raw_properties)
-        now = datetime.now(UTC).isoformat()
-        self._write(
-            lambda tx: self._tx_upsert_node(
-                tx,
-                node_id=node_id,
-                node_type=node_type,
-                properties=validated,
-                now=now,
-            )
-        )
-        return {"id": node_id, "type": node_type, "ontology_entity_id": node_type, "properties": validated}
+        result = self.apply_actions_atomic(
+            [{"action": "create_node", "id": node_id, "type": node_type, "properties": properties}]
+        )["actions"][0]
+        return {**{key: result[key] for key in ("id", "type", "properties")}, "ontology_entity_id": result["type"]}
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         node = self._read(lambda tx: self._tx_get_node(tx, node_id))
@@ -513,21 +515,10 @@ class Neo4jGraphDatabase(GraphDatabase):
         return snapshot
 
     def update_node_property(self, node_id: str, properties: dict[str, Any]) -> dict[str, Any]:
-        node = self.get_node(node_id)
-        if node is None:
-            raise ValueError(f"Node with ID '{node_id}' does not exist.")
-        validated = self.validate_properties(node["type"], {**node["properties"], **properties})
-        now = datetime.now(UTC).isoformat()
-        self._write(
-            lambda tx: self._tx_upsert_node(
-                tx,
-                node_id=node_id,
-                node_type=node["type"],
-                properties=validated,
-                now=now,
-            )
-        )
-        return {"id": node_id, "type": node["type"], "ontology_entity_id": node["type"], "properties": validated}
+        result = self.apply_actions_atomic(
+            [{"action": "update_node_property", "id": node_id, "properties": properties}]
+        )["actions"][0]
+        return {**{key: result[key] for key in ("id", "type", "properties")}, "ontology_entity_id": result["type"]}
 
     def delete_node(self, node_id: str) -> bool:
         def delete(tx: Any) -> bool:
@@ -601,23 +592,10 @@ class Neo4jGraphDatabase(GraphDatabase):
     def create_edge(
         self, from_id: str, to_id: str, edge_type: str, properties: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        if self.get_node(from_id) is None:
-            raise ValueError(f"Source node '{from_id}' does not exist.")
-        if self.get_node(to_id) is None:
-            raise ValueError(f"Target node '{to_id}' does not exist.")
-        edge_properties = dict(properties or {})
-        now = datetime.now(UTC).isoformat()
-        self._write(
-            lambda tx: self._tx_upsert_edge(
-                tx,
-                from_id=from_id,
-                to_id=to_id,
-                edge_type=edge_type,
-                properties=edge_properties,
-                now=now,
-            )
-        )
-        return {"from_id": from_id, "to_id": to_id, "type": edge_type, "properties": edge_properties}
+        result = self.apply_actions_atomic(
+            [{"action": "create_edge", "from_id": from_id, "to_id": to_id, "type": edge_type, "properties": properties}]
+        )["actions"][0]
+        return {key: result[key] for key in ("from_id", "to_id", "type", "properties")}
 
     def get_edges(self, node_id: str) -> list[dict[str, Any]]:
         def fetch(tx: Any) -> list[dict[str, Any]]:
@@ -710,6 +688,7 @@ class Neo4jGraphDatabase(GraphDatabase):
         session_id: str | None = None,
         ticket_id: str | None = None,
         idempotency_key: str | None = None,
+        expected_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(actions, list) or not actions:
             raise ValueError("Graph mutation must contain at least one action")
@@ -723,6 +702,8 @@ class Neo4jGraphDatabase(GraphDatabase):
         now = datetime.now(UTC).isoformat()
         ticket_id = ticket_id or (f"tkt-{uuid.uuid4().hex[:12]}" if session_id else None)
         canonical_input = _json(actions)
+        if expected_state is not None:
+            canonical_input += _json(expected_state)
         input_hash = hashlib.sha256(canonical_input.encode("utf-8")).hexdigest()
 
         def commit(tx: Any) -> dict[str, Any]:
@@ -738,6 +719,14 @@ class Neo4jGraphDatabase(GraphDatabase):
                     if existing["input_hash"] != input_hash:
                         raise ValueError("Graph idempotency key was reused with different actions")
                     return json.loads(existing["result_json"])
+
+            readers = (
+                lambda node_id: self._tx_get_node(tx, node_id),
+                lambda *key: self._tx_get_edge(tx, *key),
+                lambda node_id: self._tx_incident_edges(tx, node_id),
+            )
+            if expected_state is not None and self._read_compensation_guard(expected_state, *readers) != expected_state:
+                raise GraphCompensationConflict("nodes or edges changed after this effect committed")
 
             normalized: list[dict[str, Any]] = []
             reverse_actions: list[dict[str, Any]] = []
@@ -975,6 +964,7 @@ class Neo4jGraphDatabase(GraphDatabase):
                 "actions": normalized,
                 "reverse_actions": reverse_actions,
                 "snapshot_before": snapshot_before,
+                "compensation_guard": self._capture_compensation_guard(normalized, *readers),
             }
             if idempotency_key:
                 tx.run(
@@ -1112,9 +1102,18 @@ class Neo4jGraphDatabase(GraphDatabase):
                 if existing:
                     if existing["input_hash"] != input_hash:
                         raise ValueError("Schema idempotency key was reused with a different proposal")
-                    return json.loads(existing["result_json"])
+                    stored = json.loads(existing["result_json"])
+                    if not stored.get("compensated"):
+                        return stored
+                    tx.run(
+                        "MATCH (effect:GraphEffect {idempotency_key: $key}) DELETE effect", key=idempotency_key
+                    ).consume()
 
+            new_ids = {item["id"] for item in normalized["new_schemas"]}
             for item in normalized["new_schemas"]:
+                parent = item.get("subclass_of")
+                if parent is not None and parent not in new_ids and self._tx_full_schema(tx, parent) is None:
+                    raise ValueError(f"Ontology entity '{item['id']}' references missing parent '{parent}'")
                 if self._tx_full_schema(tx, item["id"]) is not None:
                     raise ValueError(
                         f"Ontology entity '{item['id']}' already exists; extend the canonical entity instead"
@@ -1174,7 +1173,8 @@ class Neo4jGraphDatabase(GraphDatabase):
                     now=now,
                 ).consume()
 
-            result = {"proposal": normalized, "snapshot": snapshot}
+            snapshot_after = {schema_id: self._tx_full_schema(tx, schema_id) for schema_id in snapshot}
+            result = {"proposal": normalized, "snapshot": snapshot, "snapshot_after": snapshot_after}
             if idempotency_key:
                 tx.run(
                     """
@@ -1214,6 +1214,40 @@ class Neo4jGraphDatabase(GraphDatabase):
             raise ValueError("Schema snapshot must be an object")
 
         def restore(tx: Any) -> None:
+            effect = (
+                tx.run(
+                    "MATCH (effect:GraphEffect {idempotency_key: $key}) RETURN effect.result_json AS result_json",
+                    key=idempotency_key,
+                ).single()
+                if idempotency_key
+                else None
+            )
+            if effect is None:
+                raise GraphCompensationConflict("schema effect evidence is missing")
+            result = json.loads(effect["result_json"])
+            if result.get("snapshot") != snapshot or not isinstance(result.get("snapshot_after"), dict):
+                raise GraphCompensationConflict("schema effect evidence does not match the snapshot")
+            if result.get("compensated"):
+                return
+            for schema_id, after in result["snapshot_after"].items():
+                if self._tx_full_schema(tx, schema_id) != after:
+                    raise GraphCompensationConflict(
+                        f"ontology entity '{schema_id}' changed after this effect committed"
+                    )
+                old = snapshot[schema_id]
+                removed_fields = set(after["properties"]) - (set(old["properties"]) if old else set())
+                records = tx.run(
+                    "MATCH (n:ContextRecord)-[:INSTANCE_OF]->(:OntologyEntity {id: $id}) RETURN n.properties_json AS properties_json",
+                    id=schema_id,
+                )
+                if any(
+                    old is None or removed_fields.intersection(json.loads(record["properties_json"] or "{}"))
+                    for record in records
+                ):
+                    raise GraphCompensationConflict(f"ontology entity '{schema_id}' or its added fields are in use")
+                children = tx.run("MATCH (child:OntologyEntity {subclass_of: $id}) RETURN child.id AS id", id=schema_id)
+                if old is None and any(snapshot.get(child["id"], {}) is not None for child in children):
+                    raise GraphCompensationConflict(f"ontology entity '{schema_id}' has dependent entities")
             for schema_id, old in snapshot.items():
                 if old is None:
                     in_use = tx.run(
@@ -1260,9 +1294,11 @@ class Neo4jGraphDatabase(GraphDatabase):
                     properties_json=_json(old["properties"]),
                 ).consume()
             if idempotency_key:
+                result["compensated"] = True
                 tx.run(
-                    "MATCH (effect:GraphEffect {idempotency_key: $key}) DELETE effect",
+                    "MATCH (effect:GraphEffect {idempotency_key: $key}) SET effect.result_json = $result_json",
                     key=idempotency_key,
+                    result_json=_json(result),
                 ).consume()
 
         self._write(restore)

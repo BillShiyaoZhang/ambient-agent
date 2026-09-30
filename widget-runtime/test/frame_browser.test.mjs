@@ -20,24 +20,31 @@ const CHROMIUM_PATH = CHROMIUM_CANDIDATES.find((candidate) =>
 
 test(
   "renders a controller natively while CSP blocks its direct network access",
-  { skip: CHROMIUM_PATH ? false : "Chromium is not installed" },
+  {
+    skip: CHROMIUM_PATH ? false : "Chromium is not installed",
+    timeout: 30_000,
+  },
   async (context) => {
     const server = createFrameServer();
     await new Promise((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve);
     });
-    context.after(
-      () => new Promise((resolve) => server.close(resolve)),
-    );
+    let browser;
+    context.after(async () => {
+      try {
+        await browser?.close();
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
     const address = server.address();
     const frameUrl = `http://127.0.0.1:${address.port}/frame.html`;
 
-    const browser = await chromium.launch({
+    browser = await chromium.launch({
       executablePath: CHROMIUM_PATH,
       headless: true,
     });
-    context.after(() => browser.close());
     const page = await browser.newPage();
     const pageErrors = [];
     const diagnostics = [];

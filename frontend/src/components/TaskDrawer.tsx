@@ -94,6 +94,58 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   const [detailView, setDetailView] = useState<DetailView>("overview");
   const [error, setError] = useState("");
   const runsRefreshGeneration = useRef(0);
+  const selectedIdRef = useRef<string | null>(null);
+  const selectionGeneration = useRef(0);
+  const detailGeneration = useRef(0);
+  const openRef = useRef(open);
+  const mountedRef = useRef(true);
+  const actionPendingRef = useRef(false);
+  const [actionPending, setActionPending] = useState(false);
+  openRef.current = open;
+
+  const clearSelection = useCallback(() => {
+    selectedIdRef.current = null;
+    selectionGeneration.current += 1;
+    detailGeneration.current += 1;
+    setSelectedId(null);
+    setSelected(null);
+    setDetailView("overview");
+    setError("");
+  }, []);
+
+  const closeDrawer = () => {
+    clearSelection();
+    onClose();
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      selectedIdRef.current = null;
+      selectionGeneration.current += 1;
+      detailGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) clearSelection();
+  }, [clearSelection, open]);
+
+  const refreshSelected = useCallback(async (runId: string) => {
+    if (!mountedRef.current || !openRef.current || selectedIdRef.current !== runId) return;
+    const generation = ++detailGeneration.current;
+    const isCurrent = () => mountedRef.current && openRef.current
+      && selectedIdRef.current === runId && detailGeneration.current === generation;
+    try {
+      const next = await runService.get(runId);
+      if (!isCurrent()) return;
+      if (next.id !== runId) throw new Error("The returned task does not match the selected task");
+      setSelected(next);
+    } catch (detailError) {
+      if (isCurrent()) setError(detailError instanceof Error ? detailError.message : String(detailError));
+    }
+  }, []);
 
   const refreshRuns = useCallback(async () => {
     const generation = ++runsRefreshGeneration.current;
@@ -112,7 +164,6 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
         ...recentRuns,
         ...openRuns.filter((run) => !recentIds.has(run.id)),
       ]);
-      setError("");
     } catch (refreshError) {
       if (generation !== runsRefreshGeneration.current) return;
       setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
@@ -126,7 +177,6 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
   const refreshRuntimes = useCallback(async () => {
     try {
       setRuntimes(await runService.runtimes());
-      setError("");
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
     }
@@ -173,9 +223,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
         await Promise.all([
           refreshRuns(),
           loadSelected
-            ? runService.get(loadSelected).then((nextSelected) => {
-                if (!disposed) setSelected(nextSelected);
-              })
+            ? refreshSelected(loadSelected)
             : Promise.resolve(),
           open && tab === "runtimes" ? refreshRuntimes() : Promise.resolve(),
         ]);
@@ -199,7 +247,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
       if (maxWaitTimer !== null) window.clearTimeout(maxWaitTimer);
       unsubscribe();
     };
-  }, [open, refreshRuns, refreshRuntimes, selectedId, tab]);
+  }, [open, refreshRuns, refreshRuntimes, refreshSelected, selectedId, tab]);
 
   useEffect(() => {
     if (open && tab === "runtimes") void refreshRuntimes();
@@ -229,36 +277,54 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
     ? runErrorPresentation(selected.error, language)
     : null;
 
-  const perform = async (operation: () => Promise<unknown>) => {
+  const perform = async (operation: () => Promise<unknown>, targetRunId?: string) => {
+    if (actionPendingRef.current || (targetRunId && targetRunId !== selectedIdRef.current)) return;
+    const selectionAtStart = selectedIdRef.current;
+    const generationAtStart = selectionGeneration.current;
+    const isCurrentSelection = () => mountedRef.current && openRef.current
+      && selectedIdRef.current === selectionAtStart && selectionGeneration.current === generationAtStart;
+    actionPendingRef.current = true;
+    setActionPending(true);
+    setError("");
     try {
       await operation();
       await Promise.all([
         refreshRuns(),
-        selectedId ? runService.get(selectedId).then(setSelected) : Promise.resolve(),
+        selectionAtStart && isCurrentSelection()
+          ? refreshSelected(selectionAtStart) : Promise.resolve(),
         tab === "runtimes" ? refreshRuntimes() : Promise.resolve(),
       ]);
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : String(actionError));
+      if (mountedRef.current && openRef.current && (!targetRunId || isCurrentSelection())) {
+        setError(actionError instanceof Error ? actionError.message : String(actionError));
+      }
+    } finally {
+      actionPendingRef.current = false;
+      if (mountedRef.current) setActionPending(false);
     }
   };
 
-  const openDetail = async (run: AmbientRunSummary) => {
+  const openDetail = (run: AmbientRunSummary) => {
     setDetailView("overview");
+    selectionGeneration.current += 1;
+    selectedIdRef.current = run.id;
     setSelectedId(run.id);
-    setSelected(await runService.get(run.id));
+    setSelected(null);
+    setError("");
+    void refreshSelected(run.id);
   };
 
   return (
     <SystemDrawer
       open={open}
-      onClose={onClose}
+      onClose={closeDrawer}
       label={isZh ? "任务中心" : "Task Center"}
       closeLabel={isZh ? "关闭任务中心" : "Close Task Center"}
       className="task-drawer"
     >
         <header>
           <div><h2>{isZh ? "任务中心" : "Task Center"}</h2><p>{isZh ? "后台工作与运行环境" : "Background work and runtimes"}</p></div>
-          <SystemIconButton onClick={onClose} label={isZh ? "关闭" : "Close"}><X size={18} /></SystemIconButton>
+          <SystemIconButton onClick={closeDrawer} label={isZh ? "关闭" : "Close"}><X size={18} /></SystemIconButton>
         </header>
         <nav>
           <button className={tab === "active" ? "is-active" : ""} onClick={() => setTab("active")}>{isZh ? "进行中" : "Active"}<span>{counts.active}</span></button>
@@ -275,7 +341,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
                   <Server size={17} />
                   <div><strong>{runtime.id}</strong><small>{runtime.type} · {runtime.status}</small></div>
                   {runtime.managed && runtime.status !== "stopped" && (
-                    <button onClick={() => perform(() => runService.stopRuntime(runtime.id))}>{isZh ? "停止" : "Stop"}</button>
+                    <button disabled={actionPending} onClick={() => perform(() => runService.stopRuntime(runtime.id))}>{isZh ? "停止" : "Stop"}</button>
                   )}
                 </article>
               ))}
@@ -298,12 +364,18 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
             ))
           )}
         </div>
-        {selected && (
+        {selectedId && !selected && (
+          <section className="task-run-detail" role="status">
+            <SystemIconButton label={isZh ? "返回任务列表" : "Back to task list"} onClick={clearSelection}>←</SystemIconButton>
+            <p><LoaderCircle size={15} />{isZh ? "正在加载任务详情…" : "Loading task details…"}</p>
+          </section>
+        )}
+        {selected && selected.id === selectedId && (
           <section className="task-run-detail">
             <header>
               <SystemIconButton
                 label={isZh ? "返回任务列表" : "Back to task list"}
-                onClick={() => { setSelected(null); setSelectedId(null); setDetailView("overview"); }}
+                onClick={clearSelection}
               >
                 ←
               </SystemIconButton>
@@ -311,7 +383,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
               <SystemIconButton
                 className="task-detail-close"
                 label={isZh ? "关闭任务中心" : "Close Task Center"}
-                onClick={onClose}
+                onClick={closeDrawer}
               >
                 <X size={17} />
               </SystemIconButton>
@@ -354,7 +426,7 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
                   <div className="task-interaction" key={interaction.id}>
                     <strong>{interaction.prompt}</strong>
                     <pre>{JSON.stringify(interaction.payload, null, 2)}</pre>
-                    <div><button onClick={() => perform(() => runService.resolve(interaction.id, { approved: false }))}>{isZh ? "拒绝" : "Deny"}</button><button className="is-primary" onClick={() => perform(() => runService.resolve(interaction.id, { approved: true }))}>{isZh ? "允许" : "Allow"}</button></div>
+                    <div><button disabled={actionPending} onClick={() => perform(() => runService.resolve(interaction.id, { approved: false }), selected.id)}>{isZh ? "拒绝" : "Deny"}</button><button disabled={actionPending} className="is-primary" onClick={() => perform(() => runService.resolve(interaction.id, { approved: true }), selected.id)}>{isZh ? "允许" : "Allow"}</button></div>
                   </div>
                 ))}
                 {selected.result !== undefined && selected.result !== null && <><h4>{isZh ? "结果" : "Result"}</h4><pre>{JSON.stringify(selected.result, null, 2)}</pre></>}
@@ -378,16 +450,16 @@ export function TaskDrawer({ open, language, onClose, onCountsChange, onOpenSour
                 )}
                 <h4>{isZh ? "输入" : "Input"}</h4><pre>{JSON.stringify(selected.input, null, 2)}</pre>
                 <footer>
-                  {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button onClick={() => perform(() => runService.cancel(selected.id))}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
+                  {ACTIVE.has(selected.status) || selected.status === "waiting_user" ? <button disabled={actionPending} onClick={() => perform(() => runService.cancel(selected.id), selected.id)}><CircleStop size={15} />{isZh ? "取消" : "Cancel"}</button> : null}
                   {["failed", "cancelled"].includes(selected.status)
                     && selected.error?.retryable !== false
                     && !["unknown", "committed"].includes(selected.error?.effect_state || "")
-                    ? <button onClick={() => perform(() => runService.retry(selected.id))}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button>
+                    ? <button disabled={actionPending} onClick={() => perform(() => runService.retry(selected.id), selected.id)}><RotateCcw size={15} />{isZh ? "重试" : "Retry"}</button>
                     : null}
                   {selected.status === "needs_attention" ? <>
-                    <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"))}>{isZh ? "确认未执行" : "Not committed"}</button>
-                    <button onClick={() => perform(() => runService.reconcile(selected.id, "compensated"))}>{isZh ? "确认已补偿" : "Compensated"}</button>
-                    <button onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_committed"))}>{isZh ? "确认已执行" : "Committed"}</button>
+                    <button disabled={actionPending} onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_not_committed"), selected.id)}>{isZh ? "确认未执行" : "Not committed"}</button>
+                    <button disabled={actionPending} onClick={() => perform(() => runService.reconcile(selected.id, "compensated"), selected.id)}>{isZh ? "确认已补偿" : "Compensated"}</button>
+                    <button disabled={actionPending} onClick={() => perform(() => runService.reconcile(selected.id, "confirmed_committed"), selected.id)}>{isZh ? "确认已执行" : "Committed"}</button>
                   </> : null}
                 </footer>
               </>

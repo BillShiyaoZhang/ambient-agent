@@ -34,9 +34,21 @@ Coding Agent 只在 per-Run staging App 中工作：
 
 路径/argv/env/staging policy 降低风险，但不是完整 OS 网络/文件系统隔离。它不能替代 Widget runtime authorizer。
 
+Windows 子进程保留运行 Node、系统 shell 和原生 CLI 所必需的非秘密 OS 变量：`SYSTEMROOT`、`SYSTEMDRIVE`、`COMSPEC`、`PATHEXT`、`USERPROFILE` 与 `WINDIR`。它们不扩大工具或文件授权，也不允许 Ambient Provider 凭据传给原生 Codex。
+
+ACP 文件读写保持 UTF-8 文本原有的 LF/CRLF，不执行系统默认换行转换。文件变更审批把 `oldText` 的 UTF-8 SHA-256 与当前原始文件字节比较；换行变化也属于修改，旧 hash、错误路径与复用的变更证据仍被拒绝。
+
+每轮 ACP prompt 附带三个允许产物的有界快照；新建 App 明确标记这些文件不存在。Coding Agent 应使用原生 `apply_patch` 或实际暴露的 ACP file tool 写入允许文件，不能通过 shell 读取、扫描目录或绕过文件权限。产物验证由宿主完成；过大的文件不截断为完整内容，模型必须报告缺少安全编辑上下文。
+
+ACP 启动失败保留有界 stderr 诊断；启动及协议异常的消息在返回前使用同一脱敏边界。先移除控制序列并识别凭据字段、Bearer token、URL 凭据，再替换已知环境秘密，防止短 token 破坏字段名后导致其它凭据漏出。普通 OS 环境值不是秘密，不应整批隐藏。stderr 的保存与错误输出都有独立上限；不能把原始 stderr、含秘密的异常文本或完整环境写进日志、Run 或 UI。
+
+MCP 停止和失败清理必须在所属 event loop 仍运行时等待子进程退出，并关闭 stdin、stdout、stderr 的全部 pipe transport。畸形或超大响应可能使 stdout 停读，因此不能只等待 PID 退出或取消 reader；这两种失败仍须完成相同清理，保持既有响应大小上限与所有 pending request 的失败语义。
+
+Coding Agent 的版本与登录状态探针保留五秒期限。探针超时仍返回既有失败结果，调用取消仍传播取消；返回或传播前必须终止仍存活的探针子进程，并在当前 event loop 中等待退出、排空和关闭其 stdout/stderr 管道。正常探针仍返回原退出码与有界清理后的输出，不扩大 CLI 环境或执行权限。
+
 ## 5. 审计与敏感数据
 
-- 每次 capability allow/deny 记录 App、Manifest revision、类目、operation、resource 摘要和稳定 code，不记录文件内容、secret 或完整上游 body。
+- 已接入的 Run effect、Tool Gateway、adapter 与 LLM 路径按各自契约记录事件。`CapabilityAuthorizer`、App 文件操作与 Graph query 尚未统一记录每次 capability allow/deny；完整访问审计仍是未实施的覆盖项。新增 hook 应只记录 App、Manifest revision、类目、operation、resource 摘要和稳定 code，不记录文件内容、secret 或完整上游 body。
 - Run events 使用版本化 envelope，并带 Run/session/step/attempt/trace 关联。
 - Tool/adapter events 对敏感参数脱敏并限制大小；LLM audit 保存有界 preview、hash、usage 与 latency。
 - 终态 Run events 与 LLM audit 按 retention policy 清理，但仍是敏感 workspace 数据。

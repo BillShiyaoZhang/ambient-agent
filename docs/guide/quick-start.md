@@ -3,6 +3,7 @@
 ## 环境要求
 
 - Docker Desktop（包含 Compose v2）；或本机 Python 3.11–3.13、`uv`、Node.js 22.18+（22.x）或 24.11+，以及 npm。
+- Windows 本机执行 `uv sync --locked` 还需要完整的 Visual Studio C++ 构建工具与 Windows SDK。锁定的 LiteLLM 1.92.0 只有 Linux 预编译轮子，在 Windows 上会通过 Maturin/Rust 编译；仅安装 Visual Studio 外壳或存在 `vcvarsall.bat` 不足以提供 `cl.exe` / `link.exe`。按 [Microsoft 官方安装说明](https://learn.microsoft.com/en-us/cpp/build/vscpp-step-0-installation)在 Visual Studio Installer 中安装“使用 C++ 的桌面开发”工作负载，或使用下面的 Docker / Dev Container 路径运行完整后端，勿通过跳过依赖或改锁定版本来掩盖安装失败。
 - 使用 Dev Container 开发时，还需要 VS Code 与 Dev Containers 扩展。
 
 ## 方式一：Docker Compose（推荐）
@@ -104,6 +105,7 @@ Dev Container 已声明转发工作区端口 8000、5173、5174、浏览器 Widg
 uv sync
 npm --prefix frontend install
 npm --prefix docs install
+npm --prefix widget-runtime ci --ignore-scripts
 ```
 
 本地测试显式使用 SQLite 兼容适配器。若要运行接近生产的本机后端，请先启动 Neo4j，并在启动 Uvicorn 前设置 `GRAPH_DATABASE_BACKEND=neo4j`、`NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD` 与 `NEO4J_DATABASE`。
@@ -113,7 +115,12 @@ npm --prefix docs install
 ```bash
 uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 npm --prefix frontend run dev
+npm --prefix widget-runtime run start:frame
 ```
+
+以上三个长期运行命令分别放在独立终端。直接启动的 Widget Frame 默认监听 `127.0.0.1` 的 8001 端口，
+容器通过 `WIDGET_FRAME_HOST=0.0.0.0` 显式监听容器接口，发布到宿主机的端口仍只绑定 loopback。
+浏览器必须可访问 `http://localhost:8001/frame.html`；否则 Widget 会报 `runtime_handshake_timeout`。
 
 若要预览文档：
 

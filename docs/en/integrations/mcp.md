@@ -48,7 +48,7 @@ Each `call()`:
 
 A server-initiated `ping` receives a normal JSON-RPC response. Other unsupported client methods receive `-32601` instead of hanging silently. Notifications and late responses whose caller already timed out or cancelled are safely ignored.
 
-`stop()` sends terminate, escalates to kill after a bounded grace period, and then closes stdin, reader tasks, and pending requests. Backend shutdown and `/api/runtimes/{id}/stop` use this path.
+`stop()` ends pending requests, stops readers, and closes every stdin, stdout, and stderr pipe transport. It then sends terminate, escalates to kill after a bounded grace period, and waits for the child to exit. Cleanup finishes while its owning event loop is running, including when oversized output stopped a reader or paused a StreamReader transport; it leaves neither pipes nor an unreaped child. Backend shutdown and `/api/runtimes/{id}/stop` use this path.
 
 ## 3. Permission identity
 

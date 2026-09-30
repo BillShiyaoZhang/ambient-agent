@@ -28,7 +28,7 @@ from backend.capabilities.models import RuntimeContract, normalize_grants
 from backend.coding_agent_repair import decide_widget_repair
 from backend.coding_agent_runtime import spec_for
 from backend.context_manager import ContextManager
-from backend.graph_db import GraphDatabase
+from backend.graph_db import GraphCompensationConflict, GraphDatabase
 from backend.graph_query_engine import execute_graph_query
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_runtime import use_model_selections
@@ -805,7 +805,7 @@ class DurableAgentWorkflow:
             raise WorkflowError("Interaction was cancelled", code="interaction_cancelled")
         response = interaction.get("response")
         state.pending_interaction_id = None
-        return response if isinstance(response, dict) else {"approved": bool(response)}
+        return response if isinstance(response, dict) else {"approved": response is True}
 
     @staticmethod
     def _approval(response: dict[str, Any]) -> str:
@@ -870,17 +870,16 @@ class DurableAgentWorkflow:
         compensated = False
         if state.data.get("graph_compensations") and not state.data.get("non_compensable_effect"):
             try:
-                for item in reversed(state.data["graph_compensations"]):
-                    actions = item.get("actions", []) if isinstance(item, dict) else item
-                    ticket_id = item.get("ticket_id") if isinstance(item, dict) else None
-                    self.graph_db.apply_actions_atomic(
-                        actions,
-                        idempotency_key=f"compensate:{ticket_id}" if ticket_id else None,
-                    )
+                self._compensate_graph(state)
                 state.data["graph_compensations"] = []
                 state.data["effects_committed"] = False
                 effect_state = "none"
                 compensated = True
+            except GraphCompensationConflict as exc:
+                state.data["compensation_conflict"] = str(exc)
+                code = "graph_compensation_conflict"
+                message = str(exc)
+                effect_state = "unknown"
             except Exception:
                 logger.exception("Unable to compensate durable graph saga")
                 effect_state = "unknown"
@@ -994,12 +993,27 @@ class DurableAgentWorkflow:
                 logger.exception("Unable to persist the failed Widget diagnostic in chat")
         return failure
 
+    def _compensate_graph(self, state: AgentRunState) -> None:
+        for item in reversed(state.data["graph_compensations"]):
+            if not isinstance(item, dict) or not isinstance(item.get("guard"), dict):
+                raise GraphCompensationConflict("legacy checkpoint has no committed-state guard")
+            ticket_id = item.get("ticket_id")
+            self.graph_db.apply_actions_atomic(
+                item.get("actions", []),
+                expected_state=item["guard"],
+                idempotency_key=f"compensate:{ticket_id}" if ticket_id else None,
+            )
+
     def cleanup_state(self, state: AgentRunState | dict[str, Any] | None) -> None:
         """Best-effort cleanup for cancelled/abandoned retained staging artifacts."""
 
         if not state:
             return
         normalized = state if isinstance(state, AgentRunState) else AgentRunState.model_validate(state)
+        if normalized.data.get("effect_in_flight"):
+            # Cancelling to_thread does not stop the writer. Retain evidence
+            # and staging until reconciliation establishes the final effect.
+            return
         staged = normalized.data.get("staged_app")
         if staged and not normalized.data.get("non_compensable_effect"):
             try:
@@ -1010,15 +1024,11 @@ class DurableAgentWorkflow:
 
         if normalized.data.get("graph_compensations") and not normalized.data.get("non_compensable_effect"):
             try:
-                for item in reversed(normalized.data["graph_compensations"]):
-                    actions = item.get("actions", []) if isinstance(item, dict) else item
-                    ticket_id = item.get("ticket_id") if isinstance(item, dict) else None
-                    self.graph_db.apply_actions_atomic(
-                        actions,
-                        idempotency_key=f"compensate:{ticket_id}" if ticket_id else None,
-                    )
+                self._compensate_graph(normalized)
                 normalized.data["graph_compensations"] = []
                 normalized.data["effects_committed"] = False
+            except GraphCompensationConflict as exc:
+                normalized.data["compensation_conflict"] = str(exc)
             except Exception:
                 logger.exception("Unable to compensate cancelled durable graph saga")
 
@@ -1303,7 +1313,11 @@ class DurableAgentWorkflow:
             raise
         state.data.pop("effect_in_flight", None)
         state.data.setdefault("graph_compensations", []).append(
-            {"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}
+            {
+                "ticket_id": mutation["ticket_id"],
+                "actions": mutation["reverse_actions"],
+                "guard": mutation["compensation_guard"],
+            }
         )
         state.data["effects_committed"] = True
         language = str(state.data.get("language") or "zh")
@@ -2210,12 +2224,21 @@ class DurableAgentWorkflow:
                 await asyncio.to_thread(promote_coding_agent_staging, staged_result)
                 state.data.pop("effect_in_flight", None)
             state.artifact_refs.append({"type": "app", "id": staged_result.app_id, "sha256": artifact_hash})
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
+            # A to_thread publication may still complete after cancellation.
+            # Never roll its schema back while that external effect is unknown.
+            raise
+        except Exception:
+            state.data.pop("effect_in_flight", None)
             if schema_change is not None:
-                self.graph_db.restore_schema_snapshot(
-                    schema_change["snapshot"],
-                    idempotency_key=schema_effect_key,
-                )
+                try:
+                    self.graph_db.restore_schema_snapshot(
+                        schema_change["snapshot"],
+                        idempotency_key=schema_effect_key,
+                    )
+                except GraphCompensationConflict as exc:
+                    state.data["compensation_conflict"] = str(exc)
+                    raise WorkflowError(str(exc), code="schema_compensation_conflict", effect_state="unknown") from exc
             raise
 
         state.data["effects_committed"] = True

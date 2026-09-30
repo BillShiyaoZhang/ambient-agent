@@ -77,6 +77,12 @@ Widgets register live queries with `ambient.graph.subscribe(query, callback)`. T
 
 Public mutation actions are `create_node`, `update_node_property`, `delete_node`, `create_edge`, and `delete_edge`. `preflight_actions` validates the complete batch without writing. `apply_actions_atomic` commits the batch, reverse actions, rollback ticket, and effect-ledger entry in one Neo4j transaction. A repeated idempotency key with identical input returns the original result; reusing it with different input is rejected.
 
+Atomic mutation results include their committed `compensation_guard`. `apply_actions_atomic(..., expected_state=guard)` checks nodes, edges, and incident-edge sets before making any writes; a mismatch raises `GraphCompensationConflict` and rolls back the entire transaction. Schema effects similarly retain `snapshot_after`; `restore_schema_snapshot` obtains conditional evidence from the effect ledger and refuses to overwrite concurrent changes or remove a new entity that is in use. Checks and changes share one serialized write transaction. Legacy effects without conditional evidence cannot be restored automatically. Conditional compensation leaves ontology, property, and Widget-capability authorization guards intact.
+
+Standalone record/edge writes and schema registration share the same transaction boundary. Node-property merges, entity/parent validation, and schema-property merges read their current state after acquiring the write lock, so stale reads cannot overwrite concurrent fields or write fields just removed by compensation.
+
+A valid backend read query may omit `target_type` in an `include`; its related data then depends on any entity type, so the `mutated_types` optimization must not skip it. Explicit target types depend only on the root type and those target types. Edge changes reevaluate relevant includes; unchanged results are not pushed again. Widget authorization continues to require explicit target types; this query-invalidation contract does not relax access grants.
+
 Widget declarations and manifest `schema_refs` provide context, not authorization. Backend ontology validation is final. If a requested record has no suitable entity, the schema-alignment flow must grow the ontology and receive approval before the record mutation can pass.
 
 The deterministic pre-publish schema diff reports a type mismatch only when a JavaScript value's type is statically known from a literal or explicit coercion. Dynamic expressions such as `place.latitude` and function results are classified as unknown and deferred to graph-mutation preflight; the verifier must not invent a string type and trigger needless rework.
@@ -89,6 +95,10 @@ Setting `GRAPH_MIGRATE_SQLITE=1` imports an existing `workspace/graph.db` once. 
 
 ## 6. Acceptance criteria
 
+`tests/backend/test_graph_compensation.py` uses an isolated SQLite adapter by default and skips real Neo4j cases. The integration gate requires explicit `AMBIENT_TEST_NEO4J_ISOLATED=1`, `AMBIENT_TEST_NEO4J_URI`, and `AMBIENT_TEST_NEO4J_PASSWORD` targeting a separate disposable Neo4j server (CI uses port 17687). Each case clears that test server; never target a user or production graph.
+
+Graph HTTP/WebSocket integration tests use Graph, RunStore, coordinator, App manager, and session storage in the same temporary workspace, start the full application lifespan, then close it and restore every replaced global. Replacing only Graph while retaining another case's Run/session lane does not isolate a test.
+
 - A fresh backend exposes one pre-built ontology and its core entity inventory.
 - Unknown or abstract entity IDs cannot be used for records.
 - Every stored context record resolves to exactly one ontology entity.
@@ -99,3 +109,4 @@ Setting `GRAPH_MIGRATE_SQLITE=1` imports an existing `workspace/graph.db` once. 
 - Router snapshot construction is storage-independent and behaves consistently with the Dev Container Neo4j backend and the SQLite test adapter.
 - The static schema diff does not report unknown dynamic JavaScript expressions as type mismatches; actual mutations must still pass backend preflight.
 - Installing, enabling, updating, or uninstalling a Skill leaves the ontology and KG unchanged; user facts produced by a Skill still align to canonical entities and pass the existing approval and mutation flow.
+- Graph/schema conditional compensation restores idempotently without conflicts. Concurrent node, edge, or schema changes and use of a newly created entity preserve committed data, reject the entire conflicting batch, and allow the Run to enter `needs_attention`.

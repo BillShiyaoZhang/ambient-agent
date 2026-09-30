@@ -98,3 +98,7 @@ Schema 与 Capability 对齐对话框在原有可编辑表单上方增加图形�
 - 隐私地图区分 `observed`、`declared`、`unknown`，展示窗口与盲区，并且响应中不存在 raw payload。
 - Schema 审批编辑会实时更新拓扑，现有 validator 与授权边界保持有效。
 - 新行为有纯适配器测试、组件交互测试、API 契约测试；完整前端测试、构建、Ruff、后端测试和文档校验通过。
+
+### 执行图中的当前等待与历史审批
+
+Run snapshot 中步骤的最终状态与 attempt 优先于同一次或更早尝试的历史事件。`step_committed` 的 Wait outcome 记录曾请求审批，不能覆盖已经 succeeded 的步骤。只有仍 pending 的 interaction 或当前 waiting_user phase 可以表示当前等待；resolved/cancelled interaction 和已完成任务不能使旧节点继续显示等待用户。成功 Run 会将旧 snapshot 中残留的 waiting_user 步骤显示为已完成。缺少 steps 的旧 snapshot 仍可由事件恢复过程，但离开当前等待且没有 pending interaction 后，历史 Wait 不再作为活跃等待。事件详情保留审批历史，图节点状态表达当前执行事实。

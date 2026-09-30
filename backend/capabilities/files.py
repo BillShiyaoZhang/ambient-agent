@@ -155,7 +155,20 @@ class AppFileGateway:
             if candidate.is_symlink():
                 raise AppFileError("Symbolic links are not allowed in App data paths")
             if candidate.is_file():
-                result.append(candidate.relative_to(root).as_posix())
+                candidate_path = candidate.relative_to(root).as_posix()
+                try:
+                    self.authorizer.authorize_file(
+                        app_id,
+                        "read",
+                        candidate_path,
+                        manifest_revision=manifest_revision,
+                        grants_digest=grants_digest,
+                    )
+                except CapabilityDenied as exc:
+                    if exc.code == "capability_scope_denied":
+                        continue
+                    raise AppFileError(f"File capability denied: {exc}") from exc
+                result.append(candidate_path)
         return sorted(result)
 
     def delete(

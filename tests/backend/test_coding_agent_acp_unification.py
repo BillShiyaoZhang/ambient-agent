@@ -52,6 +52,13 @@ async def test_runtime_does_not_report_agent_available_when_its_acp_bridge_is_mi
     monkeypatch.setenv("CODEX_ACP_COMMAND", str(tmp_path / "missing-codex-acp"))
     runtime = CodingAgentRuntime(tmp_path / "workspace")
 
+    async def probe(argv, *, agent_id):
+        assert agent_id == "codex"
+        assert argv in ([codex, "--version"], [codex, "login", "status"])
+        return 0, "codex-cli test" if argv[-1] == "--version" else "Logged in"
+
+    monkeypatch.setattr(runtime, "_run_probe", probe)
+
     status = await runtime.status("codex")
 
     assert status["installed"] is True

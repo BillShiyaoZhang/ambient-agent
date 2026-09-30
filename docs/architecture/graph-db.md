@@ -77,6 +77,12 @@ Widget 使用 `ambient.graph.subscribe(query, callback)` 注册实时查询。�
 
 公开 mutation action 为 `create_node`、`update_node_property`、`delete_node`、`create_edge` 和 `delete_edge`。`preflight_actions` 在不写库的情况下校验整个 batch；`apply_actions_atomic` 在一个 Neo4j transaction 中提交 batch、reverse actions、rollback ticket 和 effect ledger。相同幂等 key 携带相同输入时返回原结果，携带不同输入时会被拒绝。
 
+Atomic mutation 结果包含提交后 `compensation_guard`。`apply_actions_atomic(..., expected_state=guard)` 在任何写入前校验节点、边及节点的关联边集合；冲突抛出 `GraphCompensationConflict` 并回滚整个事务。Schema effect 同样保存 `snapshot_after`；`restore_schema_snapshot` 从 effect ledger 获取条件证据，拒绝覆盖并发修改或删除正在使用的新实体。条件检查和变更必须在同一个串行写事务内完成；旧 effect 缺少条件证据时拒绝自动恢复。条件补偿不改变本体、属性或 Widget capability 授权守卫。
+
+所有 standalone record/edge 写入以及 schema 注册共享上述写事务约束；当前节点属性合并、实体/父实体校验和 schema 字段合并必须在取得写锁后读取，避免锁前旧快照覆盖并发字段或写入刚被补偿删除的 schema 字段。
+
+合法后端只读查询的 `include` 可以省略 `target_type`，此时关联数据依赖任意实体类型，`mutated_types` 优化不能跳过查询。显式 `target_type` 只依赖根类型和该目标类型；边变更必须重算相关 include。结果不变时不重复推送。Widget 授权仍要求显式 `target_type`，此查询优化契约不放宽授权约束。
+
 Widget 声明和 manifest `schema_refs` 只提供上下文，不构成授权，最终以后端本体校验为准。若请求的数据没有合适实体，schema alignment 流程必须先增长本体并获得批准，随后 record mutation 才能通过。
 
 发布前的确定性 schema diff 只在 JavaScript 值的类型可由字面量或显式类型转换静态确定时报告类型不匹配。对 `place.latitude`、函数返回值等动态表达式，校验器必须标记为未知并把最终类型判断交给 graph mutation preflight，不能臆测为字符串并触发无效返工。
@@ -89,6 +95,10 @@ Widget 声明和 manifest `schema_refs` 只提供上下文，不构成授权，�
 
 ## 6. 验收标准
 
+`tests/backend/test_graph_compensation.py` 默认使用隔离 SQLite adapter，并跳过真实 Neo4j case。集成 gate 必须明确同时设置 `AMBIENT_TEST_NEO4J_ISOLATED=1`、`AMBIENT_TEST_NEO4J_URI`、`AMBIENT_TEST_NEO4J_PASSWORD`，并指向独立 disposable Neo4j（CI 使用 17687 端口）。每个 case 清空该 test server；不得指向用户或生产 Graph。
+
+Graph HTTP/WebSocket 集成测试使用同一个临时 workspace 中的 Graph、RunStore、coordinator、App manager 和会话 storage，启动完整 application lifespan 并在结束后关闭及恢复所有全局替换；不能只替换 Graph 而复用前一 case 的 Run/session lane。
+
 - 新后端只暴露一个预置本体及其 core 实体清单。
 - 未知或抽象的实体 ID 不能用于 record。
 - 每个已存 context record 都恰好解析到一个本体实体。
@@ -99,3 +109,4 @@ Widget 声明和 manifest `schema_refs` 只提供上下文，不构成授权，�
 - Router 的快照构建不得依赖具体存储实现，在 Dev Container 的 Neo4j 后端与 SQLite 测试适配器上行为一致。
 - 静态 schema diff 不得把无法确定类型的动态 JavaScript 表达式误报为类型不匹配；实际 mutation 仍须通过后端 preflight。
 - Skill 的安装、启用、更新和卸载不得改变 ontology 或 KG；Skill 产生的用户事实仍须对齐 canonical entity，并通过既有审批与 mutation 流程。
+- Graph/schema 条件补偿在无冲突时幂等恢复；遇到并发节点、边、schema 变更或新实体被使用时保留已提交数据，拒绝整个冲突 batch，并可转入 Run `needs_attention`。

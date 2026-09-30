@@ -55,6 +55,14 @@ flowchart TB
 
 The WebSocket creates only lightweight submission/response-projection bridges; it does not execute agent, MCP, or remote-Agent effects in the connection task. The reducer reuses `AgentOrchestrator` as a domain helper, while `RunCoordinator` owns execution. Browser disconnection does not change authoritative Run state.
 
+`RunCoordinator.shutdown()` closes scheduling before cancelling background tasks; a wake/cancellation race cannot leave the scheduler looping or claiming Runs. The stop boundary lasts until every worker finishes cleanup and its lease is released, without abandoning cleanup on timeout. The next lifespan can restart scheduling after that boundary completes.
+
+`RunStore` persists a permission-grant intent in the same transaction that accepts a valid approval;
+unfinished intents prevent scheduler claims. `RunCoordinator` applies grants idempotently and completes
+the intent, recovering interrupted grants on startup. Stale or cancelled approvals have no grant effect.
+Graph compensation requires matching post-effect state, and schema rollback validates the effect ledger;
+conflicts require reconciliation and preserve concurrent commits.
+
 ## 2. Persistent data model
 
 ```mermaid

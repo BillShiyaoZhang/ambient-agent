@@ -12,7 +12,7 @@ import {
 
 const CURRENT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8001;
-const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_HOST = "127.0.0.1";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATED_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 const UNCACHEABLE_CACHE_CONTROL = "no-store";

@@ -55,6 +55,12 @@ flowchart TB
 
 WebSocket 只创建轻量的提交/响应投影 bridge，不在连接 task 中执行 agent、MCP 或远端 Agent 副作用。`AgentOrchestrator` 被 reducer 复用为 domain helper，控制权在 `RunCoordinator`；浏览器断线不改变 Run 的事实状态。
 
+`RunCoordinator.shutdown()` 在取消后台 task 前先关闭调度入口；wake/cancel 竞争不能让 scheduler 继续循环或领取 Run。停止边界持续到所有 worker 完成清理并释放 lease，不能超时抛弃清理；完成后下一次 lifespan 才能重启调度。
+
+`RunStore` 在接受有效权限审批的同一事务中保存授权意图；未完成意图阻止调度 claim。
+`RunCoordinator` 幂等写入权限并完成意图，启动时恢复崩溃遗留意图；过期或取消审批没有授权副作用。
+图谱补偿只在提交后状态仍匹配时执行，Schema 回滚校验效果记录；冲突进入需要对账状态并保留并发提交。
+
 ## 2. 持久数据模型
 
 ```mermaid

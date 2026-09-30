@@ -6,7 +6,9 @@ Ambient Agent 使用工作区级 Provider Registry 管理大模型连接。Provi
 ## 配置与秘密
 
 - 非秘密配置写入 `workspace/llm/config.json`。
-- UI 输入的凭据写入 `workspace/llm/secrets.json`；文件权限必须为 `0600`，REST API 只返回
+- UI 输入的凭据写入 `workspace/llm/secrets.json`；POSIX 文件权限为 `0600`，Windows 使用
+  禁止继承、仅允许文件所有者的受保护 DACL。临时文件在写入秘密前设置权限，替换后再次验证设置；
+  已有秘密文件启动时重新收紧权限，失败时终止保存而不静默放宽。REST API 只返回
   `configured` 与掩码，不返回秘密值。
 - 凭据也可以引用环境变量。配置只保存变量名，运行时由服务端解析。
 - 同一预设可以创建多个 Provider Profile，例如个人 OpenAI 与公司 Azure。
@@ -15,6 +17,12 @@ Provider Profile 包含 `id`、显示名、预设、连接参数、凭据引用�
 `provider_id/model_id` 作为稳定身份，并记录 API 模式、工具调用、图像、推理、上下文窗口及
 验证状态。模型发现优先请求实时 provider API，其次使用 LiteLLM 元数据；用户始终可以手工
 添加模型 ID。
+
+重新发现按模型 ID 合并，不覆盖已有 API 模式、手工显示名、来源或已验证能力。
+同一次发现中的重复 ID 只保留一项；发现没有返回的已有模型仍保留，以免破坏默认和会话引用。
+网络请求结束后以最新配置为合并基准，保留请求期间用户保存的设置。
+若等待期间 Provider 的连接、预设、启用状态或凭据发生变化，则丢弃旧响应与元数据，
+只返回当前模型列表，避免将旧账号或 endpoint 的模型混入新连接。
 
 ### MiniMax 区域
 

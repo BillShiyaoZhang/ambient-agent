@@ -70,9 +70,21 @@ async def discover_models(store: LLMConfigStore, provider_id: str) -> list[dict[
     except (httpx.HTTPError, ValueError, KeyError):
         discovered = []
 
-    merged: dict[str, dict[str, Any]] = {item.id: item.model_dump(mode="json") for item in profile.models}
+    # The network request may have outlived an edit in the settings UI.
+    current = store.get_provider(provider_id)
+    if (
+        current.preset != profile.preset
+        or current.connection != profile.connection
+        or current.credential_refs != profile.credential_refs
+        or current.enabled != profile.enabled
+    ):
+        return [model.model_dump(mode="json") for model in current.models]
+    current, _, current_credentials = store.provider_runtime(provider_id)
+    if current_credentials != credentials:
+        return [model.model_dump(mode="json") for model in current.models]
+    merged: dict[str, dict[str, Any]] = {item.id: item.model_dump(mode="json") for item in current.models}
     for item in discovered:
-        merged[item["id"]] = item
+        merged.setdefault(item["id"], item)
     try:
         import litellm
 

@@ -97,14 +97,20 @@ class SubscriptionManager:
                         )
                         continue
                 # Optimization check: skip executing query if the mutation doesn't affect its types
-                if mutated_types is not None:
+                if mutated_types:
                     query_type = query.get("type")
                     includes = query.get("include", [])
                     include_types = {inc.get("target_type") for inc in includes if inc.get("target_type")}
+                    unbounded_include = any(not inc.get("target_type") for inc in includes)
 
                     # If query matches a specific type and that type isn't in mutated_types,
                     # and none of the included types are in mutated_types, we can skip
-                    if query_type and query_type not in mutated_types and not (include_types & mutated_types):
+                    if (
+                        query_type
+                        and not unbounded_include
+                        and query_type not in mutated_types
+                        and not (include_types & mutated_types)
+                    ):
                         continue
 
                 try:

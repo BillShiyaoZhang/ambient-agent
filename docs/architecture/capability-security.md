@@ -131,7 +131,7 @@ Schema 对齐 interaction 的 proposal 是一个原子对象：
 | SDK membrane | 只构造获批类目的 SDK 方法；每次请求自动绑定当前 `app_id` | 缩小可发现接口并避免 Controller 选择其他 App 身份 |
 | 后端 authorizer | 从持久 manifest 重新读取 grants，验证 operation/resource，再调用 adapter | 不信任前端、WebSocket payload 或 Controller 声明 |
 
-任何一层不能解析请求时都拒绝。稳定错误包含 `code`、`capability`、`operation` 和安全的 `details`；不得返回 secret、绝对宿主路径或无界上游响应。所有允许与拒绝结果进入审计记录。
+任何一层不能解析请求时都拒绝。稳定错误包含 `code`、`capability`、`operation` 和安全的 `details`；不得返回 secret、绝对宿主路径或无界上游响应。审计覆盖已接入的 Run effect、Tool Gateway、adapter 和 LLM 路径；`CapabilityAuthorizer`、App 文件操作与 Graph query 尚未统一接入逐次 allow/deny 审计 hook，不能把现有日志视为完整的 capability 访问账本。
 
 ## 6. 资源边界
 
@@ -152,6 +152,8 @@ Schema 对齐 interaction 的 proposal 是一个原子对象：
 
 - `app://data/` 是唯一 Widget 文件根；manifest、controller、README、staging、会话、Graph 和 LLM 凭据永远不可见。
 - path 必须是规范化 POSIX 相对路径，拒绝空路径、绝对路径、`..`、NUL、符号链接和不匹配的 glob。
+- 文件模式从 `app://data/` 根开始匹配，不能按路径后缀授权；`exports/report.txt` 不授权 `private/exports/report.txt`，单层 `*` 不跨目录，末尾 `/**` 才授权该目录的后代。
+- list 先验证目录的读取授权，再逐项按当前 Manifest revision 与 grants digest 过滤返回的文件路径。递归扫描不能披露未匹配 read grant 的后代文件名。
 - write 使用临时文件、`fsync` 和原子替换；delete 只删除精确获批的普通文件。
 
 ### Installed capabilities
@@ -177,3 +179,4 @@ Schema 对齐 interaction 的 proposal 是一个原子对象：
 4. Widget 只看到批准后的 SDK surface，且不能使用被禁止的 host global。
 5. Agent prompt 中的能力说明由结构化 catalog 生成，并与 authorizer 使用同一 ontology。
 6. 中英文文档、manifest/schema 示例、静态 verifier、SDK 和后端 policy 使用相同的类目 ID。
+7. 原生浏览器回归必须在保留 CSP 与全部安全断言的情况下完成并退出。测试结束或失败时，先关闭浏览器，再关闭 frame HTTP server，避免浏览器保留的连接阻塞 server teardown；单文件测试使用有限的超时。

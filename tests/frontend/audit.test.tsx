@@ -102,7 +102,8 @@ describe("AuditLogPanel Component", () => {
     }));
 
     render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Data map" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Data map" })); });
+    await act(async () => { await vi.dynamicImportSettled(); });
 
     expect(await screen.findByText("Unknown / uninstrumented")).toBeDefined();
     expect(screen.getByRole("searchbox", { name: "Search graph" })).toBeDefined();
@@ -145,7 +146,8 @@ describe("AuditLogPanel Component", () => {
 
     const view = render(<AuditLogPanel isOpen language="en" onClose={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Data map" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Data map" })); });
+    await act(async () => { await vi.dynamicImportSettled(); });
     expect(await screen.findByText("Local runtime context")).toBeDefined();
     expect(fetch).toHaveBeenCalledTimes(2);
 
@@ -212,6 +214,7 @@ describe("AuditLogPanel Component", () => {
       secondMap.resolve(dataset("Fresh snapshot"));
       await secondMap.promise;
     });
+    await act(async () => { await vi.dynamicImportSettled(); });
     expect(await screen.findByText("Fresh snapshot")).toBeDefined();
 
     await act(async () => {

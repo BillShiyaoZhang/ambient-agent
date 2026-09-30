@@ -1352,7 +1352,7 @@ async def resolve_run_interaction(interaction_id: str, data: RunInteractionResol
         interaction = run_store.get_interaction(interaction_id)
         if interaction is None:
             raise KeyError(interaction_id)
-        response = data.response if isinstance(data.response, dict) else {"approved": bool(data.response)}
+        response = data.response if isinstance(data.response, dict) else {"approved": data.response is True}
         return _public_run_payload(run_coordinator.resolve_interaction(interaction_id, response))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Interaction not found") from exc

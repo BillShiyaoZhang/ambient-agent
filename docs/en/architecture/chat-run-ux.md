@@ -293,3 +293,14 @@ Acceptance criteria:
 - Streaming does not steal scroll position while the user reads older content.
 - A resized desktop overlay restores after refresh, never overflows narrow viewports, and preserves the user's preferred size when returning to desktop.
 - Keyboard and screen-reader users can expand, approve, stop, and open artifacts.
+
+## 11. Async state and conversation isolation
+
+- Changing conversations immediately clears the previous messages. A history response can update only its still-active conversation; late responses or errors after cleanup, switching, or reconnect cannot overwrite current messages.
+- Within one conversation, merge history and persisted ack/reply messages received while the request was pending by positive integer message ID. The live version wins and each ID appears once. A language-triggered refresh follows the same rule.
+- A Run cancellation response and its failure-recovery refresh also belong to the original conversation; switching conversations cannot insert the old Run into the new one.
+- Task Center's selected ID and displayed detail ID must match. A new selection clears the prior detail; late detail reads, event refreshes, post-action refreshes, and errors check the current selection and request generation.
+- Returning to the list, closing the drawer, or unmounting invalidates pending detail reads. A failed read shows a recoverable drawer error rather than an unhandled Promise rejection.
+- An action targets the Run/interaction confirmed at click time and disables duplicate submission until completion. Its refresh cannot replace a task selected later.
+- Leaving and reselecting the same task ID creates a new selection generation. An old action's error and detail refresh cannot enter the new detail.
+- Acceptance uses controlled async responses for out-of-order A→B selection, history/live-message overlap, close/back navigation, detail errors, and selection changes during an action.

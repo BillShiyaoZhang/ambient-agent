@@ -98,3 +98,7 @@ The Schema and Capability alignment dialog adds a graph preview above the existi
 - The privacy map distinguishes `observed`, `declared`, and `unknown`, shows its window and blind spots, and contains no raw payload.
 - Schema-approval edits update the topology immediately while existing validation and authorization boundaries remain effective.
 - Pure adapter tests, component interaction tests, and API contract tests cover the new behavior; the complete frontend suite/build, Ruff, backend suite, and documentation checks pass.
+
+### Current waiting versus historical approvals
+
+A Run snapshot's final step status and attempt take precedence over historical events from the same or an earlier attempt. A `step_committed` Wait outcome records a past approval request and cannot overwrite an already-succeeded step. Only a pending interaction or the current waiting_user phase represents an active wait; resolved/cancelled interactions and finished Runs cannot leave old nodes waiting for the user. A succeeded Run displays waiting_user steps left in a legacy snapshot as completed. Legacy snapshots without steps can still recover progress from events, but a past Wait is no longer active once execution moves on with no pending interaction. Event details retain approval history while node status describes current execution facts.

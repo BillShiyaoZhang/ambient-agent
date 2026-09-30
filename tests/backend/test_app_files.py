@@ -1,9 +1,48 @@
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from backend.capabilities.files import AppFileError, AppFileGateway
 from backend.app_manager import AppManager
+
+
+def scoped_gateway(root, capabilities):
+    manifest = SimpleNamespace(capabilities=capabilities, revision="revision", grants_digest="digest")
+    manager = SimpleNamespace(app_path=lambda _app_id: root, get_manifest=lambda _app_id: manifest)
+    return AppFileGateway(manager)
+
+
+@pytest.mark.parametrize("operation", ["read", "write", "delete"])
+def test_file_exact_grant_rejects_same_suffix_under_another_directory(tmp_path, operation):
+    target = tmp_path / "data" / "private" / "exports" / "report.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("protected", encoding="utf-8")
+    scope = {"paths": ["exports/report.txt"]}
+    if operation == "write":
+        scope["max_bytes"] = 100
+    gateway = scoped_gateway(tmp_path, [{"id": f"file.{operation}", "scope": scope}])
+    with pytest.raises(AppFileError, match="capability"):
+        if operation == "write":
+            gateway.write_text("audit", "private/exports/report.txt", "changed")
+        elif operation == "read":
+            gateway.read_text("audit", "private/exports/report.txt")
+        else:
+            gateway.delete("audit", "private/exports/report.txt")
+    assert target.read_text(encoding="utf-8") == "protected"
+
+
+def test_file_listing_filters_out_descendants_outside_single_level_read_grant(tmp_path):
+    directory = tmp_path / "data" / "exports"
+    (directory / "private").mkdir(parents=True)
+    (directory / "report.txt").write_text("allowed", encoding="utf-8")
+    (directory / "private" / "secret.txt").write_text("protected", encoding="utf-8")
+    gateway = scoped_gateway(tmp_path, [{"id": "file.read", "scope": {"paths": ["exports/*"]}}])
+    assert gateway.list_files("audit", "exports", manifest_revision="revision", grants_digest="digest") == [
+        "exports/report.txt"
+    ]
+    with pytest.raises(AppFileError, match="stale"):
+        gateway.list_files("audit", "exports", manifest_revision="old")
 
 
 @pytest.fixture
@@ -46,7 +85,7 @@ def test_app_file_gateway_rejects_path_escape(file_app, path):
         gateway.read_text("notes-app", path)
 
 
-def test_app_file_gateway_rejects_scope_size_and_symlinks(file_app, tmp_path):
+def test_app_file_gateway_rejects_scope_size_and_symlinks(file_app, tmp_path, monkeypatch):
     _manager, gateway, app_dir = file_app
     with pytest.raises(AppFileError, match="capability"):
         gateway.write_text("notes-app", "settings.json", "x")
@@ -57,9 +96,13 @@ def test_app_file_gateway_rejects_scope_size_and_symlinks(file_app, tmp_path):
     data_root.mkdir(exist_ok=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    try:
+    if os.name == "nt":
+        # Model the unsafe directory boundary without requiring Windows symlink privilege.
+        linked = data_root / "drafts"
+        linked.mkdir()
+        original_is_symlink = type(linked).is_symlink
+        monkeypatch.setattr(type(linked), "is_symlink", lambda path: path == linked or original_is_symlink(path))
+    else:
         os.symlink(outside, data_root / "drafts")
-    except OSError:
-        pytest.skip("symlinks unavailable")
     with pytest.raises(AppFileError, match="link"):
         gateway.write_text("notes-app", "drafts/escape.md", "x")

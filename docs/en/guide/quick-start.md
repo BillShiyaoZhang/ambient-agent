@@ -2,6 +2,8 @@
 
 ## Prerequisites
 
+On native Windows, `uv sync --locked` also requires complete Visual Studio C++ build tools and the Windows SDK. Locked LiteLLM 1.92.0 ships Linux wheels and builds through Maturin/Rust on Windows; the Visual Studio shell or `vcvarsall.bat` alone does not supply `cl.exe` / `link.exe`. Follow the [Microsoft installation instructions](https://learn.microsoft.com/en-us/cpp/build/vscpp-step-0-installation) to install the **Desktop development with C++** workload in Visual Studio Installer, or use the Docker / Dev Container paths below for the complete Backend. Keep the locked dependencies and report installation failures instead of omitting them.
+
 - Docker Desktop with Compose v2; or local Python 3.11–3.13, `uv`, Node.js 22.18+ on the 22.x line or 24.11+, and npm.
 - VS Code with the Dev Containers extension when using the development container.
 
@@ -145,6 +147,7 @@ The Dev Container forwards workspace ports 8000, 5173, and 5174, the browser Wid
 uv sync
 npm --prefix frontend install
 npm --prefix docs install
+npm --prefix widget-runtime ci --ignore-scripts
 ```
 
 Local tests use the explicit SQLite compatibility adapter. For a local production-like backend, start Neo4j and set `GRAPH_DATABASE_BACKEND=neo4j`, `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` before running Uvicorn.
@@ -155,7 +158,13 @@ another terminal:
 ```bash
 uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 npm --prefix frontend run dev
+npm --prefix widget-runtime run start:frame
 ```
+
+Run these three long-lived commands in separate terminals. A directly started Widget Frame defaults to `127.0.0.1:8001`.
+Containers explicitly set `WIDGET_FRAME_HOST=0.0.0.0` for their own interfaces; published Host ports still bind to loopback.
+The Frame must be browser-reachable at `http://localhost:8001/frame.html`; otherwise Widgets
+fail with `runtime_handshake_timeout`.
 
 To preview the documentation:
 

@@ -48,7 +48,7 @@ Capability Manifest 中的 `mcp_tool` action 由 `RunCoordinator` 执行，并�
 
 Server 发起的 `ping` 会得到正常 JSON-RPC response；其他未声明的 client method 返回 `-32601`，不会被静默挂起。Notification 与已经 timeout/cancel 的迟到 response 可以安全忽略。
 
-`stop()` 先 terminate，在 bounded grace period 后升级为 kill，随后关闭 stdin、reader task 和所有 pending request。Backend shutdown 与 `/api/runtimes/{id}/stop` 都使用该路径。
+`stop()` 结束所有 pending request、停止 reader 并关闭 stdin、stdout、stderr 的全部 pipe transport；随后 terminate，在 bounded grace period 后升级为 kill，并等待子进程退出。清理必须在所属 event loop 仍运行时完成；超大输出导致 reader 停读或 StreamReader 暂停读取时，也不能遗留管道或跳过进程回收。Backend shutdown 与 `/api/runtimes/{id}/stop` 都使用该路径。
 
 ## 3. 权限身份
 

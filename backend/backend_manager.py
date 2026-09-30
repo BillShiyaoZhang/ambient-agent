@@ -433,7 +433,18 @@ class StdioJsonRpcClient:
         self._fail_transport(MCPTransportError("MCP client stopped"))
 
         process = self.process
+        await self._cancel_task(self.read_task)
+        await self._cancel_task(self.stderr_task)
         if process is not None:
+            if process.stdin is not None:
+                process.stdin.close()
+            # An oversized response can pause StreamReader's transport before
+            # EOF. Waiting for process exit alone then leaves its exit waiter
+            # and the pipe alive. Close the remaining readers on this loop.
+            for stream in (process.stdout, process.stderr):
+                transport = getattr(stream, "_transport", None)
+                if transport is not None:
+                    transport.close()
             if process.returncode is None:
                 with suppress(OSError):
                     process.terminate()
@@ -443,18 +454,15 @@ class StdioJsonRpcClient:
                     logger.warning("MCP process did not terminate in time; killing it")
                     with suppress(OSError):
                         process.kill()
-                    with suppress(TimeoutError):
-                        await asyncio.wait_for(process.wait(), timeout=self.stop_timeout_seconds)
+                    # After kill, keep ownership until the OS reaps the child.
+                    await process.wait()
             else:
                 with suppress(Exception):
                     await process.wait()
             if process.stdin is not None:
-                process.stdin.close()
                 with suppress(Exception):
                     await asyncio.wait_for(process.stdin.wait_closed(), timeout=self.stop_timeout_seconds)
 
-        await self._cancel_task(self.read_task)
-        await self._cancel_task(self.stderr_task)
         self.read_task = None
         self.stderr_task = None
         self.process = None

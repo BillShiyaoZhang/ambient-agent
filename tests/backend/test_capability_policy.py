@@ -3,6 +3,29 @@ import pytest
 from backend.capabilities.policy import CapabilityAuthorizer, CapabilityDenied
 
 
+@pytest.mark.parametrize(
+    ("pattern", "path", "allowed"),
+    [
+        ("settings.json", "settings.json", True),
+        ("settings.json", "private/settings.json", False),
+        ("exports/*", "exports/report.txt", True),
+        ("exports/*", "private/exports/report.txt", False),
+        ("exports/*", "exports/private/report.txt", False),
+        ("exports/**", "exports/private/report.txt", True),
+        ("exports/**", "private/exports/report.txt", False),
+    ],
+)
+def test_file_globs_are_anchored_to_app_data_root(pattern, path, allowed):
+    authorizer = CapabilityAuthorizer(
+        manifest_loader=lambda _: Manifest([{"id": "file.read", "scope": {"paths": [pattern]}}])
+    )
+    if allowed:
+        authorizer.authorize_file("audit", "read", path)
+    else:
+        with pytest.raises(CapabilityDenied):
+            authorizer.authorize_file("audit", "read", path)
+
+
 class Manifest:
     def __init__(self, capabilities, revision="2:1.0.0", grants_digest="digest-v1"):
         self.capabilities = capabilities

@@ -494,6 +494,22 @@ class RunStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_interactions_run ON run_interactions(run_id, status);
 
+                CREATE TABLE IF NOT EXISTS permission_grant_outbox (
+                    interaction_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    permission_type TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY(interaction_id) REFERENCES run_interactions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_permission_grant_pending
+                    ON permission_grant_outbox(run_id, status);
+
                 CREATE TABLE IF NOT EXISTS run_steps (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
@@ -1200,7 +1216,11 @@ class RunStore:
                 ).fetchall()
             }
             candidates = connection.execute(
-                "SELECT * FROM runs WHERE status='queued' AND adapter_type<>'internal' ORDER BY created_at, id LIMIT 100"
+                """SELECT * FROM runs WHERE status='queued' AND adapter_type<>'internal'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM permission_grant_outbox
+                       WHERE run_id=runs.id AND status='pending'
+                   ) ORDER BY created_at, id LIMIT 100"""
             ).fetchall()
             active_rows = connection.execute(
                 """SELECT * FROM runs
@@ -1901,7 +1921,20 @@ class RunStore:
             resolved_target = target_status or ("running" if run["adapter_type"] == "internal" else "queued")
             if resolved_target not in _TRANSITIONS["waiting_user"]:
                 raise ValueError(f"invalid interaction target status: {resolved_target}")
+            payload = json.loads(row["payload_json"])
+            permission_type = payload.get("permission_type") if row["type"] == "permission" else None
+            approved = response.get("approved") is True if isinstance(response, dict) else response is True
+            grant_pending = approved and permission_type in {"mcp_spawn", "agent_connect"}
+            if grant_pending and resolved_target != "queued":
+                raise ValueError("permission grants must resume through the durable queue")
             now = _now()
+            if grant_pending:
+                connection.execute(
+                    """INSERT INTO permission_grant_outbox
+                       (interaction_id,run_id,permission_type,value_json,created_at)
+                       VALUES (?,?,?,?,?)""",
+                    (interaction_id, row["run_id"], permission_type, _json(payload.get("value") or {}), now),
+                )
             connection.execute(
                 "UPDATE run_interactions SET status='resolved', response_json=?, resolved_at=? WHERE id=?",
                 (_json(response), now, interaction_id),
@@ -1914,7 +1947,7 @@ class RunStore:
             next_version = int(run["version"]) + 1
             updates: dict[str, Any] = {
                 "status": resolved_target,
-                "summary": summary,
+                "summary": "Applying permission" if grant_pending else summary,
                 "updated_at": now,
                 "version": next_version,
             }
@@ -1947,6 +1980,55 @@ class RunStore:
                 {"from": run["status"], "to": resolved_target, "version": next_version},
             )
         return self.get_interaction(interaction_id) or {}
+
+    def pending_permission_grants(self, *, due_only: bool = False) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM permission_grant_outbox WHERE status='pending'
+                   AND (?=0 OR next_attempt_at IS NULL OR next_attempt_at<=?)
+                   ORDER BY created_at, interaction_id""",
+                (int(due_only), _now()),
+            ).fetchall()
+        return [{**dict(row), "value": json.loads(row["value_json"])} for row in rows]
+
+    def complete_permission_grant(self, interaction_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            intent = connection.execute(
+                "SELECT * FROM permission_grant_outbox WHERE interaction_id=? AND status='pending'",
+                (interaction_id,),
+            ).fetchone()
+            if not intent:
+                return
+            connection.execute(
+                "UPDATE permission_grant_outbox SET status='applied',completed_at=? WHERE interaction_id=?",
+                (_now(), interaction_id),
+            )
+            connection.execute(
+                "UPDATE runs SET summary='Permission granted',error_json=NULL,updated_at=? WHERE id=? AND status='queued'",
+                (_now(), intent["run_id"]),
+            )
+
+    def defer_permission_grant(self, interaction_id: str) -> None:
+        # Never persist exception text: adapters can include command arguments or secrets.
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """UPDATE permission_grant_outbox SET attempts=attempts+1,next_attempt_at=?
+                   WHERE interaction_id=? AND status='pending'""",
+                ((datetime.now(UTC) + timedelta(seconds=5)).isoformat(), interaction_id),
+            )
+            connection.execute(
+                """UPDATE runs SET summary='Permission grant pending; retrying',error_json=?,updated_at=?
+                   WHERE status='queued' AND id=(
+                       SELECT run_id FROM permission_grant_outbox WHERE interaction_id=? AND status='pending'
+                   )""",
+                (
+                    _json({"code": "permission_grant_pending", "message": "Permission could not be saved; retrying"}),
+                    _now(),
+                    interaction_id,
+                ),
+            )
 
     def recover_pending_staging_cleanup(self, run_id: str | None = None) -> int:
         """Finish staging deletion from a durable tombstone.
@@ -2469,6 +2551,7 @@ class RunCoordinator:
         self.global_limit = max(1, int(os.getenv("RUNNER_MAX_CONCURRENCY", "4")))
         self.owner_limit = max(1, int(os.getenv("RUNNER_MAX_PER_APP", "1")))
         self._wake = asyncio.Event()
+        self._stopping = False
         self._scheduler: asyncio.Task | None = None
         self._heartbeat: asyncio.Task | None = None
         self._active: dict[str, asyncio.Task] = {}
@@ -2481,19 +2564,27 @@ class RunCoordinator:
         self.ensure_started()
 
     def ensure_started(self) -> None:
+        if self._stopping and (self._scheduler is not None or self._heartbeat is not None):
+            return
         if self._scheduler is not None and not self._scheduler.done():
             return
         # TestClient and embedded hosts may create a fresh event loop for each
         # lifespan. asyncio primitives must belong to the current loop.
+        self._stopping = False
         self._wake = asyncio.Event()
         self.worker_id = f"worker-{uuid.uuid4()}"
         self.store.recover_orphaned(self.worker_id)
         self.store.cleanup_events()
+        self.recover_permission_grants()
         self._scheduler = asyncio.create_task(self._scheduler_loop())
         self._heartbeat = asyncio.create_task(self._heartbeat_loop())
         self._wake.set()
 
     async def shutdown(self) -> None:
+        # wait_for may return a completed wake while consuming cancellation.
+        # Stop the loops explicitly before taking the worker snapshot, so that
+        # this race cannot claim more work or keep shutdown waiting forever.
+        self._stopping = True
         tasks = [task for task in (self._scheduler, self._heartbeat, *self._active.values()) if task]
         for task in tasks:
             task.cancel()
@@ -2536,7 +2627,7 @@ class RunCoordinator:
 
     async def _heartbeat_loop(self) -> None:
         try:
-            while True:
+            while not self._stopping:
                 self.store.heartbeat(self.worker_id, run_ids=set(self._active))
                 self.store.recover_orphaned(self.worker_id)
                 await asyncio.sleep(10)
@@ -2545,10 +2636,11 @@ class RunCoordinator:
 
     async def _scheduler_loop(self) -> None:
         try:
-            while True:
+            while not self._stopping:
                 self._wake.clear()
                 self.store.recover_orphaned(self.worker_id)
-                while len(self._active) < self.global_limit:
+                self.recover_permission_grants(due_only=True)
+                while not self._stopping and len(self._active) < self.global_limit:
                     run = self.store.claim_next(
                         self.worker_id,
                         self.global_limit,
@@ -3360,22 +3452,17 @@ class RunCoordinator:
         interaction = self.store.get_interaction(interaction_id)
         if interaction is None:
             raise KeyError(interaction_id)
-        approved = bool(response.get("approved")) if isinstance(response, dict) else bool(response)
         payload = interaction.get("payload") or {}
-        permission_type = payload.get("permission_type")
-        value = payload.get("value") or {}
+        permission_type = payload.get("permission_type") if interaction.get("type") == "permission" else None
         run_id = interaction["run_id"]
+        if permission_type:
+            approved = response.get("approved") is True if isinstance(response, dict) else response is True
+            if interaction.get("type") != "permission" or permission_type not in {"mcp_spawn", "agent_connect"}:
+                raise ValueError("unsupported permission interaction")
         if expected_run_version is None and isinstance(response, dict):
             supplied_version = response.get("expected_run_version", response.get("run_version"))
             if supplied_version is not None:
                 expected_run_version = int(supplied_version)
-        if approved and permission_type == "mcp_spawn":
-            if value.get("identity") is not None and hasattr(self.backend_manager, "approve_mcp_identity"):
-                self.backend_manager.approve_mcp_identity(value["app_id"], value["identity"])
-            else:
-                self.backend_manager.approve_mcp(value["app_id"], value["command"], value.get("args", []))
-        elif approved and permission_type == "agent_connect":
-            self.backend_manager.approve_agent(value["app_id"], value["agent_url"])
         if not permission_type or approved:
             self.store.resolve_interaction(
                 interaction_id,
@@ -3383,6 +3470,8 @@ class RunCoordinator:
                 expected_run_version=expected_run_version,
                 summary="Permission granted" if permission_type else "Interaction resolved",
             )
+            if permission_type:
+                self.recover_permission_grants()
             run = self.store.get_run(run_id) or {}
             if run.get("status") == "queued":
                 self._wake.set()
@@ -3399,3 +3488,20 @@ class RunCoordinator:
         if run.get("status") == "queued":
             self._wake.set()
         return run
+
+    def recover_permission_grants(self, *, due_only: bool = False) -> None:
+        for intent in self.store.pending_permission_grants(due_only=due_only):
+            value = intent["value"]
+            try:
+                if intent["permission_type"] == "mcp_spawn":
+                    if value.get("identity") is not None and hasattr(self.backend_manager, "approve_mcp_identity"):
+                        self.backend_manager.approve_mcp_identity(value["app_id"], value["identity"])
+                    else:
+                        self.backend_manager.approve_mcp(value["app_id"], value["command"], value.get("args", []))
+                elif intent["permission_type"] == "agent_connect":
+                    self.backend_manager.approve_agent(value["app_id"], value["agent_url"])
+                else:
+                    raise ValueError("unsupported durable permission intent")
+                self.store.complete_permission_grant(intent["interaction_id"])
+            except Exception:
+                self.store.defer_permission_grant(intent["interaction_id"])

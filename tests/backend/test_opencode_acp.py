@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -109,7 +110,28 @@ def test_orphan_staging_cleanup_only_removes_old_unreferenced_directories(tmp_pa
     assert regular_file.read_text(encoding="utf-8") == "must stay"
 
 
-def test_orphan_staging_cleanup_skips_symlinks_and_out_of_root_references(tmp_path):
+def _create_test_link(link, target, monkeypatch):
+    """Inject link semantics on Windows without requiring a developer's symlink privilege."""
+    if os.name != "nt":
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return
+    if target.is_dir():
+        link.mkdir()
+    else:
+        link.touch()
+    original_is_symlink = Path.is_symlink
+    original_resolve = Path.resolve
+    monkeypatch.setattr(Path, "is_symlink", lambda path: path == link or original_is_symlink(path))
+
+    def resolve(path, *args, **kwargs):
+        if path == link or path.is_relative_to(link):
+            return original_resolve(target / path.relative_to(link), *args, **kwargs)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+
+def test_orphan_staging_cleanup_skips_symlinks_and_out_of_root_references(tmp_path, monkeypatch):
     apps_dir = tmp_path / "apps"
     apps_dir.mkdir()
     outside = tmp_path / "outside"
@@ -117,7 +139,7 @@ def test_orphan_staging_cleanup_skips_symlinks_and_out_of_root_references(tmp_pa
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("untouched", encoding="utf-8")
     linked = apps_dir / f".linked-app.staging-{'a' * 32}"
-    linked.symlink_to(outside, target_is_directory=True)
+    _create_test_link(linked, outside, monkeypatch)
 
     orphan = apps_dir / f".orphan-app.staging-{'b' * 32}"
     orphan.mkdir()
@@ -445,7 +467,7 @@ async def test_existing_file_update_with_matching_old_text_is_allowed(tmp_path):
     old_text = "export default function App() { return null; }\n"
     new_text = "export default function App() { return 'updated'; }\n"
     controller = tmp_path / "controller.js"
-    controller.write_text(old_text, encoding="utf-8")
+    controller.write_bytes(old_text.encode("utf-8"))
     client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
     await client.session_update(
         session_id="sess",
@@ -467,6 +489,141 @@ async def test_existing_file_update_with_matching_old_text_is_allowed(tmp_path):
 
     assert isinstance(response.outcome, AllowedOutcome)
     assert controller.read_text(encoding="utf-8") == old_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["first\nsecond\n", "first\r\nsecond\r\n"])
+async def test_acp_file_roundtrip_preserves_raw_newlines_and_edit_hash(tmp_path, text):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda _: None)
+    await client.write_text_file("sess", "controller.js", text)
+    controller = tmp_path / "controller.js"
+    assert controller.read_bytes() == text.encode("utf-8")
+    response = await client.read_text_file("sess", "controller.js")
+    assert response.content == text
+    await client.session_update(
+        "sess",
+        _codex_file_operation_start(
+            "newline-edit", "controller.js", kind="update", old_text=response.content, new_text="new\n"
+        ),
+    )
+    approved = await client.request_permission(
+        "sess",
+        _pathless_file_permission("newline-edit"),
+        _file_permission_options(),
+        **_codex_permission_kwargs("newline-edit"),
+    )
+    assert isinstance(approved.outcome, AllowedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_acp_file_edit_rejects_changed_newlines_even_with_matching_text(tmp_path):
+    controller = tmp_path / "controller.js"
+    controller.write_bytes(b"before\n")
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda _: None)
+    await client.session_update(
+        "sess",
+        _codex_file_operation_start(
+            "stale-newline", "controller.js", kind="update", old_text="before\n", new_text="after\n"
+        ),
+    )
+    controller.write_bytes(b"before\r\n")
+    response = await client.request_permission(
+        "sess",
+        _pathless_file_permission("stale-newline"),
+        _file_permission_options(),
+        **_codex_permission_kwargs("stale-newline"),
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_acp_startup_error_includes_bounded_sanitized_stderr(tmp_path):
+    from backend.coding_agent_acp import CodingAgentACPStartupError, spawn_agent_process
+
+    script = (
+        "import sys; sys.stderr.write('x' * 30000 + '\\n'); "
+        "sys.stderr.write('Authorization: Bearer bearer-secret\\napi_key=field-secret\\n'"
+        "'https://user:password@example.test\\nknown-env-secret\\nStartup dependency unavailable\\n'); sys.exit(7)"
+    )
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda _: None)
+    with pytest.raises(CodingAgentACPStartupError) as failure:
+        async with spawn_agent_process(
+            client,
+            sys.executable,
+            "-c",
+            script,
+            env={**os.environ, "CODEX_ACCESS_TOKEN": "known-env-secret"},
+            cwd=tmp_path,
+            inherit_default_environment=False,
+        ) as (connection, _process):
+            await connection.initialize(protocol_version=1)
+    message = str(failure.value)
+    assert "Startup dependency unavailable" in message
+    assert "7" in message
+    assert len(message) < 5000
+    for secret in ("bearer-secret", "field-secret", "user:password", "known-env-secret"):
+        assert secret not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("short_token", ["a", "pi", "key"])
+async def test_acp_short_known_secret_does_not_break_other_stderr_credential_redaction(tmp_path, short_token):
+    from backend.coding_agent_acp import CodingAgentACPStartupError, spawn_agent_process
+
+    script = "import sys; sys.stderr.write('api_key=qwerty\\nWindows root C:/Windows\\n'); sys.exit(7)"
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda _: None)
+    with pytest.raises(CodingAgentACPStartupError) as failure:
+        async with spawn_agent_process(
+            client,
+            sys.executable,
+            "-c",
+            script,
+            env={**os.environ, "CODEX_ACCESS_TOKEN": short_token},
+            cwd=tmp_path,
+            inherit_default_environment=False,
+        ) as (connection, _process):
+            await connection.initialize(protocol_version=1)
+    diagnostic = str(failure.value)
+    assert "qwerty" not in diagnostic
+    assert "C:/Windows" in diagnostic
+    assert "[REDACTED]" in diagnostic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [RuntimeError, PermissionError])
+async def test_acp_launch_exceptions_redact_known_credentials_and_bound_messages(tmp_path, monkeypatch, exception_type):
+    from types import SimpleNamespace
+
+    from backend.coding_agent_acp import CodingAgentACPProtocolError, CodingAgentACPStartupError, run_coding_agent_acp
+
+    token = "synthetic-protocol-token"
+    connection = AsyncMock()
+    connection.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    connection.new_session = AsyncMock(side_effect=exception_type("x" * 10000 + f" rejected {token} api_key=qwerty"))
+
+    @contextlib.asynccontextmanager
+    async def spawn(*args, **kwargs):
+        yield connection, MagicMock(returncode=0)
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+    launch = SimpleNamespace(
+        agent_id="codex",
+        agent_name="Codex",
+        argv=("fake-agent",),
+        environment={"CODEX_ACCESS_TOKEN": token, "SYSTEMROOT": "C:/Windows"},
+        timeout_seconds=2.0,
+    )
+    expected_type = CodingAgentACPStartupError if exception_type is PermissionError else CodingAgentACPProtocolError
+    with pytest.raises(expected_type) as failure:
+        await run_coding_agent_acp("review-app", "Build a no-capability Widget", launch=launch)
+    message = str(failure.value)
+    assert token not in message
+    assert "qwerty" not in message
+    assert len(message) < 5000
+    rendered_traceback = "".join(traceback.format_exception(failure.value))
+    assert token not in rendered_traceback
+    assert "qwerty" not in rendered_traceback
 
 
 @pytest.mark.asyncio
@@ -1370,13 +1527,13 @@ async def test_unknown_tool_kind_is_denied(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_path_jail_rejects_sibling_and_symlink_escape(tmp_path):
+async def test_path_jail_rejects_sibling_and_symlink_escape(tmp_path, monkeypatch):
     workspace_root = tmp_path / "app"
     sibling = tmp_path / "app-evil"
     workspace_root.mkdir()
     sibling.mkdir()
     (sibling / "payload.js").write_text("secret", encoding="utf-8")
-    (workspace_root / "linked.js").symlink_to(sibling / "payload.js")
+    _create_test_link(workspace_root / "linked.js", sibling / "payload.js", monkeypatch)
     client = FastAPIACPClient(workspace_root=workspace_root, on_update_callback=lambda x: None)
 
     with pytest.raises(RequestError):
@@ -1431,7 +1588,8 @@ async def test_terminal_uses_environment_allowlist_and_output_limit(tmp_path, mo
     monkeypatch.setenv("AMBIENT_TEST_SECRET", "must-not-leak")
     client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda x: None)
     code = (
-        "import os; print(os.getenv('AMBIENT_TEST_SECRET', 'missing')); print(os.getenv('NODE_ENV')); print('x' * 100)"
+        "import os, sys; sys.stdout.reconfigure(newline='\\n'); "
+        "print(os.getenv('AMBIENT_TEST_SECRET', 'missing')); print(os.getenv('NODE_ENV')); print('x' * 100)"
     )
 
     response = await client.create_terminal(
@@ -1557,6 +1715,47 @@ async def test_durable_acp_protocol_failure_transfers_generated_draft(monkeypatc
     assert captured.value.error_code == "CodingAgentACPProtocolError"
     assert draft.staging_dir.is_dir()
     assert "GeneratedDraft" in (draft.staging_dir / "controller.js").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing", [False, True])
+async def test_acp_prompt_supplies_only_allowed_artifacts_and_legal_write_guidance(tmp_path, monkeypatch, existing):
+    live_dir = tmp_path / "weather-card"
+    if existing:
+        live_dir.mkdir()
+        (live_dir / "controller.js").write_bytes(b"export default function Existing() { return null; }\n")
+        _write_manifest(live_dir, "weather-card")
+        (live_dir / "data").mkdir()
+        (live_dir / "data" / "secret.txt").write_text("private-data-must-not-enter-prompt", encoding="utf-8")
+    mock_conn = AsyncMock()
+    mock_conn.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    mock_conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="sess-context"))
+
+    async def generate(*, session_id, prompt):
+        text = prompt[0].text
+        assert "# Allowed staging artifact context" in text
+        assert "Use native apply_patch" in text
+        assert "Do not call exec_command" in text
+        assert "private-data-must-not-enter-prompt" not in text
+        if existing:
+            assert "function Existing()" in text
+        else:
+            assert '"path": "controller.js", "exists": false' in text
+        staging = Path(mock_conn.new_session.call_args.kwargs["cwd"])
+        (staging / "controller.js").write_bytes(b"export default function Generated() { return null; }\n")
+        _write_manifest(staging, "weather-card")
+        return PromptResponse(stop_reason="end_turn")
+
+    mock_conn.prompt = generate
+
+    @contextlib.asynccontextmanager
+    async def mock_spawn(to_client, command, *args, **kwargs):
+        to_client.on_connect(mock_conn)
+        yield mock_conn, MagicMock(returncode=0)
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", mock_spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+    await run_opencode_agent_acp(app_id="weather-card", instruction="build")
 
 
 @pytest.mark.asyncio

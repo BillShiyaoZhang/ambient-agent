@@ -23,11 +23,12 @@ export function createThemeController(): ThemeController {
   let preference: ThemePreference = stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
   let systemTheme: EffectiveTheme = media.matches ? "dark" : "light";
   const listeners = new Set<(snapshot: ThemeSnapshot) => void>();
+  let listening = false;
 
-  const snapshot = (): ThemeSnapshot => ({
-    preference,
-    effective: preference === "system" ? systemTheme : preference,
-  });
+  const snapshot = (): ThemeSnapshot => {
+    if (!listening) systemTheme = media.matches ? "dark" : "light";
+    return { preference, effective: preference === "system" ? systemTheme : preference };
+  };
   const apply = () => {
     const current = snapshot();
     document.documentElement.dataset.theme = current.effective;
@@ -39,7 +40,10 @@ export function createThemeController(): ThemeController {
     systemTheme = event.matches ? "dark" : "light";
     if (preference === "system") apply();
   };
-  media.addEventListener("change", handleSystemChange);
+  const stopListening = () => {
+    if (listening) media.removeEventListener("change", handleSystemChange);
+    listening = false;
+  };
   apply();
 
   return {
@@ -51,10 +55,19 @@ export function createThemeController(): ThemeController {
     },
     subscribe(listener) {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      if (!listening) {
+        systemTheme = media.matches ? "dark" : "light";
+        media.addEventListener("change", handleSystemChange);
+        listening = true;
+      }
+      apply();
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) stopListening();
+      };
     },
     destroy() {
-      media.removeEventListener("change", handleSystemChange);
+      stopListening();
       listeners.clear();
     },
   };

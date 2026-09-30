@@ -799,6 +799,61 @@ describe("graph visualization adapters", () => {
     expect(graph.nodes.find((node) => node.id === "workflow:needs_attention")?.status).toBe("needs_attention");
   });
 
+  it("keeps final step snapshots ahead of historical approval outcomes", () => {
+    const graph = workflowToGraph({
+      status: "succeeded",
+      state: { phase: "done" },
+      steps: [
+        { step_key: "graph_preflight", status: "succeeded", attempt: 1 },
+        { step_key: "wait_graph_approval", status: "succeeded", attempt: 1 },
+        { step_key: "graph_commit", status: "succeeded", attempt: 1 },
+      ],
+      interactions: [{ id: "approved", status: "resolved" }],
+      events: [{ sequence: 3, step_id: "graph_preflight", attempt: 1, type: "step_committed", payload: { outcome: { kind: "wait", interaction_id: "approved" } } }],
+    });
+    expect(graph.nodes.find((node) => node.id === "workflow:graph_preflight")?.status).toBe("succeeded");
+    expect(graph.nodes.filter((node) => node.status === "waiting")).toHaveLength(0);
+    expect(graph.nodes.find((node) => node.id === "workflow:graph_preflight")?.details?.["Latest event"]).toBe("step_committed");
+  });
+
+  it("puts a pending approval on the current phase rather than its completed producer", () => {
+    const graph = workflowToGraph({
+      status: "waiting_user",
+      state: { phase: "wait_graph_approval" },
+      steps: [{ step_key: "graph_preflight", status: "succeeded", attempt: 1 }],
+      interactions: [{ id: "approval", status: "pending" }],
+      events: [{ sequence: 3, step_id: "graph_preflight", attempt: 1, type: "step_committed", payload: { outcome: { kind: "wait", interaction_id: "approval" } } }],
+    });
+    expect(graph.nodes.find((node) => node.id === "workflow:graph_preflight")?.status).toBe("succeeded");
+    expect(graph.nodes.find((node) => node.id === "workflow:wait_graph_approval")?.status).toBe("waiting");
+  });
+
+  it("expires resolved approval waits in event-only completed snapshots", () => {
+    const graph = workflowToGraph({
+      status: "succeeded", state: { phase: "done" }, interactions: [{ id: "approval", status: "resolved" }],
+      events: [{ sequence: 3, step_id: "wait_plan", attempt: 1, type: "step_committed", payload: { outcome: { kind: "wait", interaction_id: "approval" } } }],
+    });
+    expect(graph.nodes.find((node) => node.id === "workflow:wait_plan")?.status).toBe("succeeded");
+  });
+
+  it("never leaves current waiting nodes in a succeeded Run even with a stale legacy step", () => {
+    const graph = workflowToGraph({ status: "succeeded", state: { phase: "done" }, steps: [{ step_key: "wait_plan", status: "waiting_user", attempt: 1 }] });
+    expect(graph.nodes.filter((node) => node.status === "waiting")).toHaveLength(0);
+  });
+
+  it("ignores events from an older step attempt without hiding a newer attempt", () => {
+    const graph = workflowToGraph({
+      steps: [{ step_key: "plan", status: "succeeded", attempt: 2 }],
+      events: [{ sequence: 3, step_id: "plan", attempt: 1, type: "step_failed", payload: { error: "old failure" } }],
+    });
+    expect(graph.nodes.find((node) => node.id === "workflow:plan")).toMatchObject({ status: "succeeded", badges: expect.arrayContaining(["Attempt 2"]) });
+    const retryGraph = workflowToGraph({
+      steps: [{ step_key: "plan", status: "failed", attempt: 1 }],
+      events: [{ sequence: 4, step_id: "plan", attempt: 2, type: "step_started", payload: {} }],
+    });
+    expect(retryGraph.nodes.find((node) => node.id === "workflow:plan")?.status).toBe("running");
+  });
+
   it("normalizes data-map metadata while dropping forbidden raw payload fields", () => {
     const graph = dataMapToGraph({
       version: 1,

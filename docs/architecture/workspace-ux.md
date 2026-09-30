@@ -114,3 +114,24 @@ Popovers 支持 Escape、外部点击和焦点返回。审批对话框是 blocki
 - 普通文本以 WCAG AA 对比度为目标，焦点状态不只依赖颜色表达。
 
 核心状态迁移与几何算法位于 `frontend/src/lib/windowManager.ts`，交互实现位于 `AppWorkspace.tsx`，覆盖测试位于 `tests/frontend/window_manager.test.ts` 与 `workspace_ui.test.tsx`。
+
+## 动作表单与主题生命周期
+
+- App Center 动作输入按 JSON Schema 的类型、必需字段、enum、嵌套 properties/items 验证；array/object 使用 JSON 文本输入并在提交前解析，integer 必须为整数，number 必须有限。
+- enum 选择保留原始 JSON 值及类型，包括 boolean、number、null 和结构化值；同样显示的字符串与数字不能混淆。
+- 未填写且没有显式 default 的可选字段不出现在请求中，尤其不能将空 number 转成 null。缺少必需字段、类型不符、无效 JSON 或不在 enum 的值在本地显示字段错误，且不启动 Run。
+- Schema 里的显式 default 保留其值及类型，嵌套必需字段与数组项执行相同验证；后端继续执行权威校验。
+- nullable boolean 文本输入使用 JSON 的 true/false/null，提交为对应布尔值或 null。
+- 主题控制器支持 setup→cleanup→setup。订阅恢复时重新接入系统媒体监听，并读取最新系统主题；最后一个订阅清理后释放监听，重复 destroy 安全。
+- StrictMode 的 effect 重放不能停止“跟随系统”，不能泄漏首次 render 创建的监听；手动主题偏好仍优先于系统变更。
+
+## 构建与下载体积
+
+- 生产构建保留 Vite 默认的 500 kB 分包提示阈值。稳定的 React runtime 独立分包；vendor 分组本身不改变组件挂载、事件订阅和请求时机。
+- AppWorkspace 仅在既有的非空画布条件下加载 JavaScript 模块，首次加载显示可访问的工作区加载提示；共享样式继续由入口加载，画布、聊天和任务状态继续由 App 管理。模块加载完成后沿用原窗口与 Widget 生命周期，空画布首页不下载该视图代码。
+- 已延迟加载的 Graph Explorer 及其专属依赖保持按需加载；不能通过宽泛 vendor 分组把它们带入初始下载。
+- 验证同时比较主包体积和 HTML 的完整静态 JavaScript 依赖（含 gzip 总量），并确认图谱仍是动态依赖；仅移动字节而增加初始下载量不视为优化。
+- 分包应使依赖缓存独立于业务代码变化。接受前运行完整前端测试、lint、TypeScript/生产构建，并通过生产产物的浏览器访问复查初次加载与主要入口。
+- 开发、构建与测试依赖由 package-lock 固定兼容版本，并检查全部依赖的 npm audit：Vitest 与配套 mocker 至少 4.1.11，当前 3.x nanoid 至少 3.3.18，当前 7.x undici 至少 7.29.1。安全更新先保留原公告与失败审计，再更新兼容范围、执行 npm ci，并要求 audit 无已知告警及完整前端门禁通过；生产前端镜像仅提供构建后的静态资源。
+- 锁文件保留跨平台可选依赖，使用 Windows 安装与生产 Node22/Linux 的 npm ci 验证可移植性；宿主系统不能使另一平台所需的条目丢失。
+- 动态图谱的集成测试在请求状态已提交后等待真实模块导入完成，再断言图节点与隐私隔离；验收不依赖冷缓存、并行构建下的一秒加载时限。

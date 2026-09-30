@@ -42,9 +42,14 @@ OpenCode 已包含在 Backend 镜像中。如需使用 Codex，直接在“模�
 ```bash
 uv sync
 npm --prefix frontend install
+npm --prefix widget-runtime ci --ignore-scripts
 uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 npm --prefix frontend run dev
+npm --prefix widget-runtime run start:frame
 ```
+
+后端、前端和 Widget Frame 分别在独立终端运行。浏览器需能访问
+`http://localhost:8001/frame.html`；Frame 缺失会导致 Widget 握手超时。
 
 完整说明见[中文文档](docs/guide/introduction.md)或 [English documentation](docs/en/guide/introduction.md)。
 
@@ -74,6 +79,13 @@ npm --prefix frontend run test
 npm --prefix frontend run build
 npm --prefix widget-runtime test
 ```
+
+CI 还会在独立 Neo4j 5.26 实例中执行并发补偿回归。手工运行该门禁时，设置
+`AMBIENT_TEST_NEO4J_URI`、`AMBIENT_TEST_NEO4J_PASSWORD`、`AMBIENT_TEST_NEO4J_ISOLATED=1`，
+再执行 `uv run pytest tests/backend/test_graph_compensation.py`。
+测试会清空这个实例的上下文与效果记录，必须使用可丢弃的新实例，不能指向已有工作区数据库。
+生产镜像的构建上下文排除本机依赖缓存、审查产物和 Agent 私有设置。
+默认 Pytest 只收集 `tests/` 下的项目测试；工作区下载的第三方插件与审查产物不属于项目回归套件。
 
 ## English
 

@@ -130,6 +130,7 @@ describe("TaskDrawer", () => {
     fireEvent.click(screen.getByText("Attention"));
     fireEvent.click(await screen.findByText("Send mail"));
     fireEvent.click(await screen.findByRole("button", { name: "Execution graph" }));
+    await act(async () => { await vi.dynamicImportSettled(); });
 
     expect(await screen.findByText("Schema approval")).toBeDefined();
     expect(screen.getByText("Waiting for user")).toBeDefined();
@@ -181,6 +182,7 @@ describe("TaskDrawer", () => {
     fireEvent.click(screen.getByText("Attention"));
     fireEvent.click(await screen.findByText("Send mail"));
     fireEvent.click(await screen.findByRole("button", { name: "Execution graph" }));
+    await act(async () => { await vi.dynamicImportSettled(); });
 
     expect(await screen.findByText("Route intent")).toBeDefined();
   });

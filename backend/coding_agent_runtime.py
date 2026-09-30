@@ -62,17 +62,23 @@ _SAFE_ENV = {
     "CODEX_ACCESS_TOKEN",
     "CODEX_API_KEY",
     "CODEX_CA_CERTIFICATE",
+    "COMSPEC",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "LANG",
     "LC_ALL",
     "NO_PROXY",
     "PATH",
+    "PATHEXT",
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
     "TEMP",
     "TMP",
     "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
     "all_proxy",
     "http_proxy",
     "https_proxy",
@@ -342,6 +348,7 @@ class CodingAgentRuntime:
         )
 
     async def _run_probe(self, argv: list[str], *, agent_id: str) -> tuple[int, str]:
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -353,6 +360,16 @@ class CodingAgentRuntime:
             return proc.returncode or 0, _clean_output(stdout[:_OUTPUT_LIMIT])
         except (FileNotFoundError, PermissionError, OSError, TimeoutError) as exc:
             return 1, str(exc)
+        finally:
+            if proc is not None:
+                if proc.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                # communicate resumes cancelled pipe readers and awaits EOF/reaping.
+                await proc.communicate()
+                # Process has no public close API; EOF alone can leave its transport
+                # open on Unix until a later callback, beyond the caller's loop.
+                proc._transport.close()
 
     async def status(self, agent_id: str) -> dict[str, Any]:
         spec = spec_for(agent_id)

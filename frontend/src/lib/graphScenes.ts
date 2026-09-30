@@ -695,6 +695,7 @@ export function workflowToGraph(
   const copy = WORKFLOW_COPY[language];
   const run = asRecord(runValue);
   const overlays = new Map<string, WorkflowOverlay>();
+  const stepSnapshots = new Map<string, WorkflowOverlay>();
   const knownPhases = new Set(DURABLE_WORKFLOW_DESCRIPTOR.nodes.map((node) => node.id));
   const discoveredPhases = new Set<string>();
 
@@ -737,8 +738,14 @@ export function workflowToGraph(
       result: step.result ?? step.output ?? prior.result,
       error: step.error ?? prior.error,
     });
+    stepSnapshots.set(id, overlays.get(id)!);
   }
 
+  const runStatus = normalizeRunStatus(run?.status);
+  const pendingInteractionIds = new Set(asRecords(run?.interactions)
+    .filter((interaction) => interaction.status === "pending")
+    .map((interaction) => asString(interaction.id)));
+  const hasWaitSnapshot = runStatus !== undefined || Array.isArray(run?.interactions);
   const events = asRecords(run?.events)
     .sort((left, right) =>
       (asFiniteNumber(left.sequence) ?? 0) - (asFiniteNumber(right.sequence) ?? 0));
@@ -750,10 +757,26 @@ export function workflowToGraph(
     const sequence = asFiniteNumber(event.sequence) ?? 0;
     if (prior.sequence !== undefined && sequence < prior.sequence) continue;
     const payload = asRecord(event.payload);
+    const attempt = asFiniteNumber(event.attempt) ?? asFiniteNumber(payload?.attempt);
+    const snapshot = stepSnapshots.get(id);
+    if (snapshot?.attempt !== undefined && attempt !== undefined && attempt < snapshot.attempt) continue;
+    let status = eventStatus(event);
+    const outcome = asRecord(payload?.outcome);
+    if (status === "waiting" && outcome?.kind === "wait" && hasWaitSnapshot) {
+      const pendingHere = pendingInteractionIds.has(asString(outcome.interaction_id))
+        && (!currentPhase || currentPhase === id);
+      const currentWait = runStatus === "waiting" && currentPhase === id;
+      if (!pendingHere && !currentWait) status = "succeeded";
+    }
+    if (
+      snapshot?.status
+      && ["succeeded", "failed", "cancelled"].includes(snapshot.status)
+      && (attempt === undefined || snapshot.attempt === undefined || attempt <= snapshot.attempt)
+    ) status = snapshot.status;
     overlays.set(id, {
       ...prior,
-      status: eventStatus(event) ?? prior.status,
-      attempt: asFiniteNumber(event.attempt) ?? prior.attempt,
+      status: status ?? prior.status,
+      attempt: attempt ?? prior.attempt,
       summary: asString(payload?.summary) ?? asString(event.summary) ?? prior.summary,
       result: payload?.result ?? event.result ?? prior.result,
       error: errorFromRecord(event) ?? prior.error,
@@ -771,6 +794,12 @@ export function workflowToGraph(
       current: true,
       error: run?.error ?? prior.error,
     });
+  }
+
+  if (runStatus === "succeeded") {
+    for (const [id, overlay] of overlays) {
+      if (overlay.status === "waiting") overlays.set(id, { ...overlay, status: "succeeded" });
+    }
   }
 
   const descriptorNodes: GraphNode[] = DURABLE_WORKFLOW_DESCRIPTOR.nodes.map((node) => {

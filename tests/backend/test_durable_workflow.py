@@ -2059,7 +2059,13 @@ async def test_retryable_saga_failure_keeps_prior_effect_and_compensation(tmp_pa
         intent=IntentPlan(kind=IntentKind.MULTI_INTENT),
         data={
             "effects_committed": True,
-            "graph_compensations": [{"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}],
+            "graph_compensations": [
+                {
+                    "ticket_id": mutation["ticket_id"],
+                    "actions": mutation["reverse_actions"],
+                    "guard": mutation["compensation_guard"],
+                }
+            ],
             "multi_index": 1,
             "multi_results": [{"message": "committed"}],
         },
@@ -2113,7 +2119,13 @@ async def test_shutdown_requeues_checkpoint_without_compensating_live_effect(
         intent=IntentPlan(kind=IntentKind.MULTI_INTENT),
         data={
             "effects_committed": True,
-            "graph_compensations": [{"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}],
+            "graph_compensations": [
+                {
+                    "ticket_id": mutation["ticket_id"],
+                    "actions": mutation["reverse_actions"],
+                    "guard": mutation["compensation_guard"],
+                }
+            ],
             "multi_index": 1,
             "multi_results": [{"message": "committed"}],
         },
@@ -2144,7 +2156,11 @@ async def test_shutdown_requeues_checkpoint_without_compensating_live_effect(
     assert released["state"]["data"]["multi_index"] == 1
     assert released["state"]["data"]["multi_results"] == [{"message": "committed"}]
     assert released["state"]["data"]["graph_compensations"] == [
-        {"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}
+        {
+            "ticket_id": mutation["ticket_id"],
+            "actions": mutation["reverse_actions"],
+            "guard": mutation["compensation_guard"],
+        }
     ]
 
 
@@ -2180,7 +2196,13 @@ async def test_explicit_cancel_still_compensates_inflight_durable_workflow(
         intent=IntentPlan(kind=IntentKind.MULTI_INTENT),
         data={
             "effects_committed": True,
-            "graph_compensations": [{"ticket_id": mutation["ticket_id"], "actions": mutation["reverse_actions"]}],
+            "graph_compensations": [
+                {
+                    "ticket_id": mutation["ticket_id"],
+                    "actions": mutation["reverse_actions"],
+                    "guard": mutation["compensation_guard"],
+                }
+            ],
         },
     )
     coordinator = RunCoordinator(store, SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
@@ -2207,3 +2229,69 @@ async def test_explicit_cancel_still_compensates_inflight_durable_workflow(
     assert graph_db.get_node("cancel-saga-node") is None
     assert completed["state"]["data"]["effects_committed"] is False
     assert completed["state"]["data"]["graph_compensations"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [False, None, "false", "true", "approve", "deny", 1, 0, ["approve"]])
+async def test_raw_graph_approval_cannot_coerce_truthy_non_boolean_response(tmp_path: Path, response: Any) -> None:
+    store = RunStore(str(tmp_path))
+    graph = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph)
+    state = _state(
+        phase="graph_preflight",
+        workflow_type="graph_mutation",
+        intent=IntentPlan(
+            kind=IntentKind.GRAPH_MUTATION,
+            actions=[
+                {
+                    "action": "create_node",
+                    "id": "raw-approval-node",
+                    "type": "Task",
+                    "properties": {"title": "Requires approval"},
+                }
+            ],
+        ),
+    )
+    run = _create_run(store, state)
+    waiting, current, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="approval-request")
+    assert isinstance(waiting, Wait)
+    store.resolve_interaction(waiting.interaction_id, response, expected_run_version=current["version"])
+    outcome, current, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="approval-response")
+    assert isinstance(outcome, Failed)
+    assert outcome.error_code == "approval_denied"
+    assert current["status"] == "failed"
+    assert graph.get_node("raw-approval-node") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [True, {"approved": True}, {"approved": "approve"}])
+async def test_graph_approval_preserves_literal_true_and_declared_object_protocol(
+    tmp_path: Path, response: Any
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph)
+    state = _state(
+        phase="graph_preflight",
+        workflow_type="graph_mutation",
+        intent=IntentPlan(
+            kind=IntentKind.GRAPH_MUTATION,
+            actions=[
+                {
+                    "action": "create_node",
+                    "id": "raw-approval-node",
+                    "type": "Task",
+                    "properties": {"title": "Approved"},
+                }
+            ],
+        ),
+    )
+    run = _create_run(store, state)
+    waiting, current, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="approval-request")
+    assert isinstance(waiting, Wait)
+    store.resolve_interaction(waiting.interaction_id, response, expected_run_version=current["version"])
+    outcome, _, _ = await _execute_fenced_step(store, workflow, run["id"], worker_id="approval-response")
+    assert isinstance(outcome, Continue)
+    assert outcome.next_phase == "graph_commit"
+    await _execute_fenced_step(store, workflow, run["id"], worker_id="approval-commit")
+    assert graph.get_node("raw-approval-node")["properties"]["title"] == "Approved"

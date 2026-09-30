@@ -245,6 +245,63 @@ async def test_coordinator_persists_permission_wait_without_occupying_queue(tmp_
 
 
 @pytest.mark.asyncio
+async def test_shutdown_finishes_when_wake_race_returns_after_scheduler_cancellation(tmp_path, monkeypatch):
+    """Python 3.11 wait_for may consume cancellation when its wake already won."""
+    store = RunStore(str(tmp_path))
+    coordinator = RunCoordinator(
+        store, SimpleNamespace(get_action=lambda *_args: None), SimpleNamespace(), SimpleNamespace()
+    )
+    original_wait_for = asyncio.wait_for
+    waiting = asyncio.Event()
+    cancellation_consumed = asyncio.Event()
+    consumed = False
+    claim_calls = []
+    original_claim_next = store.claim_next
+
+    def record_claim(*args, **kwargs):
+        claim_calls.append(True)
+        return original_claim_next(*args, **kwargs)
+
+    async def racing_wait_for(awaitable, timeout):
+        nonlocal consumed
+        frame = getattr(awaitable, "cr_frame", None)
+        if frame is None or frame.f_locals.get("self") is not coordinator._wake:
+            return await original_wait_for(awaitable, timeout)
+        awaitable.close()
+        waiting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if consumed:
+                raise
+            consumed = True
+            cancellation_consumed.set()
+            return True
+
+    monkeypatch.setattr(asyncio, "wait_for", racing_wait_for)
+    monkeypatch.setattr(store, "claim_next", record_claim)
+    await coordinator.start()
+    await original_wait_for(waiting.wait(), timeout=1)
+    initial_claim_count = len(claim_calls)
+    shutdown = asyncio.create_task(coordinator.shutdown())
+    await original_wait_for(cancellation_consumed.wait(), timeout=1)
+    timed_out = False
+    try:
+        await original_wait_for(asyncio.shield(shutdown), timeout=0.2)
+    except TimeoutError:
+        timed_out = True
+    finally:
+        # The Red implementation must still unwind before the test exits.
+        if not shutdown.done():
+            coordinator._scheduler.cancel()
+        await original_wait_for(shutdown, timeout=1)
+    assert not timed_out, "Scheduler kept running after shutdown cancellation was consumed"
+    assert len(claim_calls) == initial_claim_count
+    assert coordinator._scheduler is None
+    assert coordinator._heartbeat is None
+
+
+@pytest.mark.asyncio
 async def test_direct_mcp_resource_uses_durable_permission_and_resumes(tmp_path):
     class Catalog:
         def get_action(self, *_args):
@@ -1760,6 +1817,9 @@ async def test_shutdown_waits_for_cancelled_worker_cleanup(tmp_path, monkeypatch
     )
     cancellation_seen = asyncio.Event()
     cleanup_finished = asyncio.Event()
+    await coordinator.start()
+    original_scheduler = coordinator._scheduler
+    original_worker_id = coordinator.worker_id
 
     async def worker_with_slow_cleanup():
         try:
@@ -1779,12 +1839,19 @@ async def test_shutdown_waits_for_cancelled_worker_cleanup(tmp_path, monkeypatch
         await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
         await asyncio.sleep(0)
         assert not shutdown.done()
+        coordinator.ensure_started()
+        assert coordinator._scheduler is original_scheduler
+        assert coordinator.worker_id == original_worker_id
     finally:
         cleanup_finished.set()
         await asyncio.wait_for(worker, timeout=1)
         await asyncio.wait_for(shutdown, timeout=1)
 
     assert worker.done()
+    coordinator.ensure_started()
+    assert coordinator._scheduler is not original_scheduler
+    assert coordinator.worker_id != original_worker_id
+    await coordinator.shutdown()
 
 
 @pytest.mark.asyncio

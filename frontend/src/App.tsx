@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { lazy, Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
 import wsService from "./services/websocket";
 import type { Message } from "./components/ChatPanel";
 import type { Widget } from "./components/DashboardCanvas";
@@ -13,7 +13,6 @@ import type { Session } from "./components/SessionSidebar";
 import { AppCenter } from "./components/AppCenter";
 import { AppPermissionModal } from "./components/AppPermissionModal";
 import { MutationPreview, type MutationPreviewData } from "./components/MutationPreview";
-import { AppWorkspace } from "./components/AppWorkspace";
 import { AgentChatOverlay } from "./components/AgentChatOverlay";
 import type { RunInteractionAction } from "./components/ChatRunCard";
 import { TaskDrawer } from "./components/TaskDrawer";
@@ -76,6 +75,11 @@ import { getApiBaseUrl, webSocketUrl } from "./services/apiBase";
 import type { SocketConnectionState } from "./services/socketReconnect";
 
 const API_BASE = getApiBaseUrl();
+
+const AppWorkspace = lazy(async () => {
+  const module = await import("./components/AppWorkspace");
+  return { default: module.AppWorkspace };
+});
 
 function combinedConnectionState(
   commandState: SocketConnectionState,
@@ -163,6 +167,9 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesSessionIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
   const [chatProjection, setChatProjection] = useState<ConversationProjection>(EMPTY_CONVERSATION_PROJECTION);
   const [widgets, setWidgets] = useState<Widget[]>([]);
   const [canvasConfig, setCanvasConfig] = useState<CanvasConfigV3>(() => ({ ...EMPTY_CANVAS, windows: {} }));
@@ -734,17 +741,31 @@ function App() {
   useEffect(() => {
     if (!activeSessionId) return;
     let disposed = false;
+    if (messagesSessionIdRef.current !== activeSessionId) {
+      messagesSessionIdRef.current = activeSessionId;
+      setMessages([]);
+    }
     setChatProjection(EMPTY_CONVERSATION_PROJECTION);
 
     // Load message history from DB
     const loadSessionHistory = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/sessions/${activeSessionId}/messages`);
-        if (res.ok) {
+        if (res.ok && !disposed) {
           const data = await res.json();
+          if (disposed) return;
           // Filter to only user and agent conversational messages for the Chat UI
-          const chatMsgs = data.filter((msg: any) => msg.role === "user" || msg.role === "agent");
-          setMessages(chatMsgs);
+          const chatMsgs: Message[] = Array.isArray(data)
+            ? data.filter((msg: any) => msg.role === "user" || msg.role === "agent")
+            : [];
+          setMessages((previous) => {
+            const history = chatMsgs.reduce(mergeIncomingMessage, []);
+            return previous.reduce((merged, message) => (
+              Number.isSafeInteger(message.id) && Number(message.id) > 0
+                ? mergeIncomingMessage(merged, message)
+                : [...merged, message]
+            ), history);
+          });
         }
       } catch (err) {
         console.error("Error loading chat history:", err);
@@ -768,6 +789,7 @@ function App() {
     });
 
     const handleProjection = (data: any) => {
+      if (disposed) return;
       if (data.type === "ack" || data.type === "reply") {
         if (!Number.isSafeInteger(data.message?.id) || data.message.id < 1) return;
         if (data.type === "reply" && data.message?.sender === "agent" && !chatOpenRef.current) {
@@ -988,14 +1010,18 @@ function App() {
   };
 
   const handleCancelRun = useCallback(async (runId: string) => {
+    const sessionId = activeSessionIdRef.current;
     setChatProjection((current) => markRunCancelling(current, runId));
     try {
       const run = await runService.cancel(runId);
+      if (activeSessionIdRef.current !== sessionId) return;
       setChatProjection((current) => projectRunSnapshot(current, run));
     } catch (error) {
+      if (activeSessionIdRef.current !== sessionId) return;
       console.error("Error cancelling run:", error);
       try {
         const run = await runService.get(runId);
+        if (activeSessionIdRef.current !== sessionId) return;
         setChatProjection((current) => projectRunSnapshot(current, run));
       } catch (refreshError) {
         console.error("Error refreshing run after cancellation failed:", refreshError);
@@ -1149,6 +1175,7 @@ function App() {
     <div className="w-screen h-screen overflow-hidden font-sans" data-theme={theme.effective}>
       {canvasConfig.open_app_ids.length === 0 ? appCenter("home") : (
         <>
+          <Suspense fallback={<div role="status" aria-live="polite">{language === "zh" ? "正在加载工作区…" : "Loading workspace…"}</div>}>
           <AppWorkspace
             widgets={uniqueWidgets}
             canvas={canvasConfig}
@@ -1178,6 +1205,7 @@ function App() {
             theme={theme}
             onThemeChange={(preference) => themeControllerRef.current!.setPreference(preference)}
           />
+          </Suspense>
           {appCenter("overlay")}
         </>
       )}
@@ -1185,7 +1213,7 @@ function App() {
       <AgentChatOverlay
         open={isChatOpen}
         unreadCount={unreadCount}
-        messages={messages}
+        messages={messagesSessionIdRef.current === activeSessionId ? messages : []}
         runCards={orderedRunCards(chatProjection)}
         liveStreams={chatProjection.liveStreams}
         interactions={chatProjection.interactions}

@@ -135,17 +135,11 @@ def test_graph_query_and_subscription_budgets_are_enforced(tmp_path):
     assert invalid_target not in manager.active_subscriptions
 
 
-def test_graph_mutation_endpoint(tmp_path, monkeypatch):
-    workspace_dir = str(tmp_path / "workspace")
-    monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
-
-    # Force Main App backend configuration to reload / use this temp directory
+def test_graph_mutation_endpoint(tmp_path, graph_api_client):
     from backend import main
 
-    # Re-initialize the GraphDatabase in main using the mocked env
-    main.graph_db = GraphDatabase(workspace_dir)
-
-    client = TestClient(app)
+    client = graph_api_client
+    assert main.run_store.workspace_dir == main.graph_db.workspace_dir == str(tmp_path / "workspace")
 
     # Create nodes first
     payload = {
@@ -174,7 +168,7 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     }
 
     response = client.post("/api/graph/mutate", json=payload)
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     res_data = response.json()
     assert res_data["status"] == "success"
     durable_run = main.run_store.get_run(res_data["run_id"], include_events=True)
@@ -218,20 +212,14 @@ def test_graph_mutation_endpoint(tmp_path, monkeypatch):
     assert len(db.get_edges("t-mut-1")) == 0
 
 
-def test_graph_mutation_endpoint_rejects_invalid_and_oversized_batches(tmp_path, monkeypatch):
-    workspace_dir = str(tmp_path / "workspace")
-    monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
-
-    from backend import main
-
-    main.graph_db = GraphDatabase(workspace_dir)
-    client = TestClient(app)
+def test_graph_mutation_endpoint_rejects_invalid_and_oversized_batches(graph_api_client):
+    client = graph_api_client
 
     invalid = client.post(
         "/api/graph/mutate",
         json={"actions": [{"action": "not-supported"}]},
     )
-    assert invalid.status_code == 422
+    assert invalid.status_code == 422, invalid.text
     assert invalid.json()["detail"]["code"] == "invalid_graph_mutation"
 
     too_many = client.post(
@@ -255,14 +243,10 @@ def test_graph_mutation_endpoint_rejects_invalid_and_oversized_batches(tmp_path,
     assert too_large.status_code == 422
 
 
-def test_graph_mutation_idempotency_precedes_state_dependent_preflight(tmp_path, monkeypatch):
-    workspace_dir = str(tmp_path / "workspace")
-    monkeypatch.setenv("WORKSPACE_DIR", workspace_dir)
-
+def test_graph_mutation_idempotency_precedes_state_dependent_preflight(tmp_path, graph_api_client):
     from backend import main
 
-    main.graph_db = GraphDatabase(workspace_dir)
-    client = TestClient(app)
+    client = graph_api_client
 
     generated_payload = {
         "idempotency_key": f"generated-id:{tmp_path}",
@@ -276,7 +260,7 @@ def test_graph_mutation_idempotency_precedes_state_dependent_preflight(tmp_path,
     }
     created = client.post("/api/graph/mutate", json=generated_payload)
     duplicate_create = client.post("/api/graph/mutate", json=generated_payload)
-    assert created.status_code == duplicate_create.status_code == 200
+    assert created.status_code == duplicate_create.status_code == 200, (created.text, duplicate_create.text)
     assert duplicate_create.json()["run_id"] == created.json()["run_id"]
     assert duplicate_create.json()["ticket_id"] == created.json()["ticket_id"]
     generated_id = created.json()["actions"][0]["id"]

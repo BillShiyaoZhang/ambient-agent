@@ -37,7 +37,8 @@ def _path_matches(pattern: str, path: str) -> bool:
     if pattern.endswith("/**"):
         prefix = pattern[:-3].rstrip("/")
         return path == prefix or path.startswith(f"{prefix}/")
-    return PurePosixPath(path).match(pattern)
+    # Relative Path.match() accepts suffixes; grants always start at the App data root.
+    return PurePosixPath(f"/{path}").match(f"/{pattern}")
 
 
 class CapabilityAuthorizer:

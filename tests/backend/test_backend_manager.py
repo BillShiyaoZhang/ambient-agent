@@ -405,6 +405,8 @@ for line in sys.stdin:
         max_response_bytes=256,
     )
     await client.start()
+    process = client.process
+    pipe_transports = [process.stdin.transport, process.stdout._transport, process.stderr._transport]
     try:
         outcomes = await asyncio.gather(
             client.call("tools/call", {"name": "bad"}),
@@ -415,6 +417,8 @@ for line in sys.stdin:
         assert not client.pending_requests
     finally:
         await client.stop()
+    assert process.returncode is not None
+    assert all(transport.is_closing() for transport in pipe_transports)
 
 
 @pytest.mark.asyncio

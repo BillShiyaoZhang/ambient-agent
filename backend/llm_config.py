@@ -316,6 +316,40 @@ _CATALOG_BY_ID = {item["id"]: item for item in PROVIDER_CATALOG}
 _CONFIG_VERSION = 3
 
 
+def _secure_secret_file(path: Path) -> None:
+    """Set owner-only access using the platform's actual permission model."""
+    if path.is_symlink():
+        raise LLMConfigError("refusing to secure a symlink credential file")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    convert.restype = wintypes.BOOL
+    set_security = advapi.SetFileSecurityW
+    set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    set_security.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    try:
+        # P disables inheritance; OW is Windows' Owner Rights principal.
+        if not convert("D:P(A;;FA;;;OW)", 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not set_security(str(path), 0x00000004 | 0x80000000, descriptor):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel.LocalFree(descriptor)
+    except OSError as exc:
+        raise LLMConfigError("Cannot restrict credential file permissions", code="llm_secret_permissions") from exc
+
+
 class LLMConfigStore:
     """Store non-secret profiles separately from write-only credentials."""
 
@@ -331,7 +365,7 @@ class LLMConfigStore:
         if not self.secrets_path.exists():
             self._write_json(self.secrets_path, {}, secret=True)
         else:
-            os.chmod(self.secrets_path, 0o600)
+            _secure_secret_file(self.secrets_path)
         # A damaged registry or credential file must fail startup before a
         # later settings mutation can overwrite the only recoverable copy.
         self._profiles()
@@ -401,13 +435,21 @@ class LLMConfigStore:
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         try:
             mode = 0o600 if secret else 0o644
-            os.fchmod(fd, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), mode)
+                else:
+                    os.chmod(temp_name, mode)
+                if secret:
+                    _secure_secret_file(Path(temp_name))
                 json.dump(data, handle, indent=2, ensure_ascii=False)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
-            os.chmod(path, mode)
+            if secret:
+                _secure_secret_file(path)
+            else:
+                os.chmod(path, mode)
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
