@@ -55,7 +55,9 @@ import {
   startCodingAgentAuth,
   updateCodingAgentSettings,
   updateCodingAgentModel,
+  type AgentModelConfig,
   type CodingAgentDefinition,
+  type CodingAgentId,
   type CodingAgentSettings,
 } from "./services/codingAgents";
 import {
@@ -167,6 +169,7 @@ function App() {
   const [llmProviders, setLLMProviders] = useState<LLMProvider[]>([]);
   const [llmSettings, setLLMSettings] = useState<LLMSettings>({ default_model: null, fast_model: null });
   const [codingAgents, setCodingAgents] = useState<CodingAgentDefinition[]>([]);
+  const llmConfigurationRequest = useRef(0);
   const [codingAgentSettings, setCodingAgentSettings] = useState<CodingAgentSettings>({
     default_agent: "opencode",
     agent_models: {
@@ -260,11 +263,13 @@ function App() {
   }, []);
 
   const refreshLLMConfiguration = useCallback(async () => {
+    const request = ++llmConfigurationRequest.current;
     try {
       const [llmConfiguration, codingAgentConfiguration] = await Promise.all([
         loadLLMConfiguration(API_BASE),
         loadCodingAgentConfiguration(API_BASE),
       ]);
+      if (request !== llmConfigurationRequest.current) return;
       setLLMCatalog(llmConfiguration.catalog);
       setLLMProviders(llmConfiguration.providers);
       setLLMSettings(llmConfiguration.settings);
@@ -273,6 +278,15 @@ function App() {
     } catch (error) {
       console.error("Error loading LLM configuration:", error);
     }
+  }, []);
+  const saveCodingAgentModel = useCallback(async (agentId: CodingAgentId, config: AgentModelConfig) => {
+    // Reads begun before or during this save cannot undo its confirmed result.
+    llmConfigurationRequest.current += 1;
+    const saved = await updateCodingAgentModel(API_BASE, agentId, config);
+    llmConfigurationRequest.current += 1;
+    setCodingAgentSettings((current) => ({ ...current, agent_models: { ...current.agent_models, [agentId]: saved } }));
+    setCodingAgents((current) => current.map((agent) => agent.id === agentId ? { ...agent, model_config: saved } : agent));
+    return saved;
   }, []);
   const [isAppStoreOpen, setIsAppStoreOpen] = useState(false);
   const [isAuditOpen, setIsAuditOpen] = useState(false);
@@ -1317,7 +1331,7 @@ function App() {
         onGetCodingAgentAuth={(agentId) => getCodingAgentAuth(API_BASE, agentId)}
         onListCodingAgentModels={(agentId) => listCodingAgentModels(API_BASE, agentId)}
         onClearCodingAgentAuth={(agentId) => clearCodingAgentAuth(API_BASE, agentId)}
-        onUpdateCodingAgentModel={(agentId, config) => updateCodingAgentModel(API_BASE, agentId, config)}
+        onUpdateCodingAgentModel={saveCodingAgentModel}
       />
 
       {!IS_REMOTE_WORKSPACE ? <RemoteWorkspaceDialog open={isRemoteWorkspaceOpen} language={language} onClose={() => setIsRemoteWorkspaceOpen(false)} /> : null}

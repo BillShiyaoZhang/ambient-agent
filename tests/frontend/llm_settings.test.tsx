@@ -81,6 +81,45 @@ const waitingAuth: CodingAgentAuthSession = {
   id: "auth-1", agent_id: "codex", status: "waiting", method: "device_code", verification_uri: "https://auth.openai.com/codex/device", user_code: "TEST-123", expires_at: null, error: "",
 };
 
+describe("coding agent model saves", () => {
+  it("uses the authoritative native binding and falls back to the agent snapshot when it is absent", async () => {
+    const agent = { ...codexAgent, model_config: { mode: "native" as const, native_model: "gpt-default" } };
+    const authoritative = { ...codingSettings, agent_models: { ...codingSettings.agent_models, codex: { mode: "native" as const, native_model: "gpt-fast" } } };
+    const props = { ...dialogProps, codingAgents: [agent], onListCodingAgentModels: vi.fn().mockResolvedValue(codexModels), onUpdateCodingAgentModel: vi.fn() };
+    const { rerender } = render(<LLMSettingsDialog {...props} codingAgentSettings={authoritative} />);
+    await screen.findByRole("option", { name: "GPT Fast · Fast model" });
+    expect((screen.getByRole("combobox", { name: "Codex model" }) as HTMLSelectElement).value).toBe("gpt-fast");
+    rerender(<LLMSettingsDialog {...props} codingAgentSettings={{ ...codingSettings, agent_models: {} }} />);
+    expect((screen.getByRole("combobox", { name: "Codex model" }) as HTMLSelectElement).value).toBe("gpt-default");
+    rerender(<LLMSettingsDialog {...props} codingAgentSettings={undefined} />);
+    expect((screen.getByRole("combobox", { name: "Codex model" }) as HTMLSelectElement).value).toBe("gpt-default");
+  });
+
+  it("uses authoritative shared bindings before older agent snapshots", () => {
+    render(<LLMSettingsDialog {...dialogProps} codingAgents={[{ ...opencodeAgent, installed: true, model_config: { mode: "shared_binding", provider_id: "openai-main", model_id: "gpt-b" } }]} codingAgentSettings={{ ...codingSettings, agent_models: { opencode: { mode: "shared_binding", provider_id: "openai-main", model_id: "gpt-a" } } }} onUpdateCodingAgentModel={vi.fn()} />);
+    expect((screen.getByRole("combobox", { name: "Execution model" }) as HTMLSelectElement).value).toBe("openai-main:gpt-a");
+  });
+
+  it("blocks duplicate saves and preserves the original native selection when saving fails", async () => {
+    let rejectSave!: (error: Error) => void;
+    const updateModel = vi.fn().mockReturnValue(new Promise((_resolve, reject) => { rejectSave = reject; }));
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(<LLMSettingsDialog {...dialogProps} codingAgentSettings={{ ...codingSettings, agent_models: { codex: { mode: "native", native_model: "gpt-fast" } } }} onListCodingAgentModels={vi.fn().mockResolvedValue(latestCodexModels)} onUpdateCodingAgentModel={updateModel} onRefresh={refresh} />);
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    const picker = screen.getByRole("combobox", { name: "Codex model" }) as HTMLSelectElement;
+    fireEvent.change(picker, { target: { value: "gpt-new" } });
+    expect(updateModel).toHaveBeenCalledWith("codex", { mode: "native", native_model: "gpt-new" });
+    expect(picker.disabled).toBe(true);
+    fireEvent.change(picker, { target: { value: "gpt-default" } });
+    expect(updateModel).toHaveBeenCalledTimes(1);
+    await act(async () => rejectSave(new Error("Model save unavailable")));
+    expect(picker.value).toBe("gpt-fast");
+    expect(picker.disabled).toBe(false);
+    expect(screen.getByRole("status").textContent).toBe("Model save unavailable");
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
 describe("Codex managed updates", () => {
   it.each([
     { language: "en" as const, action: "Update", target: "Update to 0.159.3", started: "Codex update started" },
@@ -133,7 +172,7 @@ describe("Codex managed updates", () => {
     const updateModel = vi.fn();
     const refresh = vi.fn().mockResolvedValue(undefined);
     const oldAgent = { ...codexAgent, version: "codex-cli 0.145.0", update_available: true, target_version: "0.159.3", model_config: { mode: "native" as const, native_model: "gpt-fast" } };
-    const props = { ...dialogProps, onInstallCodingAgent: install, onListCodingAgentModels: listModels, onRefresh: refresh, onUpdateSettings: updateSettings, onUpdateCodingAgent: updateAgent, onUpdateCodingAgentModel: updateModel };
+    const props = { ...dialogProps, codingAgentSettings: { ...codingSettings, agent_models: { ...codingSettings.agent_models, codex: oldAgent.model_config } }, onInstallCodingAgent: install, onListCodingAgentModels: listModels, onRefresh: refresh, onUpdateSettings: updateSettings, onUpdateCodingAgent: updateAgent, onUpdateCodingAgentModel: updateModel };
     const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[oldAgent]} />);
     await screen.findByRole("option", { name: "GPT Fast · Fast model" });
 

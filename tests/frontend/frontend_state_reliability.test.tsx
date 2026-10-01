@@ -1,6 +1,7 @@
 import React, { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentModelConfig, CodingAgentDefinition } from "../../frontend/src/services/codingAgents";
 
 const harness = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -47,18 +48,23 @@ vi.mock("../../frontend/src/services/runLive", async (importOriginal) => {
 vi.mock("../../frontend/src/components/AppCenter", () => ({ AppCenter: () => null }));
 vi.mock("../../frontend/src/components/AppWorkspace", () => ({ AppWorkspace: () => null }));
 vi.mock("../../frontend/src/components/AgentChatOverlay", () => ({
-  AgentChatOverlay: ({ messages, activeSessionId, onSelectSession, runCards = [], onCancelRun }: {
+  AgentChatOverlay: ({ messages, activeSessionId, onSelectSession, runCards = [], onCancelRun, codingAgent, codingAgentModel, onManageModels }: {
     messages: Array<{ content: string }>;
     activeSessionId: string | null;
     onSelectSession: (id: string) => void;
     runCards: Array<{ id: string }>;
     onCancelRun: (id: string) => void;
+    codingAgent?: CodingAgentDefinition;
+    codingAgentModel?: AgentModelConfig;
+    onManageModels: () => void;
   }) => <section>
     <output data-testid="session">{activeSessionId}</output>
     <output data-testid="messages">{messages.map((message) => message.content).join("|")}</output>
     <output data-testid="run-ids">{runCards.map((run) => run.id).join("|")}</output>
+    <output data-testid="coding-agent-bindings">{codingAgentModel?.native_model}|{codingAgent?.model_config.native_model}</output>
     {runCards[0] && <button onClick={() => onCancelRun(runCards[0].id)}>Cancel chat run</button>}
     <button onClick={() => onSelectSession("session-b")}>Select session B</button>
+    <button onClick={onManageModels}>模型与 Provider</button>
   </section>,
 }));
 
@@ -82,6 +88,46 @@ const run = (id: string, title: string) => ({
   summary: title, input: {}, attempt: 1, created_at: "2026-09-30T00:00:00Z", updated_at: "2026-09-30T00:00:00Z", interactions: [],
 });
 
+const managedCodex: CodingAgentDefinition = {
+  id: "codex", name: "Codex", description: "Managed coding agent", auth_hint: "Independent login", auth_mode: "codex_native", auth_methods: ["device_code"], uses_run_model: false,
+  available: true, installed: true, installable: true, install_state: "installed", install_operation: null, command_env: "CODEX_COMMAND", execution_target: "container",
+  authenticated: true, auth_state: "signed_in", version: "codex-cli 0.159.3", status_detail: "Logged in",
+  model_capability: { modes: ["native"], default_mode: "native", selection: "optional", catalog_source: "agent", supports_inherit: false },
+  model_config: { mode: "native", native_model: "gpt-fast" },
+};
+
+function codingConfiguration(binding: AgentModelConfig) {
+  return { agents: [{ ...managedCodex, model_config: binding }], settings: { default_agent: "codex", agent_models: { codex: binding } } };
+}
+
+function mockCodingModelApi() {
+  let binding = managedCodex.model_config;
+  const read = vi.fn(async () => response(codingConfiguration(binding)));
+  const save = vi.fn(async (config: AgentModelConfig) => { binding = config; return response(binding); });
+  const defaultFetch = vi.mocked(fetch).getMockImplementation()!;
+  const models = ["gpt-default", "gpt-fast", "gpt-5.6-luna", "fixture-4", "fixture-5", "fixture-6", "fixture-7", "fixture-8"].map((id, index) => ({
+    id, model: id, display_name: id === "gpt-5.6-luna" ? "GPT Luna" : id, description: "", is_default: index === 0, default_reasoning_effort: "medium", supported_reasoning_efforts: ["medium"],
+  }));
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/coding-agents")) return read();
+    if (url.endsWith("/api/coding-agents/codex/models")) return Promise.resolve(response({ agent_id: "codex", default_model: "gpt-default", models }));
+    if (url.endsWith("/api/coding-agents/codex/model") && init?.method === "PATCH") return save(JSON.parse(String(init.body)));
+    return defaultFetch(input, init);
+  });
+  return { read, save, snapshot: () => codingConfiguration(binding), setBinding: (config: AgentModelConfig) => { binding = config; } };
+}
+
+async function openCodingModels() {
+  render(<App />);
+  await waitFor(() => expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-fast|gpt-fast"));
+  fireEvent.click(screen.getByRole("button", { name: "模型与 Provider" }));
+  await screen.findByRole("option", { name: "GPT Luna" });
+  const picker = screen.getByRole("combobox", { name: "Codex 模型" }) as HTMLSelectElement;
+  await waitFor(() => expect(picker.disabled).toBe(false));
+  return picker;
+}
+
 describe("frontend async state regression contracts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -104,6 +150,62 @@ describe("frontend async state regression contracts", () => {
     }));
   });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  describe("coding model persistence", () => {
+    it("applies a saved native model before a slow refresh and keeps it when settings reopen", async () => {
+      const api = mockCodingModelApi();
+      const picker = await openCodingModels();
+      expect(picker.options).toHaveLength(9);
+      const refresh = deferred<Response>();
+      api.read.mockReturnValueOnce(refresh.promise);
+      fireEvent.change(picker, { target: { value: "gpt-5.6-luna" } });
+      await waitFor(() => expect(api.read).toHaveBeenCalledTimes(3));
+      expect(api.save).toHaveBeenCalledWith({ mode: "native", native_model: "gpt-5.6-luna" });
+      expect(picker.value).toBe("gpt-5.6-luna");
+      expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-5.6-luna|gpt-5.6-luna");
+      await act(async () => refresh.resolve(response(api.snapshot())));
+      fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+      fireEvent.click(screen.getByRole("button", { name: "模型与 Provider" }));
+      await waitFor(() => expect((screen.getByRole("combobox", { name: "Codex 模型" }) as HTMLSelectElement).value).toBe("gpt-5.6-luna"));
+    });
+
+    it("invalidates reads begun before and during a model save so late snapshots cannot undo it", async () => {
+      const api = mockCodingModelApi();
+      const picker = await openCodingModels();
+      const beforeSave = deferred<Response>();
+      const duringSave = deferred<Response>();
+      const save = deferred<AgentModelConfig>();
+      api.read.mockReturnValueOnce(beforeSave.promise);
+      fireEvent.click(screen.getByRole("button", { name: "刷新配置" }));
+      api.save.mockImplementationOnce(async () => { const binding = await save.promise; api.setBinding(binding); return response(binding); });
+      fireEvent.change(picker, { target: { value: "gpt-5.6-luna" } });
+      await act(async () => beforeSave.resolve(response(codingConfiguration({ mode: "native", native_model: "gpt-default" }))));
+      expect(picker.value).toBe("gpt-fast");
+      api.read.mockReturnValueOnce(duringSave.promise);
+      fireEvent.click(screen.getByRole("button", { name: "刷新配置" }));
+      await act(async () => save.resolve({ mode: "native", native_model: "gpt-5.6-luna" }));
+      await waitFor(() => expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-5.6-luna|gpt-5.6-luna"));
+      await act(async () => duringSave.resolve(response(codingConfiguration({ mode: "native", native_model: "gpt-default" }))));
+      expect(picker.value).toBe("gpt-5.6-luna");
+      expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-5.6-luna|gpt-5.6-luna");
+    });
+
+    it("keeps a successful save visible when its background configuration refresh fails", async () => {
+      const api = mockCodingModelApi();
+      const picker = await openCodingModels();
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        api.read.mockRejectedValueOnce(new Error("Configuration unavailable"));
+        fireEvent.change(picker, { target: { value: "gpt-5.6-luna" } });
+        await screen.findByText("Codex 模型配置已更新");
+        expect(picker.value).toBe("gpt-5.6-luna");
+        expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-5.6-luna|gpt-5.6-luna");
+        expect(error).toHaveBeenCalledWith("Error loading LLM configuration:", expect.any(Error));
+      } finally {
+        error.mockRestore();
+      }
+    });
+  });
 
   it("does not let session A's late history overwrite selected session B", async () => {
     const historyA = deferred<Response>();

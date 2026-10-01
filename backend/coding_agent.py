@@ -170,8 +170,10 @@ class CodingAgentConfigStore:
         return catalog
 
     async def runtime_catalog(self) -> list[dict[str, Any]]:
+        statuses = await asyncio.gather(*(self.runtime.status(spec.id) for spec in SPECS))
+        # Preferences can change while CLI probes await; bind the response only
+        # after they finish so agents and the enclosing settings agree.
         catalog = self.catalog()
-        statuses = await asyncio.gather(*(self.runtime.status(item["id"]) for item in catalog))
         for item, status in zip(catalog, statuses, strict=True):
             item.update(status)
         return catalog

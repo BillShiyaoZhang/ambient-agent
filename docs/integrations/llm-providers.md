@@ -63,6 +63,8 @@ MiniMax 的国际站和中国站是两个独立 Provider 预设，API Key 与请
 
 ## Codex 模型目录自动刷新
 
+编码模型切换以已保存的 `settings.agent_models` 为显示依据。保存成功的响应立即更新当前选择，后续刷新不能把保存前启动的旧请求结果覆盖回来；正在保存时禁止重复提交同一选择器，失败保留原选择并显示错误。`GET /api/coding-agents` 在状态探测结束后统一读取模型绑定，避免同一响应中的 `agents[].model_config` 与 `settings.agent_models` 分别来自切换前后。验收使用可控制完成顺序的请求验证“保存时旧刷新晚到”、状态探测期间切换，以及重新打开设置后保持已保存模型。
+
 模型列表通过 Ambient 后端实际使用的 Codex `app-server` 的 `model/list` 发现，不在网页中写死模型名称，也不使用通用 OpenAI API 模型目录替代。连接依次发送 `initialize`、`initialized` 和分页 `model/list`，只展示可见条目及返回的默认模型。这里的 Codex 登录和状态目录由 Ambient 管理；容器部署读取容器内的目录，不自动读取 Windows 桌面 Codex 的账号或缓存。
 
 Codex 已安装并登录时，每次打开模型设置，以及安装完成、版本变化或登录成功后，网页重新获取编码代理的原生模型目录；已启用的 Codex Native Provider 同时通过现有 `discover-models` 同步模型，再更新默认/快速模型选择器。新建的原生 Provider 也会触发一次发现。API Provider 保持现有手动发现行为，模型合并仍遵循上面的引用与能力保留规则。自动刷新不改变默认、快速或编码代理模型绑定，并继续提供手动刷新。

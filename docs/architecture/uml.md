@@ -342,6 +342,8 @@ classDiagram
 
 ## 8. Coding Agent Runtime 与模型所有权
 
+`CodingAgentConfigStore.runtime_catalog()` 先完成异步运行时探测，再读取当前模型绑定，使一个目录响应中的代理配置与已保存设置一致。网页以保存响应更新选择，并丢弃保存前发出的旧刷新结果；该同步规则不改变既有 Run 的模型快照。
+
 ```mermaid
 flowchart LR
     Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]

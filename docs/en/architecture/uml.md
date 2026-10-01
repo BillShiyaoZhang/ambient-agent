@@ -352,6 +352,8 @@ classDiagram
 
 ## 8. Coding Agent Runtime and model ownership
 
+`CodingAgentConfigStore.runtime_catalog()` completes asynchronous runtime probes before reading current model bindings, keeping agent configurations and persisted settings consistent within a catalog response. The UI updates selection from the save response and discards older refresh results issued before saving; this synchronization rule preserves existing Run model snapshots.
+
 ```mermaid
 flowchart LR
     Settings[coding_agent.py: CodingAgentConfigStore] --> Runtime[coding_agent_runtime.py: CodingAgentRuntime]

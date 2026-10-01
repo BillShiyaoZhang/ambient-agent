@@ -117,6 +117,8 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
   const [agentAuth, setAgentAuth] = useState<Record<string, CodingAgentAuthSession>>({});
   const [agentModelCatalogs, setAgentModelCatalogs] = useState<Record<string, CodingAgentModelCatalog>>({});
   const [agentModelLoading, setAgentModelLoading] = useState<Record<string, boolean>>({});
+  const [agentModelSaving, setAgentModelSaving] = useState<Record<string, boolean>>({});
+  const agentModelSaves = useRef(new Set<CodingAgentId>());
   const [providerModelLoading, setProviderModelLoading] = useState<Record<string, boolean>>({});
   const refreshState = useRef({ open: false, epoch: 0, agents: new Map<CodingAgentId, ModelRefreshScope>(), providers: new Map<string, ModelRefreshScope>() });
   const authVersions = useRef(new Map<CodingAgentId, { signature: string; version: number; installed: boolean; authenticated: boolean | null }>());
@@ -183,6 +185,18 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
     try { await action(); await onRefresh(); setNotice({ tone: "success", text: success }); }
     catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(null); }
+  };
+
+  const saveAgentModel = async (agentId: CodingAgentId, config: AgentModelConfig, success: string) => {
+    if (!props.onUpdateCodingAgentModel || agentModelSaves.current.has(agentId)) return;
+    agentModelSaves.current.add(agentId);
+    setAgentModelSaving((current) => ({ ...current, [agentId]: true }));
+    try {
+      await run(`model-${agentId}`, () => props.onUpdateCodingAgentModel!(agentId, config), success);
+    } finally {
+      agentModelSaves.current.delete(agentId);
+      setAgentModelSaving((current) => ({ ...current, [agentId]: false }));
+    }
   };
 
   useEffect(() => {
@@ -457,15 +471,16 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
                   : agent.auth_methods.length && !ready
                     ? (isZh ? "需要登录" : "Sign-in required")
                     : (isZh ? "已就绪" : "Ready");
-            const currentBinding = agent.model_config.inherit
+            const modelConfig = props.codingAgentSettings?.agent_models?.[agent.id] ?? agent.model_config;
+            const currentBinding = modelConfig.inherit
               ? "__inherit__"
-              : agent.model_config.provider_id && agent.model_config.model_id
-                ? `${agent.model_config.provider_id}:${agent.model_config.model_id}`
+              : modelConfig.provider_id && modelConfig.model_id
+                ? `${modelConfig.provider_id}:${modelConfig.model_id}`
                 : "__inherit__";
             const nativeCatalog = agentModelCatalogs[agent.id];
             const nativeDefault = nativeCatalog?.models.find((model) => model.id === nativeCatalog.default_model)
               ?? nativeCatalog?.models.find((model) => model.is_default);
-            const selectedNativeModel = agent.model_config.native_model ?? "";
+            const selectedNativeModel = modelConfig.native_model ?? "";
             return <article className={`coding-agent-option ${selected ? "is-selected" : ""}`} key={agent.id}>
               <button
                 type="button"
@@ -500,17 +515,17 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
                 <button type="button" onClick={() => void run(`cancel-auth-${agent.id}`, () => clearAgentAuth(agent.id), isZh ? "已取消登录" : "Sign-in cancelled")}>{isZh ? "取消" : "Cancel"}</button>
               </div> : null}
 
-              {agent.installed && agent.model_capability.catalog_source === "provider_registry" ? <><label className="coding-agent-model"><span>{isZh ? "执行模型" : "Execution model"}</span><select value={currentBinding} disabled={!props.onUpdateCodingAgentModel} onChange={(event) => {
+              {agent.installed && agent.model_capability.catalog_source === "provider_registry" ? <><label className="coding-agent-model"><span>{isZh ? "执行模型" : "Execution model"}</span><select value={currentBinding} disabled={agentModelSaving[agent.id] || !props.onUpdateCodingAgentModel} onChange={(event) => {
                 const value = event.target.value;
                 const config: AgentModelConfig = value === "__inherit__"
                   ? { mode: "shared_binding", inherit: "ambient.primary" }
                   : { mode: "shared_binding", provider_id: value.slice(0, value.indexOf(":")), model_id: value.slice(value.indexOf(":") + 1) };
-                void run(`model-${agent.id}`, () => props.onUpdateCodingAgentModel!(agent.id, config), isZh ? `${agent.name} 模型绑定已更新` : `${agent.name} model binding updated`);
+                void saveAgentModel(agent.id, config, isZh ? `${agent.name} 模型绑定已更新` : `${agent.name} model binding updated`);
               }}><option value="__inherit__" disabled={nativePrimary}>{isZh ? "跟随 Ambient 主模型" : "Inherit Ambient primary"}</option>{providers.filter((provider) => provider.enabled && !isNativeProvider(provider)).flatMap((provider) => provider.models.filter((model) => model.api_mode !== "codex_native").map((model) => <option key={`${provider.id}:${model.id}`} value={`${provider.id}:${model.id}`}>{provider.name} · {model.display_name || model.id}</option>))}</select></label>
                 {nativePrimary ? <p className="coding-agent-auth-hint">{isZh ? "OpenCode 需要 API Provider 模型。请在这里选择 API 模型，或使用 Codex 作为编码代理。" : "OpenCode needs an API provider model. Choose an API model here or use Codex as the coding agent."}</p> : null}
               </> : null}
 
-              {agent.installed && agent.model_capability.catalog_source === "agent" ? <div className="coding-agent-model"><label><span>{isZh ? `${agent.name} 模型` : `${agent.name} model`}</span><select aria-label={isZh ? `${agent.name} 模型` : `${agent.name} model`} value={selectedNativeModel} disabled={!ready || !nativeCatalog || agentModelLoading[agent.id] || !props.onUpdateCodingAgentModel} onChange={(event) => void run(`model-${agent.id}`, () => props.onUpdateCodingAgentModel!(agent.id, { mode: "native", native_model: event.target.value || null }), isZh ? `${agent.name} 模型配置已更新` : `${agent.name} model configuration updated`)}>
+              {agent.installed && agent.model_capability.catalog_source === "agent" ? <div className="coding-agent-model"><label><span>{isZh ? `${agent.name} 模型` : `${agent.name} model`}</span><select aria-label={isZh ? `${agent.name} 模型` : `${agent.name} model`} value={selectedNativeModel} disabled={!ready || !nativeCatalog || agentModelLoading[agent.id] || agentModelSaving[agent.id] || !props.onUpdateCodingAgentModel} onChange={(event) => void saveAgentModel(agent.id, { mode: "native", native_model: event.target.value || null }, isZh ? `${agent.name} 模型配置已更新` : `${agent.name} model configuration updated`)}>
                 <option value="">{nativeDefault ? `${isZh ? "Agent 默认" : "Agent default"} · ${nativeDefault.display_name}` : (isZh ? "使用 Agent 默认模型" : "Use agent default")}</option>
                 {selectedNativeModel && !nativeCatalog?.models.some((model) => model.id === selectedNativeModel) ? <option value={selectedNativeModel}>{selectedNativeModel}</option> : null}
                 {nativeCatalog?.models.map((model) => <option key={model.id} value={model.id}>{model.display_name}{model.is_default ? (isZh ? "（当前默认）" : " (current default)") : ""}{model.description ? ` · ${model.description}` : ""}</option>)}

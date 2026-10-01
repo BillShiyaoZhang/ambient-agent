@@ -596,6 +596,28 @@ def test_coding_agent_api_lists_and_rejects_unready_selection(tmp_path, monkeypa
     assert invalid.json()["detail"]["code"] == "coding_agent_not_found"
 
 
+@pytest.mark.asyncio
+async def test_coding_agent_catalog_reads_model_bindings_after_status_probes(tmp_path, monkeypatch):
+    store = CodingAgentConfigStore(tmp_path / "workspace")
+    store.update_agent_model("codex", {"mode": "native", "native_model": "gpt-5.6-luna"})
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def status(agent_id):
+        entered.set()
+        await release.wait()
+        return {"installed": True, "authenticated": agent_id == "codex", "available": True}
+
+    monkeypatch.setattr(store.runtime, "status", status)
+    pending = asyncio.create_task(store.runtime_catalog())
+    await entered.wait()
+    store.update_agent_model("codex", {"mode": "native", "native_model": "gpt-6-luna"})
+    release.set()
+    agents = await pending
+    codex = next(agent for agent in agents if agent["id"] == "codex")
+    assert codex["model_config"] == store.get_settings()["agent_models"]["codex"]
+    assert codex["model_config"]["native_model"] == "gpt-6-luna"
+
+
 def test_coding_agent_models_api_returns_native_catalog_and_rejects_shared_catalog(tmp_path, monkeypatch):
     store = CodingAgentConfigStore(tmp_path / "workspace")
     monkeypatch.setattr(main_module, "coding_agent_config_store", store)
