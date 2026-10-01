@@ -1,0 +1,124 @@
+{
+  "status": "PASS",
+  "phase": "trusted-local-revocation",
+  "checks": [
+    "isolated_ready_fixture_and_fixed_sources",
+    "single_attempt_enrollment_pair_claim_local_approve",
+    "launch_consumed_clean_url_host_only_cookie_and_remote_management_denied",
+    "real_widget_count_zero_to_one",
+    "real_empty_chat_three_websockets_no_llm_message",
+    "synthetic_fixture_chat_remains_empty",
+    "local_revoke_closes_existing_ws_and_rejects_old_cookie_http"
+  ],
+  "stages": [
+    "remote-before-browser",
+    "remote-ready",
+    "remote-widget-count1",
+    "remote-chat-three-ws",
+    "remote-revoked"
+  ],
+  "websocket_paths": [
+    "/ws/chat",
+    "/ws/run-live",
+    "/ws/runs",
+    "/ws/widgets/remote-fixture/client-runtime"
+  ],
+  "live_gateway_connections": {
+    "tunnel": 1,
+    "ws": 4
+  },
+  "revoked_http_status": 401,
+  "revoked_reload_status": 401,
+  "phase_metrics": [
+    {
+      "stage": "remote-before-browser",
+      "connections": {
+        "control": 1,
+        "tunnel": 1,
+        "http": 0
+      },
+      "buffer_bytes": 34376696,
+      "queued_bytes": 0,
+      "capacity_rejections": 0
+    },
+    {
+      "stage": "remote-ready",
+      "connections": {
+        "control": 1,
+        "tunnel": 1,
+        "http": 4,
+        "ws": 4
+      },
+      "buffer_bytes": 235207640,
+      "queued_bytes": 0,
+      "capacity_rejections": 0
+    },
+    {
+      "stage": "remote-widget-count1",
+      "connections": {
+        "control": 1,
+        "tunnel": 1,
+        "http": 0,
+        "ws": 4
+      },
+      "buffer_bytes": 184351704,
+      "queued_bytes": 0,
+      "capacity_rejections": 0
+    },
+    {
+      "stage": "remote-chat-three-ws",
+      "connections": {
+        "control": 1,
+        "tunnel": 1,
+        "http": 0,
+        "ws": 4
+      },
+      "buffer_bytes": 184351704,
+      "queued_bytes": 0,
+      "capacity_rejections": 0
+    },
+    {
+      "stage": "remote-revoked",
+      "connections": {
+        "control": 1,
+        "tunnel": 0,
+        "http": 0,
+        "ws": 0
+      },
+      "buffer_bytes": 32768,
+      "queued_bytes": 0,
+      "capacity_rejections": 0
+    }
+  ],
+  "pins": {
+    "deploy": "d6dd823f1b379440616a2dc2e866ce9d9bac7729",
+    "web": "fa55096cc66f88f17f1b6191a5bc41d046cd08e8"
+  },
+  "screenshots": [
+    "remote-widget-chat.jpg"
+  ],
+  "environment": {
+    "kind": "isolated synthetic loopback HTTP",
+    "viewport": "1280x800",
+    "browser": "Playwright 1.62.1 / installed headless Chrome, fresh temporary profile",
+    "reservation_budget_bytes": 268435456,
+    "production_compose_default_reservation_budget_bytes": 134217728,
+    "active_sampling_hold_seconds": 8
+  },
+  "limitations": [
+    "Loopback HTTP synthetic fixture; production HTTPS/TLS and load remain separate gates.",
+    "Gateway reservations are not measured process RSS."
+  ],
+  "browser_http_rejections": [
+    {
+      "path": "/favicon.svg",
+      "status": 403
+    },
+    {
+      "path": "/",
+      "status": 401
+    }
+  ],
+  "blocked_external_http_requests": 0,
+  "isolated_browser_closed": true
+}
