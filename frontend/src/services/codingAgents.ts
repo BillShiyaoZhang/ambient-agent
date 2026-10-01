@@ -39,6 +39,8 @@ export interface CodingAgentDefinition {
   available: boolean;
   installed: boolean;
   installable: boolean;
+  update_available?: boolean;
+  target_version?: string;
   install_state: "not_installed" | "installing" | "installed" | "failed";
   install_operation: CodingAgentInstallOperation | null;
   command_env: string;

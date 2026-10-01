@@ -29,7 +29,6 @@ ModelMode = Literal["native", "shared_binding", "hybrid", "none"]
 ACPTransport = Literal["native", "bridge"]
 
 _CODEX_VERSION = "0.145.0"
-_CODEX_RELEASE_TAG = f"rust-v{_CODEX_VERSION}"
 _CODEX_ARCHIVE_LIMIT = 160 * 1024 * 1024
 _CODEX_RELEASES = {
     ("darwin", "arm64"): (
@@ -57,10 +56,35 @@ _CODEX_BINARY_SIZES = {
     "aarch64-unknown-linux-musl": 269360944,
     "x86_64-unknown-linux-musl": 310730800,
 }
+_CODEX_CODING_VERSION = "0.159.3"
+_CODEX_CODING_RELEASES = {
+    ("darwin", "arm64"): (
+        "aarch64-apple-darwin",
+        "51de50a39ea592b5b0a64ae0474548c282181cb6b96d9bd08965a682ae12774c",
+    ),
+    ("darwin", "x86_64"): (
+        "x86_64-apple-darwin",
+        "cbaea8206d3189b8a7cd7c1b476e14a541ab22d469c37253f758ff71d4ed24b7",
+    ),
+    ("linux", "arm64"): (
+        "aarch64-unknown-linux-musl",
+        "cd5f307b3fcd6080773e684b86c3114a67d4f1c61dc447be09876b552eb4bea7",
+    ),
+    ("linux", "x86_64"): (
+        "x86_64-unknown-linux-musl",
+        "b48ca1b2d6b1bf42b944e02c3d937c898e24651916684cdc35fdedf31b291bcb",
+    ),
+}
+_CODEX_CODING_BINARY_SIZES = {
+    "aarch64-apple-darwin": 240351424,
+    "x86_64-apple-darwin": 259442080,
+    "aarch64-unknown-linux-musl": 247459224,
+    "x86_64-unknown-linux-musl": 287086056,
+}
 _OUTPUT_LIMIT = 64 * 1024
 _APP_SERVER_OUTPUT_LIMIT = 1024 * 1024
 _APP_SERVER_TIMEOUT = 15.0
-_CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.1.7"
+_CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@2.1.1"
 _CODEX_ACP_IMAGE_ENTRYPOINT = Path("/opt/coding-agent-acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js")
 _DEVICE_CODE_RE = re.compile(r"\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b")
 _URL_RE = re.compile(r"https://[^\s\x1b]+")
@@ -251,6 +275,54 @@ class CodingAgentRuntime:
             environment.update({"CODEX_HOME": str(state_dir), "HOME": str(state_dir)})
         return environment
 
+    def _coding_root(self) -> Path:
+        return self.agent_root("codex") / "coding" / _CODEX_CODING_VERSION
+
+    def _managed_coding_command(self) -> Path:
+        return self._coding_root() / "bin" / self.managed_command("codex").name
+
+    def coding_command(self, agent_id: str) -> list[str] | None:
+        """Select coding execution without changing the pinned primary command."""
+        if agent_id == "codex" and not os.getenv("CODEX_COMMAND", "").strip():
+            upgraded = self._managed_coding_command()
+            if upgraded.is_file():
+                return [str(upgraded)]
+        return self.command(agent_id)
+
+    def coding_environment(self, agent_id: str) -> dict[str, str]:
+        """Isolate coding caches while leaving authentication CLI-owned."""
+        environment = self.process_environment(agent_id)
+        if (
+            agent_id != "codex"
+            or os.getenv("CODEX_COMMAND", "").strip()
+            or not self._managed_coding_command().is_file()
+        ):
+            return environment
+        home = self._prepare_coding_home()
+        environment.update({"CODEX_HOME": str(home), "HOME": str(home)})
+        return environment
+
+    def _prepare_coding_home(self) -> Path:
+        home = self._coding_root() / "state"
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            home.chmod(0o700)
+        source_auth = (self.state_dir("codex") / "auth.json").absolute()
+        alias = home / "auth.json"
+        if alias.is_symlink():
+            if alias.resolve() != source_auth.resolve():
+                raise CodingAgentRuntimeError("Invalid managed Codex login link", code="coding_agent_auth_invalid")
+        elif alias.exists():
+            raise CodingAgentRuntimeError("Unexpected independent Codex login", code="coding_agent_auth_invalid")
+        else:
+            try:
+                alias.symlink_to(source_auth)
+            except FileExistsError:
+                # Concurrent catalog/ACP startup may have created the same alias.
+                if not alias.is_symlink() or alias.resolve() != source_auth.resolve():
+                    raise CodingAgentRuntimeError("Invalid managed Codex login link", code="coding_agent_auth_invalid")
+        return home
+
     @staticmethod
     def _resolve_configured_command(value: str, *, setting: str) -> list[str]:
         try:
@@ -305,7 +377,7 @@ class CodingAgentRuntime:
         """Resolve an Agent into the single ACP execution contract."""
 
         spec = spec_for(agent_id)
-        command = self.command(agent_id)
+        command = self.coding_command(agent_id)
         if command is None:
             raise CodingAgentRuntimeError("Coding agent is not installed", code="coding_agent_not_installed")
 
@@ -319,7 +391,7 @@ class CodingAgentRuntime:
                 )
             argv = self._bridge_command(spec)
 
-        environment = self.process_environment(agent_id)
+        environment = self.coding_environment(agent_id)
         if extra_environment:
             environment.update(extra_environment)
         if agent_id == "codex":
@@ -381,7 +453,15 @@ class CodingAgentRuntime:
 
     async def status(self, agent_id: str) -> dict[str, Any]:
         spec = spec_for(agent_id)
-        command = self.command(agent_id)
+        command = self.coding_command(agent_id)
+        managed_codex = agent_id == "codex" and not os.getenv("CODEX_COMMAND", "").strip()
+        update_available = (
+            managed_codex and self.command(agent_id) is not None and not self._managed_coding_command().is_file()
+        )
+        update = {
+            "update_available": update_available,
+            "target_version": _CODEX_CODING_VERSION if managed_codex else "",
+        }
         if command is None:
             operation = self._active_install(agent_id)
             if agent_id in self._install_tasks:
@@ -399,6 +479,7 @@ class CodingAgentRuntime:
                 "auth_state": "signed_out" if spec.auth_methods else "not_required",
                 "version": "",
                 "status_detail": operation.get("error", "") if operation else "",
+                **update,
             }
         version_code, version = await self._run_probe([*command, "--version"], agent_id=agent_id)
         installed = version_code == 0
@@ -406,7 +487,8 @@ class CodingAgentRuntime:
         auth_state: AuthState = "not_required"
         detail = ""
         if spec.auth_methods and installed:
-            login_code, detail = await self._run_probe([*command, "login", "status"], agent_id=agent_id)
+            login_command = self.command(agent_id) or command
+            login_code, detail = await self._run_probe([*login_command, "login", "status"], agent_id=agent_id)
             authenticated = login_code == 0
             auth_state = "signed_in" if authenticated else "signed_out"
             active_auth = self._auth_sessions.get(agent_id)
@@ -419,15 +501,22 @@ class CodingAgentRuntime:
             except CodingAgentRuntimeError as exc:
                 available = False
                 detail = str(exc)
+        operation = self._active_install(agent_id)
+        install_state = "installed" if installed else "failed"
+        if agent_id in self._install_tasks:
+            install_state = "installing"
+        elif operation and operation["status"] == "failed":
+            install_state = "failed"
         return {
             "installed": installed,
-            "install_state": "installed" if installed else "failed",
-            "install_operation": self._active_install(agent_id),
+            "install_state": install_state,
+            "install_operation": operation,
             "available": available,
             "authenticated": authenticated,
             "auth_state": auth_state,
             "version": version if installed else "",
             "status_detail": detail,
+            **update,
         }
 
     async def models(self, agent_id: str) -> dict[str, Any]:
@@ -439,7 +528,7 @@ class CodingAgentRuntime:
                 "This coding agent does not expose a native model catalog",
                 code="model_catalog_unsupported",
             )
-        command = self.command(agent_id)
+        command = self.coding_command(agent_id)
         if command is None:
             raise CodingAgentRuntimeError("Coding agent is not installed", code="coding_agent_not_installed")
         status = await self.status(agent_id)
@@ -454,7 +543,7 @@ class CodingAgentRuntime:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=self.process_environment(agent_id),
+                env=self.coding_environment(agent_id),
                 start_new_session=os.name != "nt",
                 limit=_APP_SERVER_OUTPUT_LIMIT,
             )
@@ -643,7 +732,12 @@ class CodingAgentRuntime:
                 "This coding agent is provided by the system image", code="install_unsupported"
             )
         async with self._locks[agent_id]:
-            if self.command(agent_id):
+            task = self._install_tasks.get(agent_id)
+            if task and not task.done():
+                return self._active_install(agent_id) or {}
+            if self.command(agent_id) and (
+                os.getenv(spec.command_env, "").strip() or self._managed_coding_command().is_file()
+            ):
                 return {
                     "id": "installed",
                     "agent_id": agent_id,
@@ -651,9 +745,6 @@ class CodingAgentRuntime:
                     "created_at": time.time(),
                     "error": "",
                 }
-            task = self._install_tasks.get(agent_id)
-            if task and not task.done():
-                return self._active_install(agent_id) or {}
             operation_id = uuid.uuid4().hex
             operation = {
                 "id": operation_id,
@@ -672,7 +763,9 @@ class CodingAgentRuntime:
         try:
             spec = spec_for(agent_id)
             if spec.install_handler == "codex_standalone":
-                await self._install_codex(operation_id)
+                if not self.command(agent_id):
+                    await self._install_codex(operation_id)
+                await self._install_coding_codex(operation_id)
             else:
                 raise CodingAgentRuntimeError("Unsupported installer", code="install_unsupported")
             operation["status"] = "installed"
@@ -685,7 +778,29 @@ class CodingAgentRuntime:
             self._install_tasks.pop(agent_id, None)
 
     async def _install_codex(self, operation_id: str) -> None:
-        agent_root = self.agent_root("codex")
+        await self._install_codex_release(
+            operation_id, self.agent_root("codex"), _CODEX_VERSION, _CODEX_RELEASES, _CODEX_BINARY_SIZES
+        )
+
+    async def _install_coding_codex(self, operation_id: str) -> None:
+        self.process_environment("codex")
+        self._prepare_coding_home()
+        await self._install_codex_release(
+            operation_id + "-coding",
+            self._coding_root(),
+            _CODEX_CODING_VERSION,
+            _CODEX_CODING_RELEASES,
+            _CODEX_CODING_BINARY_SIZES,
+        )
+
+    async def _install_codex_release(
+        self,
+        operation_id: str,
+        agent_root: Path,
+        release_version: str,
+        releases: dict[tuple[str, str], tuple[str, str]],
+        binary_sizes: dict[str, int],
+    ) -> None:
         agent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging = agent_root / f".install-{operation_id}"
         staging.mkdir(mode=0o700)
@@ -698,16 +813,16 @@ class CodingAgentRuntime:
                 machine = "x86_64"
             elif machine in {"aarch64", "arm64"}:
                 machine = "arm64"
-            release = _CODEX_RELEASES.get((system, machine))
+            release = releases.get((system, machine))
             if release is None:
                 raise CodingAgentRuntimeError(
                     f"Codex managed installation does not support {system}/{machine}",
                     code="install_unsupported",
                 )
             target, expected_sha256 = release
-            expected_binary_size = _CODEX_BINARY_SIZES[target]
+            expected_binary_size = binary_sizes[target]
             asset_name = f"codex-{target}.tar.gz"
-            asset_url = f"https://github.com/openai/codex/releases/download/{_CODEX_RELEASE_TAG}/{asset_name}"
+            asset_url = f"https://github.com/openai/codex/releases/download/rust-v{release_version}/{asset_name}"
             archive_path = staging / asset_name
             digest = hashlib.sha256()
             size = 0
@@ -761,7 +876,7 @@ class CodingAgentRuntime:
                 ) from exc
             binary.chmod(0o700)
             code, version = await self._run_probe([str(binary), "--version"], agent_id="codex")
-            if code != 0 or _CODEX_VERSION not in version.split():
+            if code != 0 or version != f"codex-cli {release_version}":
                 raise CodingAgentRuntimeError(f"Installed Codex failed validation: {version}", code="install_failed")
             destination = agent_root / "bin"
             if destination.exists():

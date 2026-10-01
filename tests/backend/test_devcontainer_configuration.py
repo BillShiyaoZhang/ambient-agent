@@ -47,9 +47,9 @@ def test_devcontainer_pins_the_same_codex_acp_bridge_as_production() -> None:
     manifest = json.loads((REPOSITORY_ROOT / "coding-agent-acp/package.json").read_text(encoding="utf-8"))
     lock = json.loads((REPOSITORY_ROOT / "coding-agent-acp/package-lock.json").read_text(encoding="utf-8"))
 
-    assert manifest["dependencies"]["@agentclientprotocol/codex-acp"] == "1.1.7"
+    assert manifest["dependencies"]["@agentclientprotocol/codex-acp"] == "2.1.1"
     locked_bridge = lock["packages"]["node_modules/@agentclientprotocol/codex-acp"]
-    assert locked_bridge["version"] == "1.1.7"
+    assert locked_bridge["version"] == "2.1.1"
     assert locked_bridge["integrity"].startswith("sha512-")
 
     for dockerfile in (dev_dockerfile, production_dockerfile):

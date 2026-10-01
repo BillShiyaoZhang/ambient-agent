@@ -365,6 +365,8 @@ Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace�
 
 ### 8.1 原生 Codex 主模型传输（待实现）
 
+`CodingAgentRuntime.command("codex")` 保留固定主模型 CLI；`coding_command("codex")` 为编码目录、状态版本与 ACP descriptor 选择独立新版 CLI，缺新版时兼容既有 CLI。托管安装/更新分别校验两个版本，不覆盖旧 `bin/codex`；认证仍由相同 Ambient 托管登录管理。状态包含可更新标记与目标版本，网页更新不改变原生主模型支持的 profile。
+
 此图先定义待实现公共子集；当前API-only的`LLMService`须按`ResolvedModel.api_mode`选择原生transport，契约见[Provider规范](/integrations/llm-providers.md)。图不表示功能已上线。实现后`verify_uml.py`须映射并核对`NativeCodexTransport`，不得省略该类放宽校验。
 
 ```mermaid

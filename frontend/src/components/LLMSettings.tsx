@@ -445,8 +445,11 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
             const authSession = activeAuthSession(agent);
             const authState = authSession?.status ?? agent.auth_state;
             const ready = agentReady(agent);
+            const canUpdate = agent.installed && agent.installable && (agent.update_available === true || agent.install_state === "installing");
+            const targetVersion = canUpdate ? agent.target_version : undefined;
+            const versionLabel = [agent.version, targetVersion ? `${isZh ? "更新至" : "Update to"} ${targetVersion}` : ""].filter(Boolean).join(" · ");
             const status = agent.install_state === "installing"
-              ? (isZh ? "安装中" : "Installing")
+              ? agent.installed ? (isZh ? "更新中" : "Updating") : (isZh ? "安装中" : "Installing")
               : !agent.installed
                 ? agent.install_state === "failed" ? (isZh ? "安装失败" : "Install failed") : (isZh ? "未安装" : "Not installed")
                 : authState === "starting" || authState === "waiting"
@@ -478,10 +481,16 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
               </button>
 
               <div className="coding-agent-actions">
-                {!agent.installed && agent.installable ? <button type="button" disabled={agent.install_state === "installing" || busy === `install-${agent.id}` || !props.onInstallCodingAgent} onClick={() => void run(`install-${agent.id}`, () => props.onInstallCodingAgent!(agent.id), isZh ? `${agent.name} 安装已开始` : `${agent.name} installation started`)}>{agent.install_state === "installing" ? <LoaderCircle className="is-spinning" size={12} /> : null}{isZh ? "安装" : "Install"}</button> : null}
+                {(!agent.installed && agent.installable) || canUpdate ? <button
+                  type="button"
+                  disabled={agent.install_state === "installing" || busy === `install-${agent.id}` || !props.onInstallCodingAgent}
+                  onClick={() => void run(`install-${agent.id}`, () => props.onInstallCodingAgent!(agent.id), agent.installed
+                    ? (isZh ? `${agent.name} 更新已开始` : `${agent.name} update started`)
+                    : (isZh ? `${agent.name} 安装已开始` : `${agent.name} installation started`))}
+                >{agent.install_state === "installing" ? <LoaderCircle className="is-spinning" size={12} /> : null}{agent.installed ? (isZh ? "更新" : "Update") : (isZh ? "安装" : "Install")}</button> : null}
                 {agent.installed && agent.auth_methods.length > 0 && !ready && authState !== "starting" && authState !== "waiting" ? <button type="button" disabled={busy === `auth-${agent.id}` || !props.onStartCodingAgentAuth} onClick={() => void beginAgentAuth(agent.id)}><LogIn size={12} />{isZh ? "使用 ChatGPT 登录" : "Sign in with ChatGPT"}</button> : null}
                 {agent.installed && ready && agent.auth_methods.length > 0 ? <button type="button" disabled={!props.onClearCodingAgentAuth} onClick={() => void run(`logout-${agent.id}`, () => clearAgentAuth(agent.id), isZh ? "已退出登录" : "Signed out")}><LogOut size={12} />{isZh ? "退出登录" : "Sign out"}</button> : null}
-                {agent.version ? <span>{agent.version}</span> : null}
+                {versionLabel ? <span>{versionLabel}</span> : null}
               </div>
 
               {(authState === "starting" || authState === "waiting") && authSession ? <div className="coding-agent-device-auth" role="status">

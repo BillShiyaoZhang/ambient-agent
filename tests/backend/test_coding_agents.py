@@ -106,6 +106,168 @@ async def test_runtime_reports_latest_install_failure(tmp_path, monkeypatch):
     assert status["install_operation"]["error"] == "installer unavailable"
 
 
+def test_coding_cli_upgrade_preserves_primary_command_and_managed_login(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    original = runtime.managed_command("codex")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pinned-primary")
+    upgraded = runtime.agent_root("codex") / "coding" / "0.159.3" / "bin" / original.name
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_bytes(b"coding-cli")
+
+    assert runtime.command("codex") == [str(original)]
+    assert runtime.coding_command("codex") == [str(upgraded)]
+    assert runtime.process_environment("codex")["CODEX_HOME"] == str(runtime.state_dir("codex"))
+
+    monkeypatch.setenv("CODEX_COMMAND", sys.executable)
+    assert runtime.coding_command("codex") == runtime.command("codex") == [sys.executable]
+
+
+def test_upgraded_coding_home_rejects_an_independent_authentication_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    original = runtime.managed_command("codex")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pinned-primary")
+    upgraded = runtime.agent_root("codex") / "coding" / "0.159.3" / "bin" / original.name
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_bytes(b"coding-cli")
+    coding_home = runtime.agent_root("codex") / "coding" / "0.159.3" / "state"
+    coding_home.mkdir()
+    (coding_home / "auth.json").write_bytes(b"untrusted-other-account")
+    with pytest.raises(CodingAgentRuntimeError) as error:
+        runtime.coding_environment("codex")
+    assert error.value.code == "coding_agent_auth_invalid"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Managed Codex installations require Linux or macOS")
+def test_upgraded_coding_home_isolates_cache_but_shares_cli_owned_login(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    original = runtime.managed_command("codex")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pinned-primary")
+    upgraded = runtime.agent_root("codex") / "coding" / "0.159.3" / "bin" / original.name
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_bytes(b"coding-cli")
+    native_home = runtime.state_dir("codex")
+    native_home.mkdir()
+    source_auth = native_home / "auth.json"
+    source_auth.write_bytes(b"opaque-test-login")
+    (native_home / "models_cache.json").write_bytes(b"original-public-catalog")
+    environment = runtime.coding_environment("codex")
+    coding_home = Path(environment["CODEX_HOME"])
+    assert coding_home != native_home
+    assert environment["HOME"] == str(coding_home)
+    assert (coding_home / "auth.json").is_symlink()
+    assert (coding_home / "auth.json").resolve() == source_auth.resolve()
+    (coding_home / "models_cache.json").write_bytes(b"new-public-catalog")
+    assert (native_home / "models_cache.json").read_bytes() == b"original-public-catalog"
+    assert source_auth.read_bytes() == b"opaque-test-login"
+    source_auth.unlink()
+    assert not (coding_home / "auth.json").exists()
+    assert runtime.coding_environment("codex")["CODEX_HOME"] == str(coding_home)
+    (coding_home / "auth.json").unlink()
+    (coding_home / "auth.json").symlink_to(tmp_path / "another-login")
+    with pytest.raises(CodingAgentRuntimeError) as error:
+        runtime.coding_environment("codex")
+    assert error.value.code == "coding_agent_auth_invalid"
+
+
+@pytest.mark.asyncio
+async def test_logout_keeps_original_command_and_login_home_after_coding_upgrade(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    original = runtime.managed_command("codex")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pinned-primary")
+    upgraded = runtime._managed_coding_command()
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_bytes(b"coding-cli")
+    calls = []
+
+    async def probe(argv, *, agent_id):
+        calls.append(argv)
+        assert runtime.process_environment(agent_id)["CODEX_HOME"] == str(runtime.state_dir("codex"))
+        return 0, "Logged out"
+
+    monkeypatch.setattr(runtime, "_run_probe", probe)
+    session = await runtime.logout("codex")
+    assert calls == [[str(original), "logout"]]
+    assert session["status"] == "signed_out"
+
+
+@pytest.mark.asyncio
+async def test_coding_upgrade_status_keeps_existing_install_ready_and_reports_target(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    original = runtime.managed_command("codex")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pinned-primary")
+    monkeypatch.setattr(runtime, "_bridge_command", lambda _spec: ["bridge"])
+
+    async def probe(argv, *, agent_id):
+        if "--version" in argv:
+            version = "0.159.3" if Path(argv[0]) == runtime._managed_coding_command() else "0.145.0"
+            return 0, f"codex-cli {version}"
+        assert Path(argv[0]) == original, "Login lifecycle remains owned by the original managed CLI"
+        return 0, "Logged in"
+
+    monkeypatch.setattr(runtime, "_run_probe", probe)
+    before = await runtime.status("codex")
+    assert before["installed"] and before["authenticated"] and before["available"]
+    assert before["update_available"] is True
+    assert before["target_version"] == "0.159.3"
+    upgraded = runtime._managed_coding_command()
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_bytes(b"coding-cli")
+    after = await runtime.status("codex")
+    assert after["version"] == "codex-cli 0.159.3"
+    assert after["update_available"] is False
+    assert after["authenticated"] is True
+    assert (await runtime.start_install("codex"))["status"] == "installed"
+    assert runtime.command("codex") == [str(original)]
+
+
+@pytest.mark.asyncio
+async def test_existing_codex_can_upgrade_once_and_retry_without_replacing_primary(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    original = runtime.managed_command("codex")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pinned-primary")
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def install_primary(_operation_id):
+        pytest.fail("An upgrade must not reinstall primary inference")
+
+    async def upgrade(operation_id):
+        calls.append(operation_id)
+        entered.set()
+        await release.wait()
+        raise RuntimeError("verified download failed")
+
+    monkeypatch.setattr(runtime, "_install_codex", install_primary)
+    monkeypatch.setattr(runtime, "_install_coding_codex", upgrade, raising=False)
+    operation = await runtime.start_install("codex")
+    assert operation["status"] == "installing"
+    await entered.wait()
+    repeated = await runtime.start_install("codex")
+    assert repeated["id"] == operation["id"]
+    release.set()
+    await runtime._install_tasks["codex"]
+    assert runtime.operation("codex", operation["id"])["status"] == "failed"
+    assert runtime.command("codex") == [str(original)]
+    assert original.read_bytes() == b"pinned-primary"
+    retry = await runtime.start_install("codex")
+    assert retry["status"] == "installing"
+    assert retry["id"] != operation["id"]
+    await runtime._install_tasks["codex"]
+    assert len(calls) == 2
+
+
 @pytest_asyncio.fixture
 async def real_probe_children(monkeypatch):
     children = []
@@ -164,11 +326,16 @@ async def test_runtime_probe_success_preserves_output_and_closes_stdio(tmp_path,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("binary_size", [None, 310730800], ids=["small-fixture", "official-expanded-size"])
-async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, monkeypatch, binary_size):
+@pytest.mark.parametrize(
+    "purpose,release_version,official_size", [("primary", "0.145.0", 310730800), ("coding", "0.159.3", 287086056)]
+)
+@pytest.mark.parametrize("binary_size", [None, "official"], ids=["small-fixture", "official-expanded-size"])
+async def test_managed_codex_install_uses_a_pinned_verified_release(
+    tmp_path, monkeypatch, binary_size, purpose, release_version, official_size
+):
     target = "x86_64-unknown-linux-musl"
-    binary_payload = b"#!/bin/sh\necho 'codex-cli 0.145.0'\n"
-    binary_size = binary_size or len(binary_payload)
+    binary_payload = f"#!/bin/sh\necho 'codex-cli {release_version}'\n".encode()
+    binary_size = official_size if binary_size == "official" else len(binary_payload)
 
     class BinarySource:
         prefix = binary_payload
@@ -218,7 +385,7 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
         def stream(self, method, url):
             assert method == "GET"
             assert url == (
-                "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-x86_64-unknown-linux-musl.tar.gz"
+                f"https://github.com/openai/codex/releases/download/rust-v{release_version}/codex-x86_64-unknown-linux-musl.tar.gz"
             )
             return FakeStream()
 
@@ -226,13 +393,22 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
     monkeypatch.setattr(coding_agent_runtime_module.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(
         coding_agent_runtime_module,
-        "_CODEX_RELEASES",
+        "_CODEX_RELEASES" if purpose == "primary" else "_CODEX_CODING_RELEASES",
         {("linux", "x86_64"): (target, hashlib.sha256(archive_payload).hexdigest())},
     )
-    monkeypatch.setattr(coding_agent_runtime_module, "_CODEX_BINARY_SIZES", {target: binary_size}, raising=False)
+    monkeypatch.setattr(
+        coding_agent_runtime_module,
+        "_CODEX_BINARY_SIZES" if purpose == "primary" else "_CODEX_CODING_BINARY_SIZES",
+        {target: binary_size},
+    )
     monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", FakeClient)
     runtime = CodingAgentRuntime(tmp_path / "workspace")
     monkeypatch.setattr(runtime, "managed_command", lambda _agent_id: runtime.agent_root("codex") / "bin" / "codex")
+    monkeypatch.setattr(runtime, "_prepare_coding_home", lambda: runtime._coding_root() / "state")
+    if purpose == "coding":
+        primary = runtime.managed_command("codex")
+        primary.parent.mkdir(parents=True)
+        primary.write_bytes(b"original-primary")
     verified_paths = []
 
     async def probe_verified_binary(argv, *, agent_id):
@@ -242,7 +418,7 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
         with Path(argv[0]).open("rb") as source:
             assert source.read(len(binary_payload)) == binary_payload
         verified_paths.append(Path(argv[0]))
-        return 0, "codex-cli 0.145.0"
+        return 0, f"codex-cli {release_version}"
 
     chmod_calls = {}
     original_chmod = Path.chmod
@@ -254,9 +430,14 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
     monkeypatch.setattr(runtime, "_run_probe", probe_verified_binary)
     monkeypatch.setattr(Path, "chmod", record_chmod)
 
-    await runtime._install_codex("verified-release")
+    if purpose == "primary":
+        await runtime._install_codex("verified-release")
+    else:
+        await runtime._install_coding_codex("verified-release")
+        assert primary.read_bytes() == b"original-primary"
+        assert runtime.command("codex") == [str(primary)]
 
-    binary = runtime.managed_command("codex")
+    binary = Path(runtime.coding_command("codex")[0])
     assert binary.stat().st_size == binary_size
     with binary.open("rb") as source:
         assert source.read(len(binary_payload)) == binary_payload
@@ -265,10 +446,13 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose,release_version", [("primary", "0.145.0"), ("coding", "0.159.3")])
 @pytest.mark.parametrize(
     "invalid", ["size-minus-one", "size-plus-one", "oversize", "path", "symlink", "hardlink", "version"]
 )
-async def test_managed_codex_install_rejects_invalid_binary_and_cleans_staging(tmp_path, monkeypatch, invalid):
+async def test_managed_codex_install_rejects_invalid_binary_and_cleans_staging(
+    tmp_path, monkeypatch, invalid, purpose, release_version
+):
     target = "x86_64-unknown-linux-musl"
     prefix = b"test-only-pinned-binary"
     expected_size = len(prefix)
@@ -300,7 +484,7 @@ async def test_managed_codex_install_rejects_invalid_binary_and_cleans_staging(t
 
     def respond(request):
         assert request.method == "GET"
-        assert str(request.url).endswith(f"/rust-v0.145.0/codex-{target}.tar.gz")
+        assert str(request.url).endswith(f"/rust-v{release_version}/codex-{target}.tar.gz")
         return coding_agent_runtime_module.httpx.Response(200, content=payload)
 
     def client_factory(**kwargs):
@@ -310,24 +494,40 @@ async def test_managed_codex_install_rejects_invalid_binary_and_cleans_staging(t
     monkeypatch.setattr(coding_agent_runtime_module.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(
         coding_agent_runtime_module,
-        "_CODEX_RELEASES",
+        "_CODEX_RELEASES" if purpose == "primary" else "_CODEX_CODING_RELEASES",
         {("linux", "x86_64"): (target, hashlib.sha256(payload).hexdigest())},
     )
-    monkeypatch.setattr(coding_agent_runtime_module, "_CODEX_BINARY_SIZES", {target: expected_size}, raising=False)
+    monkeypatch.setattr(
+        coding_agent_runtime_module,
+        "_CODEX_BINARY_SIZES" if purpose == "primary" else "_CODEX_CODING_BINARY_SIZES",
+        {target: expected_size},
+    )
     monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", client_factory)
     runtime = CodingAgentRuntime(tmp_path / "workspace")
+    monkeypatch.setattr(runtime, "_prepare_coding_home", lambda: runtime._coding_root() / "state")
+    if purpose == "coding":
+        primary = runtime.managed_command("codex")
+        primary.parent.mkdir(parents=True)
+        primary.write_bytes(b"original-primary")
     probes = []
 
     async def probe(argv, *, agent_id):
         probes.append(argv)
-        return 0, "codex-cli 0.144.0" if invalid == "version" else "codex-cli 0.145.0"
+        return 0, "codex-cli 0.144.0" if invalid == "version" else f"codex-cli {release_version}"
 
     monkeypatch.setattr(runtime, "_run_probe", probe)
     with pytest.raises(CodingAgentRuntimeError):
-        await runtime._install_codex("invalid-binary")
+        if purpose == "primary":
+            await runtime._install_codex("invalid-binary")
+        else:
+            await runtime._install_coding_codex("invalid-binary")
     assert len(probes) == (1 if invalid == "version" else 0)
-    assert not (runtime.agent_root("codex") / "bin").exists()
-    assert not (runtime.agent_root("codex") / ".install-invalid-binary").exists()
+    release_root = runtime.agent_root("codex") if purpose == "primary" else runtime._coding_root()
+    assert not (release_root / "bin").exists()
+    suffix = "" if purpose == "primary" else "-coding"
+    assert not (release_root / f".install-invalid-binary{suffix}").exists()
+    if purpose == "coding":
+        assert primary.read_bytes() == b"original-primary"
 
 
 @pytest.mark.asyncio
@@ -516,10 +716,18 @@ async def test_runtime_install_and_device_auth_lifecycle(tmp_path, monkeypatch):
         binary.chmod(0o755)
 
     monkeypatch.setattr(runtime, "_install_codex", fake_install)
+    coding_installations = []
+
+    async def fake_coding_install(operation_id):
+        assert runtime.command("codex") is not None
+        coding_installations.append(operation_id)
+
+    monkeypatch.setattr(runtime, "_install_coding_codex", fake_coding_install)
     operation = await runtime.start_install("codex")
     while runtime.operation("codex", operation["id"])["status"] == "installing":
         await asyncio.sleep(0.01)
     assert runtime.operation("codex", operation["id"])["status"] == "installed"
+    assert coding_installations == [operation["id"]]
 
     started = await runtime.start_auth("codex")
     assert started["status"] == "starting"

@@ -375,6 +375,8 @@ Docker's default seccomp profile blocks the unprivileged user namespace required
 
 ### 8.1 Native Codex primary-model transport (pending implementation)
 
+`CodingAgentRuntime.command("codex")` retains the pinned primary CLI. `coding_command("codex")` selects a separate newer CLI for coding catalogs, reported versions, and ACP descriptors, falling back to the existing CLI before upgrade. Managed installation/update verifies both versions without overwriting the original `bin/codex`; authentication stays CLI-owned in the same Ambient managed login. Status includes update availability and target version; UI updates do not broaden the native primary profile.
+
 This diagram defines a public subset before implementation. The currently API-only `LLMService` must select native transport by `ResolvedModel.api_mode`; see the [Provider contract](/en/integrations/llm-providers.md). The diagram does not claim deployment. Implementation must map and verify `NativeCodexTransport` in `verify_uml.py`, without weakening verification by omitting the class.
 
 ```mermaid

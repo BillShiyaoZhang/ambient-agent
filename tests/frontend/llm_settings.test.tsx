@@ -81,6 +81,93 @@ const waitingAuth: CodingAgentAuthSession = {
   id: "auth-1", agent_id: "codex", status: "waiting", method: "device_code", verification_uri: "https://auth.openai.com/codex/device", user_code: "TEST-123", expires_at: null, error: "",
 };
 
+describe("Codex managed updates", () => {
+  it.each([
+    { language: "en" as const, action: "Update", target: "Update to 0.159.3", started: "Codex update started" },
+    { language: "zh" as const, action: "更新", target: "更新至 0.159.3", started: "Codex 更新已开始" },
+  ])("updates an installed Codex and displays its current and target versions in $language", async ({ language, action, target, started }) => {
+    const pending = deferred<unknown>();
+    const install = vi.fn().mockReturnValue(pending.promise);
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(<LLMSettingsDialog {...dialogProps} language={language} codingAgents={[{ ...codexAgent, version: "codex-cli 0.145.0", update_available: true, target_version: "0.159.3" }]} onInstallCodingAgent={install} onRefresh={refresh} />);
+
+    const button = screen.getByRole("button", { name: action });
+    expect(screen.getByText(/codex-cli 0\.145\.0/).textContent).toContain(target);
+    fireEvent.click(button);
+    expect(install).toHaveBeenCalledWith("codex");
+    expect(button.hasAttribute("disabled")).toBe(true);
+    await act(async () => pending.resolve({ status: "installing" }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status").textContent).toBe(started);
+  });
+
+  it("disables Update while an installed Codex is updating and keeps polling with its current models", async () => {
+    vi.useFakeTimers();
+    try {
+      const install = vi.fn();
+      const refresh = vi.fn().mockResolvedValue(undefined);
+      const listModels = vi.fn().mockResolvedValue(codexModels);
+      const { unmount } = render(<LLMSettingsDialog {...dialogProps} codingAgents={[{ ...codexAgent, install_state: "installing", update_available: true, target_version: "0.159.3" }]} onInstallCodingAgent={install} onRefresh={refresh} onListCodingAgentModels={listModels} />);
+      await act(async () => {});
+
+      const button = screen.getByRole("button", { name: "Update" });
+      expect(button.hasAttribute("disabled")).toBe(true);
+      expect(screen.getByText("Updating")).toBeDefined();
+      expect(screen.getByRole("option", { name: "GPT Fast · Fast model" })).toBeDefined();
+      fireEvent.click(button);
+      expect(install).not.toHaveBeenCalled();
+      await act(async () => vi.advanceTimersByTime(1500));
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(listModels).toHaveBeenCalledTimes(1);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves models and bindings after an update fails, permits retry, and refreshes models on completion", async () => {
+    const install = vi.fn().mockResolvedValue({ status: "installing" });
+    const listModels = vi.fn().mockResolvedValueOnce(codexModels).mockResolvedValue(latestCodexModels);
+    const updateSettings = vi.fn();
+    const updateAgent = vi.fn();
+    const updateModel = vi.fn();
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const oldAgent = { ...codexAgent, version: "codex-cli 0.145.0", update_available: true, target_version: "0.159.3", model_config: { mode: "native" as const, native_model: "gpt-fast" } };
+    const props = { ...dialogProps, onInstallCodingAgent: install, onListCodingAgentModels: listModels, onRefresh: refresh, onUpdateSettings: updateSettings, onUpdateCodingAgent: updateAgent, onUpdateCodingAgentModel: updateModel };
+    const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[oldAgent]} />);
+    await screen.findByRole("option", { name: "GPT Fast · Fast model" });
+
+    rerender(<LLMSettingsDialog {...props} codingAgents={[{ ...oldAgent, install_state: "failed", install_operation: { id: "update-1", agent_id: "codex", status: "failed", created_at: 1, error: "Codex download interrupted" } }]} />);
+    expect(screen.getByText("Codex download interrupted")).toBeDefined();
+    expect((screen.getByRole("combobox", { name: "Codex model" }) as HTMLSelectElement).value).toBe("gpt-fast");
+    expect(screen.getByRole("option", { name: "GPT Fast · Fast model" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "GPT A" })).toBeDefined();
+    expect(listModels).toHaveBeenCalledTimes(1);
+    const retry = screen.getByRole("button", { name: "Update" });
+    expect(retry.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(retry);
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(install).toHaveBeenCalledWith("codex");
+
+    rerender(<LLMSettingsDialog {...props} codingAgents={[{ ...oldAgent, version: "codex-cli 0.159.3", update_available: false, install_state: "installed", install_operation: null }]} />);
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    expect(listModels).toHaveBeenCalledTimes(2);
+    expect((screen.getByRole("combobox", { name: "Codex model" }) as HTMLSelectElement).value).toBe("gpt-fast");
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+    expect(screen.queryByText(/Update to/)).toBeNull();
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(updateAgent).not.toHaveBeenCalled();
+    expect(updateModel).not.toHaveBeenCalled();
+  });
+
+  it("keeps older definitions compatible and leaves externally managed Codex without an update action", () => {
+    const { rerender } = render(<LLMSettingsDialog {...dialogProps} onInstallCodingAgent={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+    rerender(<LLMSettingsDialog {...dialogProps} codingAgents={[{ ...codexAgent, installable: false, update_available: true, target_version: "0.159.3" }]} onInstallCodingAgent={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+  });
+});
+
 describe("Codex model catalog refresh", () => {
   it("refreshes on every open and version change without refetching for new prop identities or changing selections", async () => {
     const listModels = vi.fn().mockResolvedValueOnce(codexModels).mockResolvedValue(latestCodexModels);
