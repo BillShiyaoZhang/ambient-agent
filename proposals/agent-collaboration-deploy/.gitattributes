@@ -1,0 +1,6 @@
+# Preserve exported artifact bytes for SHA256SUMS on every platform.
+*.patch -text -diff
+*.bundle -text -diff
+metadata.json -text whitespace=cr-at-eol
+verification.json -text whitespace=cr-at-eol
+SHA256SUMS -text whitespace=cr-at-eol

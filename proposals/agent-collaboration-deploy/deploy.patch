@@ -1,0 +1,1792 @@
+From 392deca500c7db906e7ba971ee04f258f1cc52e1 Mon Sep 17 00:00:00 2001
+From: Shiyao Zhang <zhangshiyao_ZSY@outlook.com>
+Date: Thu, 1 Oct 2026 14:50:39 +0800
+Subject: [PATCH] Add isolated Ambient workspace Gateway and portal proposal
+
+---
+ agent-collaboration-web                       |   2 +-
+ docker-compose.workspace.yml                  |  25 +
+ docs/architecture/README.md                   |   1 +
+ .../WORKSPACE_GATEWAY_PROPOSAL.md             |  47 +
+ docs/operations/README.md                     |   1 +
+ docs/users/README.md                          |   2 +
+ docs/users/WORKSPACE_ACCESS.md                |  15 +
+ .../WORKSPACE_GATEWAY_2026-10-01.md           |  17 +
+ workspace-gateway/.dockerignore               |  10 +
+ workspace-gateway/.gitignore                  |   9 +
+ workspace-gateway/Dockerfile                  |   9 +
+ workspace-gateway/README.md                   |  22 +
+ workspace-gateway/pytest.ini                  |   2 +
+ workspace-gateway/requirements-dev.txt        |   3 +
+ workspace-gateway/requirements.txt            |   3 +
+ workspace-gateway/tests/conftest.py           |   4 +
+ workspace-gateway/tests/test_gateway.py       | 582 ++++++++++++
+ .../workspace_gateway/__init__.py             |   1 +
+ workspace-gateway/workspace_gateway/app.py    | 865 ++++++++++++++++++
+ 19 files changed, 1619 insertions(+), 1 deletion(-)
+ create mode 100644 docker-compose.workspace.yml
+ create mode 100644 docs/architecture/WORKSPACE_GATEWAY_PROPOSAL.md
+ create mode 100644 docs/users/WORKSPACE_ACCESS.md
+ create mode 100644 docs/verification/WORKSPACE_GATEWAY_2026-10-01.md
+ create mode 100644 workspace-gateway/.dockerignore
+ create mode 100644 workspace-gateway/.gitignore
+ create mode 100644 workspace-gateway/Dockerfile
+ create mode 100644 workspace-gateway/README.md
+ create mode 100644 workspace-gateway/pytest.ini
+ create mode 100644 workspace-gateway/requirements-dev.txt
+ create mode 100644 workspace-gateway/requirements.txt
+ create mode 100644 workspace-gateway/tests/conftest.py
+ create mode 100644 workspace-gateway/tests/test_gateway.py
+ create mode 100644 workspace-gateway/workspace_gateway/__init__.py
+ create mode 100644 workspace-gateway/workspace_gateway/app.py
+
+diff --git a/agent-collaboration-web b/agent-collaboration-web
+index 21693d1..fc271b6 160000
+--- a/agent-collaboration-web
++++ b/agent-collaboration-web
+@@ -1 +1 @@
+-Subproject commit 21693d1556111a94de7c09abd614d91398f82c03
++Subproject commit fc271b6b4093fa23b334869d22c0edee11b27da4
+diff --git a/docker-compose.workspace.yml b/docker-compose.workspace.yml
+new file mode 100644
+index 0000000..b201727
+--- /dev/null
++++ b/docker-compose.workspace.yml
+@@ -0,0 +1,25 @@
++# Optional local/proposal overlay: docker compose -f docker-compose.yml -f docker-compose.workspace.yml up --build
++# Production requires a dedicated HTTPS wildcard ingress preserving the workspace Host.
++services:
++  workspace-gateway:
++    build:
++      context: ./workspace-gateway
++    environment:
++      WORKSPACE_GATEWAY_SECRET: ${WORKSPACE_GATEWAY_SECRET:?Set a separate Workspace Gateway service secret}
++      WORKSPACE_GATEWAY_DOMAIN: ${WORKSPACE_GATEWAY_DOMAIN:-localhost:8090}
++      WORKSPACE_GATEWAY_SCHEME: ${WORKSPACE_GATEWAY_SCHEME:-http}
++    volumes:
++      - workspace_gateway_data:/data
++    ports:
++      - "127.0.0.1:8090:8090"
++    networks:
++      - agent-net
++    restart: unless-stopped
++  web:
++    environment:
++      WORKSPACE_GATEWAY_URL: http://workspace-gateway:8090
++      WORKSPACE_GATEWAY_SECRET: ${WORKSPACE_GATEWAY_SECRET:?Set a separate Workspace Gateway service secret}
++    depends_on:
++      - workspace-gateway
++volumes:
++  workspace_gateway_data:
+diff --git a/docs/architecture/README.md b/docs/architecture/README.md
+index 4d57a37..8cffdf5 100644
+--- a/docs/architecture/README.md
++++ b/docs/architecture/README.md
+@@ -4,6 +4,7 @@
+ - [双边协作与用户提醒](COLLABORATION_AND_ATTENTION.md)：协议、授权边界、恢复和提醒流程。
+ - [流程图](FLOWS.md)：配对、读取、授权、投递和恢复。
+ - [产品决策](DECISIONS.md)：从早期探索中保留的身份、授权、记忆和持久状态原则。
++- [Ambient 工作区 Gateway 提案](WORKSPACE_GATEWAY_PROPOSAL.md)：独立建议副本中的本机工作区入口、双重确认授权及 HTTP/WebSocket 中转边界；未上线。
+ 
+ [可验证的隐私与合规解密 v2](COMPLIANCE_GATEWAY.md)：初版源码、信任边界、本地验收与尚未实现的加强项；现网签名策略为 `compliance`（epoch 3 长期策略、`allow_v1=false`），普通旧 v1 Agent 间路径被拒，Relay 禁用。2026-09-24 发布的 v0.8.0 接入包仍要求手工固定对端完整公钥；v0.9.1 支持同一 Platform 下凭准确 URN 首联。当前公开版本以实际发布清单为准。
+ 
+diff --git a/docs/architecture/WORKSPACE_GATEWAY_PROPOSAL.md b/docs/architecture/WORKSPACE_GATEWAY_PROPOSAL.md
+new file mode 100644
+index 0000000..ba852af
+--- /dev/null
++++ b/docs/architecture/WORKSPACE_GATEWAY_PROPOSAL.md
+@@ -0,0 +1,47 @@
++# Ambient Workspace Gateway（独立合并建议）
++
++此功能只在独立提案检出中开发，不改变上游仓库或现有 Agent Comm 控制协议。Ambient 仍拥有本地工作区、Agent、App、密钥和 Run；新 Gateway 只中转有界 HTTP/WebSocket，持久化连接授权及审计元数据，不存业务正文、不重派任务。
++
++## 首版连接流程
++
++1. Ambient Connector 主动调用 `POST /v1/connector/pairings`，保存返回的设备凭据。五分钟一次性码在数据库只存摘要。
++2. 已登录 Web BFF 使用独立服务 Bearer 领取该码，账户 ID 必须来自服务端会话。
++3. 本机显示领取账户、权限及期限，调用 `POST /v1/connector/approve`，显式提交 `account_id` 和 `grant_id` 并严格匹配领取结果。
++4. 已确认 Connector 主动建立 `/v1/connector/tunnel`。云端打开链接仅为短期一次性 launch ticket；节点独立 Host 消费票据后设置 host-only Cookie，并立即跳转 `/`。
++5. 本机或云端撤销、授权/会话到期时，已有连接也关闭。断线不会自动重放任何请求。
++
++## 稳定接口
++
++所有对外时间为 ISO UTC 字符串（数据库内部为 Unix 秒数）。节点状态为 `pending`、`claimed`、`paired`、`revoked`、`expired`，`online` 是独立布尔值。节点字段为 `node_id,name,status,online,account_id,account_label,grant_id,scopes,expires_at,workspace_origin,last_seen_at`。
++
++| 方法和路径 | 输入 / 输出 |
++| --- | --- |
++| `POST /v1/connector/pairings` | `{name,scopes,expires_in}`（300 秒至 30 日） → `{node_id,connector_token,pairing_code,pairing_expires_at,expires_at,workspace_origin}` |
++| `GET /v1/connector/state` | 设备 Bearer → 节点 |
++| `POST /v1/connector/approve` | 设备 Bearer，`{account_id,grant_id}` → 节点 |
++| `POST /v1/connector/revoke` | 设备 Bearer → 节点 |
++| `WS /v1/connector/tunnel` | 设备 Bearer；已确认且未过期 |
++| `POST /v1/accounts/{account_id}/pairings/claim` | Web 服务 Bearer，`{code,label}` → 节点 |
++| `GET /v1/accounts/{account_id}/nodes` | Web 服务 Bearer → `{nodes:[节点]}` |
++| `POST /v1/accounts/{account_id}/nodes/{node_id}/launch` | Web 服务 Bearer → `{url,expires_at}` |
++| `DELETE /v1/accounts/{account_id}/nodes/{node_id}` | Web 服务 Bearer → 节点 |
++| `DELETE /v1/accounts/{account_id}/nodes` | Web 服务 Bearer → `{revoked:数量}`，批量撤销 |
++| `DELETE /v1/accounts/{account_id}` | Web 服务 Bearer → `{revoked:数量}`，持久账户 tombstone 并撤销；重复调用幂等，用于删账户 |
++
++Tunnel `hello`、`http.request`、`ws.open` 以扁平字段携带 `node_id,account_id,grant_id,scopes,workspace_origin`。HTTP `body`、WS `kind:bytes` 的 `data` 为严格 base64；头为二元数组。WS open 附带浏览器提供的 `subprotocols`，accept 的 `subprotocol` 可为 null。支持 `http.response`、`ws.accept`、`ws.data`、`ws.close`、`ping`/`pong` 与 `revoked`。
++
++## 隔离与限制
++
++开发使用 `<node_id>.localhost:<port>`；生产使用独立 wildcard 域名和 HTTPS。服务密钥必须显式配置；生产拒绝空密钥和明文公网 origin。账户接口不得在节点 Host 暴露。节点 Cookie 不使用 Domain，HTTPS 设置 Secure，HttpOnly、SameSite=Lax，最多一小时且不得超过授权到期。
++
++Gateway 与 Connector 双重限制目标/路径。`/api/*`、`/ws/*` 到 Backend，普通静态资源到 Frontend；本机 `/api/remote-workspace` 禁止代理。只有 `/_ambient/frame.html`、`/frame_shell.css`、`/frame_shell.mjs`、`/controller_facade.mjs`、`/presentation_context.mjs`、`/vendor/*` 固定壳和模块依赖公开到 Frame。Cookie、设备 Bearer、Authorization、Host、代理身份、hop-by-hop 头不向本机转发。HTML 只注入非秘密同源配置，保持 CSP 和 sandbox 边界。
++
++Web 先验证账户删除意图与密码，再调用 terminal account 接口；Gateway 持久记录删除账户 ID 并禁止后续 claim、approve、launch，随后失效已有许可和连接，阻止跨服务删除期间的并发重新授权。Gateway 失败时 Web 不完成删除；Web 数据库删除失败时连接已经安全关闭。此 ID tombstone 不表示删除全部元数据或备份，重建账户必须采用新 ID。
++
++HTTP 正文 2 MiB；单 WS 帧 256 KiB；每节点 HTTP/浏览器 WS 各最多 16 并发；请求/WS 建立等待 30 秒。实现为单 Gateway 实例，不声称具备生产多副本路由、计费、P2P、跨账户共享或可靠排队执行能力。生产 TLS 由外部反向代理提供，并必须保留节点 Host。
++
++固定 Frame 资源使用 gzip 原始传输，因当前 Babel vendor 未压缩文件超过 2 MiB。Connector 只对固定壳白名单强制请求 gzip 并读原始压缩字节；Gateway 只对该 Frame 路由保留 `Content-Encoding: gzip`。压缩后的 HTTP/tunnel payload 仍受 2 MiB 上限，普通 API/Frontend 保持原大小限制，不普遍透传 encoding。Frontend HTML 改写后重算长度并删除 encoding，Frame HTML 与模块不注入配置或改写 CSP。
++
++## 本地测试
++
++使用独立临时 SQLite 和假本机目标先验证失败再实现。覆盖跨账户隔离、码和 launch 重放、配对后本机确认、真实双向 HTTP/WS、子协议、代理头/路径/配额、撤销和到期终止已建立通道、重启持久状态。Ambient/浏览器完整工作区验收另由集成测试记录实际环境。
+diff --git a/docs/operations/README.md b/docs/operations/README.md
+index f519d8d..324eb16 100644
+--- a/docs/operations/README.md
++++ b/docs/operations/README.md
+@@ -4,5 +4,6 @@
+ - [v2 隐私到合规迁移](V2_MIGRATION.md)：告知与选择、旧用户兼容、分阶段切换和可选 Compose 覆盖配置。
+ - [Hermes 接入与升级](HERMES.md)：本机 helper、Python 环境、实际 profile、配对和重复插件迁移。
+ - [发布工具](../../tools/release/README.md)：构建可校验安装包与 Web 运行产物。
++- [Ambient Workspace Gateway 提案运行说明](../../workspace-gateway/README.md)：可选本地服务、Compose overlay、独立 wildcard TLS 与单实例限制；不改变现网部署。
+ 
+ 具体生产版本、历史切换与回滚位置查 [发布索引](../releases/README.md)。
+diff --git a/docs/users/README.md b/docs/users/README.md
+index a2edf79..cf87028 100644
+--- a/docs/users/README.md
++++ b/docs/users/README.md
+@@ -2,6 +2,8 @@
+ 
+ 本指南面向想使用 Agent Comm 的人。你需要一台**已经能正常运行 Hermes** 的设备，以及可登录的[网页工作台](https://agent-communication.online/dashboard)。目前完整的首次自动接入流程面向 Hermes；其他 agent 软件需要各自的连接器。
+ 
++独立建议副本还提供 [Ambient 本机工作区远程入口](WORKSPACE_ACCESS.md)，需要部署相应 Gateway 和 Ambient Connector。该入口尚未部署到上述现网，普通 Agent Comm 对话配对不会自动取得完整工作区权限。
++
+ 现网已切换到签名 v2 合规策略。两个 Agent 要使用该 Platform 发送新消息，须升级到支持 v2 的接入包，分别核对身份和签名策略，并由双方主人各自在本机授权网关披露；旧版普通 v1 Agent 间通信会被拒。具体选择见[合规通信与升级说明](PRIVACY_MODE_UPGRADE.md)。网页授权或网页披露确认都不等于 Agent 间的身份核对和本机披露许可。
+ 
+ 账户注册验证、密码找回／修改和人工客服见[账户邮箱指南](ACCOUNT_EMAIL.md)。邮件功能需服务完成开通；以实际页面提示为准，既有账户的身份与连接在升级后保留。
+diff --git a/docs/users/WORKSPACE_ACCESS.md b/docs/users/WORKSPACE_ACCESS.md
+new file mode 100644
+index 0000000..3c0f0dc
+--- /dev/null
++++ b/docs/users/WORKSPACE_ACCESS.md
+@@ -0,0 +1,15 @@
++# Ambient 本机工作区远程入口（合并建议）
++
++此入口在独立提案副本中提供，尚未上线。它让登录用户通过云门户打开自己的 Ambient；Agent、App 数据、密钥和任务执行仍在用户电脑上。网页和默认 Widget Controller 在访问者浏览器运行。完整工作区授权与普通 Agent Comm 对话授权分别确认。
++
++1. 在自己的电脑启动 Ambient，并在本机的远程连接设置中填写管理员提供的 Gateway 和云门户地址。
++2. 选择期限和权限并生成一次性连接码。`workspace.control` 可读写自己的工作区并执行任务；附加 `workspace.manage` 才可远程管理 Provider、Coding Agent、Skill 和 capability。
++3. 登录目标云账户，在云门户工作区入口领取一次性码；码五分钟后失效，领取后不可重复使用。
++4. 回到原电脑 Ambient，核对账户、范围和到期时间，点击确认。仅在云端领取不会让云端获得访问权。
++5. 在门户显示在线后打开工作区。打开链接只使用一次；下次访问从门户生成新链接。浏览器会话最多一小时，并且不能超过本机授权期限。
++
++电脑需要持续开机、联网并运行 Ambient。离线不会取消已在本机运行的任务；恢复后读取同一任务的真实状态，不能把网络回执丢失当成需要重复提交。不同电脑的工作区使用不同域名，浏览器存储和 Cookie 独立。
++
++在云门户或本机撤销连接后，远程请求和已经打开的连接立即失效。本机离线时，本机撤销先关闭本地通道；无法通知云端时也不继续使用原许可。已执行的操作不能通过撤销倒退。账号误领时不要在本机确认；先撤销本次连接并重新生成码。
++
++Gateway 不持久保存中转的业务正文，但 TLS 在入口终止时，运营者仍能够处理明文请求与响应。现有 Agent Comm 云工作台的已授权同步副本使用原来的独立机制。完整数据边界和部署限制见[Gateway 提案设计](../architecture/WORKSPACE_GATEWAY_PROPOSAL.md)。
+diff --git a/docs/verification/WORKSPACE_GATEWAY_2026-10-01.md b/docs/verification/WORKSPACE_GATEWAY_2026-10-01.md
+new file mode 100644
+index 0000000..34fc0d5
+--- /dev/null
++++ b/docs/verification/WORKSPACE_GATEWAY_2026-10-01.md
+@@ -0,0 +1,17 @@
++# Workspace Gateway 本地契约验收 — 2026-10-01
++
++范围为独立提案检出新增 Gateway，未修改或发布上游仓库，未连接现网或使用原用户身份。环境为 Windows、Ambient 已有 uv Python 环境、FastAPI TestClient 和隔离临时 SQLite。
++
++先写测试并确认缺少 Gateway 实现导致 `ModuleNotFoundError`，实现后 22 个测试通过。交叉审查发现固定 Frame 模块依赖缺口和慢上传期间会话到期的缺口，均新增失败测试后修复。静态检查 `ruff check` 通过，源码经 `ruff format` 整理。执行命令见 [服务 README](../../workspace-gateway/README.md)。
++
++已验证：服务凭据与云账户隔离；五分钟配对码领取后不可重放、必须由本机按领取账户/grant 确认；不同 Host 不消费他节点 launch ticket、过期/重放票据拒绝；host-only HttpOnly Cookie；完整扁平身份透传与代理敏感头删除；HTTP 真实请求/响应匹配；HTML 同源配置注入且原 CSP 保留；无凭据固定 Frame 壳；WS 子协议及双向文本/二进制；撤销关闭在途 HTTP、既有 WS 和设备连接；授权及浏览器会话到期关闭连接；路径穿越、本机连接管理 API、HTTP 大小、WS 帧大小、HTTP 并发和超时；重启保留身份/grant，数据库不含原始设备密钥或配对码。
++
++补充验证了固定 Frame 模块依赖链、HTTP body 读取及 WS accept 等待期间到期不会派发写请求或接受过期浏览器、WS 并发额度、固定 Frame gzip 大资源的有界原始传输和浏览器解码、发送阻塞也计入整体超时预算、账户批量撤销及永久删除账户 tombstone 阻止重新领取；同账户删除调用幂等，不影响其它账户。
++
++TestClient 报告一条上游 httpx 弃用提示，未影响测试。按仓库 AGENTS 运行 `tools/maintenance/check_structure.py`，有 92 个已有历史链接错误，均为 2026-09-23/24 报告引用本次检出未包含的 `build/` 证据产物；新增 Gateway 文档未报链接错误。此记录不证明真实浏览器/真实 Ambient Connector、Docker 镜像构建、生产 wildcard TLS、运营限流、计费或多副本已通过；完整本地交互由集成验收记录覆盖。
++
++收尾时以独立 `WORKSPACE_DIR`、Gateway `PYTHONPATH`，从 Ambient 检出运行 `uv --cache-dir .tmp-uv-cache run --no-sync pytest -c .cache/agent-collaboration-proposal/workspace-gateway/pytest.ini --confcutdir=.cache/agent-collaboration-proposal/workspace-gateway .cache/agent-collaboration-proposal/workspace-gateway/tests -q`，再次得到 `22 passed, 1 warning in 3.75s`。显式配置和 `confcutdir` 避免加载 Ambient 的 conftest；Windows sandbox 拒绝现有 pytest launcher 后，复验使用获准的本机进程权限。`ruff check` 再次通过；结构检查为 162 个 Markdown、相同 92 个历史证据链接错误。
++
++可选 Gateway Compose overlay 使用独立临时 Docker 配置目录和仅用于解析的合成 `PLATFORM_ADMIN_TOKEN`、`NEXTAUTH_SECRET`、`WORKSPACE_GATEWAY_SECRET`，执行 `docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.workspace.yml config --no-env-resolution --quiet` 成功；未构建镜像或启动容器。
++
++另用全新 Gateway SQLite、随机合成服务密钥和 loopback `8798`，配合 Web 的全新 SQLite 与本地 HTTPS 门户执行未改写断言的 `tests/integration/workspace-portal-smoke.cjs`。保存的输出为 `WORKSPACE_PORTAL_SMOKE_PASS real login, origin/account isolation, local confirmation, deletion revocation and stale-cookie rejection`，退出码 0；确认真实 NextAuth 登录、跨源及伪造账户拒绝、本机确认、错误密码保留授权、正确删除撤销授权、旧会话拒绝及删除后再次 approve 拒绝。完成后按已确认命令行停止本次 Gateway 测试进程；未接触原用户数据库或公开服务。
+diff --git a/workspace-gateway/.dockerignore b/workspace-gateway/.dockerignore
+new file mode 100644
+index 0000000..b04311b
+--- /dev/null
++++ b/workspace-gateway/.dockerignore
+@@ -0,0 +1,10 @@
++.pytest_cache
++.ruff_cache
++__pycache__
++**/__pycache__
++*.pyc
++.venv
++data
++*.sqlite3*
++*.db*
++*.log
+diff --git a/workspace-gateway/.gitignore b/workspace-gateway/.gitignore
+new file mode 100644
+index 0000000..6fd6248
+--- /dev/null
++++ b/workspace-gateway/.gitignore
+@@ -0,0 +1,9 @@
++.pytest_cache/
++.ruff_cache/
++__pycache__/
++*.pyc
++.venv/
++data/
++*.sqlite3*
++*.db*
++*.log
+diff --git a/workspace-gateway/Dockerfile b/workspace-gateway/Dockerfile
+new file mode 100644
+index 0000000..434740d
+--- /dev/null
++++ b/workspace-gateway/Dockerfile
+@@ -0,0 +1,9 @@
++FROM python:3.12-slim
++WORKDIR /app
++COPY requirements.txt ./
++RUN pip install --no-cache-dir -r requirements.txt && useradd --uid 10001 --create-home gateway && mkdir /data && chown gateway:gateway /data
++COPY workspace_gateway ./workspace_gateway
++USER gateway
++ENV WORKSPACE_GATEWAY_DATABASE=/data/workspace-gateway.sqlite3
++EXPOSE 8090
++CMD ["uvicorn", "workspace_gateway.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090", "--no-proxy-headers", "--no-access-log", "--ws-max-size", "2861744", "--limit-concurrency", "256"]
+diff --git a/workspace-gateway/README.md b/workspace-gateway/README.md
+new file mode 100644
+index 0000000..2fa2b73
+--- /dev/null
++++ b/workspace-gateway/README.md
+@@ -0,0 +1,22 @@
++# Ambient Workspace Gateway proposal
++
++This isolated proposal adds a single-process HTTP/WebSocket relay beside the existing Web and Platform services. It never schedules Ambient Runs or stores proxied business bodies. The protocol and boundaries are described in [the design](../docs/architecture/WORKSPACE_GATEWAY_PROPOSAL.md).
++
++## Local development
++
++Install `requirements-dev.txt` in a disposable Python 3.11+ environment. Set `WORKSPACE_GATEWAY_SECRET` to a separate random service secret, `WORKSPACE_GATEWAY_DOMAIN=localhost:8090`, and `WORKSPACE_GATEWAY_SCHEME=http`. From this directory run:
++
++```sh
++uvicorn workspace_gateway.app:create_app --factory --host 127.0.0.1 --port 8090 --no-proxy-headers --no-access-log --ws-max-size 2861744
++pytest -c pytest.ini --confcutdir=. tests -q
++```
++
++Configure the proposed Web BFF with the same secret and `WORKSPACE_GATEWAY_URL=http://127.0.0.1:8090`. Configure Ambient with that Gateway URL and the Web portal URL. Ambient initiates pairing, the signed-in portal claims it, and the owner approves it in the local Ambient window. Opening the node from the portal consumes a one-use link and sets a separate host-only workspace cookie. Modern browsers resolve `*.localhost` to loopback; command-line HTTP clients may require a loopback resolver mapping.
++
++The optional [Compose overlay](../docker-compose.workspace.yml) exposes Gateway only on local loopback. It deliberately does not alter existing production nginx routes. Production operators must configure a dedicated wildcard workspace hostname and TLS ingress, preserve the Host header and WebSocket upgrades, restrict internal BFF service access, suppress/redact launch query strings in ingress access logs, protect the SQLite volume and backups, and enforce deployment-wide registration/rate/billing limits. `WORKSPACE_GATEWAY_SCHEME=https` controls secure workspace cookies; direct plain HTTP ingress must never remain publicly reachable.
++
++HTTP and response bodies are limited to 2 MiB, WS frames to 256 KiB, and each node to 16 HTTP plus 16 browser WS connections. HTTP and WS establishment waits expire after 30 seconds. Cookies expire within one hour and within the local grant. Revocation and grant/session expiry also invalidate live connections. Startup requires a secret and refuses public HTTP workspace origins. The default SQLite file is ignored local state; do not commit it. One active Gateway instance is supported; multi-replica routing, P2P, shared workspaces and cloud execution are outside this proposal.
++
++Only fixed public Frame assets may retain gzip content encoding. The current Babel vendor exceeds the uncompressed 2 MiB ceiling, so Connector requests gzip and relays its raw compressed payload within the same 2 MiB wire budget. Other services retain the ordinary body limit and drop encoding when rewritten. No CSP or Widget sandbox permissions are expanded.
++
++For local tests using an existing Ambient runtime, run `uv run --no-sync python -m pytest -c .cache/agent-collaboration-proposal/workspace-gateway/pytest.ini --confcutdir=.cache/agent-collaboration-proposal/workspace-gateway .cache/agent-collaboration-proposal/workspace-gateway/tests -q` from the Ambient checkout. This only confirms isolated relay contracts; the browser and real Connector integration need their own recorded validation.
+diff --git a/workspace-gateway/pytest.ini b/workspace-gateway/pytest.ini
+new file mode 100644
+index 0000000..5ee6477
+--- /dev/null
++++ b/workspace-gateway/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++testpaths = tests
+diff --git a/workspace-gateway/requirements-dev.txt b/workspace-gateway/requirements-dev.txt
+new file mode 100644
+index 0000000..9f7db80
+--- /dev/null
++++ b/workspace-gateway/requirements-dev.txt
+@@ -0,0 +1,3 @@
++-r requirements.txt
++httpx>=0.28,<1
++pytest>=9,<10
+diff --git a/workspace-gateway/requirements.txt b/workspace-gateway/requirements.txt
+new file mode 100644
+index 0000000..4e2c538
+--- /dev/null
++++ b/workspace-gateway/requirements.txt
+@@ -0,0 +1,3 @@
++fastapi==0.139.0
++uvicorn==0.51.0
++websockets==16.0
+diff --git a/workspace-gateway/tests/conftest.py b/workspace-gateway/tests/conftest.py
+new file mode 100644
+index 0000000..5801bea
+--- /dev/null
++++ b/workspace-gateway/tests/conftest.py
+@@ -0,0 +1,4 @@
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+diff --git a/workspace-gateway/tests/test_gateway.py b/workspace-gateway/tests/test_gateway.py
+new file mode 100644
+index 0000000..02863c3
+--- /dev/null
++++ b/workspace-gateway/tests/test_gateway.py
+@@ -0,0 +1,582 @@
++import base64
++import asyncio
++import gzip
++import sqlite3
++from concurrent.futures import ThreadPoolExecutor
++from datetime import datetime
++
++import pytest
++from fastapi.testclient import TestClient
++from starlette.websockets import WebSocketDisconnect
++
++from workspace_gateway.app import GatewayConfig, create_app
++
++SERVICE = {"Authorization": "Bearer test-service-secret"}
++
++
++def setup_node(client, account="alice", expires_in=3600):
++    pair = client.post(
++        "/v1/connector/pairings", json={"name": "My Ambient", "scopes": ["workspace.control"], "expires_in": expires_in}
++    ).json()
++    device = {"Authorization": "Bearer " + pair["connector_token"]}
++    claimed = client.post(
++        f"/v1/accounts/{account}/pairings/claim",
++        headers=SERVICE,
++        json={"code": pair["pairing_code"], "label": account + "@example.test"},
++    )
++    assert claimed.status_code == 200
++    node = claimed.json()
++    approved = client.post(
++        "/v1/connector/approve", headers=device, json={"account_id": account, "grant_id": node["grant_id"]}
++    )
++    assert approved.status_code == 200
++    return pair, device, node
++
++
++@pytest.fixture
++def app(tmp_path):
++    return create_app(
++        GatewayConfig(
++            database=str(tmp_path / "gateway.sqlite3"),
++            secret="test-service-secret",
++            workspace_domain="localhost:8090",
++            scheme="http",
++        )
++    )
++
++
++def launch(client, pair, account="alice"):
++    result = client.post(f"/v1/accounts/{account}/nodes/{pair['node_id']}/launch", headers=SERVICE)
++    assert result.status_code == 200, result.text
++    url = result.json()["url"]
++    response = client.get(url, follow_redirects=False)
++    assert response.status_code == 303
++    assert response.headers["location"] == "/"
++    assert "HttpOnly" in response.headers["set-cookie"]
++    assert "Domain=" not in response.headers["set-cookie"]
++    return url
++
++
++def test_pairing_claim_requires_local_confirmation_and_is_single_use(app):
++    with TestClient(app) as client:
++        pair = client.post(
++            "/v1/connector/pairings", json={"name": "Home", "scopes": ["workspace.control"], "expires_in": 3600}
++        ).json()
++        device = {"Authorization": "Bearer " + pair["connector_token"]}
++        assert (
++            client.post(
++                "/v1/accounts/alice/pairings/claim", json={"code": pair["pairing_code"], "label": "alice"}
++            ).status_code
++            == 401
++        )
++        claimed = client.post(
++            "/v1/accounts/alice/pairings/claim", headers=SERVICE, json={"code": pair["pairing_code"], "label": "alice"}
++        ).json()
++        assert claimed["status"] == "claimed"
++        assert (
++            client.post(
++                "/v1/accounts/bob/pairings/claim", headers=SERVICE, json={"code": pair["pairing_code"], "label": "bob"}
++            ).status_code
++            == 409
++        )
++        assert (
++            client.post(
++                "/v1/connector/approve", headers=device, json={"account_id": "bob", "grant_id": claimed["grant_id"]}
++            ).status_code
++            == 409
++        )
++        with pytest.raises(WebSocketDisconnect):
++            with client.websocket_connect("/v1/connector/tunnel", headers=device):
++                pass
++        assert (
++            client.post(
++                "/v1/connector/approve", headers=device, json={"account_id": "alice", "grant_id": claimed["grant_id"]}
++            ).status_code
++            == 200
++        )
++        assert client.get("/v1/accounts/bob/nodes", headers=SERVICE).json() == {"nodes": []}
++        assert client.delete(f"/v1/accounts/bob/nodes/{pair['node_id']}", headers=SERVICE).status_code == 404
++
++
++def test_launch_host_cookie_replay_and_proxy_http(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            hello = tunnel.receive_json()
++            assert hello["type"] == "hello" and hello["account_id"] == "alice"
++            assert hello["grant_id"] == node["grant_id"]
++            url = launch(client, pair)
++            assert client.get(url, follow_redirects=False).status_code == 401
++            assert client.post(f"/v1/accounts/bob/nodes/{pair['node_id']}/launch", headers=SERVICE).status_code == 404
++            origin = pair["workspace_origin"]
++            assert client.get(origin + "/v1/accounts/alice/nodes", headers=SERVICE).status_code == 404
++            with ThreadPoolExecutor() as executor:
++                response = executor.submit(
++                    client.get,
++                    origin + "/api/graphs?x=1",
++                    headers={"X-Account-Id": "bob", "Authorization": "Bearer stolen", "X-Forwarded-Host": "evil.test"},
++                )
++                message = tunnel.receive_json()
++                assert message["type"] == "http.request" and message["service"] == "backend"
++                assert message["path"] == "/api/graphs?x=1" and message["account_id"] == "alice"
++                assert not {"cookie", "authorization", "host", "x-account-id", "x-forwarded-host"} & {
++                    item[0].lower() for item in message["headers"]
++                }
++                tunnel.send_json(
++                    {
++                        "type": "http.response",
++                        "id": message["id"],
++                        "status": 200,
++                        "headers": [["content-type", "application/json"]],
++                        "body": base64.b64encode(b'{"real":true}').decode(),
++                    }
++                )
++                assert response.result(timeout=5).json() == {"real": True}
++
++
++def test_html_config_and_public_frame_allowlist(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            with ThreadPoolExecutor() as executor:
++                response = executor.submit(client.get, pair["workspace_origin"] + "/")
++                message = tunnel.receive_json()
++                html = b"<html><head></head><body>App</body></html>"
++                tunnel.send_json(
++                    {
++                        "type": "http.response",
++                        "id": message["id"],
++                        "status": 200,
++                        "headers": [
++                            ["content-type", "text/html"],
++                            ["content-length", str(len(html))],
++                            ["content-security-policy", "default-src 'self'"],
++                        ],
++                        "body": base64.b64encode(html).decode(),
++                    }
++                )
++                page = response.result(timeout=5)
++                assert "window.__AMBIENT_REMOTE__=" in page.text and pair["node_id"] in page.text
++                assert page.headers["content-security-policy"] == "default-src 'self'"
++                assert int(page.headers["content-length"]) == len(page.content)
++                client.cookies.clear()
++                frame = executor.submit(client.get, pair["workspace_origin"] + "/_ambient/frame.html")
++                message = tunnel.receive_json()
++                assert message["service"] == "frame" and message["path"] == "/frame.html"
++                tunnel.send_json(
++                    {
++                        "type": "http.response",
++                        "id": message["id"],
++                        "status": 200,
++                        "headers": [["content-type", "text/html"]],
++                        "body": base64.b64encode(b"<html>Frame</html>").decode(),
++                    }
++                )
++                assert "__AMBIENT_REMOTE__" not in frame.result(timeout=5).text
++            assert client.get(pair["workspace_origin"] + "/api/graphs").status_code == 401
++            assert client.get(pair["workspace_origin"] + "/_ambient/private").status_code == 404
++
++
++def test_websocket_subprotocol_and_bidirectional_frames_and_revoke(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            with ThreadPoolExecutor() as executor:
++
++                def browser():
++                    with client.websocket_connect(
++                        pair["workspace_origin"].replace("http:", "ws:") + "/ws/events", subprotocols=["ambient-v1"]
++                    ) as ws:
++                        assert ws.accepted_subprotocol == "ambient-v1"
++                        ws.send_text("hello")
++                        assert ws.receive_bytes() == b"reply"
++                        assert ws.receive()["type"] == "websocket.close"
++
++                task = executor.submit(browser)
++                opened = tunnel.receive_json()
++                assert opened["type"] == "ws.open" and opened["subprotocols"] == ["ambient-v1"]
++                tunnel.send_json({"type": "ws.accept", "id": opened["id"], "subprotocol": "ambient-v1"})
++                message = tunnel.receive_json()
++                assert message["type"] == "ws.data" and message["kind"] == "text" and message["data"] == "hello"
++                tunnel.send_json(
++                    {
++                        "type": "ws.data",
++                        "id": opened["id"],
++                        "kind": "bytes",
++                        "data": base64.b64encode(b"reply").decode(),
++                    }
++                )
++                assert client.delete(f"/v1/accounts/alice/nodes/{pair['node_id']}", headers=SERVICE).status_code == 200
++                assert tunnel.receive_json()["type"] == "revoked"
++                task.result(timeout=5)
++            assert client.get(pair["workspace_origin"] + "/api/graphs").status_code == 401
++
++
++def test_expiry_rejects_ticket_and_closes_live_tunnel(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client, expires_in=300)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            url = launch(client, pair)
++            app.state.clock = lambda: datetime.fromisoformat(node["expires_at"].replace("Z", "+00:00")).timestamp() + 1
++            assert client.get("/v1/connector/state", headers=device).json()["status"] == "expired"
++            assert client.get(url, follow_redirects=False).status_code == 401
++            assert tunnel.receive_json()["type"] == "revoked"
++
++
++def test_paths_body_quota_and_timeout(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            origin = pair["workspace_origin"]
++            assert client.post(origin + "/api/remote-workspace/approve").status_code == 403
++            assert client.get(origin + "/api/%2e%2e/secrets").status_code == 400
++            assert client.post(origin + "/api/graphs", content=b"x" * (2 * 1024 * 1024 + 1)).status_code == 413
++            app.state.config.request_timeout = 0.05
++            assert client.get(origin + "/api/graphs").status_code == 504
++            tunnel.receive_json()
++
++
++def test_restart_keeps_grant_without_raw_tokens_or_content(tmp_path):
++    config = GatewayConfig(
++        database=str(tmp_path / "gateway.sqlite3"),
++        secret="test-service-secret",
++        workspace_domain="localhost:8090",
++        scheme="http",
++    )
++    with TestClient(create_app(config)) as client:
++        pair, device, node = setup_node(client)
++    raw = (tmp_path / "gateway.sqlite3").read_bytes()
++    assert pair["connector_token"].encode() not in raw
++    assert pair["pairing_code"].encode() not in raw
++    with TestClient(create_app(config)) as client:
++        state = client.get("/v1/connector/state", headers=device).json()
++        assert state["status"] == "paired" and state["grant_id"] == node["grant_id"] and state["online"] is False
++    database = sqlite3.connect(config.database)
++    assert database.execute("select count(*) from audit").fetchone()[0] >= 3
++
++
++def test_public_plaintext_and_missing_secret_rejected():
++    with pytest.raises(ValueError):
++        GatewayConfig(secret="", workspace_domain="workspaces.example.com", scheme="https")
++    with pytest.raises(ValueError):
++        GatewayConfig(secret="real", workspace_domain="workspaces.example.com", scheme="http")
++
++
++def test_http_concurrency_and_inflight_revoke(app):
++    app.state.config.http_concurrency = 1
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            with ThreadPoolExecutor() as executor:
++                waiting = executor.submit(client.get, pair["workspace_origin"] + "/api/graphs")
++                assert tunnel.receive_json()["type"] == "http.request"
++                assert client.get(pair["workspace_origin"] + "/api/graphs").status_code == 429
++                assert client.post("/v1/connector/revoke", headers=device).status_code == 200
++                assert waiting.result(timeout=5).status_code == 503
++                assert tunnel.receive_json()["type"] == "revoked"
++
++
++def test_wrong_workspace_host_cannot_consume_ticket(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        second, _, _ = setup_node(client, account="bob")
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            ticket = client.post(f"/v1/accounts/alice/nodes/{pair['node_id']}/launch", headers=SERVICE).json()["url"]
++            wrong = ticket.replace(pair["node_id"], second["node_id"])
++            assert client.get(wrong, follow_redirects=False).status_code == 401
++            assert client.get(ticket, follow_redirects=False).status_code == 303
++
++
++def test_pairing_and_launch_expiry(app):
++    with TestClient(app) as client:
++        pair = client.post("/v1/connector/pairings", json={"name": "Expired", "expires_in": 3600}).json()
++        expiry = datetime.fromisoformat(pair["pairing_expires_at"].replace("Z", "+00:00")).timestamp()
++        app.state.clock = lambda: expiry + 1
++        assert (
++            client.post(
++                "/v1/accounts/alice/pairings/claim",
++                headers=SERVICE,
++                json={"code": pair["pairing_code"], "label": "alice"},
++            ).status_code
++            == 409
++        )
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            ticket = client.post(f"/v1/accounts/alice/nodes/{pair['node_id']}/launch", headers=SERVICE).json()
++            expires = datetime.fromisoformat(ticket["expires_at"].replace("Z", "+00:00")).timestamp()
++            app.state.clock = lambda: expires + 1
++            assert client.get(ticket["url"], follow_redirects=False).status_code == 401
++
++
++def test_session_expiry_closes_existing_browser_websocket(app):
++    app.state.config.session_ttl = 1
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            clock = app.state.clock
++            with ThreadPoolExecutor() as executor:
++
++                def browser():
++                    with client.websocket_connect(
++                        pair["workspace_origin"].replace("http:", "ws:") + "/ws/events"
++                    ) as ws:
++                        ws.send_text("online")
++                        assert ws.receive()["type"] == "websocket.close"
++
++                waiting = executor.submit(browser)
++                opened = tunnel.receive_json()
++                tunnel.send_json({"type": "ws.accept", "id": opened["id"], "subprotocol": None})
++                assert tunnel.receive_json()["data"] == "online"
++                app.state.clock = lambda: clock() + 2
++                waiting.result(timeout=5)
++                assert tunnel.receive_json()["type"] == "ws.close"
++
++
++def test_browser_websocket_frame_limit(app):
++    app.state.config.frame_limit = 8
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            with ThreadPoolExecutor() as executor:
++
++                def browser():
++                    with client.websocket_connect(
++                        pair["workspace_origin"].replace("http:", "ws:") + "/ws/events"
++                    ) as ws:
++                        ws.send_bytes(b"123456789")
++                        assert ws.receive()["type"] == "websocket.close"
++
++                waiting = executor.submit(browser)
++                opened = tunnel.receive_json()
++                tunnel.send_json({"type": "ws.accept", "id": opened["id"], "subprotocol": None})
++                assert tunnel.receive_json()["type"] == "ws.close"
++                waiting.result(timeout=5)
++
++
++def test_all_fixed_frame_module_dependencies_are_public_and_frame_routed(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            with ThreadPoolExecutor() as executor:
++                for path in [
++                    "/_ambient/frame.html",
++                    "/frame_shell.css",
++                    "/frame_shell.mjs",
++                    "/controller_facade.mjs",
++                    "/presentation_context.mjs",
++                    "/vendor/babel.min.js",
++                    "/vendor/htm-preact.js",
++                ]:
++                    waiting = executor.submit(client.get, pair["workspace_origin"] + path)
++                    message = tunnel.receive_json()
++                    assert message["service"] == "frame"
++                    assert message["path"] == ("/frame.html" if path == "/_ambient/frame.html" else path)
++                    tunnel.send_json(
++                        {
++                            "type": "http.response",
++                            "id": message["id"],
++                            "status": 200,
++                            "headers": [
++                                ["content-type", "application/javascript"],
++                                ["access-control-allow-origin", "*"],
++                            ],
++                            "body": base64.b64encode(b"export {};").decode(),
++                        }
++                    )
++                    assert waiting.result(timeout=5).status_code == 200
++
++
++def test_account_bulk_revoke_only_affects_own_nodes(app):
++    with TestClient(app) as client:
++        first, first_device, _ = setup_node(client)
++        second, _, _ = setup_node(client)
++        other, _, _ = setup_node(client, account="bob")
++        with client.websocket_connect("/v1/connector/tunnel", headers=first_device) as tunnel:
++            tunnel.receive_json()
++            assert client.delete("/v1/accounts/alice/nodes").status_code == 401
++            assert client.delete("/v1/accounts/alice/nodes", headers=SERVICE).json() == {"revoked": 2}
++            assert tunnel.receive_json()["type"] == "revoked"
++            assert all(
++                n["status"] == "revoked"
++                for n in client.get("/v1/accounts/alice/nodes", headers=SERVICE).json()["nodes"]
++            )
++            assert client.get("/v1/accounts/bob/nodes", headers=SERVICE).json()["nodes"][0]["status"] == "paired"
++
++
++def test_missing_frame_modules_are_public_even_without_browser_session(app):
++    with TestClient(app) as client:
++        pair, _, _ = setup_node(client)
++        for path in ["/controller_facade.mjs", "/presentation_context.mjs"]:
++            assert client.get(pair["workspace_origin"] + path).status_code == 503
++
++
++def test_account_deletion_is_terminal_and_idempotent(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        assert client.delete("/v1/accounts/alice", headers=SERVICE).json() == {"revoked": 1}
++        assert client.delete("/v1/accounts/alice", headers=SERVICE).json() == {"revoked": 0}
++        assert (
++            client.post(
++                "/v1/connector/approve", headers=device, json={"account_id": "alice", "grant_id": node["grant_id"]}
++            ).status_code
++            == 409
++        )
++        next_pair = client.post("/v1/connector/pairings", json={"name": "New"}).json()
++        assert (
++            client.post(
++                "/v1/accounts/alice/pairings/claim",
++                headers=SERVICE,
++                json={"code": next_pair["pairing_code"], "label": "alice"},
++            ).status_code
++            == 410
++        )
++        assert (
++            client.post(
++                "/v1/accounts/bob/pairings/claim",
++                headers=SERVICE,
++                json={"code": next_pair["pairing_code"], "label": "bob"},
++            ).status_code
++            == 200
++        )
++
++
++def test_browser_expiry_during_request_body_does_not_dispatch(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client, expires_in=7200)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            clock = app.state.clock
++
++            async def expire_during_body(request, call_next):
++                original = request._receive
++
++                async def late_receive():
++                    message = await original()
++                    app.state.clock = lambda: clock() + 3601
++                    return message
++
++                request._receive = late_receive
++                return await call_next(request)
++
++            from starlette.middleware.base import BaseHTTPMiddleware
++
++            app.middleware_stack = BaseHTTPMiddleware(app.middleware_stack, dispatch=expire_during_body)
++            app.state.config.request_timeout = 0.05
++            assert client.post(pair["workspace_origin"] + "/api/graphs", content=b"write").status_code == 401
++            assert not app.state.tunnels[pair["node_id"]].http
++
++
++def test_fixed_frame_gzip_asset_stays_within_wire_limit_and_decodes_in_browser(app):
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            with ThreadPoolExecutor() as executor:
++                waiting = executor.submit(client.get, pair["workspace_origin"] + "/vendor/babel.min.js")
++                message = tunnel.receive_json()
++                source = b"/* known vendor asset */" + b"x" * (2 * 1024 * 1024 + 100)
++                compressed = gzip.compress(source)
++                assert len(compressed) < app.state.config.http_limit < len(source)
++                tunnel.send_json(
++                    {
++                        "type": "http.response",
++                        "id": message["id"],
++                        "status": 200,
++                        "headers": [
++                            ["content-type", "text/javascript"],
++                            ["content-encoding", "gzip"],
++                            ["access-control-allow-origin", "*"],
++                        ],
++                        "body": base64.b64encode(compressed).decode(),
++                    }
++                )
++                response = waiting.result(timeout=5)
++                assert response.headers["content-encoding"] == "gzip"
++                assert response.content == source
++
++
++def test_browser_expiry_while_waiting_for_ws_accept_is_denied(app):
++    app.state.config.session_ttl = 1
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client, expires_in=7200)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            clock = app.state.clock
++            with ThreadPoolExecutor() as executor:
++
++                def browser():
++                    with pytest.raises(WebSocketDisconnect):
++                        with client.websocket_connect(pair["workspace_origin"].replace("http:", "ws:") + "/ws/events"):
++                            pytest.fail("Expired browser session was accepted")
++
++                waiting = executor.submit(browser)
++                opened = tunnel.receive_json()
++                app.state.clock = lambda: clock() + 2
++                tunnel.send_json({"type": "ws.accept", "id": opened["id"], "subprotocol": None})
++                waiting.result(timeout=5)
++                assert tunnel.receive_json()["type"] == "ws.close"
++
++
++def test_browser_websocket_concurrency_quota(app):
++    app.state.config.ws_concurrency = 1
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            url = pair["workspace_origin"].replace("http:", "ws:") + "/ws/events"
++            with ThreadPoolExecutor() as executor:
++
++                def browser():
++                    with client.websocket_connect(url) as ws:
++                        ws.send_text("ready")
++                        assert ws.receive()["type"] == "websocket.close"
++
++                waiting = executor.submit(browser)
++                opened = tunnel.receive_json()
++                tunnel.send_json({"type": "ws.accept", "id": opened["id"], "subprotocol": None})
++                assert tunnel.receive_json()["data"] == "ready"
++                with pytest.raises(WebSocketDisconnect):
++                    with client.websocket_connect(url):
++                        pytest.fail("WebSocket concurrency quota was ignored")
++                tunnel.send_json({"type": "ws.close", "id": opened["id"], "code": 1000, "reason": "done"})
++                waiting.result(timeout=5)
++
++
++def test_http_timeout_budget_includes_blocked_tunnel_write(app):
++    app.state.config.request_timeout = 0.03
++    with TestClient(app) as client:
++        pair, device, node = setup_node(client)
++        with client.websocket_connect("/v1/connector/tunnel", headers=device) as tunnel:
++            tunnel.receive_json()
++            launch(client, pair)
++            active = app.state.tunnels[pair["node_id"]]
++            original = active.socket.send_json
++            completed = []
++
++            async def blocked_write(message):
++                await asyncio.sleep(0.1)
++                completed.append(True)
++                await original(message)
++
++            active.socket.send_json = blocked_write
++            assert client.get(pair["workspace_origin"] + "/api/graphs").status_code == 504
++            assert not completed, "The request timeout only started after the blocked write"
+diff --git a/workspace-gateway/workspace_gateway/__init__.py b/workspace-gateway/workspace_gateway/__init__.py
+new file mode 100644
+index 0000000..d4871ee
+--- /dev/null
++++ b/workspace-gateway/workspace_gateway/__init__.py
+@@ -0,0 +1 @@
++"""Bounded, single-instance Ambient workspace relay."""
+diff --git a/workspace-gateway/workspace_gateway/app.py b/workspace-gateway/workspace_gateway/app.py
+new file mode 100644
+index 0000000..75edb08
+--- /dev/null
++++ b/workspace-gateway/workspace_gateway/app.py
+@@ -0,0 +1,865 @@
++from __future__ import annotations
++
++import asyncio
++import base64
++import contextlib
++import hashlib
++import json
++import os
++import re
++import secrets
++import sqlite3
++import time
++from contextlib import asynccontextmanager
++from dataclasses import dataclass, field
++from datetime import datetime, UTC
++from pathlib import Path
++from urllib.parse import unquote
++
++from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
++from fastapi.responses import RedirectResponse, Response
++from pydantic import BaseModel, ConfigDict, Field
++
++COOKIE = "ambient_workspace"
++SCOPES = {"workspace.control", "workspace.manage"}
++HOP_HEADERS = {
++    "connection",
++    "keep-alive",
++    "proxy-authenticate",
++    "proxy-authorization",
++    "te",
++    "trailer",
++    "transfer-encoding",
++    "upgrade",
++}
++PRIVATE_HEADERS = {"host", "cookie", "authorization", "origin", "x-account-id", "x-node-id", "x-grant-id", "forwarded"}
++NODE_RE = re.compile(r"^[a-f0-9]{24}$")
++
++
++def digest(value: str) -> str:
++    return hashlib.sha256(value.encode()).hexdigest()
++
++
++def iso(value: float | None) -> str | None:
++    return datetime.fromtimestamp(value, UTC).isoformat().replace("+00:00", "Z") if value is not None else None
++
++
++@dataclass
++class GatewayConfig:
++    database: str = "data/workspace-gateway.sqlite3"
++    secret: str = ""
++    workspace_domain: str = "localhost:8090"
++    scheme: str = "http"
++    http_limit: int = 2 * 1024 * 1024
++    frame_limit: int = 256 * 1024
++    http_concurrency: int = 16
++    ws_concurrency: int = 16
++    request_timeout: float = 30
++    pairing_ttl: int = 300
++    launch_ttl: int = 60
++    session_ttl: int = 3600
++    max_nodes: int = 10000
++
++    def __post_init__(self):
++        self.workspace_domain = self.workspace_domain.lower().rstrip(".")
++        if not self.secret.strip():
++            raise ValueError("WORKSPACE_GATEWAY_SECRET is required, including local development")
++        if self.scheme not in {"http", "https"} or not re.fullmatch(
++            r"[a-z0-9.-]+(?::[0-9]{1,5})?", self.workspace_domain
++        ):
++            raise ValueError("Use a hostname[:port] workspace domain and http/https scheme")
++        hostname = self.workspace_domain.split(":")[0]
++        if self.scheme != "https" and hostname != "localhost":
++            raise ValueError("Public workspaces require HTTPS; HTTP is only available for *.localhost")
++
++    @classmethod
++    def from_env(cls):
++        return cls(
++            database=os.getenv("WORKSPACE_GATEWAY_DATABASE", "data/workspace-gateway.sqlite3"),
++            secret=os.getenv("WORKSPACE_GATEWAY_SECRET", ""),
++            workspace_domain=os.getenv("WORKSPACE_GATEWAY_DOMAIN", "localhost:8090"),
++            scheme=os.getenv("WORKSPACE_GATEWAY_SCHEME", "http"),
++        )
++
++
++class PairBody(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    name: str = Field(min_length=1, max_length=100)
++    scopes: list[str] = Field(default_factory=lambda: ["workspace.control"], min_length=1, max_length=2)
++    expires_in: int = Field(default=86400, ge=300, le=30 * 86400)
++
++
++class ClaimBody(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    code: str = Field(min_length=1, max_length=128)
++    label: str = Field(min_length=1, max_length=200)
++
++
++class ApprovalBody(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    account_id: str = Field(min_length=1, max_length=200)
++    grant_id: str = Field(min_length=1, max_length=100)
++
++
++class Store:
++    def __init__(self, path: str):
++        Path(path).parent.mkdir(parents=True, exist_ok=True)
++        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
++        self.db.row_factory = sqlite3.Row
++        self.db.executescript("""
++            PRAGMA journal_mode=WAL;
++            PRAGMA foreign_keys=ON;
++            CREATE TABLE IF NOT EXISTS nodes (
++                node_id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
++                pairing_hash TEXT UNIQUE, pairing_expires REAL NOT NULL, status TEXT NOT NULL,
++                account_id TEXT, account_label TEXT, grant_id TEXT NOT NULL, scopes TEXT NOT NULL,
++                expires REAL NOT NULL, last_seen REAL, created REAL NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS nodes_account ON nodes(account_id);
++            CREATE TABLE IF NOT EXISTS launches (token_hash TEXT PRIMARY KEY, node_id TEXT NOT NULL,
++                grant_id TEXT NOT NULL, expires REAL NOT NULL, FOREIGN KEY(node_id) REFERENCES nodes(node_id));
++            CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, node_id TEXT NOT NULL,
++                grant_id TEXT NOT NULL, expires REAL NOT NULL, FOREIGN KEY(node_id) REFERENCES nodes(node_id));
++            CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, timestamp REAL NOT NULL,
++                event TEXT NOT NULL, node_id TEXT, account_id TEXT, status INTEGER, bytes INTEGER);
++            CREATE TABLE IF NOT EXISTS deleted_accounts (account_id TEXT PRIMARY KEY, deleted REAL NOT NULL);
++        """)
++
++    def one(self, sql, args=()):
++        row = self.db.execute(sql, args).fetchone()
++        return dict(row) if row else None
++
++    def node(self, node_id):
++        return self.one("SELECT * FROM nodes WHERE node_id=?", (node_id,))
++
++    def audit(self, now, event, node=None, status=None, size=None):
++        self.db.execute(
++            "INSERT INTO audit(timestamp,event,node_id,account_id,status,bytes) VALUES(?,?,?,?,?,?)",
++            (now, event, node["node_id"] if node else None, node["account_id"] if node else None, status, size),
++        )
++
++
++@dataclass
++class BrowserPipe:
++    accepted: asyncio.Future
++    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=32))
++
++
++@dataclass
++class Tunnel:
++    socket: WebSocket
++    node_id: str
++    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
++    http: dict[str, asyncio.Future] = field(default_factory=dict)
++    http_services: dict[str, str] = field(default_factory=dict)
++    browser: dict[str, BrowserPipe] = field(default_factory=dict)
++    closed: bool = False
++
++    async def send(self, message, authorize=None):
++        async with self.send_lock:
++            if self.closed:
++                raise HTTPException(503, "Node is offline")
++            if authorize is not None:
++                authorize()
++            await self.socket.send_json(message)
++
++    async def exchange(self, message, future, timeout, authorize=None):
++        async with asyncio.timeout(timeout):
++            await self.send(message, authorize=authorize)
++            return await future
++
++    async def close(self, reason="Node is offline", revoked=False):
++        if self.closed:
++            return
++        if revoked:
++            with contextlib.suppress(Exception):
++                await asyncio.wait_for(self.send({"type": "revoked", "reason": reason}), timeout=1)
++        self.closed = True
++        for future in list(self.http.values()):
++            if not future.done():
++                future.set_exception(HTTPException(503, reason))
++        for pipe in list(self.browser.values()):
++            if not pipe.accepted.done():
++                pipe.accepted.set_exception(HTTPException(503, reason))
++            while pipe.queue.full():
++                pipe.queue.get_nowait()
++            pipe.queue.put_nowait({"type": "ws.close", "code": 1008 if revoked else 1012, "reason": reason})
++        with contextlib.suppress(Exception):
++            await asyncio.wait_for(self.socket.close(code=1008 if revoked else 1012, reason=reason[:100]), timeout=1)
++
++
++def safe_headers(pairs, *, response=False, fixed_frame=False):
++    if not isinstance(pairs, list) or len(pairs) > 100:
++        raise ValueError("Invalid headers")
++    connection_tokens = set()
++    for pair in pairs:
++        if not isinstance(pair, (list, tuple)) or len(pair) != 2 or not all(isinstance(v, str) for v in pair):
++            raise ValueError("Invalid header pair")
++        if pair[0].lower() == "connection":
++            connection_tokens.update(value.strip().lower() for value in pair[1].split(","))
++    result = []
++    for name, value in pairs:
++        lower = name.lower()
++        if (
++            not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
++            or any(c in value for c in "\r\n\x00")
++            or len(value) > 8192
++        ):
++            raise ValueError("Invalid header")
++        if lower in HOP_HEADERS | connection_tokens or lower == "content-length":
++            continue
++        if response:
++            if lower == "set-cookie":
++                continue
++            if lower == "content-encoding":
++                if not fixed_frame:
++                    continue
++                if value.lower().strip() != "gzip":
++                    raise ValueError("Fixed frame assets only allow gzip content encoding")
++        elif (
++            lower in PRIVATE_HEADERS
++            or lower.startswith(("x-forwarded-", "x-ambient-", "sec-websocket-"))
++            or lower == "accept-encoding"
++        ):
++            continue
++        result.append([lower, value])
++    if sum(len(a) + len(b) for a, b in result) > 32768:
++        raise ValueError("Headers exceed quota")
++    return result
++
++
++def decode_body(value, limit):
++    if not isinstance(value, str) or len(value) > ((limit + 2) // 3) * 4:
++        raise ValueError("Body exceeds quota")
++    result = base64.b64decode(value, validate=True)
++    if len(result) > limit:
++        raise ValueError("Body exceeds quota")
++    return result
++
++
++def route_path(path: str, method: str):
++    decoded = path
++    for _ in range(3):
++        decoded = unquote(decoded)
++    if (
++        not decoded.startswith("/")
++        or "\\" in decoded
++        or "\x00" in decoded
++        or "//" in decoded
++        or any(part in {"..", "."} for part in decoded.split("/"))
++    ):
++        raise HTTPException(400, "Invalid workspace path")
++    if decoded == "/api/remote-workspace" or decoded.startswith("/api/remote-workspace/"):
++        raise HTTPException(403, "Connection management is local only")
++    if decoded.startswith("/v1/") or (decoded.startswith("/_ambient/") and decoded != "/_ambient/frame.html"):
++        raise HTTPException(404, "Unknown workspace route")
++    if decoded == "/_ambient/frame.html":
++        service, local, public = "frame", "/frame.html", True
++    elif decoded in {
++        "/frame_shell.css",
++        "/frame_shell.mjs",
++        "/controller_facade.mjs",
++        "/presentation_context.mjs",
++    } or decoded.startswith("/vendor/"):
++        service, local, public = "frame", decoded, True
++    elif decoded.startswith(("/api/", "/ws/")):
++        service, local, public = "backend", path, False
++    else:
++        service, local, public = "frontend", path, False
++    if public and method not in {"GET", "HEAD"}:
++        raise HTTPException(405, "Static frame resources are read only")
++    if service == "frontend" and method not in {"GET", "HEAD"}:
++        raise HTTPException(405, "Frontend resources are read only")
++    return service, local, public
++
++
++def create_app(config: GatewayConfig | None = None) -> FastAPI:
++    config = config or GatewayConfig.from_env()
++    store = Store(config.database)
++    tunnels: dict[str, Tunnel] = {}
++
++    def now():
++        return app.state.clock()
++
++    def origin(node_id):
++        return f"{config.scheme}://{node_id}.{config.workspace_domain}"
++
++    def host_node(connection):
++        host = connection.headers.get("host", "").lower().rstrip(".")
++        suffix = "." + config.workspace_domain
++        if not host.endswith(suffix):
++            return None
++        node_id = host[: -len(suffix)]
++        return node_id if NODE_RE.fullmatch(node_id) else "invalid"
++
++    def control_host(connection):
++        if host_node(connection) is not None:
++            raise HTTPException(404, "Control routes are unavailable on workspace hosts")
++
++    def auth_secret(request):
++        control_host(request)
++        if not secrets.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.secret):
++            raise HTTPException(401, "Service authentication required")
++
++    def device_node(request):
++        control_host(request)
++        value = request.headers.get("authorization", "")
++        if not value.startswith("Bearer ") or len(value) > 300:
++            raise HTTPException(401, "Device authentication required")
++        node = store.one("SELECT * FROM nodes WHERE token_hash=?", (digest(value[7:]),))
++        if not node:
++            raise HTTPException(401, "Invalid device credentials")
++        return node
++
++    def node_status(node):
++        if node["status"] == "revoked" or (
++            node["account_id"]
++            and store.one("SELECT account_id FROM deleted_accounts WHERE account_id=?", (node["account_id"],))
++        ):
++            return "revoked"
++        if node["expires"] <= now() or (node["status"] == "pending" and node["pairing_expires"] <= now()):
++            return "expired"
++        return node["status"]
++
++    def serialize(node):
++        tunnel = tunnels.get(node["node_id"])
++        status = node_status(node)
++        return {
++            "node_id": node["node_id"],
++            "name": node["name"],
++            "status": status,
++            "online": status == "paired" and tunnel is not None and not tunnel.closed,
++            "account_id": node["account_id"],
++            "account_label": node["account_label"],
++            "grant_id": node["grant_id"],
++            "scopes": json.loads(node["scopes"]),
++            "expires_at": iso(node["expires"]),
++            "workspace_origin": origin(node["node_id"]),
++            "last_seen_at": iso(node["last_seen"]),
++        }
++
++    def identity(node):
++        info = serialize(node)
++        return {key: info[key] for key in ("node_id", "account_id", "grant_id", "scopes", "workspace_origin")}
++
++    def account_node(account_id, node_id):
++        node = store.node(node_id)
++        if not node or node["account_id"] != account_id:
++            raise HTTPException(404, "Unknown node")
++        return node
++
++    def valid_node(node):
++        if not node or node_status(node) != "paired":
++            raise HTTPException(401, "Workspace authorization is inactive")
++
++    def session_node(connection, *, public=False):
++        node_id = host_node(connection)
++        if node_id is None:
++            raise HTTPException(404, "Use the node workspace hostname")
++        node = store.node(node_id)
++        valid_node(node)
++        if not public:
++            cookie = connection.cookies.get(COOKIE, "")
++            session = store.one("SELECT * FROM sessions WHERE token_hash=?", (digest(cookie),)) if cookie else None
++            if (
++                not session
++                or session["node_id"] != node_id
++                or session["grant_id"] != node["grant_id"]
++                or session["expires"] <= now()
++            ):
++                raise HTTPException(401, "Open the workspace from the signed-in cloud portal")
++        else:
++            session = None
++        return node, session
++
++    def active_tunnel(node):
++        tunnel = tunnels.get(node["node_id"])
++        if not tunnel or tunnel.closed:
++            raise HTTPException(503, "Node is offline")
++        return tunnel
++
++    async def revoke(node):
++        store.db.execute("UPDATE nodes SET status='revoked',pairing_hash=NULL WHERE node_id=?", (node["node_id"],))
++        store.db.execute("DELETE FROM sessions WHERE node_id=?", (node["node_id"],))
++        store.db.execute("DELETE FROM launches WHERE node_id=?", (node["node_id"],))
++        store.audit(now(), "revoke", node)
++        if tunnel := tunnels.get(node["node_id"]):
++            await tunnel.close("Workspace authorization revoked", revoked=True)
++        return serialize(store.node(node["node_id"]))
++
++    async def sweep():
++        while True:
++            await asyncio.sleep(0.25)
++            for node_id, tunnel in list(tunnels.items()):
++                if node_status(store.node(node_id)) != "paired":
++                    await tunnel.close("Workspace authorization expired", revoked=True)
++            store.db.execute("DELETE FROM launches WHERE expires<=?", (now(),))
++            store.db.execute("DELETE FROM sessions WHERE expires<=?", (now(),))
++
++    @asynccontextmanager
++    async def lifespan(application):
++        task = asyncio.create_task(sweep())
++        yield
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++        for tunnel in list(tunnels.values()):
++            await tunnel.close("Gateway shutting down")
++        store.db.close()
++
++    app = FastAPI(
++        title="Ambient Workspace Gateway (proposal)", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
++    )
++    app.state.config = config
++    app.state.store = store
++    app.state.tunnels = tunnels
++    app.state.clock = time.time
++
++    @app.get("/health")
++    async def health(request: Request):
++        control_host(request)
++        return {"status": "ok"}
++
++    @app.post("/v1/connector/pairings")
++    async def pair(request: Request, body: PairBody):
++        control_host(request)
++        if (
++            not set(body.scopes) <= SCOPES
++            or "workspace.control" not in body.scopes
++            or len(set(body.scopes)) != len(body.scopes)
++        ):
++            raise HTTPException(422, "Unknown or duplicate workspace scope")
++        if store.one("SELECT count(*) AS n FROM nodes")["n"] >= config.max_nodes:
++            raise HTTPException(429, "Gateway node capacity reached")
++        node_id, token, code, grant = (
++            secrets.token_hex(12),
++            secrets.token_urlsafe(48),
++            secrets.token_urlsafe(18),
++            secrets.token_hex(16),
++        )
++        stamp = now()
++        store.db.execute(
++            "INSERT INTO nodes(node_id,name,token_hash,pairing_hash,pairing_expires,status,grant_id,scopes,expires,created) VALUES(?,?,?,?,?,'pending',?,?,?,?)",
++            (
++                node_id,
++                body.name,
++                digest(token),
++                digest(code),
++                stamp + config.pairing_ttl,
++                grant,
++                json.dumps(body.scopes),
++                stamp + body.expires_in,
++                stamp,
++            ),
++        )
++        node = store.node(node_id)
++        store.audit(stamp, "pair", node)
++        return {
++            "node_id": node_id,
++            "connector_token": token,
++            "pairing_code": code,
++            "pairing_expires_at": iso(node["pairing_expires"]),
++            "expires_at": iso(node["expires"]),
++            "workspace_origin": origin(node_id),
++        }
++
++    @app.get("/v1/connector/state")
++    async def state(request: Request):
++        node = device_node(request)
++        if node_status(node) == "expired" and (tunnel := tunnels.get(node["node_id"])):
++            await tunnel.close("Workspace authorization expired", revoked=True)
++        return serialize(node)
++
++    @app.post("/v1/connector/approve")
++    async def approve(request: Request, body: ApprovalBody):
++        node = device_node(request)
++        if node_status(node) != "claimed" or node["account_id"] != body.account_id or node["grant_id"] != body.grant_id:
++            raise HTTPException(409, "Approval must match the claimed account and grant")
++        store.db.execute("UPDATE nodes SET status='paired' WHERE node_id=? AND status='claimed'", (node["node_id"],))
++        store.audit(now(), "approve", node)
++        return serialize(store.node(node["node_id"]))
++
++    @app.post("/v1/connector/revoke")
++    async def device_revoke(request: Request):
++        return await revoke(device_node(request))
++
++    @app.post("/v1/accounts/{account_id}/pairings/claim")
++    async def claim(request: Request, account_id: str, body: ClaimBody):
++        auth_secret(request)
++        if len(account_id) > 200:
++            raise HTTPException(422, "Invalid account")
++        if store.one("SELECT account_id FROM deleted_accounts WHERE account_id=?", (account_id,)):
++            raise HTTPException(410, "Account has been deleted")
++        node = store.one("SELECT * FROM nodes WHERE pairing_hash=?", (digest(body.code),))
++        if not node or node_status(node) != "pending" or node["pairing_expires"] <= now():
++            raise HTTPException(409, "Pairing code expired or already claimed")
++        changed = store.db.execute(
++            "UPDATE nodes SET account_id=?,account_label=?,status='claimed',pairing_hash=NULL WHERE node_id=? AND status='pending' AND pairing_hash=?",
++            (account_id, body.label, node["node_id"], digest(body.code)),
++        ).rowcount
++        if changed != 1:
++            raise HTTPException(409, "Pairing code already claimed")
++        node = store.node(node["node_id"])
++        store.audit(now(), "claim", node)
++        return serialize(node)
++
++    @app.get("/v1/accounts/{account_id}/nodes")
++    async def nodes(request: Request, account_id: str):
++        auth_secret(request)
++        return {
++            "nodes": [
++                serialize(dict(row))
++                for row in store.db.execute(
++                    "SELECT * FROM nodes WHERE account_id=? ORDER BY created DESC", (account_id,)
++                )
++            ]
++        }
++
++    @app.post("/v1/accounts/{account_id}/nodes/{node_id}/launch")
++    async def launch(request: Request, account_id: str, node_id: str):
++        auth_secret(request)
++        node = account_node(account_id, node_id)
++        valid_node(node)
++        active_tunnel(node)
++        token, expires = secrets.token_urlsafe(32), min(now() + config.launch_ttl, node["expires"])
++        store.db.execute("INSERT INTO launches VALUES(?,?,?,?)", (digest(token), node_id, node["grant_id"], expires))
++        store.audit(now(), "launch", node)
++        return {"url": origin(node_id) + "/_ambient/launch?ticket=" + token, "expires_at": iso(expires)}
++
++    @app.delete("/v1/accounts/{account_id}/nodes/{node_id}")
++    async def account_revoke(request: Request, account_id: str, node_id: str):
++        auth_secret(request)
++        return await revoke(account_node(account_id, node_id))
++
++    async def revoke_account_nodes(account_id):
++        selected = [
++            dict(row)
++            for row in store.db.execute("SELECT * FROM nodes WHERE account_id=? AND status!='revoked'", (account_id,))
++        ]
++        # Invalidate every grant before yielding while closing socket connections.
++        store.db.execute("UPDATE nodes SET status='revoked',pairing_hash=NULL WHERE account_id=?", (account_id,))
++        for node in selected:
++            await revoke(node)
++        return {"revoked": len(selected)}
++
++    @app.delete("/v1/accounts/{account_id}/nodes")
++    async def bulk_revoke(request: Request, account_id: str):
++        auth_secret(request)
++        return await revoke_account_nodes(account_id)
++
++    @app.delete("/v1/accounts/{account_id}")
++    async def delete_account(request: Request, account_id: str):
++        auth_secret(request)
++        # A permanent tombstone blocks concurrent claims and all existing grants.
++        store.db.execute("INSERT OR IGNORE INTO deleted_accounts VALUES(?,?)", (account_id, now()))
++        return await revoke_account_nodes(account_id)
++
++    @app.get("/_ambient/launch")
++    async def consume_launch(request: Request, ticket: str = ""):
++        node_id = host_node(request)
++        node = store.node(node_id) if node_id else None
++        valid_node(node)
++        launched = store.one("SELECT * FROM launches WHERE token_hash=?", (digest(ticket),))
++        if (
++            not launched
++            or launched["node_id"] != node_id
++            or launched["grant_id"] != node["grant_id"]
++            or launched["expires"] <= now()
++        ):
++            raise HTTPException(401, "Launch link expired or already used")
++        if store.db.execute("DELETE FROM launches WHERE token_hash=?", (digest(ticket),)).rowcount != 1:
++            raise HTTPException(401, "Launch link already used")
++        token, expires = secrets.token_urlsafe(32), min(now() + config.session_ttl, node["expires"])
++        store.db.execute("INSERT INTO sessions VALUES(?,?,?,?)", (digest(token), node_id, node["grant_id"], expires))
++        store.audit(now(), "session", node)
++        response = RedirectResponse(
++            "/", status_code=303, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
++        )
++        response.set_cookie(
++            COOKIE,
++            token,
++            max_age=max(1, int(expires - now())),
++            httponly=True,
++            secure=config.scheme == "https",
++            samesite="lax",
++            path="/",
++        )
++        return response
++
++    @app.websocket("/v1/connector/tunnel")
++    async def connector(socket: WebSocket):
++        try:
++            node = device_node(socket)
++            valid_node(node)
++        except HTTPException:
++            await socket.close(code=1008)
++            return
++        await socket.accept()
++        tunnel = Tunnel(socket, node["node_id"])
++        previous = tunnels.get(node["node_id"])
++        if previous:
++            await previous.close("Connector replaced by a new connection")
++        tunnels[node["node_id"]] = tunnel
++        store.db.execute("UPDATE nodes SET last_seen=? WHERE node_id=?", (now(), node["node_id"]))
++        store.audit(now(), "online", node)
++        await tunnel.send({"type": "hello", **identity(node)})
++        try:
++            while True:
++                wire = await socket.receive_text()
++                if len(wire.encode()) > config.http_limit * 4 // 3 + 65536:
++                    raise ValueError("Tunnel message exceeds quota")
++                message = json.loads(wire)
++                if not isinstance(message, dict):
++                    raise ValueError("Invalid tunnel message")
++                valid_node(store.node(node["node_id"]))
++                kind, correlation = message.get("type"), message.get("id")
++                if kind == "ping":
++                    store.db.execute("UPDATE nodes SET last_seen=? WHERE node_id=?", (now(), node["node_id"]))
++                    await tunnel.send({"type": "pong"})
++                elif kind == "http.response" and correlation in tunnel.http:
++                    body = decode_body(message.get("body"), config.http_limit)
++                    headers = safe_headers(
++                        message.get("headers"),
++                        response=True,
++                        fixed_frame=tunnel.http_services.get(correlation) == "frame",
++                    )
++                    status = message.get("status")
++                    if not isinstance(status, int) or not 200 <= status <= 599:
++                        raise ValueError("Invalid upstream status")
++                    future = tunnel.http[correlation]
++                    if not future.done():
++                        future.set_result((status, headers, body))
++                elif kind in {"ws.accept", "ws.data", "ws.close"} and correlation in tunnel.browser:
++                    pipe = tunnel.browser[correlation]
++                    if kind == "ws.accept":
++                        if not pipe.accepted.done():
++                            pipe.accepted.set_result(message.get("subprotocol"))
++                    else:
++                        if kind == "ws.data":
++                            if message.get("kind") == "bytes":
++                                decode_body(message.get("data"), config.frame_limit)
++                            elif (
++                                message.get("kind") != "text"
++                                or not isinstance(message.get("data"), str)
++                                or len(message["data"].encode()) > config.frame_limit
++                            ):
++                                raise ValueError("Invalid WebSocket frame")
++                        if pipe.queue.full():
++                            raise ValueError("Browser WebSocket backpressure quota exceeded")
++                        pipe.queue.put_nowait(message)
++                elif kind not in {"http.response", "ws.accept", "ws.data", "ws.close", "pong"}:
++                    raise ValueError("Unknown tunnel message type")
++        except (WebSocketDisconnect, RuntimeError):
++            pass
++        except (ValueError, HTTPException):
++            await tunnel.close("Invalid tunnel message or inactive authorization")
++        finally:
++            await tunnel.close()
++            if tunnels.get(node["node_id"]) is tunnel:
++                tunnels.pop(node["node_id"], None)
++            store.audit(now(), "offline", node)
++
++    @app.websocket("/{path:path}")
++    async def browser_ws(socket: WebSocket, path: str):
++        tunnel = None
++        correlation = None
++        accepted = False
++        try:
++            service, local, public = route_path("/" + path, "GET")
++            if service != "backend" or not local.startswith("/ws/"):
++                raise HTTPException(403, "Only backend WebSocket routes are allowed")
++            node, session = session_node(socket)
++            if socket.headers.get("origin") and socket.headers["origin"] != origin(node["node_id"]):
++                raise HTTPException(403, "Workspace Origin mismatch")
++            tunnel = active_tunnel(node)
++            if len(tunnel.browser) >= config.ws_concurrency:
++                raise HTTPException(429, "Node WebSocket concurrency quota exceeded")
++            correlation = secrets.token_hex(12)
++            pipe = BrowserPipe(asyncio.get_running_loop().create_future())
++            tunnel.browser[correlation] = pipe
++            protocols = [
++                item.strip() for item in socket.headers.get("sec-websocket-protocol", "").split(",") if item.strip()
++            ]
++            if len(protocols) > 16 or any(len(item) > 128 for item in protocols):
++                raise HTTPException(400, "Too many WebSocket subprotocols")
++            query = str(socket.url.query)
++            protocol = await tunnel.exchange(
++                {
++                    "type": "ws.open",
++                    "id": correlation,
++                    **identity(node),
++                    "service": "backend",
++                    "method": "GET",
++                    "path": local + ("?" + query if query else ""),
++                    "headers": safe_headers([[k, v] for k, v in socket.headers.items()]),
++                    "subprotocols": protocols,
++                },
++                pipe.accepted,
++                config.request_timeout,
++                authorize=lambda: session_node(socket),
++            )
++            if protocol is not None and protocol not in protocols:
++                raise HTTPException(502, "Upstream selected an unknown subprotocol")
++            valid_node(store.node(node["node_id"]))
++            if session["expires"] <= now():
++                raise HTTPException(401, "Browser workspace session expired")
++            await socket.accept(subprotocol=protocol)
++            accepted = True
++            store.audit(now(), "ws.open", node)
++
++            def check():
++                valid_node(store.node(node["node_id"]))
++                if session["expires"] <= now():
++                    raise HTTPException(401, "Browser workspace session expired")
++
++            async def browser_to_node():
++                while True:
++                    message = await socket.receive()
++                    check()
++                    if message["type"] == "websocket.disconnect":
++                        return
++                    payload = message.get("text")
++                    binary = message.get("bytes")
++                    size = len(payload.encode()) if payload is not None else len(binary or b"")
++                    if size > config.frame_limit:
++                        raise HTTPException(413, "WebSocket frame exceeds quota")
++                    await tunnel.send(
++                        {
++                            "type": "ws.data",
++                            "id": correlation,
++                            "kind": "text" if payload is not None else "bytes",
++                            "data": payload if payload is not None else base64.b64encode(binary or b"").decode(),
++                        },
++                        authorize=lambda: session_node(socket),
++                    )
++
++            async def node_to_browser():
++                while True:
++                    message = await pipe.queue.get()
++                    check()
++                    if message["type"] == "ws.close":
++                        code = message.get("code", 1000)
++                        code = (
++                            code
++                            if isinstance(code, int)
++                            and (
++                                code in {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014}
++                                or 3000 <= code <= 4999
++                            )
++                            else 1000
++                        )
++                        await socket.close(code=code, reason=str(message.get("reason", ""))[:100])
++                        return
++                    if message["kind"] == "text":
++                        await socket.send_text(message["data"])
++                    else:
++                        await socket.send_bytes(decode_body(message["data"], config.frame_limit))
++
++            async def expiry_guard():
++                while True:
++                    await asyncio.sleep(0.25)
++                    check()
++
++            tasks = [asyncio.create_task(fn()) for fn in (browser_to_node, node_to_browser, expiry_guard)]
++            try:
++                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
++                for task in done:
++                    task.result()
++            finally:
++                for task in tasks:
++                    task.cancel()
++                await asyncio.gather(*tasks, return_exceptions=True)
++        except (TimeoutError, HTTPException, ValueError):
++            with contextlib.suppress(Exception):
++                await socket.close(code=1008)
++        except (WebSocketDisconnect, RuntimeError):
++            pass
++        finally:
++            if tunnel and correlation:
++                tunnel.browser.pop(correlation, None)
++                if accepted:
++                    store.audit(now(), "ws.close", node)
++                if not tunnel.closed:
++                    with contextlib.suppress(Exception):
++                        await tunnel.send(
++                            {"type": "ws.close", "id": correlation, "code": 1000, "reason": "Browser disconnected"}
++                        )
++
++    @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
++    async def proxy(request: Request, path: str):
++        service, local, public = route_path("/" + path, request.method)
++        node, session = session_node(request, public=public)
++        if (
++            not public
++            and request.method not in {"GET", "HEAD", "OPTIONS"}
++            and request.headers.get("origin")
++            and request.headers["origin"] != origin(node["node_id"])
++        ):
++            raise HTTPException(403, "Workspace Origin mismatch")
++        tunnel = active_tunnel(node)
++        if len(tunnel.http) >= config.http_concurrency:
++            raise HTTPException(429, "Node HTTP concurrency quota exceeded")
++        body = bytearray()
++        async for chunk in request.stream():
++            body.extend(chunk)
++            if len(body) > config.http_limit:
++                raise HTTPException(413, "HTTP body exceeds quota")
++        try:
++            headers = safe_headers([[k, v] for k, v in request.headers.items()])
++        except ValueError as exc:
++            raise HTTPException(400, str(exc)) from exc
++        # Streaming the request body yields control; re-check before reserving a slot.
++        valid_node(store.node(node["node_id"]))
++        if session and session["expires"] <= now():
++            raise HTTPException(401, "Browser workspace session expired")
++        if len(tunnel.http) >= config.http_concurrency:
++            raise HTTPException(429, "Node HTTP concurrency quota exceeded")
++        correlation = secrets.token_hex(12)
++        future = asyncio.get_running_loop().create_future()
++        tunnel.http[correlation] = future
++        tunnel.http_services[correlation] = service
++        try:
++            query = str(request.url.query)
++            status, headers, output = await tunnel.exchange(
++                {
++                    "type": "http.request",
++                    "id": correlation,
++                    **identity(node),
++                    "service": service,
++                    "method": request.method,
++                    "path": local + ("?" + query if query else ""),
++                    "headers": headers,
++                    "body": base64.b64encode(body).decode(),
++                },
++                future,
++                config.request_timeout,
++                authorize=lambda: session_node(request, public=public),
++            )
++            valid_node(store.node(node["node_id"]))
++            if session and session["expires"] <= now():
++                raise HTTPException(401, "Browser workspace session expired")
++            media_type = next((v for k, v in headers if k == "content-type"), "")
++            if service == "frontend" and "text/html" in media_type and request.method != "HEAD":
++                bootstrap = (
++                    "<script>window.__AMBIENT_REMOTE__="
++                    + json.dumps({"apiBaseUrl": "/", "nodeId": node["node_id"]}, separators=(",", ":"))
++                    + ";</script>"
++                )
++                text = output.decode("utf-8")
++                text = text.replace("<head>", "<head>" + bootstrap, 1) if "<head>" in text else bootstrap + text
++                output = text.encode("utf-8")
++            response = Response(output, status_code=status)
++            for name, value in headers:
++                response.headers.append(name, value)
++            response.headers["Cache-Control"] = "no-store"
++            response.headers["Referrer-Policy"] = "no-referrer"
++            store.audit(now(), "http." + service, node, status, len(output))
++            return response
++        except TimeoutError as exc:
++            store.audit(now(), "http.timeout", node, 504)
++            raise HTTPException(504, "Local workspace response timed out") from exc
++        finally:
++            tunnel.http.pop(correlation, None)
++            tunnel.http_services.pop(correlation, None)
++
++    return app
+-- 
+2.45.1.windows.1
+

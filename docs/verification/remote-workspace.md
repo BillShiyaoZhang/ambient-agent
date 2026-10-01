@@ -20,10 +20,12 @@
 
 ## 自动化验证
 
-前端完整 36 个文件、275 个测试通过，生产构建和 lint 通过。后端完整 814 个测试通过、21 项跳过；Connector + Compose focused 35 项通过；Ruff check 与 144 个文件 format 检查通过。Gateway 22 项契约回归通过，Widget facade/frame/server 21 项通过。Web 完整回归与建议包恢复结果另记。
+前端完整 36 个文件、275 个测试通过，生产构建和 lint 通过。后端完整 814 个测试通过、21 项跳过；Connector + Compose focused 35 项通过；Ruff check 与 144 个文件 format 检查通过。Gateway 22 项契约回归通过，Widget facade/frame/server 21 项通过。Web 完整 suite 在本机隔离 Linux 容器中 397/397 通过；相关定向单测 41 项通过，生产构建、Next lint 与等价 ESLint 通过。真实 HTTPS NextAuth、账户/Origin 隔离、已批准授权的错误密码保护、成功删除后 Gateway 撤销/旧 cookie 失效及迟到确认拒绝通过；结果保存在隔离 build 的日志。
+
+建议包的两份增量 Git bundle 已在仅含原基线的隔离检出中完成校验与离线恢复。Deploy 建议 commit 为 `392deca500c7db906e7ba971ee04f258f1cc52e1`，Web 为 `fc271b6b4093fa23b334869d22c0edee11b27da4`；父项目 Web gitlink 与恢复后的 Web HEAD 一致，Platform/SDK 版本未变。云端源检出与恢复检出均无待提交变更；原云项目未修改，Ambient 不含 submodule。导出包、元数据、校验和与恢复记录位于仓库根 `proposals/agent-collaboration-deploy`。
 
 ## 运行限制
 
 当前锁定 LiteLLM 1.92.0 无 Windows 预编译 wheel。本机回归使用 SHA 与 uv.lock 一致的官方源码生成仅用于测试的纯 Python wheel，官方可选 native bridge 保持 fallback；依赖版本和锁文件不变。记录保存在 `.cache/dependency-build`。生产镜像安装方式不变。
 
-部署仓库历史文档检查存在 92 处旧报告引用缺失构建产物；新建议文档未产生链接错误。没有伪造旧测试产物或放宽断言。本地通过不代表公网 TLS、服务器入口或多副本已验证。
+部署仓库历史文档检查存在 92 处旧报告引用缺失构建产物；新建议文档未产生链接错误。没有伪造旧测试产物或放宽断言。Windows 上的 Web 完整 suite 为 396 通过、1 个既有 POSIX 0600 权限用例失败；该测试与安全实现的 Git blob 均与基础版本一致，未放宽安全检查，同一完整 suite 在 Linux 容器全绿。Ambient Compose 和 Gateway overlay 只完成配置解析，未启动用户现有容器。浏览器走原生隔离服务；本地通过不代表公网 TLS、服务器入口或多副本已验证。

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "created_utc": "2026-10-01T06:53:30.8258217Z",
+  "branch": "codex/ambient-workspace-proposal",
+  "ref": "refs/heads/codex/ambient-workspace-proposal",
+  "deploy": {
+    "base": "e607a3ea72657b7d0eb861a04e4a09f1421f7a8b",
+    "head": "392deca500c7db906e7ba971ee04f258f1cc52e1",
+    "patch_format": "git format-patch mail patch"
+  },
+  "web": {
+    "base": "21693d1556111a94de7c09abd614d91398f82c03",
+    "head": "fc271b6b4093fa23b334869d22c0edee11b27da4",
+    "patch_format": "git diff raw patch"
+  },
+  "unchanged": {
+    "platform": "407ed72b4fdf1c42f25e3afe56e0de9308813c25",
+    "sdk": "e2f6fce544f8dcf8523fcacb70184d51c3749a14"
+  },
+  "incremental_bundles": true,
+  "pushed": false,
+  "deployed": false,
+  "ambient_submodule_added": false,
+  "artifacts": {
+    "deploy.patch": {
+      "bytes": 92754,
+      "sha256": "2b624721fe1d474b598d8c5e53a6e1edd7447009d52617c784944fcda478d783"
+    },
+    "deploy.bundle": {
+      "bytes": 25649,
+      "sha256": "f8bb3db48c4f4f73ac30990be5b992ec5222a40493f604330d23c6cdcf0d7837"
+    },
+    "web.patch": {
+      "bytes": 102997,
+      "sha256": "8da5eb8fdfd63a42a09a441bbc6dbc1ebf317e0b785cfe07b74efacae805a9a8"
+    },
+    "web.bundle": {
+      "bytes": 33013,
+      "sha256": "726fe5bca2e94d1344508bcbed70ec6a780c4f493c15a93a654632b3615b1c48"
+    }
+  }
+}

@@ -1,0 +1,1253 @@
+diff --git a/.env.example b/.env.example
+index 65837887cf5f1d7b911f5826178c90dd6991c7c3..38de2b9b5dc286897f6d932899ddfdde2fe72bd9 100644
+--- a/.env.example
++++ b/.env.example
+@@ -28,3 +28,7 @@ AGENT_PLATFORM_URL="http://localhost:8080"
+ # Operator CLI only. Configure a separate random token of at least 32 UTF-8 bytes.
+ # Never expose it as NEXT_PUBLIC_* or include it in browser requests/logs.
+ MODERATION_ADMIN_TOKEN=""
++
++# Optional Ambient workspace portal, server-side only. Match the gateway service secret.
++WORKSPACE_GATEWAY_URL=""
++WORKSPACE_GATEWAY_SECRET=""
+diff --git a/.gitignore b/.gitignore
+index ac6d02694e186426c18502df243a63a7850a5dde..c5ce32e9fc09c39ca3585b79b860e0a9cfba6296 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,4 +39,5 @@ next-env.d.ts
+ 
+ # Prisma
+ prisma/*.db
+-prisma/*.db-journal
+\ No newline at end of file
++prisma/*.db-journal
++.npm-cache/
+diff --git a/docs/README.md b/docs/README.md
+index 66738d32871db66bc748551f4c3b82829000a397..40b12fffc7c7dd0ff33fed7c056c7b12f7e100e4 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -1,5 +1,6 @@
+ # Web 维护文档
+ 
++- [Ambient 本地工作区云入口（建议实现）](architecture/REMOTE_WORKSPACE.md)：一次性领取、本机确认、独立 Gateway 和账户隔离。
+ - [技术参考](architecture/TECHNICAL_REFERENCE.md)：组件边界、同步、RPC、开发与验证。
+ - [视觉约定](architecture/VISUAL_DESIGN.md)：官网统一场景、工作台表面、原创图片与响应式验证。
+ - [部署与迁移](operations/DEPLOYMENT.md)：配置、升级、账户邮件、数据保留和回滚。
+@@ -9,8 +10,10 @@
+ - [内容规范与人工处理](operations/COMMUNITY.md)：公开 `/community` 规范、主人网站审核、举报证据和实际责任人确认项。
+ - [内容安全 API](architecture/CONTENT_SAFETY.md)：跨端隔离、认证屏蔽、主人审核与举报契约。
+ - [举报处理运行手册](operations/MODERATION.md)：持久队列、管理员令牌与 CLI、公开回复和运营验收。
++- [连接 Ambient 本地工作区（建议实现）](users/REMOTE_WORKSPACE.md)：领取、回到本机确认、打开与撤销。
+ - [核对、屏蔽与举报](users/CONTENT_SAFETY.md)：本人网站审核、App 入口与未知提交核实。
+ - [测试入口](../tests/README.md)：自动测试及隔离集成检查。
++- [工作区入口建议分支验证](verification/REMOTE_WORKSPACE_PROPOSAL_2026-10-01.md)：Linux 完整回归、Windows 权限差异与合成 HTTPS 删除 smoke。
+ - [官网与文档入口](../site/README.md)：Next.js 公开页面、文档阅读器与历史静态文件。
+ - [客户端契约](../packages/client-contract/README.md)：跨端协议与兼容要求。
+ 
+diff --git a/docs/architecture/REMOTE_WORKSPACE.md b/docs/architecture/REMOTE_WORKSPACE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a22205b83d9bf8318ec703c910791f188b7a6a55
+--- /dev/null
++++ b/docs/architecture/REMOTE_WORKSPACE.md
+@@ -0,0 +1,40 @@
++# Ambient 本地工作区云入口（建议实现）
++
++此入口复用现有 NextAuth 账户，只连接用户电脑上的 Ambient，不在 Web 或 Platform 启动另一份 Agent。当前改动位于隔离建议分支，尚未部署。
++
++## 使用流程与授权
++
++1. 在 Ambient 本机“远程连接”创建一次性码或链接，选择 `workspace.control`（工作区操作）及可选 `workspace.manage`（配置与能力管理）和到期时间。
++2. 在 `/connect-workspace?code=...` 登录正确云账户并明确领取，或在 `/dashboard/workspaces` 输入一次性码。GET 打开链接不自动领取。
++3. 回到 Ambient 本机核对领取账户、范围与期限并确认。云端领取后显示“等待本机确认”，尚不可打开工作区。
++4. 本机已确认且连接在线后，点击“打开工作区”。Web 取得一次性访问链接，浏览器跳到该节点独立 origin。Agent、数据、密钥和 Run 仍在用户电脑。
++5. 本机或云端撤销后，Gateway 使现有工作区会话与通道失效。网页列表保留已撤销状态；重新接入须本机发起新申请。
++
++本次工作区范围独立于普通聊天的 RPC 配对。网页不能修改本机范围、期限或代替本机确认。一个节点首版绑定一个账户；账户可有多个节点。离线页面不会提交或重试 Ambient Run。
++
++## Web 与 Gateway 接口
++
++设置服务端环境变量 `WORKSPACE_GATEWAY_URL`（例如内网 `http://workspace-gateway:8090`）和 `WORKSPACE_GATEWAY_SECRET`（至少 32 字节随机值）。这两个值不使用 `NEXT_PUBLIC_`，不传入浏览器。Gateway 需配置相同 service secret。未设置时入口返回未配置提示，现有聊天和账户功能继续使用原服务。
++
++| 浏览器 BFF | Gateway | 约束 |
++| --- | --- | --- |
++| GET `/api/workspace-nodes` | GET `/v1/accounts/{account_id}/nodes` | 从登录会话取账户，只读本账户节点 |
++| POST `/api/workspace-nodes/claim`，`{code}` | POST `/v1/accounts/{account_id}/pairings/claim`，`{code,label}` | label 为会话邮箱；不能提交 account_id、权限或期限 |
++| POST `/api/workspace-nodes/{id}/open`，`{}` | POST `/v1/accounts/{account_id}/nodes/{id}/launch` | Gateway 核验归属、未撤销、期限及在线；返回一次性 URL |
++| DELETE `/api/workspace-nodes/{id}`，`{}` | DELETE `/v1/accounts/{account_id}/nodes/{id}` | 撤销此账户节点 |
++
++所有 BFF 使用真实 `getServerSession(authOptions)`；变更请求沿用现有可信 `NEXTAUTH_URL` 同源 Origin 校验、严格 JSON 和有界正文。Gateway 的所有账户请求带独立 service Bearer；不透传浏览器 Cookie、Authorization、Host 或账户参数。响应为 `private, no-store`，`Vary: Cookie`。没有 Gateway 请求正文或响应正文日志，不创建 Ambient 工作区数据库副本。
++
++Gateway 节点列表为 `{nodes:[...]}`，节点字段含 `node_id,name,status,online,account_id,account_label,grant_id,scopes,expires_at,workspace_origin,last_seen_at`，时间使用 ISO 8601 UTC 字符串。状态为 `pending/claimed/paired/revoked/expired`；`online` 为独立布尔值，已配对但断开显示离线。列表数据由 Gateway 返回，Web 不从云记录推断当前本机权限。
++
++## 验证与部署边界
++
++`node --test tests/unit/workspace-nodes.test.cjs tests/unit/middleware.test.cjs` 覆盖账户派生、未登录和错误 Origin、严格载荷、节点归属、claim/launch/revoke、Gateway 凭据隔离与故障、登录返回一次性链接及状态语义；`npm run build` 检查页面和接口的生产编译。隔离真实 HTTP fixture 可用现有 NextAuth 登录验证 BFF，不联系公网平台或真实模型。
++
++发布还需根部署仓库配置独立 Gateway、service secret、通道节点 wildcard/TLS、配额和撤销。此文档及本地测试不代表现网已经提供工作区连接。已有 MQ 与 libp2p Relay 不直接承载此 HTTP/WS 工作区通道；现有获准聊天副本保持原路径。
++
++## 账户生命周期与政策范围
++
++配置 Gateway 后，账户删除先验证当前密码、会话版本及本地归档结构，再调用服务端 `DELETE /v1/accounts/{account_id}`，只有收到明确撤销回执后才提交现有数据库删除事务。Gateway 持久标记该账户已删除，关闭其远程授权、会话与通道，并拒绝迟到的领取、本机确认和打开请求。上游失败时本地账户保留，界面提示撤销尚未确认并允许重试；远程撤销成功而本地事务失败时，账户可能仍在，但远程访问已关闭。未配置可选 Gateway 的旧部署保持原账户删除流程。
++
++现有平台 policy disclosure 管理聊天 RPC 控制与同步，新 HTTP/WS 工作区使用独立授权及服务范围。`/dashboard/workspaces` 不用聊天 RPC 的政策回执决定通道访问；页面直接披露 Gateway 能读取传输内容、不保存正文副本及权限由本机控制。原聊天门禁的提示限定为“聊天控制与同步”。商业上线仍需制定 Gateway 服务政策、留存约定和运营者认证，不把现有聊天政策或其签名当作 Gateway 合同。
+diff --git a/docs/architecture/TECHNICAL_REFERENCE.md b/docs/architecture/TECHNICAL_REFERENCE.md
+index 399b1966a3b6e508fb29e2fe2fb021f63adab0ca..cd07f48b54eae7dd00c76a5cb14fbe47682ba15f 100644
+--- a/docs/architecture/TECHNICAL_REFERENCE.md
++++ b/docs/architecture/TECHNICAL_REFERENCE.md
+@@ -332,3 +332,9 @@ Web 在认证响应保存、直接控制响应和旧快照读取时统一隔离
+ 队列具体行的点击还绑定该行 ID、Agent、目标与摘要；即使本机待审入口仍存在，也不能改选另一份同正文版本。若其他精确匹配版本已拒绝，点击未拒绝行会要求刷新核对。SDK 的 `review_preview` 与 `state().inbox` 对同一普通消息分别带网站/宿主派生字段；审核证据剔除这些派生字段，保留消息 ID、发送者、正文、类型和任务等语义字段。历史已批准摘要不能迁移为新摘要的批准。
+ 
+ 完整预览仍显示风险说明，用户必须勾选明确同意并点击决定；选择版本不会自动批准。本机待审决定先于网站决定，已批准的本机状态不重发审核。账户范围与窗口失焦在预览、决定各异步步骤前后重新核验；本机决定已外发后发生失焦或换账户时，不继续网站批准，并保留原请求供核实，不自动重放本机决定。验证见 `native-review-preview.test.cjs` 和 `content-review-version-browser.cjs`；这是组件与合成 HTTP 回归，真实 Agent、正式部署与业务闭环另行验收。
++
++## Ambient 本地工作区云入口（建议实现）
++
++隔离建议分支新增账户派生的工作区节点 BFF、一次性码领取、等待本机确认、状态列表、打开与撤销。独立 Gateway 处理工作区 HTTP/WS；Web 不创建 Ambient 内容副本，也不通过原 MQ 模拟整个页面。接口、权限、环境变量和部署边界见 [云入口契约](REMOTE_WORKSPACE.md)，用户流程见 [连接本地工作区](../users/REMOTE_WORKSPACE.md)。
++
++配置 Gateway 时，删除账户在密码、会话及账户确认后，先调用 `DELETE /v1/accounts/{account_id}`。Gateway 持久停用该 ID、撤销其所有节点与现有通道，并拒绝迟到的领取、批准和打开；幂等成功回执后 Web 才执行本地条件删除事务。撤销未确认返回 `503 WORKSPACE_REVOKE_UNCONFIRMED` 并保留账户。云撤销成功后本地删除失败时，远程访问仍已停止，不能把数据库回滚解释为权限恢复。未配置此可选功能的既有安装保留原删除路径。
+diff --git a/docs/operations/DEPLOYMENT.md b/docs/operations/DEPLOYMENT.md
+index 643d7e79d2c3fc828214f9aa1fe6e52fbf41a85d..4e1a15c852b7574a5f1ac7d82d8df28d635cbe9a 100644
+--- a/docs/operations/DEPLOYMENT.md
++++ b/docs/operations/DEPLOYMENT.md
+@@ -125,3 +125,7 @@ npm run db:migrate
+ 现有 SDK 没有 conversation.list，也没有 inbox / conversation 历史分页；首次升级只能恢复已知会话及远端最近 100 项读取窗口，不能宣称完整旧历史已回补。同步失败时保留最后一次成功读取的数据，并准确显示离线、权限或同步失败状态。
+ 
+ 控制台专用信箱中，验签成功但不是有效匹配 RPC 的消息会消费丢弃。升级前需要保留的旧控制台消息应从升级前数据库和备份离线归档。
++
++## Ambient 工作区入口（建议实现）
++
++按 [独立 Gateway 契约](../architecture/REMOTE_WORKSPACE.md) 配置运行时 `WORKSPACE_GATEWAY_URL` 和 `WORKSPACE_GATEWAY_SECRET`；不要以 `NEXT_PUBLIC_` 导出 service secret。Gateway 必须支持账户 terminal 删除，确认撤销既有浏览器会话/通道并拒绝之后的新授权，Web 才能安全删除云账户。Gateway 配置改变后重新创建 Web 容器；源码提案不代表现网已经发布。
+diff --git a/docs/users/REMOTE_WORKSPACE.md b/docs/users/REMOTE_WORKSPACE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..422d7026594297cf5256133f8def8246ec3ca7ba
+--- /dev/null
++++ b/docs/users/REMOTE_WORKSPACE.md
+@@ -0,0 +1,18 @@
++# 连接 Ambient 本地工作区（建议实现）
++
++这项入口连接你自己电脑上的 Ambient。需要先在本机启用连接，再用正确云账户领取，最后回到本机确认。本次建议分支尚未部署；线上是否可用以实际入口为准。
++
++1. 在 Ambient 本机的“远程连接”生成一次性码或连接链接，核对工作区名称、范围和期限。
++2. 用你打算授权的账户登录 Agent Comm，打开链接或到“本地工作区”输入一次性码，点击“以当前账户领取”。
++3. 页面显示“等待本机确认”。回到电脑上的 Ambient，核对显示的领取账户、权限和到期时间后确认。
++4. 保持 Ambient 运行并联网；云端显示“在线”后点击“打开工作区”。网页读取和操作仍在这台电脑上处理。
++
++“操作工作区与运行任务”允许工作区读写和 Agent 执行；“管理模型、Agent 与能力配置”额外允许配置管理。普通 Hermes 聊天配对不包含这些工作区权限。网页领取不会扩大你在本机选择的范围，也不能代替本机确认。
++
++“离线”时请检查电脑、Ambient 和网络。页面不会重新提交已有任务；重连后由 Ambient 原有持久状态恢复。授权到期后需在本机重新发起连接。
++
++可以在云端或本机撤销。撤销停止后续访问并关闭已经打开的远程连接，不删除本机工作区或回滚已经执行的任务。删除云账户前会先停止该账户的所有工作区访问；若入口暂时不可达、撤销尚未确认，账户删除会停止并要求稍后重试。云端撤销已完成但本次数据库删除失败时，账户可能仍在，工作区访问已经停止。
++
++工作区内容和模型密钥保留在本机。中转 Gateway 处理网页 HTTP/WS 数据且能够看到传输正文，但不保存正文副本；运营者需正确部署 TLS、日志、配额及存储策略。原有 Hermes 账户聊天副本继续遵循其原来的权限和保存规则。
++
++实现与部署说明见 [云入口契约](../architecture/REMOTE_WORKSPACE.md)。
+diff --git a/docs/verification/REMOTE_WORKSPACE_PROPOSAL_2026-10-01.md b/docs/verification/REMOTE_WORKSPACE_PROPOSAL_2026-10-01.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5f6916490ce638800b127dc2694dbc6cf0ec128
+--- /dev/null
++++ b/docs/verification/REMOTE_WORKSPACE_PROPOSAL_2026-10-01.md
+@@ -0,0 +1,41 @@
++# Ambient 工作区入口建议分支验证（2026-10-01）
++
++本记录覆盖隔离建议检出的 Web 入口，基线为 `21693d1556111a94de7c09abd614d91398f82c03`。没有推送、部署或访问真实模型、邮件、线上 Platform、原项目数据库及用户工作区。产品边界见[云入口契约](../architecture/REMOTE_WORKSPACE.md)，复现入口见[测试指南](../../tests/README.md)。
++
++## 自动检查
++
++| 检查 | 环境与实际结果 |
++| --- | --- |
++| 工作区入口、认证、账户删除和政策定向回归 | Windows，41 项通过 |
++| `npm test` 完整回归 | Windows，397 项中 396 项通过；唯一失败为既有 moderation CLI 的 POSIX `0600` 令牌文件权限检查 |
++| `npm test` 完整回归 | 缓存 Web builder 的 Linux 环境、Node 24.21.0，397 项通过，0 失败、0 跳过，15.406 秒 |
++| `npm run lint` | Windows，退出 0，无 ESLint 警告或错误；Next.js 提示该命令将在版本 16 移除 |
++| `npm run build` | Windows，生产构建及类型检查通过 |
++
++Linux 检查使用本机已有的 `agent-collaboration-web:collaboration-v096-0fc9a6c82352-builder`（镜像 `49a9b3ee0cb5`）及其中的 Linux 依赖，不拉取镜像。运行参数为 `--pull never --network none --read-only --tmpfs /tmp:rw,exec`，建议检出只读挂载到 `/proposal`；源码复制到临时目录，排除 `.git`、`.env*`、`node_modules`、`.next` 和 `build`。测试数据库及修复后的 workspace 包链接均在临时目录中，容器退出后删除。
++
++Windows 的权限断言没有降低。`tests/unit/moderation.test.cjs` 的 Git blob 仍为 `25e2f90270712f1f8be0bcc22a370ed1f7ac6757`，`scripts/moderation-admin.cjs` 仍为 `32ce9a2bfe14b5b5a990c4a0b4b34eb18ed3152f`，两者与基线完全相同；Linux 完整回归包含该检查并通过。
++
++## 真实 HTTPS 账户删除 smoke
++
++本轮重新运行未改动的 `node tests/integration/workspace-portal-smoke.cjs`，退出 0，保存了以下实际标准输出：
++
++```text
++WORKSPACE_PORTAL_SMOKE_PASS real login, origin/account isolation, local confirmation, deletion revocation and stale-cookie rejection
++```
++
++服务仅监听 loopback：HTTPS Web `localhost:3330`，内部 Next.js `127.0.0.1:3331`，独立 Gateway `127.0.0.1:8798`。Web fixture 新建 `portal-1790836957890.db`，Gateway 使用独立临时 SQLite，账户、密码和 service secret 均为运行时合成值；只对该进程通过 `NODE_EXTRA_CA_CERTS` 信任 build 目录内的 localhost 测试证书。
++
++脚本走真实 NextAuth 登录和 BFF/Gateway HTTP，拒绝错误 Origin 和客户端指定账户；领取后在设备接口明确确认到 `paired`；错误密码保留已确认授权；正确删除取得明确回执后，原 cookie 请求节点返回 401，设备授权已撤销，迟到的设备确认被拒绝。两个本轮 Web fixture 进程已按创建记录与命令行核对并停止；Gateway 由其创建者停止。此 smoke 没有启动 Ambient Run 或调用模型，不能替代生产 TLS、运营政策、真实用户环境或部署验收。
++
++## 留存证据
++
++原始输出仅留在被忽略的 `build/workspace-portal-preview/`，数据库、证书私钥、运行时密码和凭据不进入 Git 或建议包。下列 SHA-256 对应本轮本地文件：
++
++| 文件 | SHA-256 |
++| --- | --- |
++| `full-suite-linux-final.log` | `E690AD9E2624588F31E2066B7299EA4ADC7FB9B000622B8563644E50AA1D0463` |
++| `https-deletion-smoke-final.log` | `D99E7D75DC5D18D8353479F3F5FDB18D09CD4C5979FC99D9906FFFADE6085E0A` |
++| `web-tests.log`（Windows 完整回归） | `B23186F62E9DB46875FFA3796DEF7F5A2A727695F6D22AF3E1CB4E1708E91B73` |
++| `tests/integration/workspace-portal-smoke.cjs` | `ED030F588A5557E4906FC75C4C1377A929BE6FAC793E05F2BBCEF8138FA2F7A5` |
++| `tests/integration/workspace-portal-fixture.cjs` | `996994346820EDAF42BB87E3C0198B15AFEAC8955BAC09ED30C1B9FFA561F169` |
+diff --git a/next.config.js b/next.config.js
+index f873a98aea0589691437bca97832b2338994cb42..bac03bd74962b2be6e944cb99f445d9f2ecd1240 100644
+--- a/next.config.js
++++ b/next.config.js
+@@ -12,7 +12,7 @@ const nextConfig = {
+     ];
+     return [
+       { source: "/agent-comm-sw.js", headers: [{ key: "Cache-Control", value: "no-cache, no-store, must-revalidate" }, { key: "Service-Worker-Allowed", value: "/" }] },
+-      ...["/verify-email", "/reset-password", "/confirm-password-change", "/forgot-password", "/resend-verification", "/api/auth/:path*"].map(source => ({ source, headers: privateHeaders })),
++      ...["/connect-workspace", "/api/workspace-nodes/:path*", "/verify-email", "/reset-password", "/confirm-password-change", "/forgot-password", "/resend-verification", "/api/auth/:path*"].map(source => ({ source, headers: privateHeaders })),
+     ];
+   },
+ };
+diff --git a/src/app/api/platform-policy/route.ts b/src/app/api/platform-policy/route.ts
+index a9f3a4853310d95a346dd20e0d8aa02c0262a432..176c29b17c18499357622904c37d02219ebba1d9 100644
+--- a/src/app/api/platform-policy/route.ts
++++ b/src/app/api/platform-policy/route.ts
+@@ -28,7 +28,7 @@ export async function GET() {
+   const userId = await accountId();
+   if (!userId) return json({ error: "Unauthorized" }, 401);
+   try { return json(await readPolicyDisclosure(userId)); }
+-  catch { return json({ error: "无法验证平台当前政策，远程工作台已暂停。" }, 503); }
++  catch { return json({ error: "无法验证平台当前政策，聊天工作台已暂停。" }, 503); }
+ }
+ 
+ export async function POST(request: Request) {
+@@ -44,7 +44,7 @@ export async function POST(request: Request) {
+       "resume" in body && body.resume === true) {
+     try { const disclosure = await resumePolicyUse(userId); await wakeAfterPolicyAccess(userId); return json(disclosure); }
+     catch (error) { return error instanceof PolicyChangedError ? json({ error: error.message }, 409)
+-      : json({ error: "无法验证平台当前政策，远程工作台保持暂停。" }, 503); }
++      : json({ error: "无法验证平台当前政策，聊天工作台保持暂停。" }, 503); }
+   }
+   if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 2 ||
+       !("policy_hash" in body) || !("confirm" in body) ||
+@@ -55,7 +55,7 @@ export async function POST(request: Request) {
+     await wakeAfterPolicyAccess(userId); return json(disclosure); }
+   catch (error) {
+     if (error instanceof PolicyChangedError) return json({ error: error.message }, 409);
+-    return json({ error: "无法验证平台当前政策，远程工作台已暂停。" }, 503);
++    return json({ error: "无法验证平台当前政策，聊天工作台已暂停。" }, 503);
+   }
+ }
+ 
+diff --git a/src/app/api/workspace-nodes/[id]/open/route.ts b/src/app/api/workspace-nodes/[id]/open/route.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..39bb4f707a119550ded59b227356c258c6bb377e
+--- /dev/null
++++ b/src/app/api/workspace-nodes/[id]/open/route.ts
+@@ -0,0 +1,11 @@
++import { launchWorkspaceNode } from "@/lib/workspace-nodes/gateway";
++import { emptySchema, nodeBody, nodeFailure, nodeId, nodeJson, workspaceNodeAccount } from "@/lib/workspace-nodes/http";
++
++export const dynamic = "force-dynamic";
++export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
++  try {
++    const account = await workspaceNodeAccount(request);
++    if (!emptySchema.safeParse(await nodeBody(request)).success) return nodeJson({ error: "Invalid request" }, 400);
++    return nodeJson(await launchWorkspaceNode(account.id, nodeId((await params).id)));
++  } catch (error) { return nodeFailure(error); }
++}
+diff --git a/src/app/api/workspace-nodes/[id]/route.ts b/src/app/api/workspace-nodes/[id]/route.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0845e71e29d7bdab22d93e8f320bee7613b29467
+--- /dev/null
++++ b/src/app/api/workspace-nodes/[id]/route.ts
+@@ -0,0 +1,11 @@
++import { revokeWorkspaceNode } from "@/lib/workspace-nodes/gateway";
++import { emptySchema, nodeBody, nodeFailure, nodeId, nodeJson, workspaceNodeAccount } from "@/lib/workspace-nodes/http";
++
++export const dynamic = "force-dynamic";
++export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
++  try {
++    const account = await workspaceNodeAccount(request);
++    if (!emptySchema.safeParse(await nodeBody(request)).success) return nodeJson({ error: "Invalid request" }, 400);
++    return nodeJson(await revokeWorkspaceNode(account.id, nodeId((await params).id)));
++  } catch (error) { return nodeFailure(error); }
++}
+diff --git a/src/app/api/workspace-nodes/claim/route.ts b/src/app/api/workspace-nodes/claim/route.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..adc6aabac7897cd3afb3358ca8220fcb9b52c187
+--- /dev/null
++++ b/src/app/api/workspace-nodes/claim/route.ts
+@@ -0,0 +1,12 @@
++import { claimWorkspaceNode } from "@/lib/workspace-nodes/gateway";
++import { claimSchema, nodeBody, nodeFailure, nodeJson, workspaceNodeAccount } from "@/lib/workspace-nodes/http";
++
++export const dynamic = "force-dynamic";
++export async function POST(request: Request) {
++  try {
++    const account = await workspaceNodeAccount(request);
++    const parsed = claimSchema.safeParse(await nodeBody(request));
++    if (!parsed.success) return nodeJson({ error: "请输入有效的一次性连接码。" }, 400);
++    return nodeJson(await claimWorkspaceNode(account.id, parsed.data.code, account.label));
++  } catch (error) { return nodeFailure(error); }
++}
+diff --git a/src/app/api/workspace-nodes/route.ts b/src/app/api/workspace-nodes/route.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a372fe77cdac4869047b672bc8ece3828d5b4155
+--- /dev/null
++++ b/src/app/api/workspace-nodes/route.ts
+@@ -0,0 +1,8 @@
++import { listWorkspaceNodes } from "@/lib/workspace-nodes/gateway";
++import { nodeFailure, nodeJson, workspaceNodeAccount } from "@/lib/workspace-nodes/http";
++
++export const dynamic = "force-dynamic";
++export async function GET(request: Request) {
++  try { return nodeJson(await listWorkspaceNodes((await workspaceNodeAccount(request)).id)); }
++  catch (error) { return nodeFailure(error); }
++}
+diff --git a/src/app/connect-workspace/page.tsx b/src/app/connect-workspace/page.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9c000cbf683cf8cd7148b681ed2abb9abc1b8d6
+--- /dev/null
++++ b/src/app/connect-workspace/page.tsx
+@@ -0,0 +1,17 @@
++import type { Metadata } from "next";
++import { getServerSession } from "next-auth";
++import { redirect } from "next/navigation";
++import Link from "next/link";
++import { authOptions } from "@/lib/auth/auth";
++import { WorkspaceClaim } from "@/components/workspace-nodes";
++import { AppFrame } from "@/components/layout/app-frame";
++
++export const dynamic = "force-dynamic";
++export const metadata: Metadata = { title: "连接本地工作区 · Agent Comm", referrer: "no-referrer", robots: { index: false, follow: false } };
++export default async function ConnectWorkspacePage({ searchParams }: { searchParams: Promise<{ code?: string | string[] }> }) {
++  const { code } = await searchParams;
++  const value = typeof code === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(code) ? code : "";
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.id) redirect("/login?callbackUrl=" + encodeURIComponent("/connect-workspace" + (value ? "?code=" + encodeURIComponent(value) : "")));
++  return <AppFrame><main className="mx-auto max-w-2xl space-y-6 px-5 py-12"><Link href="/dashboard/workspaces" className="text-sm font-medium text-primary">Agent Comm · 本地工作区</Link><WorkspaceClaim key={session.user.id} accountId={session.user.id} accountLabel={session.user.email || session.user.id} initialCode={value} /></main></AppFrame>;
++}
+diff --git a/src/app/dashboard/me/page.tsx b/src/app/dashboard/me/page.tsx
+index 5cc51d18a978d459f9bad335d4d0835a4ab86eab..945cd2e54da630c2708e9f9019cd94783d52150c 100644
+--- a/src/app/dashboard/me/page.tsx
++++ b/src/app/dashboard/me/page.tsx
+@@ -6,6 +6,7 @@ export default function MePage() {
+   return <div className="space-y-4"><h1 className="text-lg font-semibold">我</h1><section aria-label="账户设置" className="divide-y rounded-md border bg-card">{[
+     { href: "/dashboard/settings", title: "邮箱与密码", text: "查看邮箱验证状态、验证邮箱与修改密码" },
+     { href: "/dashboard/agents", title: "我的连接与访问", text: "管理连接名称、网页访问与连接设置" },
++    { href: "/dashboard/workspaces", title: "本地工作区", text: "连接并打开电脑上的 Ambient，核对状态或撤销远程访问" },
+     { href: "/dashboard/notifications", title: "提醒与设备设置", text: "查看未读、待处理事项与系统提醒" },
+     { href: "/docs/?path=deploy/users/README.md", title: "权限与数据说明", text: "查看配对、平台政策与账户副本的边界" },
+   ].map(item => <Link key={item.href} href={item.href} className="flex items-center gap-3 p-3 hover:bg-muted"><span className="min-w-0 flex-1"><span className="block text-sm font-medium">{item.title}</span><span className="mt-0.5 block text-xs text-muted-foreground">{item.text}</span></span><ChevronRight className="h-4 w-4 text-muted-foreground" /></Link>)}</section><details className="rounded-md border p-3"><summary className="cursor-pointer text-sm font-medium">数据与授权</summary><p className="mt-2 text-sm leading-6 text-muted-foreground">Web 保存获准读取的加密账户副本，托管服务可解密这些内容。删除网页连接会删除本账户对应副本，远端数据与本机配对仍保留。暂停网页控制、撤销本机配对与停止合规披露分别管理；已披露内容不能召回。</p></details><Footer /></div>;
+diff --git a/src/app/dashboard/workspaces/page.tsx b/src/app/dashboard/workspaces/page.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..9dda857f5a28ff1a9570d0db227d02fd83980387
+--- /dev/null
++++ b/src/app/dashboard/workspaces/page.tsx
+@@ -0,0 +1,11 @@
++import { getServerSession } from "next-auth";
++import { redirect } from "next/navigation";
++import { authOptions } from "@/lib/auth/auth";
++import { WorkspaceNodes } from "@/components/workspace-nodes";
++
++export const dynamic = "force-dynamic";
++export default async function LocalWorkspacesPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.id) redirect("/login?callbackUrl=%2Fdashboard%2Fworkspaces");
++  return <WorkspaceNodes key={session.user.id} accountId={session.user.id} accountLabel={session.user.email || session.user.id} />;
++}
+diff --git a/src/components/account-deletion-section.tsx b/src/components/account-deletion-section.tsx
+index 9066e249b99144f8160239622eb2ad5bed206a48..990bedd6c9a167181950132ebe2e4aa75e6b15d8 100644
+--- a/src/components/account-deletion-section.tsx
++++ b/src/components/account-deletion-section.tsx
+@@ -116,8 +116,8 @@ export function AccountDeletionSection({ accountId, email, onDeleted }: { accoun
+       <p className="text-sm leading-6 text-muted-foreground">本工作区保存的账户资料、连接、消息副本、草稿、协作记录与提醒已删除。Agent 本机和 Platform 的数据、日志与备份不在这次删除范围内。</p>
+       <Button asChild className="min-h-11"><a href="/login">返回登录</a></Button>
+     </> : <>
+-      <p id="delete-account-scope" className="text-sm leading-6 text-muted-foreground">这会永久删除本工作区的账户、控制台身份密钥、连接、已保存的消息与协作副本、草稿、提醒和后台推送订阅，并使所有设备的登录会话失效。删除后无法恢复。</p>
+-      <p className="text-sm leading-6 text-muted-foreground">删除不会关闭 Agent 本机或清除它和 Platform 保存的数据，也不会撤销本机配对。已派发的操作可能继续完成；需要时请先在 Agent 本机撤销授权。服务日志、备份和邮件提供商保存的数据按运营者的政策处理。</p>
++      <p id="delete-account-scope" className="text-sm leading-6 text-muted-foreground">这会永久删除本工作区的账户、控制台身份密钥、连接、已保存的消息与协作副本、草稿、提醒和后台推送订阅，先停止本账户全部 Ambient 工作区的远程访问，并使所有设备的登录会话失效。删除后无法恢复。</p>
++      <p className="text-sm leading-6 text-muted-foreground">删除不会关闭 Agent 本机或清除它和 Platform 保存的数据，普通聊天的本机配对仍需在 Agent 本机管理。已派发的操作可能继续完成；需要时请先在 Agent 本机撤销授权。服务日志、备份和邮件提供商保存的数据按运营者的政策处理。</p>
+       <Link href="/privacy" className="inline-flex min-h-11 items-center rounded-sm text-sm text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">查看隐私政策与删除范围</Link>
+       {result && <AuthNotice>{result.message}</AuthNotice>}
+       {result?.state === "uncertain" ? <div className="space-y-3">
+@@ -131,7 +131,7 @@ export function AccountDeletionSection({ accountId, email, onDeleted }: { accoun
+       <Dialog open={dialog} onOpenChange={value => { if (!value) pendingPassword.current = ""; setDialog(value); }}>
+         <DialogContent>
+           <DialogTitle>永久删除账户？</DialogTitle>
+-          <DialogDescription className="break-all leading-6">你正在删除 {pendingIdentity.current?.email ?? email} 在本工作区的账户及已保存数据。所有登录会话将失效，删除后无法恢复。</DialogDescription>
++          <DialogDescription className="break-all leading-6">你正在删除 {pendingIdentity.current?.email ?? email} 在本工作区的账户及已保存数据。所有 Ambient 工作区远程访问将先停止，所有登录会话将失效，删除后无法恢复。</DialogDescription>
+           <DialogFooter className="gap-3"><Button type="button" variant="outline" onClick={() => { pendingPassword.current = ""; setDialog(false); }}>取消</Button><Button type="button" variant="destructive" onClick={deleteAccount}>永久删除账户</Button></DialogFooter>
+         </DialogContent>
+       </Dialog>
+diff --git a/src/components/layout/dashboard-content.tsx b/src/components/layout/dashboard-content.tsx
+index 248eddbd56be17ff0adabb5af941ac5ae391f50d..a8239206995b5a8c50ccf9d9a17c6210680754f3 100644
+--- a/src/components/layout/dashboard-content.tsx
++++ b/src/components/layout/dashboard-content.tsx
+@@ -6,14 +6,13 @@ import DashboardLoading from "@/app/dashboard/loading";
+ import { PolicyDisclosureGate } from "@/components/workbench/policy-disclosure";
+ 
+ export function DashboardContent({ children }: { children: ReactNode }) {
+-  const chat = usePathname() === "/dashboard/chats";
++  const pathname = usePathname(), chat = pathname === "/dashboard/chats";
+   const contentClass = chat ? "flex min-h-0 flex-1 flex-col overflow-hidden" : "min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 md:p-4";
++  const content = <Suspense fallback={<div className={contentClass}><DashboardLoading /></div>}>
++    <div className={contentClass}>{children}</div>
++  </Suspense>;
+   return <main id="main-content" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-hidden outline-none">
+-    <PolicyDisclosureGate compact>
+-      {/* Flight can suspend before the router installs its inner loading boundary. */}
+-      <Suspense fallback={<div className={contentClass}><DashboardLoading /></div>}>
+-        <div className={contentClass}>{children}</div>
+-      </Suspense>
+-    </PolicyDisclosureGate>
++    {/* The RPC Platform policy does not describe the independent workspace Gateway. */}
++    {pathname === "/dashboard/workspaces" ? content : <PolicyDisclosureGate compact>{content}</PolicyDisclosureGate>}
+   </main>;
+ }
+diff --git a/src/components/layout/dashboard-sidebar.tsx b/src/components/layout/dashboard-sidebar.tsx
+index 3b0484d5d0bbb02df5ac6e172b9e5618ccc73c5c..c892b81d6c57cfb512af71191ac535d004c78ea4 100644
+--- a/src/components/layout/dashboard-sidebar.tsx
++++ b/src/components/layout/dashboard-sidebar.tsx
+@@ -32,6 +32,7 @@ export function DashboardNavigation({ onNavigate }: { onNavigate?: () => void })
+     <nav aria-label="主导航" className="mt-6 space-y-1.5">{primaryNavigation.map(item => <Link key={item.href} href={item.href} onClick={onNavigate} aria-current={activeNavigation(pathname, item.href) ? "page" : undefined} className={`dashboard-nav-link flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${activeNavigation(pathname, item.href) ? "bg-primary font-medium text-primary-foreground shadow-sm hover:bg-primary/90" : "text-foreground/80 hover:bg-primary/5"}`}><item.icon className="h-5 w-5 shrink-0" strokeWidth={1.6} />{item.label}</Link>)}
+       <div className="!my-5 border-t" />
+       <Link href="/dashboard/agents" onClick={onNavigate} aria-current={pathname === "/dashboard/agents" ? "page" : undefined} className={`dashboard-nav-link flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${pathname === "/dashboard/agents" ? "bg-primary font-medium text-primary-foreground" : "text-foreground/80 hover:bg-primary/5"}`}><Layers3 className="h-5 w-5 shrink-0" strokeWidth={1.6} />我的连接</Link>
++      <Link href="/dashboard/workspaces" onClick={onNavigate} aria-current={pathname === "/dashboard/workspaces" ? "page" : undefined} className="dashboard-nav-link flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-foreground/80 hover:bg-primary/5"><Cable className="h-5 w-5 shrink-0" strokeWidth={1.6} />本地工作区</Link>
+       <Link href="/dashboard/notifications" onClick={onNavigate} aria-current={pathname === "/dashboard/notifications" ? "page" : undefined} className={`dashboard-nav-link flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${pathname === "/dashboard/notifications" ? "bg-primary font-medium text-primary-foreground" : "text-foreground/80 hover:bg-primary/5"}`}><Bell className="h-5 w-5 shrink-0" strokeWidth={1.6} />提醒中心</Link>
+     </nav>
+     <nav aria-label="站点导航" className="mt-auto border-t pt-4">
+diff --git a/src/components/workbench/policy-disclosure.tsx b/src/components/workbench/policy-disclosure.tsx
+index b38ee7ab43f8224fbe2b7f0299431ab55859ab07..c4e681dc749ecf6c24d92dd8275d46efc8757bdb 100644
+--- a/src/components/workbench/policy-disclosure.tsx
++++ b/src/components/workbench/policy-disclosure.tsx
+@@ -107,7 +107,7 @@ export function PolicyDisclosureGate({ children, compact = false }: { children:
+ 
+   if (!policy) return <PolicyAccessContext.Provider value={false}><section role="status" className={compact ? "max-h-[min(35dvh,max(4rem,calc(100dvh-28rem)))] shrink-0 overflow-y-auto border-b border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950" : "break-words rounded-2xl border border-amber-300 bg-amber-50 p-5 text-sm text-amber-950"}>
+     <h2 className="font-semibold">正在核验平台政策</h2>
+-    <p className="mt-2 leading-6">{error || "核验完成前，新的远程控制与后台同步暂不连接 agent。已保存内容仍可查看。"}</p>
++    <p className="mt-2 leading-6">{error || "核验完成前，新的聊天控制与后台同步暂不连接 agent。已保存内容仍可查看。"}</p>
+     {error && <Button variant="outline" size="sm" className="mt-3" onClick={() => void refresh()}>重新核验</Button>}
+   </section>{children}</PolicyAccessContext.Provider>;
+ 
+@@ -116,7 +116,7 @@ export function PolicyDisclosureGate({ children, compact = false }: { children:
+     <section aria-label="平台政策与内容可见范围" className={`${compact ? "max-h-[min(35dvh,max(4rem,calc(100dvh-28rem)))] shrink-0 overflow-y-auto border-b px-3 py-1.5" : "break-words rounded-2xl border p-4"} text-sm ${policy.can_use_workbench ? "border-border bg-card text-foreground" : "border-amber-300 bg-amber-50 text-amber-950"}`}>
+       <div className={compact ? "flex flex-wrap items-center justify-between gap-2" : "flex flex-wrap items-start justify-between gap-2"}>
+         <div className={compact && policy.can_use_workbench ? "flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-0.5" : "min-w-0 flex-1"}>
+-          <h2 className={compact ? "text-xs font-medium" : "font-semibold"}>{policy.can_use_workbench ? "平台政策与内容可见范围" : policy.paused ? "远程控制与同步已暂停" : "请确认平台政策"}</h2>
++          <h2 className={compact ? "text-xs font-medium" : "font-semibold"}>{policy.can_use_workbench ? "平台政策与内容可见范围" : policy.paused ? "聊天控制与同步已暂停" : "请确认平台政策"}</h2>
+           <p className={compact ? "text-xs leading-5 text-muted-foreground" : "mt-1 text-xs leading-5"}>{policy.status === "legacy"
+             ? "尚无可验证的 v2 签名政策；网页可读取已授权的工作台内容。"
+             : policy.mode === "compliance"
+@@ -134,20 +134,20 @@ export function PolicyDisclosureGate({ children, compact = false }: { children:
+         <p className="mt-2 leading-6">本工作台的远程控制仍使用已配对的托管 v1 通道；网页服务可以解密 agent 授权的控制回复和同步副本。这与平台网关能否解密 agent 间 v2 消息是两种不同的可见范围。</p>
+         {policy.mode === "compliance" && !policy.confirmed && <div className="mt-4 rounded-xl border border-amber-400 bg-white p-4">
+           <p className="font-medium">继续使用前，请确认当前合规披露</p>
+-          <p className="mt-1 leading-6">确认后才能继续远程控制和后台同步。已有控制台身份、agent 配对和已保存数据会保留；政策变化时需要重新确认。</p>
++          <p className="mt-1 leading-6">确认后才能继续聊天控制和后台同步。已有控制台身份、agent 配对和已保存数据会保留；政策变化时需要重新确认。</p>
+           <label className="mt-3 flex items-start gap-2 leading-6"><input type="checkbox" className="mt-1" checked={accepted} onChange={event => setAccepted(event.target.checked)} />
+             <span>我已了解：平台网关可解密符合此合规政策的 agent 间 v2 消息；网页服务可读取本工作台经授权的控制内容。</span></label>
+           <Button className="mt-3 h-auto max-w-full whitespace-normal py-2 text-center" disabled={!accepted || submitting} onClick={() => void confirm()}>{submitting ? "正在确认…" : "确认并继续使用"}</Button>
+         </div>}
+         {policy.mode === "compliance" && policy.confirmed && !policy.paused && <p className="mt-2 font-medium">本账户已确认当前政策，可继续使用工作台。</p>}
+       </>}
+-      {policy.paused && <p className="mt-3 rounded-xl border border-amber-400 bg-white p-3 leading-6">本账户已暂停新的远程控制和后台同步。已保存内容仍可查看；已经披露的内容无法收回。若要停止 Agent 向合规网关披露，请按已安装版本的说明在 Agent 本机运行 v2-disallow-compliance；若要撤销 Web 访问，请在 Agent 本机撤销控制台配对。两者互不替代。</p>}
++      {policy.paused && <p className="mt-3 rounded-xl border border-amber-400 bg-white p-3 leading-6">本账户已暂停新的聊天控制和后台同步。已保存内容仍可查看；已经披露的内容无法收回。若要停止 Agent 向合规网关披露，请按已安装版本的说明在 Agent 本机运行 v2-disallow-compliance；若要撤销 Web 聊天访问，请在 Agent 本机撤销控制台配对。两者互不替代。</p>}
+       <div className="mt-3">{policy.can_use_workbench
+-        ? <Button variant="outline" size="sm" className="h-auto max-w-full whitespace-normal py-2 text-center" disabled={submitting} onClick={() => void pause()}>暂停后续远程控制与同步</Button>
++        ? <Button variant="outline" size="sm" className="h-auto max-w-full whitespace-normal py-2 text-center" disabled={submitting} onClick={() => void pause()}>暂停后续聊天控制与同步</Button>
+         : !policy.paused
+           ? <Button variant="outline" size="sm" className="h-auto max-w-full whitespace-normal py-2 text-center" disabled={submitting} onClick={() => void pause()}>暂不接受并暂停后续控制与同步</Button>
+         : policy.paused && (policy.status === "legacy" || policy.mode === "private" || policy.confirmed)
+-          ? <Button variant="outline" size="sm" className="h-auto max-w-full whitespace-normal py-2 text-center" disabled={submitting} onClick={() => void resume()}>恢复远程控制与同步</Button>
++          ? <Button variant="outline" size="sm" className="h-auto max-w-full whitespace-normal py-2 text-center" disabled={submitting} onClick={() => void resume()}>恢复聊天控制与同步</Button>
+           : null}</div>
+       </div>}
+     </section>
+diff --git a/src/components/workspace-hub.tsx b/src/components/workspace-hub.tsx
+index e1695831df0fd30869aaea315573a8e76d54f3a7..c2a3acd56a031c02ec7abc2d2e42a02588915042 100644
+--- a/src/components/workspace-hub.tsx
++++ b/src/components/workspace-hub.tsx
+@@ -74,6 +74,7 @@ export function WorkspaceHub({ initial, mode }: { initial: { agents: AgentActivi
+     <header className="flex flex-wrap items-center justify-between gap-2">
+       <div className="flex min-w-0 flex-wrap items-center gap-3"><h1 className="text-lg font-semibold">{title}</h1>{!!agents.length && <label className="flex items-center gap-2 text-xs text-muted-foreground"><span>自己的 agent</span><select aria-label={`${title}所属 agent`} className="h-8 max-w-52 rounded-md border bg-card px-2 text-sm text-foreground" value={selected?.workspace.agent.id || ""} onChange={event => event.target.value ? choose(event.target.value) : router.push(`/dashboard/${mode}`)}>{mode === "collaborations" && <option value="">全部 agents</option>}{agents.map(({ workspace }) => <option key={workspace.agent.id} value={workspace.agent.id}>{workspace.agent.name}</option>)}</select></label>}</div>
+       {mode === "collaborations" && !selected && <Button size="sm" onClick={() => agents.length === 1 ? choose(agents[0].workspace.agent.id, true) : setChooseAgent(value => !value)} disabled={!agents.length}>发起合作</Button>}
++      <Link href="/dashboard/workspaces" className="text-xs text-primary underline underline-offset-4">本地工作区</Link>
+     </header>
+     {error && <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">{error}</p>}
+     {!agents.length ? <section className="rounded-md border border-dashed p-5"><h2 className="text-sm font-medium">尚未连接自己的 agent</h2><p className="mt-1 text-sm text-muted-foreground">连接 agent 后可查看其{title}。</p><Button asChild size="sm" variant="outline" className="mt-3"><Link href="/dashboard/agents">添加连接</Link></Button></section> : <>
+diff --git a/src/components/workspace-nodes.tsx b/src/components/workspace-nodes.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..db5c3602d35cde7df31696b5caeced7ddd2d16b5
+--- /dev/null
++++ b/src/components/workspace-nodes.tsx
+@@ -0,0 +1,105 @@
++"use client";
++
++import Link from "next/link";
++import { useCallback, useEffect, useRef, useState } from "react";
++import { Cable, ExternalLink, Loader2, RefreshCw } from "lucide-react";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { useLocalTime } from "@/components/local-time";
++import { canOpenWorkspaceNode, workspaceNodeStatus, workspaceScopeLabels, type WorkspaceNode } from "@/lib/workspace-nodes/model";
++
++async function portalRequest<T>(accountId: string, path: string, method = "GET", body?: object, signal?: AbortSignal): Promise<T> {
++  const response = await fetch(path, { method, cache: "no-store", signal,
++    headers: { "Content-Type": "application/json", "X-Workspace-Account": accountId },
++    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
++  const value = await response.json().catch(() => ({}));
++  if (!response.ok) throw new Error(response.status === 401 ? "登录已失效，请重新登录后打开原连接链接。"
++    : response.status === 409 && value.error === "ACCOUNT_CHANGED" ? "登录账户已改变，请刷新页面后核对账户。"
++    : value.error || "连接请求未完成，请重新读取状态。");
++  return value as T;
++}
++
++function NodeDetails({ node }: { node: WorkspaceNode }) {
++  const displayTime = useLocalTime();
++  return <dl className="grid gap-3 text-sm sm:grid-cols-2">
++    <div><dt className="text-muted-foreground">账户</dt><dd className="mt-1 break-all">{node.account_label}</dd></div>
++    <div><dt className="text-muted-foreground">授权到期</dt><dd className="mt-1">{displayTime(node.expires_at, { style: "full" })}</dd></div>
++    <div className="sm:col-span-2"><dt className="text-muted-foreground">本机申请的范围</dt><dd className="mt-1">{node.scopes.map(scope => workspaceScopeLabels[scope]).join("；")}</dd></div>
++  </dl>;
++}
++
++export function WorkspaceClaim({ accountId, accountLabel, initialCode = "" }: { accountId: string; accountLabel: string; initialCode?: string }) {
++  const [code, setCode] = useState(initialCode), [node, setNode] = useState<WorkspaceNode>();
++  const [busy, setBusy] = useState(false), [error, setError] = useState("");
++  async function claim(event: React.FormEvent) {
++    event.preventDefault(); if (busy) return;
++    setBusy(true); setError("");
++    try { setNode(await portalRequest<WorkspaceNode>(accountId, "/api/workspace-nodes/claim", "POST", { code: code.trim() })); setCode(""); }
++    catch (cause) { setError(cause instanceof Error ? cause.message : "领取未完成，请重新读取连接状态。"); }
++    finally { setBusy(false); }
++  }
++  return <section className="rounded-2xl border bg-card p-5 sm:p-6" aria-labelledby="workspace-claim-title">
++    <h2 id="workspace-claim-title" className="text-lg font-semibold">{node ? "连接已领取，等待本机确认" : "连接你的 Ambient 工作区"}</h2>
++    <p className="mt-2 text-sm leading-6 text-muted-foreground">当前账户：<span className="font-medium text-foreground">{accountLabel}</span>。仅领取你在自己的电脑上刚刚发起的连接。</p>
++    {node ? <div className="mt-5 space-y-4"><p className="font-medium">{node.name}</p><NodeDetails node={node} /><p className="rounded-xl bg-muted p-3 text-sm leading-6">回到 Ambient 本机，核对账户、权限范围和期限，再确认连接。领取一次性码尚未授予远程访问权。</p><Button asChild variant="outline"><Link href="/dashboard/workspaces">查看连接状态</Link></Button></div>
++      : <form onSubmit={claim} className="mt-4 space-y-3"><label htmlFor="workspace-code" className="block text-sm font-medium">本机生成的一次性连接码</label><div className="flex flex-col gap-3 sm:flex-row"><Input id="workspace-code" value={code} onChange={event => setCode(event.target.value)} autoComplete="off" spellCheck={false} maxLength={128} placeholder="粘贴连接码" disabled={busy} required /><Button type="submit" disabled={busy || !code.trim()} className="shrink-0">{busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}以当前账户领取</Button></div><p className="text-xs leading-5 text-muted-foreground">领取后，电脑上的 Ambient 仍需你亲自确认。打开此页面不会自动连接或启动任务。</p></form>}
++    {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
++  </section>;
++}
++
++export function WorkspaceNodes({ accountId, accountLabel }: { accountId: string; accountLabel: string }) {
++  const [nodes, setNodes] = useState<WorkspaceNode[]>([]), [loaded, setLoaded] = useState(false);
++  const [error, setError] = useState(""), [notice, setNotice] = useState(""), [busy, setBusy] = useState("");
++  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
++  const readVersion = useRef(0), working = useRef(false);
++  const refresh = useCallback(async (signal?: AbortSignal) => {
++    if (working.current) return;
++    const version = ++readVersion.current;
++    try {
++      const value = await portalRequest<{ nodes: WorkspaceNode[] }>(accountId, "/api/workspace-nodes", "GET", undefined, signal);
++      if (!signal?.aborted && readVersion.current === version) { setNodes(value.nodes); setError(""); setLoaded(true); }
++    } catch (cause) {
++      if (!signal?.aborted && readVersion.current === version) { setError(cause instanceof Error ? cause.message : "暂时无法读取连接。"); setLoaded(true); }
++    }
++  }, [accountId]);
++  useEffect(() => {
++    const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>;
++    const poll = async () => { await refresh(controller.signal); if (!controller.signal.aborted) timer = setTimeout(poll, document.hidden ? 30000 : 5000); };
++    void poll(); return () => { controller.abort(); clearTimeout(timer); };
++  }, [refresh]);
++  async function act(node: WorkspaceNode, action: "open" | "revoke") {
++    if (working.current) return;
++    working.current = true; readVersion.current++; setBusy(node.node_id); setError(""); setNotice("");
++    try {
++      const path = `/api/workspace-nodes/${encodeURIComponent(node.node_id)}`;
++      if (action === "open") {
++        const launch = await portalRequest<{ url: string }>(accountId, path + "/open", "POST", {});
++        window.location.assign(launch.url);
++      } else {
++        const revoked = await portalRequest<WorkspaceNode>(accountId, path, "DELETE", {});
++        setNodes(previous => previous.map(item => item.node_id === node.node_id ? revoked : item));
++        setConfirmRevoke(null); setNotice("已撤销连接，远程工作区访问已停止。");
++      }
++    } catch (cause) { setError(cause instanceof Error ? cause.message : "操作未确认，请重新读取状态。"); }
++    finally { working.current = false; setBusy(""); }
++  }
++  return <div className="space-y-6">
++    <header className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-semibold">本地工作区</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">从这里打开你电脑上的 Ambient。保持电脑开机并联网，任务仍由本机执行。</p></div><Button variant="outline" size="sm" onClick={() => void refresh()} disabled={!!busy}><RefreshCw className="mr-2 h-4 w-4" />重新读取</Button></header>
++    <p className="rounded-xl border bg-muted/40 p-3 text-sm leading-6 text-muted-foreground">工作区通过独立中转服务连接。中转服务能读取传输内容，不保存正文副本；访问范围和期限由你在 Ambient 本机确认，聊天平台的政策与暂停只管理聊天控制和同步。</p>
++    <WorkspaceClaim accountId={accountId} accountLabel={accountLabel} />
++    <section aria-labelledby="workspace-nodes-title" className="space-y-3"><h2 id="workspace-nodes-title" className="text-base font-semibold">我的工作区连接</h2>
++      {!loaded && <p className="text-sm text-muted-foreground">正在读取连接…</p>}
++      {loaded && !nodes.length && !error && <p className="rounded-2xl border p-5 text-sm text-muted-foreground">尚未连接工作区。在 Ambient 本机的“远程连接”中生成一次性码，然后在这里领取。</p>}
++      {nodes.map(node => <article key={node.node_id} className="rounded-2xl border bg-card p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><h3 className="flex items-center gap-2 font-semibold"><Cable className="h-4 w-4 text-primary" />{node.name}</h3><span className="rounded-full bg-muted px-3 py-1 text-xs">{workspaceNodeStatus(node)}</span></div>
++        <NodeDetails node={node} />
++        {node.status === "claimed" && <p className="mt-4 text-sm leading-6 text-muted-foreground">请回到 Ambient 本机确认此账户、权限与期限。完成确认并联网后才能打开工作区。</p>}
++        {node.status === "paired" && !node.online && <p className="mt-4 text-sm text-muted-foreground">本机暂时离线。保持 Ambient 运行，联网后这里会自动更新。</p>}
++        <div className="mt-5 flex flex-wrap gap-3"><Button onClick={() => void act(node, "open")} disabled={!!busy || !canOpenWorkspaceNode(node)}><ExternalLink className="mr-2 h-4 w-4" />{busy === node.node_id ? "处理中…" : "打开工作区"}</Button>
++          {node.status !== "revoked" && (confirmRevoke === node.node_id ? <div className="flex flex-wrap items-center gap-2"><span className="text-sm">停止此工作区的远程访问？</span><Button variant="destructive" disabled={!!busy} onClick={() => void act(node, "revoke")}>确认撤销</Button><Button variant="ghost" disabled={!!busy} onClick={() => setConfirmRevoke(null)}>保留连接</Button></div>
++            : <Button variant="outline" disabled={!!busy} onClick={() => setConfirmRevoke(node.node_id)}>撤销连接</Button>)}</div>
++      </article>)}
++    </section>
++    {error && <p role="alert" className="rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
++    {notice && <p role="status" className="text-sm text-primary">{notice}</p>}
++  </div>;
++}
+diff --git a/src/lib/auth/account-deletion-client.ts b/src/lib/auth/account-deletion-client.ts
+index bff0348770a0729c33249a2dc6433e5e8c8e0c97..7ea0b0c204dbd51684600a34ca7ca08ebc028a54 100644
+--- a/src/lib/auth/account-deletion-client.ts
++++ b/src/lib/auth/account-deletion-client.ts
+@@ -17,7 +17,7 @@ export async function requestAccountDeletion(currentPassword: string, expectedAc
+     const body: unknown = await response.json().catch(() => null);
+     const data = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+     if (response.status === 200 && data.deleted === true) return { state: "deleted", message: "账户已删除，本工作区的登录会话已失效。", ...(typeof data.consoleUrn === "string" ? { consoleUrn: data.consoleUrn } : {}) };
+-    const rejected = [400, 401, 403, 409, 413].includes(response.status) || data.code === "DELETE_SCHEMA_UNSUPPORTED";
++    const rejected = [400, 401, 403, 409, 413].includes(response.status) || data.code === "DELETE_SCHEMA_UNSUPPORTED" || data.code === "WORKSPACE_REVOKE_UNCONFIRMED";
+     if (!rejected) return { state: "uncertain", message: UNKNOWN };
+     const fallback = response.status === 401 ? "登录已失效，请重新登录以确认账户状态。"
+       : response.status === 413 ? "请求内容过大，删除未执行。" : "请求被拒绝，账户未删除。请核对输入和登录状态。";
+diff --git a/src/lib/auth/account-deletion.ts b/src/lib/auth/account-deletion.ts
+index 6794d109b7ef3e4aaa814e3f02d9df9931cd283e..f1571e2580c672823767fa252d2e15d06ccec632 100644
+--- a/src/lib/auth/account-deletion.ts
++++ b/src/lib/auth/account-deletion.ts
+@@ -11,7 +11,7 @@ const ACCOUNT_TABLES = ["ManagedConsoleCertificate", "UserPolicyConsent", "UserC
+ const LEGACY_TABLES = ["Contact", "Message", "HITLRequest", "Transaction"];
+ const KNOWN_TABLES = new Set(["User", "Agent", "OnboardingTicket", "WebPushSubscription", "WebPushDelivery", "AuthEmailSend", ...AGENT_TABLES, ...ACCOUNT_TABLES, ...LEGACY_TABLES]);
+ const identifier = (name: string) => Prisma.raw('"' + name.replaceAll('"', '""') + '"');
+-type Dependencies = { db?: PrismaClient; verify?: typeof verifyPassword };
++type Dependencies = { db?: PrismaClient; verify?: typeof verifyPassword; revokeWorkspaces?: (userId: string) => Promise<void> };
+ 
+ function unsafeSchema() {
+   return new AccountEmailError("当前服务的账户存档尚未支持安全删除，请联系工作区运营者升级后再操作。", 503, "DELETE_SCHEMA_UNSUPPORTED");
+@@ -39,6 +39,11 @@ async function inspectArchives(tx: Prisma.TransactionClient) {
+ 
+ export function createAccountDeletionService(dependencies: Dependencies = {}) {
+   const db = dependencies.db || prisma, verify = dependencies.verify || verifyPassword;
++  const revokeWorkspaces = dependencies.revokeWorkspaces || (async (userId: string) => {
++    if (!process.env.WORKSPACE_GATEWAY_URL && !process.env.WORKSPACE_GATEWAY_SECRET) return;
++    const { revokeAccountWorkspaceNodes } = await import("../workspace-nodes/gateway");
++    await revokeAccountWorkspaceNodes(userId);
++  });
+   return {
+     async deleteAccount(userId: string, currentPassword: string, sessionVersion: number) {
+       if (!userId || !Number.isInteger(sessionVersion) || sessionVersion < 0) throw new AccountEmailError("请重新登录后再删除账户。", 401, "UNAUTHORIZED");
+@@ -48,6 +53,13 @@ export function createAccountDeletionService(dependencies: Dependencies = {}) {
+       if (account.sessionVersion !== sessionVersion) throw new AccountEmailError("账户状态已改变，请重新登录后再操作。", 409, "ACCOUNT_CHANGED");
+       if (!await verify(currentPassword, account.passwordHash)) throw new AccountEmailError("当前密码不正确，账户未删除。", 400, "INVALID_PASSWORD");
+ 
++      // Validate before the external revocation; the final transaction repeats the fence.
++      if (!await db.user.findFirst({ where: { id: userId, sessionVersion, passwordHash: account.passwordHash } }))
++        throw new AccountEmailError("账户状态已改变，请重新登录后再操作。", 409, "ACCOUNT_CHANGED");
++      await inspectArchives(db);
++      try { await revokeWorkspaces(userId); }
++      catch { throw new AccountEmailError("工作区远程访问撤销尚未确认，账户未删除。请稍后重试或联系运营者。", 503, "WORKSPACE_REVOKE_UNCONFIRMED"); }
++
+       // No automatic retry: an unexpected transport/database failure is reported
+       // for the caller to verify, never interpreted as proof that deletion failed.
+       return db.$transaction(async tx => {
+diff --git a/src/lib/control/v2-policy.ts b/src/lib/control/v2-policy.ts
+index d39d4aa6844585cab0385a3569ed3e31b4d74a28..f9a312d46971375dbffebdc68016dc72395cd4e1 100644
+--- a/src/lib/control/v2-policy.ts
++++ b/src/lib/control/v2-policy.ts
+@@ -110,9 +110,9 @@ export async function readPolicyDisclosure(userId: string): Promise<PolicyDisclo
+ 
+ export async function requirePolicyAcknowledgement(userId: string): Promise<void> {
+   const disclosure = await readPolicyDisclosure(userId);
+-  if (disclosure.paused) throw new PolicyConsentRequiredError("本账户已暂停新的远程控制与同步。请在政策提示中恢复使用。");
++  if (disclosure.paused) throw new PolicyConsentRequiredError("本账户已暂停新的聊天控制与同步。请在政策提示中恢复使用。");
+   if (!disclosure.can_use_workbench)
+-    throw new PolicyConsentRequiredError("请先阅读并确认当前合规政策，再继续使用远程工作台。");
++    throw new PolicyConsentRequiredError("请先阅读并确认当前合规政策，再继续使用聊天工作台。");
+ }
+ 
+ export async function pausePolicyUse(userId: string): Promise<void> {
+@@ -186,7 +186,7 @@ async function enrollManagedConsole(user: User, keys: ConsoleKeys, rawPolicy: Bu
+ /** Require a signed policy decision before sending or consuming a legacy console envelope. */
+ export async function requireManagedV1(user: User, keys: ConsoleKeys, forceEnrollment = false): Promise<void> {
+   if (await prisma.userControlPause.findUnique({ where: { userId: user.id } }))
+-    throw new PolicyConsentRequiredError("本账户已暂停新的远程控制与同步。请在政策提示中恢复使用。");
++    throw new PolicyConsentRequiredError("本账户已暂停新的聊天控制与同步。请在政策提示中恢复使用。");
+   const current = await policyForConsole();
+   if (!current) return; // Old platform, with no v2 trust root configured.
+   const { policy, raw } = current;
+diff --git a/src/lib/workspace-nodes/gateway.ts b/src/lib/workspace-nodes/gateway.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..13948f6290e8c5b12d50972c17227ab21eea8dfe
+--- /dev/null
++++ b/src/lib/workspace-nodes/gateway.ts
+@@ -0,0 +1,123 @@
++import "server-only";
++import { z } from "zod";
++import type { WorkspaceNode } from "./model";
++
++export class WorkspaceGatewayError extends Error {
++  constructor(message: string, public status = 502) { super(message); }
++}
++
++const instant = z.string().datetime({ offset: true });
++const nodeSchema = z.object({
++  node_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
++  name: z.string().max(120),
++  status: z.enum(["pending", "claimed", "paired", "revoked", "expired"]),
++  online: z.boolean(),
++  account_id: z.string().nullable(),
++  account_label: z.string().nullable(),
++  grant_id: z.string().nullable(),
++  scopes: z.array(z.enum(["workspace.control", "workspace.manage"])).max(2),
++  expires_at: instant,
++  workspace_origin: z.string().url(),
++  last_seen_at: instant.nullable(),
++});
++
++function configured() {
++  const secret = process.env.WORKSPACE_GATEWAY_SECRET;
++  let url: URL;
++  try { url = new URL(process.env.WORKSPACE_GATEWAY_URL || ""); }
++  catch { throw new WorkspaceGatewayError("本地工作区入口尚未配置。", 503); }
++  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
++      || url.pathname !== "/" || !secret || new TextEncoder().encode(secret).length < 32)
++    throw new WorkspaceGatewayError("本地工作区入口尚未配置。", 503);
++  return { origin: url.origin, secret };
++}
++
++async function gateway(accountId: string, path: string, method: string, body?: object): Promise<unknown> {
++  const { origin, secret } = configured();
++  const url = `${origin}/v1/accounts/${encodeURIComponent(accountId)}/${path}`;
++  let response: Response;
++  try {
++    response = await fetch(url, {
++      method, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(10_000),
++      headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" },
++      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
++    });
++  } catch { throw new WorkspaceGatewayError("暂时无法连接工作区入口，请稍后重新读取。", 503); }
++  if (!response.ok) {
++    await response.body?.cancel();
++    const status = [400, 404, 409, 410, 429].includes(response.status) ? response.status : 502;
++    const message = status === 404 ? "工作区连接不存在，或不属于当前账户。"
++      : status === 409 ? "连接尚不可用，请核对本机确认、在线状态或一次性码。"
++      : status === 410 ? "申请或授权已到期，请在本机重新发起。"
++      : status === 429 ? "请求过于频繁，请稍后重试。"
++      : status === 400 ? "一次性码或请求无效。" : "工作区入口暂时不可用。";
++    throw new WorkspaceGatewayError(message, status);
++  }
++  // Gateway metadata is bounded independently of its HTTP/WS data plane.
++  const reader = response.body?.getReader();
++  if (!reader) throw new WorkspaceGatewayError("工作区入口返回无效响应。");
++  const chunks: Uint8Array[] = []; let size = 0;
++  try {
++    while (true) {
++      const { done, value } = await reader.read(); if (done) break;
++      size += value.byteLength;
++      if (size > 131072) { await reader.cancel(); throw new WorkspaceGatewayError("工作区入口返回无效响应。"); }
++      chunks.push(value);
++    }
++    const bytes = new Uint8Array(size); let offset = 0;
++    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
++    return JSON.parse(new TextDecoder().decode(bytes));
++  } catch { throw new WorkspaceGatewayError("工作区入口返回无效响应。"); }
++  finally { reader.releaseLock(); }
++}
++
++function ownedNode(value: unknown, accountId: string): WorkspaceNode {
++  const parsed = nodeSchema.safeParse(value);
++  if (!parsed.success || parsed.data.account_id !== accountId)
++    throw new WorkspaceGatewayError("工作区入口返回无效响应。");
++  // Zod strips undeclared fields so connector credentials can never be reflected.
++  return parsed.data;
++}
++
++export async function listWorkspaceNodes(accountId: string): Promise<{ nodes: WorkspaceNode[] }> {
++  const value = await gateway(accountId, "nodes", "GET");
++  const parsed = z.object({ nodes: z.array(z.unknown()).max(500) }).safeParse(value);
++  if (!parsed.success) throw new WorkspaceGatewayError("工作区入口返回无效响应。");
++  return { nodes: parsed.data.nodes.map(node => ownedNode(node, accountId)) };
++}
++
++export async function claimWorkspaceNode(accountId: string, code: string, label: string) {
++  return ownedNode(await gateway(accountId, "pairings/claim", "POST", { code, label }), accountId);
++}
++
++export async function revokeWorkspaceNode(accountId: string, id: string) {
++  return ownedNode(await gateway(accountId, `nodes/${encodeURIComponent(id)}`, "DELETE"), accountId);
++}
++
++export async function launchWorkspaceNode(accountId: string, id: string) {
++  const result = z.object({ url: z.string().url(), expires_at: instant }).safeParse(
++    await gateway(accountId, `nodes/${encodeURIComponent(id)}/launch`, "POST", {}));
++  if (!result.success) throw new WorkspaceGatewayError("工作区入口返回无效响应。");
++  const url = new URL(result.data.url);
++  const local = url.hostname === "localhost" || url.hostname.endsWith(".localhost") || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
++  if (url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && local)))
++    throw new WorkspaceGatewayError("工作区入口返回无效访问地址。");
++  return result.data;
++}
++
++
++export async function revokeAccountWorkspaceNodes(accountId: string): Promise<void> {
++  // Existing installations without the optional gateway retain their deletion path.
++  if (!process.env.WORKSPACE_GATEWAY_URL && !process.env.WORKSPACE_GATEWAY_SECRET) return;
++  const { origin, secret } = configured();
++  let response: Response;
++  try {
++    response = await fetch(`${origin}/v1/accounts/${encodeURIComponent(accountId)}`, {
++      method: "DELETE", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(10_000),
++      headers: { Authorization: `Bearer ${secret}` },
++    });
++    if (!response.ok) { void response.body?.cancel().catch(() => {}); throw new Error("unconfirmed"); }
++    const value = z.object({ revoked: z.number().int().nonnegative() }).safeParse(await response.json());
++    if (!value.success) throw new Error("unconfirmed");
++  } catch { throw new WorkspaceGatewayError("工作区远程访问撤销尚未确认，账户未删除。请稍后重试。", 503); }
++}
+diff --git a/src/lib/workspace-nodes/http.ts b/src/lib/workspace-nodes/http.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..69fd66066c99735467c068ecb82b8fc33cd1fd0f
+--- /dev/null
++++ b/src/lib/workspace-nodes/http.ts
+@@ -0,0 +1,36 @@
++import "server-only";
++import { getServerSession } from "next-auth";
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { authOptions } from "@/lib/auth/auth";
++import { requireSameOrigin } from "@/lib/control/control-protocol";
++import { readJsonBody, RequestBodyError } from "@/lib/shared/http-input";
++import { WorkspaceGatewayError } from "@/lib/workspace-nodes/gateway";
++
++export const nodeJson = (body: unknown, status = 200) => NextResponse.json(body, {
++  status, headers: { "Cache-Control": "private, no-store", Vary: "Cookie", "Referrer-Policy": "no-referrer" },
++});
++
++export async function workspaceNodeAccount(request?: Request) {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.id) throw new WorkspaceGatewayError("请先登录。", 401);
++  const expected = request?.headers.get("x-workspace-account");
++  if (expected && expected !== session.user.id) throw new WorkspaceGatewayError("ACCOUNT_CHANGED", 409);
++  return { id: session.user.id, label: session.user.email || session.user.id };
++}
++
++export async function nodeBody(request: Request) {
++  try { requireSameOrigin(request); } catch { throw new WorkspaceGatewayError("Forbidden origin", 403); }
++  return readJsonBody(request, 4096, true);
++}
++
++export const claimSchema = z.object({ code: z.string().trim().regex(/^[A-Za-z0-9_-]{6,128}$/) }).strict();
++export const emptySchema = z.object({}).strict();
++export function nodeId(value: string): string {
++  if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new WorkspaceGatewayError("工作区标识无效。", 400);
++  return value;
++}
++export function nodeFailure(error: unknown) {
++  const expected = error instanceof WorkspaceGatewayError || error instanceof RequestBodyError;
++  return nodeJson({ error: expected ? error.message : "工作区请求未完成，请重新读取状态。" }, expected ? error.status : 500);
++}
+diff --git a/src/lib/workspace-nodes/model.ts b/src/lib/workspace-nodes/model.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..87b4d232496f30d47ba863c121ac5fc6fca729de
+--- /dev/null
++++ b/src/lib/workspace-nodes/model.ts
+@@ -0,0 +1,31 @@
++export type WorkspaceNode = {
++  node_id: string;
++  name: string;
++  status: "pending" | "claimed" | "paired" | "revoked" | "expired";
++  online: boolean;
++  account_id: string | null;
++  account_label: string | null;
++  grant_id: string | null;
++  scopes: ("workspace.control" | "workspace.manage")[];
++  expires_at: string;
++  workspace_origin: string;
++  last_seen_at: string | null;
++};
++
++type NodeState = Pick<WorkspaceNode, "status" | "online" | "expires_at">;
++export function workspaceNodeStatus(node: NodeState): string {
++  if (node.status === "revoked") return "已撤销";
++  if (node.status === "expired" || Date.parse(node.expires_at) <= Date.now()) return "授权已到期";
++  if (node.status === "claimed") return "等待本机确认";
++  if (node.status === "pending") return "等待领取";
++  return node.online ? "在线" : "离线";
++}
++
++export function canOpenWorkspaceNode(node: NodeState): boolean {
++  return node.status === "paired" && node.online && Date.parse(node.expires_at) > Date.now();
++}
++
++export const workspaceScopeLabels = {
++  "workspace.control": "操作工作区与运行任务",
++  "workspace.manage": "管理模型、Agent 与能力配置",
++};
+diff --git a/src/middleware.ts b/src/middleware.ts
+index f28dbbe833e152cec746d81e383581b553914c9c..36aab672fd077cc76709c9bb3d3c143994f8e0ec 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -34,7 +34,7 @@ export async function middleware(request: NextRequest) {
+       });
+     }
+     const loginUrl = new URL("/login", request.url);
+-    loginUrl.searchParams.set("callbackUrl", pathname);
++    loginUrl.searchParams.set("callbackUrl", pathname === "/connect-workspace" ? pathname + request.nextUrl.search : pathname);
+     return NextResponse.redirect(loginUrl);
+   }
+ 
+diff --git a/tests/README.md b/tests/README.md
+index 330b06c073b1bde23d7d06355807f14eb336782f..56f0fd18e20079d1ff6c76b2a845edd14d24133a 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -259,3 +259,15 @@ Webpack、报告和快照只写入 `build/workspace-sync-preview/content-review-
+ 脚本使用随机 loopback 端口，不改 `.next`，不使用真实身份、数据库、业务状态或共享
+ 3061～3063 fixture；可通过 `PLAYWRIGHT_MODULE`、`CHROME_EXECUTABLE` 指定已有工具。
+ 这些回归不代表生产部署或真实 Agent 业务已经通过。
++
++## Ambient 工作区入口（建议实现）
++
++`node --test tests/unit/workspace-nodes.test.cjs tests/unit/middleware.test.cjs tests/unit/account-deletion.test.cjs` 验证账户派生、同源写入、浏览器不能选择账户/范围、上游凭据隔离、领取与本机确认的区分、打开/撤销、登录保留一次性链接及账户删除前的撤销失败保护。再执行 `npm run build`。
++
++浏览器联调用 `node tests/integration/workspace-portal-fixture.cjs`：只启动 `localhost:3310` 的隔离 Web，创建全新 `build/workspace-portal-preview/` SQLite 和合成 `.invalid` 账户，随机测试密码只在运行时输出。默认连接 loopback Gateway `127.0.0.1:8788`；通过运行时 `WORKSPACE_GATEWAY_SECRET` 设置与隔离 Gateway 一致的 service secret。此 fixture 不联系公网 Platform、模型或邮件服务。结束时停止 fixture；数据库、密码和运行输出不进入提交。
++
++生产账户变更要求 HTTPS。验证真实删除时，为独立 fixture 设置 `WORKSPACE_PORTAL_FIXTURE_PORT=3311`、`WORKSPACE_PORTAL_FIXTURE_NEXT_PORT=3312`、`WORKSPACE_PORTAL_FIXTURE_TLS_CERT` 和 `WORKSPACE_PORTAL_FIXTURE_TLS_KEY`，证书与私钥必须位于上述 build 目录。可在该目录生成一次性 localhost 自签证书；通过该进程的 `NODE_EXTRA_CA_CERTS` 信任它，不改变系统信任或生产认证规则。
++
++fixture 输出新建数据库绝对路径。为 smoke 设置 `WORKSPACE_PORTAL_FIXTURE_URL=https://localhost:3311`、`WORKSPACE_PORTAL_FIXTURE_DATABASE` 为该路径、`NODE_EXTRA_CA_CERTS` 为 fixture 证书，然后执行 `node tests/integration/workspace-portal-smoke.cjs`。它只在显式 build 数据库生成随机合成删除账户，走真实 NextAuth/BFF/Gateway，验证账号和 Origin 隔离、本机确认、密码错误不撤销、成功删除终止授权、旧 cookie 失效及迟到确认被拒绝。证书、私钥、DB 和运行时凭据均不打包。
++
++`node --test tests/unit/dashboard-workspace-policy.test.cjs tests/unit/policy-disclosure-route.test.cjs` 验证新工作区页面独立于聊天 RPC 的 policy disclosure；聊天、联系人等原页面继续执行原门禁。上线独立 Gateway 服务仍须运营者制定其服务政策、传输正文及留存披露，不以聊天 RPC 的签名政策代替。
+diff --git a/tests/integration/workspace-portal-fixture.cjs b/tests/integration/workspace-portal-fixture.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..22261cbf5cc9febfd547c7bf1de71054b2a955b0
+--- /dev/null
++++ b/tests/integration/workspace-portal-fixture.cjs
+@@ -0,0 +1,67 @@
++// Loopback-only portal with synthetic accounts and a fresh database; no model or public platform.
++const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
++const http = require("node:http"), https = require("node:https");
++const { spawn } = require("node:child_process");
++const { PrismaClient } = require("@prisma/client");
++const { migrateAccountEmail } = require("../../scripts/migrate-account-email.cjs");
++const bcrypt = require("bcryptjs");
++const root = path.resolve(__dirname, "../..");
++const output = path.join(root, "build/workspace-portal-preview");
++fs.mkdirSync(output, { recursive: true });
++const dbFile = path.join(output, "portal-" + Date.now() + ".db");
++const db = new PrismaClient({ datasources: { db: { url: "file:" + dbFile.replaceAll("\\", "/") + "?connection_limit=1" } } });
++let child, proxy;
++const password = "Ambient-Fixture-" + crypto.randomBytes(12).toString("hex");
++const port = Number(process.env.WORKSPACE_PORTAL_FIXTURE_PORT || 3310);
++const certificate = process.env.WORKSPACE_PORTAL_FIXTURE_TLS_CERT;
++const key = process.env.WORKSPACE_PORTAL_FIXTURE_TLS_KEY;
++const tls = Boolean(certificate || key);
++const nextPort = tls ? Number(process.env.WORKSPACE_PORTAL_FIXTURE_NEXT_PORT || port + 1) : port;
++const base = (tls ? "https" : "http") + "://localhost:" + port;
++function fixtureFile(filename) {
++  const resolved = fs.realpathSync(filename), relative = path.relative(fs.realpathSync(output), resolved);
++  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("TLS files must be inside this fixture build directory");
++  return fs.readFileSync(resolved);
++}
++function stop() { proxy?.close(); child?.kill(); }
++process.on("SIGINT", stop); process.on("SIGTERM", stop);
++(async () => {
++  if (!process.env.WORKSPACE_GATEWAY_SECRET) throw new Error("Set the isolated Gateway service secret at runtime");
++  if (!Number.isInteger(port) || port < 1024 || port > 65535 || !Number.isInteger(nextPort) || nextPort < 1024 || nextPort > 65535) throw new Error("Invalid loopback fixture port");
++  if (tls && (!certificate || !key || nextPort === port)) throw new Error("TLS requires fixture certificate, key and a distinct internal port");
++  const sql = fs.readFileSync(path.join(root, "prisma/remote-console.sql"), "utf8");
++  for (const statement of sql.replace(/^\s*--.*$/gm, "").split(";").filter(value => value.trim()))
++    await db.$executeRawUnsafe(statement);
++  await migrateAccountEmail(db);
++  const passwordHash = await bcrypt.hash(password, 10);
++  for (const [id, email] of [["portal-owner", "ambient-owner@example.invalid"], ["portal-other", "ambient-other@example.invalid"]])
++    await db.user.create({ data: { id, email, passwordHash, requiresEmailVerification: false, emailVerifiedAt: new Date() } });
++  await db.$disconnect();
++  child = spawn(process.execPath, [path.join(root, "node_modules/next/dist/bin/next"), "start", "--hostname", "127.0.0.1", "--port", String(nextPort)], {
++    cwd: root, windowsHide: true, stdio: "inherit", env: { ...process.env,
++      DATABASE_URL: "file:" + dbFile.replaceAll("\\", "/") + "?connection_limit=1",
++      NEXTAUTH_URL: base, NEXTAUTH_SECRET: crypto.randomBytes(32).toString("hex"),
++      AGENT_PLATFORM_URL: "http://127.0.0.1:1", WEB_PUSH_DISABLED: "1", RESEND_API_KEY: "",
++      WORKSPACE_GATEWAY_URL: process.env.WORKSPACE_GATEWAY_URL || "http://127.0.0.1:8788",
++      WORKSPACE_GATEWAY_SECRET: process.env.WORKSPACE_GATEWAY_SECRET,
++    },
++  });
++  child.on("exit", code => { proxy?.close(); process.exitCode = code || 0; });
++  if (tls) {
++    proxy = https.createServer({ cert: fixtureFile(certificate), key: fixtureFile(key) }, (request, response) => {
++      const upstream = http.request({ hostname: "127.0.0.1", port: nextPort, path: request.url, method: request.method,
++        headers: { ...request.headers, "x-forwarded-proto": "https", "x-forwarded-host": request.headers.host } }, result => {
++        response.writeHead(result.statusCode, result.headers); result.pipe(response);
++      });
++      upstream.on("error", () => { if (!response.headersSent) response.writeHead(502); response.end("Fixture unavailable"); });
++      request.pipe(upstream); response.on("close", () => upstream.destroy());
++    });
++    await new Promise((resolve, reject) => { proxy.once("error", reject); proxy.listen(port, "127.0.0.1", resolve); });
++  }
++  for (let attempt = 0; attempt < 100; attempt++) {
++    try { if ((await fetch(base + "/api/auth/csrf")).ok) break; } catch {}
++    await new Promise(resolve => setTimeout(resolve, 200));
++  }
++  if (!(await fetch(base + "/api/auth/csrf")).ok) throw new Error("fixture did not start");
++  console.log("WORKSPACE_PORTAL_READY " + JSON.stringify({ url: base, owner: "ambient-owner@example.invalid", other: "ambient-other@example.invalid", password, pid: child.pid, database: dbFile }));
++})().catch(async error => { console.error("Workspace portal fixture failed:", error.message); await db.$disconnect(); stop(); process.exitCode = 1; });
+diff --git a/tests/integration/workspace-portal-smoke.cjs b/tests/integration/workspace-portal-smoke.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2aa8b0c02ae1cb31274347e7baed940a7731725
+--- /dev/null
++++ b/tests/integration/workspace-portal-smoke.cjs
+@@ -0,0 +1,61 @@
++// Real NextAuth and Gateway HTTP regression, using only a fresh loopback fixture database.
++const assert = require("node:assert/strict"), path = require("node:path"), crypto = require("node:crypto");
++const { seedAccount } = require("./seed-account.cjs");
++const base = process.env.WORKSPACE_PORTAL_FIXTURE_URL || "http://localhost:3310";
++const gateway = process.env.WORKSPACE_GATEWAY_URL || "http://127.0.0.1:8788";
++for (const value of [base, gateway]) {
++  const url = new URL(value);
++  assert.ok(["http:", "https:"].includes(url.protocol));
++  assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(url.hostname), "fixture URLs must be loopback");
++}
++const database = process.env.WORKSPACE_PORTAL_FIXTURE_DATABASE;
++assert.ok(database && path.isAbsolute(database), "an explicit fixture database is required");
++const password = "Synthetic-" + crypto.randomBytes(18).toString("hex");
++const email = "ambient-delete-" + Date.now() + "@example.invalid";
++const jar = new Map();
++async function browser(url, { method = "GET", body, origin = base } = {}) {
++  const response = await fetch(base + url, { method, redirect: "manual",
++    headers: { Origin: origin, Cookie: [...jar].map(([key, value]) => key + "=" + value).join("; "),
++      ...(body instanceof URLSearchParams ? { "Content-Type": "application/x-www-form-urlencoded" } : body === undefined ? {} : { "Content-Type": "application/json" }) },
++    ...(body === undefined ? {} : { body: body instanceof URLSearchParams ? body : JSON.stringify(body) }) });
++  for (const cookie of response.headers.getSetCookie()) {
++    const part = cookie.split(";")[0], index = part.indexOf("=");
++    jar.set(part.slice(0, index), part.slice(index + 1));
++  }
++  return response;
++}
++async function device(url, token, body) {
++  return fetch(gateway + url, { method: body === undefined ? "GET" : "POST", headers: {
++    Authorization: "Bearer " + token, "Content-Type": "application/json",
++  }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
++}
++(async () => {
++  const account = await seedAccount({ email, password, database });
++  const csrf = await (await browser("/api/auth/csrf")).json();
++  const login = await browser("/api/auth/callback/credentials", { method: "POST",
++    body: new URLSearchParams({ csrfToken: csrf.csrfToken, email, password, callbackUrl: base + "/dashboard/workspaces", json: "true" }) });
++  assert.equal(login.status, 200);
++  const session = await (await browser("/api/auth/session")).json(); assert.equal(session.user.id, account.id);
++  const pairResponse = await fetch(gateway + "/v1/connector/pairings", { method: "POST", headers: { "Content-Type": "application/json" },
++    body: JSON.stringify({ name: "HTTP fixture deletion", scopes: ["workspace.control"], expires_in: 3600 }) });
++  assert.equal(pairResponse.status, 200); const pair = await pairResponse.json();
++  assert.equal((await browser("/api/workspace-nodes/claim", { method: "POST", origin: "https://foreign.invalid", body: { code: pair.pairing_code } })).status, 403);
++  assert.equal((await browser("/api/workspace-nodes/claim", { method: "POST", body: { code: pair.pairing_code, account_id: "portal-owner" } })).status, 400);
++  const claimedResponse = await browser("/api/workspace-nodes/claim", { method: "POST", body: { code: pair.pairing_code } });
++  assert.equal(claimedResponse.status, 200); const claimed = await claimedResponse.json();
++  assert.equal(claimed.status, "claimed"); assert.equal(claimed.account_id, account.id); assert.equal(claimed.account_label, email);
++  assert.equal("connector_token" in claimed, false);
++  const approved = await device("/v1/connector/approve", pair.connector_token, { account_id: account.id, grant_id: claimed.grant_id });
++  assert.equal(approved.status, 200); assert.equal((await approved.json()).status, "paired");
++  const wrong = await browser("/api/auth/delete-account", { method: "POST", body: { expectedAccountId: account.id, currentPassword: "incorrect-password", confirmation: "DELETE" } });
++  assert.equal(wrong.status, 400);
++  assert.equal((await (await device("/v1/connector/state", pair.connector_token)).json()).status, "paired");
++  const deleted = await browser("/api/auth/delete-account", { method: "POST", body: { expectedAccountId: account.id, currentPassword: password, confirmation: "DELETE" } });
++  assert.equal(deleted.status, 200); assert.equal((await deleted.json()).deleted, true);
++  assert.equal((await browser("/api/workspace-nodes")).status, 401, "deleted account's original cookie cannot access BFF");
++  const state = await device("/v1/connector/state", pair.connector_token);
++  if (state.ok) assert.equal((await state.json()).status, "revoked"); else assert.ok([401, 404, 409, 410].includes(state.status));
++  const late = await device("/v1/connector/approve", pair.connector_token, { account_id: account.id, grant_id: claimed.grant_id });
++  assert.ok([401, 404, 409, 410].includes(late.status), "deleted account cannot finish a concurrent local approval");
++  console.log("WORKSPACE_PORTAL_SMOKE_PASS real login, origin/account isolation, local confirmation, deletion revocation and stale-cookie rejection");
++})().catch(error => { console.error("Workspace portal smoke failed:", error.message); process.exitCode = 1; });
+diff --git a/tests/unit/account-deletion.test.cjs b/tests/unit/account-deletion.test.cjs
+index 836730940ebc0d95dc30baed96656a99eee136f5..400e81ca0c05c51efd81a69e1f7026cf5eec4f90 100644
+--- a/tests/unit/account-deletion.test.cjs
++++ b/tests/unit/account-deletion.test.cjs
+@@ -267,3 +267,39 @@ test("lost, invalid or server-error deletion replies remain uncertain and never
+   const success = await client.requestAccountDeletion("synthetic-password", "owner", async () => Response.json({ deleted: true, consoleUrn: "urn:console:owner" }));
+   assert.equal(success.state, "deleted"); assert.equal(success.consoleUrn, "urn:console:owner");
+ });
++
++test("Gateway revocation is checked before deletion and a failure keeps local account data", () => fixture(async ({ db, owner, password }) => {
++  const events = [];
++  const guarded = deletion.createAccountDeletionService({ db, revokeWorkspaces: async userId => {
++    events.push(userId); throw new Error("synthetic gateway unavailable");
++  } });
++  await assert.rejects(guarded.deleteAccount(owner.id, "wrong-password", 0), error => error.code === "INVALID_PASSWORD");
++  assert.deepEqual(events, []);
++  await assert.rejects(guarded.deleteAccount(owner.id, password, 1), error => error.code === "ACCOUNT_CHANGED");
++  assert.deepEqual(events, []);
++  await assert.rejects(guarded.deleteAccount(owner.id, password, 0), error => error.code === "WORKSPACE_REVOKE_UNCONFIRMED" && error.status === 503);
++  assert.deepEqual(events, ["owner"]);
++  assert.equal((await db.user.findUnique({ where: { id: owner.id } })).sessionVersion, 0);
++  assert.equal(await db.agent.count(), 2);
++}));
++
++test("Gateway terminal revocation precedes successful local removal for the exact account", () => fixture(async ({ db, owner, other, password }) => {
++  const events = [];
++  const guarded = deletion.createAccountDeletionService({ db, revokeWorkspaces: async userId => {
++    assert.ok(await db.user.findUnique({ where: { id: userId } }));
++    events.push(userId);
++  } });
++  assert.equal((await guarded.deleteAccount(owner.id, password, 0)).deleted, true);
++  assert.deepEqual(events, [owner.id]);
++  assert.equal(await db.user.findUnique({ where: { id: owner.id } }), null);
++  assert.ok(await db.user.findUnique({ where: { id: other.id } }));
++}));
++
++
++test("workspace revoke refusal is an explicit deletion rejection that the user may retry", async () => {
++
++  const message = "工作区远程访问撤销尚未确认，账户未删除。请稍后重试。";
++  const result = await client.requestAccountDeletion("synthetic-password", "owner", async () => Response.json({ error: message, code: "WORKSPACE_REVOKE_UNCONFIRMED" }, { status: 503 }));
++  assert.equal(result.state, "rejected");
++  assert.equal(result.message, message);
++});
+diff --git a/tests/unit/dashboard-workspace-policy.test.cjs b/tests/unit/dashboard-workspace-policy.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..df177344b835c569d3ab78c6846280c5420bfd60
+--- /dev/null
++++ b/tests/unit/dashboard-workspace-policy.test.cjs
+@@ -0,0 +1,24 @@
++const assert = require("node:assert/strict");
++const fs = require("node:fs"), path = require("node:path"), Module = require("node:module");
++const test = require("node:test"), ts = require("typescript"), React = require("react");
++const { renderToStaticMarkup } = require("react-dom/server");
++test("independent workspace pages do not claim RPC policy controls their HTTP/WS channel", () => {
++  let pathname = "/dashboard/chats";
++  const filename = path.resolve(__dirname, "../../src/components/layout/dashboard-content.tsx");
++  const loaded = new Module(filename, module); loaded.filename = filename;
++  loaded.paths = Module._nodeModulePaths(path.dirname(filename));
++  const deps = {
++    "next/navigation": { usePathname: () => pathname },
++    "@/app/dashboard/loading": { default: () => React.createElement("span", null, "Loading") },
++    "@/components/workbench/policy-disclosure": { PolicyDisclosureGate: ({ children }) => React.createElement("section", { "data-policy": "rpc" }, children) },
++  };
++  loaded.require = name => Object.hasOwn(deps, name) ? deps[name] : Module.prototype.require.call(loaded, name);
++  loaded._compile(ts.transpileModule(fs.readFileSync(filename, "utf8"), { fileName: filename,
++    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
++  }).outputText, filename);
++  const render = () => renderToStaticMarkup(React.createElement(loaded.exports.DashboardContent, null, React.createElement("div", null, "Content")));
++  assert.match(render(), /data-policy="rpc"/);
++  pathname = "/dashboard/workspaces";
++  const independent = render(); assert.doesNotMatch(independent, /data-policy="rpc"/); assert.match(independent, /Content/);
++  pathname = "/dashboard/contacts"; assert.match(render(), /data-policy="rpc"/);
++});
+diff --git a/tests/unit/middleware.test.cjs b/tests/unit/middleware.test.cjs
+index d0b670a45a41eb9169171670420757eebb9ba927..e7ad796126b70ccf31309e512b376098a6dce6aa 100644
+--- a/tests/unit/middleware.test.cjs
++++ b/tests/unit/middleware.test.cjs
+@@ -105,6 +105,11 @@ test("authentication middleware", { concurrency: false }, async (t) => {
+       assertLoginRedirect(await middleware(request(productionOrigin, pathname)), productionOrigin, pathname);
+     });
+ 
++    await t.test("preserves the workspace claim code through login without claiming it", async () => {
++      const destination = "/connect-workspace?code=PAIR1234";
++      assertLoginRedirect(await middleware(request(productionOrigin, destination)), productionOrigin, destination);
++    });
++
+     await t.test("rejects expired sessions", async () => {
+       const token = await encode({ secret, token: { sub: "regression-user" }, maxAge: -120 });
+       assertLoginRedirect(await middleware(request(
+diff --git a/tests/unit/workspace-nodes.test.cjs b/tests/unit/workspace-nodes.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fb8092eff71b1f47874a7f1aaac2fe7b32262c1
+--- /dev/null
++++ b/tests/unit/workspace-nodes.test.cjs
+@@ -0,0 +1,117 @@
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const Module = require('node:module');
++const test = require('node:test');
++const ts = require('typescript');
++
++function load(relative, deps = {}) {
++  const filename = path.resolve(__dirname, relative), loaded = new Module(filename, module);
++  loaded.filename = filename; loaded.paths = Module._nodeModulePaths(path.dirname(filename));
++  loaded.require = name => Object.hasOwn(deps, name) ? deps[name] : name === 'server-only' ? {} : Module.prototype.require.call(loaded, name);
++  loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: {
++    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
++  } }).outputText, filename);
++  return loaded.exports;
++}
++
++test('workspace node BFF derives accounts, requires Origin, and preserves local confirmation', async () => {
++  const keys = ['NEXTAUTH_URL', 'WORKSPACE_GATEWAY_URL', 'WORKSPACE_GATEWAY_SECRET'];
++  const before = Object.fromEntries(keys.map(key => [key, process.env[key]])), originalFetch = global.fetch;
++  process.env.NEXTAUTH_URL = 'https://console.example';
++  process.env.WORKSPACE_GATEWAY_URL = 'http://gateway.internal:8090';
++  process.env.WORKSPACE_GATEWAY_SECRET = 'fixture-service-secret-with-at-least-32-bytes';
++  let session = null, status = 'claimed', online = false, upstreamStatus = 200, malformed = false;
++  const calls = [];
++  const node = () => ({ node_id: 'node-own', name: 'My Ambient', status, online,
++    account_id: 'owner', account_label: 'owner@example.invalid', grant_id: 'grant-test',
++    scopes: ['workspace.control'], expires_at: '2033-05-18T03:33:20Z', workspace_origin: 'https://node-own.workspace.example', last_seen_at: null });
++  global.fetch = async (url, options) => {
++    calls.push({ url: String(url), options });
++    assert.equal(options.headers.Authorization, 'Bearer ' + process.env.WORKSPACE_GATEWAY_SECRET);
++    assert.equal(options.redirect, 'error');
++    const pathname = new URL(url).pathname;
++    if (upstreamStatus !== 200) return Response.json({ error: 'private upstream detail ' + process.env.WORKSPACE_GATEWAY_SECRET }, { status: upstreamStatus });
++    if (!pathname.startsWith('/v1/accounts/owner/')) return Response.json({ nodes: [] });
++    if (pathname.includes('/nodes/foreign/')) return Response.json({ error: 'not found' }, { status: 404 });
++    if (pathname.endsWith('/launch')) return status === 'paired' && online ? Response.json({ url: 'https://node-own.workspace.example/_ambient/launch?ticket=one-time', expires_at: '2033-05-18T03:33:20Z' }) : Response.json({ error: 'not ready' }, { status: 409 });
++    if (options.method === 'DELETE') { status = 'revoked'; online = false; return Response.json(node()); }
++    if (pathname.endsWith('/pairings/claim')) return Response.json({ ...node(), connector_token: 'MUST-NOT-REACH-BROWSER' });
++    return Response.json(malformed ? { nodes: [{ ...node(), account_id: 'other' }] } : { nodes: [node()] });
++  };
++  const gateway = load('../../src/lib/workspace-nodes/gateway.ts');
++  const input = load('../../src/lib/shared/http-input.ts');
++  const origin = { requireSameOrigin(request) { if (request.headers.get('origin') !== process.env.NEXTAUTH_URL) throw new Error('origin'); } };
++  const http = load('../../src/lib/workspace-nodes/http.ts', {
++    'next-auth': { getServerSession: async () => session }, '@/lib/auth/auth': { authOptions: {} },
++    '@/lib/control/control-protocol': origin, '@/lib/shared/http-input': input,
++    '@/lib/workspace-nodes/gateway': gateway,
++  });
++  const deps = { '@/lib/workspace-nodes/http': http, '@/lib/workspace-nodes/gateway': gateway };
++  const list = load('../../src/app/api/workspace-nodes/route.ts', deps);
++  const claim = load('../../src/app/api/workspace-nodes/claim/route.ts', deps);
++  const open = load('../../src/app/api/workspace-nodes/[id]/open/route.ts', deps);
++  const revoke = load('../../src/app/api/workspace-nodes/[id]/route.ts', deps);
++  const request = (body = {}, originValue = 'https://console.example', method = 'POST') => new Request('https://console.example/api/workspace-nodes', {
++    method, headers: { Origin: originValue, 'Content-Type': 'application/json', Authorization: 'Bearer browser-forged', Cookie: 'private-cookie' },
++    body: typeof body === 'string' ? body : JSON.stringify(body),
++  });
++  const context = id => ({ params: Promise.resolve({ id }) });
++  try {
++    assert.equal((await list.GET()).status, 401);
++    assert.equal((await claim.POST(request({ code: 'PAIR1234' }))).status, 401);
++    assert.equal(calls.length, 0);
++    session = { user: { id: 'owner', email: 'owner@example.invalid' } };
++    const switched = request({ code: 'PAIR1234' }); switched.headers.set('X-Workspace-Account', 'other');
++    assert.equal((await claim.POST(switched)).status, 409);
++    assert.equal((await claim.POST(request({ code: 'PAIR1234' }, 'https://attacker.invalid'))).status, 403);
++    assert.equal((await open.POST(request({}, ''), context('node-own'))).status, 403);
++    assert.equal((await revoke.DELETE(request({}, 'https://attacker.invalid', 'DELETE'), context('node-own'))).status, 403);
++    for (const extra of [{ account_id: 'other' }, { label: 'another person' }, { scopes: ['workspace.manage'] }])
++      assert.equal((await claim.POST(request({ code: 'PAIR1234', ...extra }))).status, 400);
++    assert.equal((await claim.POST(request('x'.repeat(4097)))).status, 413);
++    assert.equal((await open.POST(request({ account_id: 'other' }), context('node-own'))).status, 400);
++    assert.equal((await open.POST(request({}), context('../another'))).status, 400);
++    assert.equal(calls.length, 0);
++    const listed = await list.GET(); assert.equal(listed.status, 200);
++    assert.match(listed.headers.get('cache-control'), /private.*no-store/); assert.equal(listed.headers.get('vary'), 'Cookie');
++    assert.deepEqual(await listed.json(), { nodes: [node()] });
++    const claimed = await claim.POST(request({ code: 'PAIR1234' })); assert.equal(claimed.status, 200);
++    assert.equal((await claimed.json()).status, 'claimed');
++    assert.deepEqual(JSON.parse(calls.at(-1).options.body), { code: 'PAIR1234', label: 'owner@example.invalid' });
++    assert.equal('Cookie' in calls.at(-1).options.headers, false);
++    assert.equal(JSON.stringify(await gateway.claimWorkspaceNode('owner', 'PAIR1234', 'owner@example.invalid')).includes('MUST-NOT'), false);
++    assert.equal((await open.POST(request(), context('node-own'))).status, 409, 'cloud claim cannot substitute local approval');
++    status = 'paired'; online = true;
++    const launched = await open.POST(request(), context('node-own')); assert.equal(launched.status, 200);
++    assert.match((await launched.json()).url, /^https:\/\/node-own\.workspace\.example/);
++    assert.equal((await open.POST(request(), context('foreign'))).status, 404);
++    session = { user: { id: 'other', email: 'other@example.invalid' } };
++    assert.deepEqual(await (await list.GET()).json(), { nodes: [] });
++    assert.equal(calls.at(-1).url, 'http://gateway.internal:8090/v1/accounts/other/nodes');
++    session = { user: { id: 'owner', email: 'owner@example.invalid' } };
++    const removed = await revoke.DELETE(request({}, 'https://console.example', 'DELETE'), context('node-own'));
++    assert.equal(removed.status, 200); assert.equal((await removed.json()).status, 'revoked');
++    assert.equal((await open.POST(request(), context('node-own'))).status, 409);
++    malformed = true; assert.equal((await list.GET()).status, 502, 'cross-account upstream data must fail closed'); malformed = false;
++    upstreamStatus = 401; const failed = await list.GET(); assert.equal(failed.status, 502);
++    assert.equal(JSON.stringify(await failed.json()).includes(process.env.WORKSPACE_GATEWAY_SECRET), false);
++    delete process.env.WORKSPACE_GATEWAY_SECRET; assert.equal((await list.GET()).status, 503);
++  } finally {
++    global.fetch = originalFetch;
++    for (const key of keys) if (before[key] === undefined) delete process.env[key]; else process.env[key] = before[key];
++  }
++});
++
++test('workspace state text and launch eligibility reflect authorization and live connectivity', () => {
++  const { workspaceNodeStatus, canOpenWorkspaceNode } = load('../../src/lib/workspace-nodes/model.ts');
++  const node = { status: 'claimed', online: true, expires_at: '2033-05-18T03:33:20Z' };
++  assert.equal(workspaceNodeStatus(node), '等待本机确认'); assert.equal(canOpenWorkspaceNode(node), false);
++  assert.equal(workspaceNodeStatus({ ...node, status: 'paired', online: false }), '离线');
++  assert.equal(canOpenWorkspaceNode({ ...node, status: 'paired', online: false }), false);
++  assert.equal(canOpenWorkspaceNode({ ...node, status: 'paired' }), true);
++  assert.equal(workspaceNodeStatus({ ...node, status: 'revoked' }), '已撤销');
++  assert.equal(canOpenWorkspaceNode({ ...node, status: 'revoked' }), false);
++  assert.equal(workspaceNodeStatus({ ...node, status: 'paired', expires_at: '1970-01-01T00:00:01Z' }), '授权已到期');
++  assert.equal(canOpenWorkspaceNode({ ...node, status: 'paired', expires_at: '1970-01-01T00:00:01Z' }), false);
++});
