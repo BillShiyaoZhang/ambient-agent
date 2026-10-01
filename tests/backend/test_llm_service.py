@@ -121,3 +121,27 @@ def test_model_snapshot_context_is_nested_and_task_local():
             assert primary_selection().provider_id == "two"
         assert primary_selection() == primary
     assert primary_selection() is None
+
+
+@pytest.mark.asyncio
+async def test_native_selection_bypasses_sdk_kwargs_and_uses_trusted_runtime(tmp_path, monkeypatch):
+    from backend import codex_llm
+    from backend.llm_config import ResolvedModel
+    from backend.llm_service import LLMResult
+
+    captured = {}
+
+    class Native:
+        def __init__(self, runtime):
+            captured["runtime_root"] = runtime.root
+
+        async def generate(self, selection, messages, tools):
+            captured.update(selection=selection, messages=messages, tools=tools)
+            return LLMResult(text="native")
+
+    monkeypatch.setattr(codex_llm, "NativeCodexTransport", Native)
+    monkeypatch.setattr(LLMService, "_request_kwargs", lambda *_: pytest.fail("Native request reached SDK kwargs"))
+    resolved = ResolvedModel.model_construct(provider_id="native", model_id="gpt-5.6-luna", api_mode="codex_native", connection={}, credentials={})
+    result = await LLMService(LLMConfigStore(str(tmp_path))).generate(resolved, [{"role": "user", "content": "hello"}])
+    assert result.text == "native"
+    assert captured["runtime_root"] == tmp_path / "coding_agents" / "runtime"

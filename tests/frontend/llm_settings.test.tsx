@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LLMSettingsDialog, ModelPicker } from "../../frontend/src/components/LLMSettings";
 import type { CodingAgentDefinition, CodingAgentModelCatalog, CodingAgentSettings } from "../../frontend/src/services/codingAgents";
 
@@ -51,6 +51,43 @@ const codexModels: CodingAgentModelCatalog = {
 };
 
 describe("LLM provider settings", () => {
+  it("explains managed native login and creates a Codex provider without API credentials", async () => {
+    const create = vi.fn().mockResolvedValue({});
+    render(<LLMSettingsDialog open language="en"
+      catalog={[{ id: "codex_native", name: "Codex Native", category: "local", api_mode: "codex_native", fields: [], advanced_fields: [] }]}
+      providers={[]} settings={{ default_model: null, fast_model: null }}
+      onClose={vi.fn()} onRefresh={vi.fn()} onCreateProvider={create} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
+    expect(screen.getByText("Uses the Codex login managed by Ambient. Sign in under Coding agent; no API key is needed.")).toBeDefined();
+    expect(screen.queryByLabelText(/API key/)).toBeNull();
+    expect(screen.queryByLabelText(/Base URL|Secret headers|Query parameters/)).toBeNull();
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Local Codex" } });
+    fireEvent.change(screen.getByLabelText("Provider ID"), { target: { value: "local-codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const [profile, credentials] = create.mock.calls[0];
+    expect(profile).toMatchObject({ id: "local-codex", name: "Local Codex", preset: "codex_native", connection: {}, credential_refs: {} });
+    expect(credentials).toEqual({});
+  });
+
+  it("keeps native models out of OpenCode bindings while preserving explicit API model choices", () => {
+    const update = vi.fn().mockResolvedValue({});
+    const native = { id: "local-codex", name: "Local Codex", preset: "codex_native", enabled: true, connection: {}, models: [{ id: "gpt-5.6-luna", display_name: "GPT Luna" }] };
+    render(<LLMSettingsDialog open language="en"
+      catalog={[{ id: "openai", name: "OpenAI", category: "global", fields: [] }, { id: "codex_native", name: "Codex Native", category: "local", api_mode: "codex_native", fields: [] }]}
+      providers={[...providers, native]} settings={{ default_model: { provider_id: native.id, model_id: "gpt-5.6-luna" }, fast_model: null }}
+      codingAgents={[{ ...opencodeAgent, installed: true, available: true }]}
+      codingAgentSettings={codingSettings} onClose={vi.fn()} onRefresh={vi.fn()} onUpdateCodingAgentModel={update} />);
+
+    const select = screen.getByRole("combobox", { name: "Execution model" });
+    expect(within(select).queryByRole("option", { name: /GPT Luna/ })).toBeNull();
+    expect((within(select).getByRole("option", { name: "Inherit Ambient primary" }) as HTMLOptionElement).disabled).toBe(true);
+    expect(screen.getByText("OpenCode needs an API provider model. Choose an API model here or use Codex as the coding agent.")).toBeDefined();
+    fireEvent.change(select, { target: { value: "openai-main:gpt-a" } });
+    expect(update).toHaveBeenCalledWith("opencode", { mode: "shared_binding", provider_id: "openai-main", model_id: "gpt-a" });
+  });
+
   it("groups models by provider and warns for models without verified tool use", () => {
     const select = vi.fn();
     render(<ModelPicker

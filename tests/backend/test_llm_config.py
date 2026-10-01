@@ -42,6 +42,99 @@ def test_catalog_covers_common_cloud_china_enterprise_local_and_generic_presets(
     assert any(field["id"] == "base_url" for field in catalog["openai_compatible"]["fields"])
 
 
+def test_codex_native_catalog_and_defaults_need_no_api_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-api-key")
+    store = LLMConfigStore(str(tmp_path))
+    native = next(item for item in store.catalog() if item["id"] == "codex_native")
+    assert native["name"] == "Codex Native"
+    assert native["category"] == "local"
+    assert native["api_mode"] == "codex_native"
+    assert native["fields"] == []
+    assert native["advanced_fields"] == []
+    public = store.create_provider(
+        {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}, {}
+    )
+    assert public["connection"] == {}
+    assert public["credentials"] == {}
+    store.update_settings({"default_model": {"provider_id": "native", "model_id": "gpt-5.6-luna"}})
+    resolved = store.resolve_default()
+    assert resolved.model_id == resolved.litellm_model == "gpt-5.6-luna"
+    assert resolved.api_mode == "codex_native"
+    assert resolved.connection == resolved.credentials == {}
+    assert LLMConfigStore(str(tmp_path)).resolve_default() == resolved
+    assert json.loads(store.secrets_path.read_text()) == {}
+
+
+@pytest.mark.parametrize("changes", [
+    {"connection": {"base_url": "https://example.test"}},
+    {"connection": {"command": "unsafe"}},
+    {"connection": {"auth_path": "unsafe"}},
+    {"connection": {"headers": {"Authorization": "private"}}},
+    {"credential_refs": {"api_key": {"source": "env", "env_var": "OPENAI_API_KEY"}}},
+    {"command": "unsafe"},
+    {"auth_path": "unsafe"},
+    {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]},
+    {"models": [{"id": "gpt-5.6-luna", "api_mode": "chat_completions"}]},
+])
+def test_codex_native_rejects_configuration_injections_before_writing(tmp_path, changes):
+    store = LLMConfigStore(str(tmp_path))
+    profile = {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}
+    store.create_provider(profile, {})
+    before = store.config_path.read_bytes(), store.secrets_path.read_bytes()
+    with pytest.raises(LLMConfigError) as failure:
+        store.update_provider("native", changes, None)
+    assert failure.value.code == "llm_invalid_configuration"
+    assert (store.config_path.read_bytes(), store.secrets_path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("credential", [
+    {"api_key": {"source": "stored", "value": "never-store"}},
+    {"api_key": {"source": "env", "env_var": "OPENAI_API_KEY"}},
+    {"auth_json": {"source": "stored", "value": "never-store"}},
+])
+def test_codex_native_rejects_credentials_on_create_and_update(tmp_path, credential):
+    store = LLMConfigStore(str(tmp_path))
+    profile = {"id": "native", "name": "Native", "preset": "codex_native"}
+    before = store.config_path.read_bytes(), store.secrets_path.read_bytes()
+    with pytest.raises(LLMConfigError) as failure:
+        store.create_provider(profile, credential)
+    assert failure.value.code == "llm_invalid_configuration"
+    assert (store.config_path.read_bytes(), store.secrets_path.read_bytes()) == before
+    store.create_provider(profile, {})
+    with pytest.raises(LLMConfigError):
+        store.update_provider("native", {}, credential)
+    assert json.loads(store.secrets_path.read_text()) == {}
+
+
+def test_api_provider_cannot_spoof_codex_native_transport(tmp_path):
+    store = LLMConfigStore(str(tmp_path))
+    with pytest.raises(LLMConfigError) as failure:
+        store.create_provider(
+            {"id": "api", "name": "API", "preset": "openai", "models": [{"id": "gpt-5.6-luna", "api_mode": "codex_native"}]}, {}
+        )
+    assert failure.value.code == "llm_invalid_configuration"
+    assert store.list_providers() == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"connection": {"command": "private-marker"}},
+    {"credential_refs": {"api_key": {"source": "stored"}}},
+    {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]},
+    {"auth_path": "private-marker"},
+])
+def test_persisted_codex_native_configuration_fails_closed_without_rewrite(tmp_path, changes):
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native"}, {})
+    config = json.loads(store.config_path.read_text())
+    config["providers"][0].update(changes)
+    original = json.dumps(config)
+    store.config_path.write_text(original)
+    with pytest.raises(LLMConfigError) as failure:
+        LLMConfigStore(str(tmp_path))
+    assert failure.value.code == "llm_config_corrupt"
+    assert store.config_path.read_text() == original
+
+
 def test_minimax_global_and_china_use_separate_compatible_endpoints(tmp_path):
     store = LLMConfigStore(str(tmp_path))
     catalog = {item["id"]: item for item in store.catalog()}

@@ -37,3 +37,4 @@
 - **验证记录**
   - [远程工作区首版验收](/verification/remote-workspace.md)
   - [远程工作区交接验收 · 2026-10-01](/verification/remote-workspace-handoff-2026-10-01.md)
+  - [公网工作区运行验收 · 2026-10-01](/verification/remote-workspace-production-2026-10-01.md)

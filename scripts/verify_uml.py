@@ -15,6 +15,7 @@ CLASS_TO_FILE = {
     "AppRecordStore": "backend/app_records.py",
     "ContextManager": "backend/context_manager.py",
     "LLMService": "backend/llm_service.py",
+    "NativeCodexTransport": "backend/codex_llm.py",
     "LLMResult": "backend/llm_service.py",
     "LLMConfigStore": "backend/llm_config.py",
     "ProviderProfile": "backend/llm_config.py",

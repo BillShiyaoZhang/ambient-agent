@@ -1010,6 +1010,7 @@ _OPENCODE_WIDGET_PERMISSION_POLICY: dict[str, Any] = {
 
 def _opencode_runtime_env() -> dict[str, str]:
     """Build a process-local OpenCode override from the active run snapshot."""
+    from backend.llm_config import LLMConfigError
     from backend.llm_runtime import coding_selection
     from backend.llm_service import get_default_llm_store
 
@@ -1029,6 +1030,11 @@ def _opencode_runtime_env() -> dict[str, str]:
     if selection is None:
         return {"OPENCODE_CONFIG_CONTENT": json.dumps(inline_config, ensure_ascii=False)}
     resolved = get_default_llm_store().resolve(selection)
+    if resolved.api_mode == "codex_native":
+        raise LLMConfigError(
+            "Select an API provider for the coding agent shared model binding",
+            code="coding_agent_model_binding_unsupported",
+        )
     provider_key = f"ambient-{resolved.provider_id}"
     npm = _OPENCODE_NPM_BY_PRESET.get(resolved.preset, "@ai-sdk/openai-compatible")
     options: dict[str, Any] = {}

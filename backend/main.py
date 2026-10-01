@@ -345,7 +345,12 @@ def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
                 model_id=str(coding_config.get("model_id") or ""),
             )
         )
-        llm_config_store.resolve(coding_model)
+        coding_resolved = llm_config_store.resolve(coding_model)
+        if coding_resolved.api_mode == "codex_native":
+            raise CodingAgentConfigError(
+                "Select an API provider for the coding agent shared model binding",
+                code="coding_agent_model_binding_unsupported",
+            )
     return {
         "primary": primary.model_dump(mode="json"),
         "fast": fast.model_dump(mode="json"),
@@ -909,7 +914,14 @@ async def update_coding_agent_settings(data: CodingAgentSettingsUpdateRequest):
 async def update_coding_agent_model(agent_id: str, data: AgentModelConfig):
     try:
         if data.mode == "shared_binding" and not data.inherit:
-            llm_config_store.resolve(ModelSelection(provider_id=data.provider_id or "", model_id=data.model_id or ""))
+            resolved = llm_config_store.resolve(
+                ModelSelection(provider_id=data.provider_id or "", model_id=data.model_id or "")
+            )
+            if resolved.api_mode == "codex_native":
+                raise CodingAgentConfigError(
+                    "Select an API provider for the coding agent shared model binding",
+                    code="coding_agent_model_binding_unsupported",
+                )
         return coding_agent_config_store.update_agent_model(agent_id, data.model_dump())
     except (CodingAgentConfigError, CodingAgentRuntimeError, LLMConfigError) as exc:
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -2721,7 +2733,11 @@ async def websocket_chat(
             await update_session_title(content_str)
             return repair_run
 
-        model_snapshot = _snapshot_model_config(current_session)
+        try:
+            model_snapshot = _snapshot_model_config(current_session)
+        except CodingAgentConfigError as exc:
+            await send_to_session(session_id, {"type": "error", "code": exc.code, "message": str(exc)})
+            return None
 
         state = AgentRunState(
             workflow_type="agent_chat",

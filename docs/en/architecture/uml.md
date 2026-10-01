@@ -373,6 +373,26 @@ The system image supplies the OpenCode CLI. Codex is downloaded to a dedicated p
 
 Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.
 
+### 8.1 Native Codex primary-model transport (pending implementation)
+
+This diagram defines a public subset before implementation. The currently API-only `LLMService` must select native transport by `ResolvedModel.api_mode`; see the [Provider contract](/en/integrations/llm-providers.md). The diagram does not claim deployment. Implementation must map and verify `NativeCodexTransport` in `verify_uml.py`, without weakening verification by omitting the class.
+
+```mermaid
+classDiagram
+    class LLMService {
+        +store
+        +generate(selection, messages, tools) LLMResult
+    }
+    class NativeCodexTransport {
+        +runtime: CodingAgentRuntime
+        +generate(selection, messages, tools) LLMResult
+        +discover_models() list
+    }
+    LLMService --> NativeCodexTransport : native model selection only
+```
+
+`runtime` reuses trusted commands and managed native login. `generate` accepts a `ResolvedModel` snapshot, complete history, and tool declarations, returning `LLMResult` without executing tools. `discover_models` reads actual app-server catalogs without proving entitlement. Ephemeral native inference permits only in-memory Plan and Plan-only CodeMode; effects still pass through Ambient tools, Capabilities, and Runs. Cancellation/timeouts await owned process-group closure and temporary-directory removal without implicit repair, fallback, or replay.
+
 ## Remote entry to the local workspace
 The cloud entry manages accounts, nodes, and grants. The Connector connects outbound to the Gateway and checks the locally approved account, grant, scopes, and expiry for each request before forwarding bounded HTTP / WebSocket traffic to fixed loopback services. Revocation closes local forwarding and connections first. Runs, Apps, Graph, and Widgets still execute and store data in the local workspace.
 

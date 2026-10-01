@@ -110,6 +110,28 @@ async def test_all_registered_agents_dispatch_through_the_same_acp_runner(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_direct_opencode_runner_rejects_native_model_before_acp_launch(tmp_path, monkeypatch):
+    from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
+    from backend.llm_runtime import use_model_selections
+
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native",
+                           "models": [{"id": "gpt-5.6-luna"}]}, {})
+    monkeypatch.setattr("backend.llm_service.get_default_llm_store", lambda: store)
+    runtime = CodingAgentRuntime(tmp_path)
+    launch = MagicMock(return_value=SimpleNamespace(agent_id="opencode"))
+    invoke = AsyncMock(return_value=None)
+    monkeypatch.setattr(runtime, "acp_launch", launch)
+    monkeypatch.setattr(coding_agent_module, "run_coding_agent_acp", invoke)
+    selection = ModelSelection(provider_id="native", model_id="gpt-5.6-luna")
+    with use_model_selections(selection), pytest.raises(LLMConfigError) as failure:
+        await coding_agent_module.run_coding_agent("native-test", "build", coding_agent="opencode", runtime=runtime)
+    assert failure.value.code == "coding_agent_model_binding_unsupported"
+    launch.assert_not_called()
+    invoke.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_main_composition_root_has_no_opencode_execution_bypass(monkeypatch):
     calls = []
 

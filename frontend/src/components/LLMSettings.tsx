@@ -119,6 +119,9 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
   const [agentModelAttempted, setAgentModelAttempted] = useState<Record<string, boolean>>({});
   const preset = catalog.find((item) => item.id === presetId) ?? catalog[0];
   const presetFields = preset ? [...preset.fields, ...(preset.advanced_fields ?? [])] : [];
+  const isNativeProvider = (provider: LLMProvider) => catalog.find((item) => item.id === provider.preset)?.api_mode === "codex_native";
+  const primaryProvider = providers.find((provider) => provider.id === settings.default_model?.provider_id);
+  const nativePrimary = primaryProvider ? isNativeProvider(primaryProvider) : false;
 
   const run = async (key: string, action: () => Promise<unknown>, success: string) => {
     setBusy(key); setNotice(null);
@@ -357,13 +360,15 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
                 <button type="button" onClick={() => void run(`cancel-auth-${agent.id}`, async () => { await props.onClearCodingAgentAuth?.(agent.id); setAgentAuth((current) => { const next = { ...current }; delete next[agent.id]; return next; }); }, isZh ? "已取消登录" : "Sign-in cancelled")}>{isZh ? "取消" : "Cancel"}</button>
               </div> : null}
 
-              {agent.installed && agent.model_capability.catalog_source === "provider_registry" ? <label className="coding-agent-model"><span>{isZh ? "执行模型" : "Execution model"}</span><select value={currentBinding} disabled={!props.onUpdateCodingAgentModel} onChange={(event) => {
+              {agent.installed && agent.model_capability.catalog_source === "provider_registry" ? <><label className="coding-agent-model"><span>{isZh ? "执行模型" : "Execution model"}</span><select value={currentBinding} disabled={!props.onUpdateCodingAgentModel} onChange={(event) => {
                 const value = event.target.value;
                 const config: AgentModelConfig = value === "__inherit__"
                   ? { mode: "shared_binding", inherit: "ambient.primary" }
                   : { mode: "shared_binding", provider_id: value.slice(0, value.indexOf(":")), model_id: value.slice(value.indexOf(":") + 1) };
                 void run(`model-${agent.id}`, () => props.onUpdateCodingAgentModel!(agent.id, config), isZh ? `${agent.name} 模型绑定已更新` : `${agent.name} model binding updated`);
-              }}><option value="__inherit__">{isZh ? "跟随 Ambient 主模型" : "Inherit Ambient primary"}</option>{providers.filter((provider) => provider.enabled).flatMap((provider) => provider.models.map((model) => <option key={`${provider.id}:${model.id}`} value={`${provider.id}:${model.id}`}>{provider.name} · {model.display_name || model.id}</option>))}</select></label> : null}
+              }}><option value="__inherit__" disabled={nativePrimary}>{isZh ? "跟随 Ambient 主模型" : "Inherit Ambient primary"}</option>{providers.filter((provider) => provider.enabled && !isNativeProvider(provider)).flatMap((provider) => provider.models.filter((model) => model.api_mode !== "codex_native").map((model) => <option key={`${provider.id}:${model.id}`} value={`${provider.id}:${model.id}`}>{provider.name} · {model.display_name || model.id}</option>))}</select></label>
+                {nativePrimary ? <p className="coding-agent-auth-hint">{isZh ? "OpenCode 需要 API Provider 模型。请在这里选择 API 模型，或使用 Codex 作为编码代理。" : "OpenCode needs an API provider model. Choose an API model here or use Codex as the coding agent."}</p> : null}
+              </> : null}
 
               {agent.installed && agent.model_capability.catalog_source === "agent" ? <div className="coding-agent-model"><label><span>{isZh ? `${agent.name} 模型` : `${agent.name} model`}</span><select aria-label={isZh ? `${agent.name} 模型` : `${agent.name} model`} value={selectedNativeModel} disabled={!ready || !nativeCatalog || agentModelLoading[agent.id] || !props.onUpdateCodingAgentModel} onChange={(event) => void run(`model-${agent.id}`, () => props.onUpdateCodingAgentModel!(agent.id, { mode: "native", native_model: event.target.value || null }), isZh ? `${agent.name} 模型配置已更新` : `${agent.name} model configuration updated`)}>
                 <option value="">{nativeDefault ? `${isZh ? "Agent 默认" : "Agent default"} · ${nativeDefault.display_name}` : (isZh ? "使用 Agent 默认模型" : "Use agent default")}</option>
@@ -379,7 +384,9 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
       </section> : null}
 
       {adding && preset ? <form className="llm-add-form" onSubmit={submitProvider}>
-        <div className="llm-form-heading"><strong>{isZh ? "新增 Provider" : "New provider"}</strong><span>{isZh ? "自定义端点可能让服务端访问本地或内网地址。" : "Custom endpoints can let the server access local or private-network addresses."}</span></div>
+        <div className="llm-form-heading"><strong>{isZh ? "新增 Provider" : "New provider"}</strong><span>{preset?.api_mode === "codex_native"
+          ? (isZh ? "使用 Ambient 托管的 Codex 登录。可在编码代理区域登录，无需填写 API key。" : "Uses the Codex login managed by Ambient. Sign in under Coding agent; no API key is needed.")
+          : (isZh ? "自定义端点可能让服务端访问本地或内网地址。" : "Custom endpoints can let the server access local or private-network addresses.")}</span></div>
         <label><span>{isZh ? "预设" : "Preset"}</span><select value={presetId} onChange={(event) => { setPresetId(event.target.value); setValues({}); }}>
           {catalog.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.category}</option>)}
         </select></label>

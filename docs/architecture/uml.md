@@ -363,6 +363,26 @@ OpenCode CLI 由系统镜像提供；Codex 只有在用户选择安装时才下�
 
 Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。
 
+### 8.1 原生 Codex 主模型传输（待实现）
+
+此图先定义待实现公共子集；当前API-only的`LLMService`须按`ResolvedModel.api_mode`选择原生transport，契约见[Provider规范](/integrations/llm-providers.md)。图不表示功能已上线。实现后`verify_uml.py`须映射并核对`NativeCodexTransport`，不得省略该类放宽校验。
+
+```mermaid
+classDiagram
+    class LLMService {
+        +store
+        +generate(selection, messages, tools) LLMResult
+    }
+    class NativeCodexTransport {
+        +runtime: CodingAgentRuntime
+        +generate(selection, messages, tools) LLMResult
+        +discover_models() list
+    }
+    LLMService --> NativeCodexTransport : native model selection only
+```
+
+`runtime`复用受信命令与托管原生登录；`generate`接收`ResolvedModel`快照、完整历史和工具声明，返回`LLMResult`而不执行工具。`discover_models`读取实际app-server目录，不证明entitlement。原生ephemeral inference仅允许内存Plan及Plan-only CodeMode，副作用仍经Ambient工具、Capability和Run。取消/超时等待关闭本次进程组与回收临时目录，无隐式repair、fallback或重放。
+
 ## 本地工作区远程入口
 云入口只管理账户、节点和授权。Connector 主动连接 Gateway，逐次验证本机批准的账户、grant、范围与期限，再将有界 HTTP / WebSocket 流量发送到固定 loopback 服务。撤销先在本机关闭转发和连接。Run、App、Graph 与 Widget 的执行和数据仍由本地工作区管理。
 

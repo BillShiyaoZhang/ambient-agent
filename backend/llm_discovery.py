@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from backend.llm_config import LLMConfigStore, ModelRef, ModelSelection
+from backend.llm_config import LLMConfigError, LLMConfigStore, ModelRef, ModelSelection
 from backend.llm_service import LLMService
 
 
@@ -28,6 +28,32 @@ def _model(model_id: str, name: str | None = None, source: str = "discovered") -
 async def discover_models(store: LLMConfigStore, provider_id: str) -> list[dict[str, Any]]:
     profile, preset, credentials = store.provider_runtime(provider_id)
     strategy = preset.get("discovery")
+    if strategy == "codex_native":
+        from backend.codex_llm import NativeCodexTransport
+        from backend.coding_agent_runtime import CodingAgentRuntime
+
+        catalog = await NativeCodexTransport(CodingAgentRuntime(store.workspace_dir)).discover_models()
+        current = store.get_provider(provider_id)
+        if (
+            current.preset != profile.preset
+            or current.connection != profile.connection
+            or current.credential_refs != profile.credential_refs
+            or current.enabled != profile.enabled
+        ):
+            return [model.model_dump(mode="json") for model in current.models]
+        merged = {model.id: model.model_dump(mode="json") for model in current.models}
+        for item in catalog:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+                raise LLMConfigError("Native model catalog is invalid", code="llm_provider_error")
+            model_id = item["id"].strip()
+            name = item.get("name") if isinstance(item.get("name"), str) else model_id
+            merged.setdefault(model_id, ModelRef(
+                id=model_id, provider_id=provider_id, model_id=model_id,
+                display_name=name, api_mode="codex_native", source="discovered",
+            ).model_dump(mode="json"))
+        models = list(merged.values())
+        store.update_provider(provider_id, {"models": models}, None)
+        return models
     base_url = (
         profile.connection.get("base_url") or preset.get("default_base_url") or _DEFAULT_BASES.get(profile.preset)
     )

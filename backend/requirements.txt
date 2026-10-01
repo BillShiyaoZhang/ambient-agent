@@ -10,6 +10,8 @@ httpx>=0.28.1
 jinja2>=3.1.6
 python-dotenv>=1.2.2
 litellm==1.92.0
+jsonschema==4.26.0
+referencing==0.37.0
 neo4j>=6.0,<7
 orjson>=3.10.0
 pyyaml>=6.0.3

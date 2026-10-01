@@ -14,7 +14,7 @@ export interface ModelCapabilities {
 export interface LLMModel {
   id: string;
   display_name?: string | null;
-  api_mode?: "chat_completions" | "responses" | null;
+  api_mode?: "chat_completions" | "responses" | "codex_native" | null;
   capabilities?: ModelCapabilities;
   source?: "manual" | "discovered" | "catalog";
 }
@@ -52,7 +52,7 @@ export interface ProviderPreset {
   fields: CatalogField[];
   advanced_fields?: CatalogField[];
   default_base_url?: string | null;
-  api_mode?: "chat_completions" | "responses";
+  api_mode?: "chat_completions" | "responses" | "codex_native";
 }
 
 export interface LLMSettings {

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 class LLMConfigError(RuntimeError):
@@ -44,7 +44,7 @@ class ModelRef(BaseModel):
     provider_id: str | None = None
     model_id: str | None = None
     display_name: str | None = None
-    api_mode: Literal["chat_completions", "responses"] | None = None
+    api_mode: Literal["chat_completions", "responses", "codex_native"] | None = None
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     source: Literal["manual", "discovered", "catalog"] = "manual"
 
@@ -70,6 +70,25 @@ class ProviderProfile(BaseModel):
     connection: dict[str, Any] = Field(default_factory=dict)
     credential_refs: dict[str, CredentialRef] = Field(default_factory=dict)
     models: list[ModelRef] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_native_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("preset") == "codex_native":
+            if set(value) - set(cls.model_fields):
+                raise ValueError("Native Codex does not accept custom provider fields")
+        return value
+
+    @model_validator(mode="after")
+    def validate_transport_configuration(self):
+        if self.preset == "codex_native":
+            if self.connection or self.credential_refs:
+                raise ValueError("Native Codex connection and credentials must be empty")
+            if any(model.api_mode not in {None, "codex_native"} for model in self.models):
+                raise ValueError("Native Codex cannot use an API transport")
+        elif any(model.api_mode == "codex_native" for model in self.models):
+            raise ValueError("API providers cannot use the Native Codex transport")
+        return self
 
     @field_validator("id")
     @classmethod
@@ -99,7 +118,7 @@ class ResolvedModel(BaseModel):
     preset: str
     model_id: str
     litellm_model: str
-    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
+    api_mode: Literal["chat_completions", "responses", "codex_native"] = "chat_completions"
     connection: dict[str, Any] = Field(default_factory=dict)
     credentials: dict[str, str] = Field(default_factory=dict)
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
@@ -132,6 +151,7 @@ def _preset(
     discovery: str | None = None,
     metadata_prefix: str | None = None,
     discovered_model_prefixes: list[str] | None = None,
+    advanced_fields: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": preset_id,
@@ -139,7 +159,7 @@ def _preset(
         "category": category,
         "litellm_prefix": prefix,
         "fields": fields if fields is not None else [_API_KEY],
-        "advanced_fields": _ADVANCED_FIELDS,
+        "advanced_fields": advanced_fields if advanced_fields is not None else _ADVANCED_FIELDS,
         "default_base_url": base_url,
         "api_mode": api_mode,
         "discovery": discovery,
@@ -149,6 +169,10 @@ def _preset(
 
 
 PROVIDER_CATALOG = [
+    _preset(
+        "codex_native", "Codex Native", "local", "", [],
+        api_mode="codex_native", discovery="codex_native", advanced_fields=[],
+    ),
     _preset("openai", "OpenAI", "global", "openai", discovery="openai"),
     _preset("anthropic", "Anthropic", "global", "anthropic", discovery="anthropic"),
     _preset("gemini", "Google AI Studio", "global", "gemini", discovery="gemini"),
@@ -694,11 +718,15 @@ class LLMConfigStore:
             if model.id not in seen:
                 model.provider_id = profile.id
                 model.model_id = model.id
+                if profile.preset == "codex_native":
+                    model.api_mode = "codex_native"
                 seen.add(model.id)
                 unique_models.append(model)
         profile.models = unique_models
 
     def _apply_credentials(self, profile: ProviderProfile, updates: dict[str, Any]) -> None:
+        if profile.preset == "codex_native" and updates:
+            raise LLMConfigError("Native Codex does not accept provider credentials", code="llm_invalid_configuration")
         secrets = self._load_secrets()
         changed = False
         for name, raw in updates.items():

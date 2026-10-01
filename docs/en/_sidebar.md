@@ -37,3 +37,4 @@
 - **Verification Records**
   - [First Remote Workspace Verification](/en/verification/remote-workspace.md)
   - [Remote Workspace Handoff · 2026-10-01](/en/verification/remote-workspace-handoff-2026-10-01.md)
+  - [Public Workspace Runtime · 2026-10-01](/en/verification/remote-workspace-production-2026-10-01.md)

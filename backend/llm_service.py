@@ -1,4 +1,4 @@
-"""Unified LiteLLM-backed model transport for Ambient Agent."""
+"""Unified API and native model transports for Ambient Agent."""
 
 from __future__ import annotations
 
@@ -122,8 +122,15 @@ class LLMService:
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResult:
         resolved = selection if isinstance(selection, ResolvedModel) else self.store.resolve(selection)
-        kwargs = self._request_kwargs(resolved, messages, tools)
         try:
+            if resolved.api_mode == "codex_native":
+                from backend.codex_llm import NativeCodexTransport
+                from backend.coding_agent_runtime import CodingAgentRuntime
+
+                return await NativeCodexTransport(CodingAgentRuntime(self.store.workspace_dir)).generate(
+                    resolved, messages, tools
+                )
+            kwargs = self._request_kwargs(resolved, messages, tools)
             if resolved.api_mode == "responses":
                 fn = self._responses_fn
                 if fn is None:
