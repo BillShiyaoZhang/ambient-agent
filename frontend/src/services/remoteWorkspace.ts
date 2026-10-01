@@ -16,6 +16,7 @@ export interface RemoteWorkspaceStatus {
   pairing_expires_at?: string | null;
   workspace_origin?: string | null;
   last_error?: string | null;
+  retry_after?: number;
 }
 
 export interface RemoteWorkspacePair {
@@ -24,6 +25,25 @@ export interface RemoteWorkspacePair {
   name: string;
   scopes: string[];
   expires_in: number;
+  enrollment_token: string;
+}
+
+export class RemoteWorkspaceRequestError extends Error {
+  readonly status: number;
+  readonly retryAfter: number | null;
+  constructor(status: number, retryAfter: number | null = null) {
+    super(`Remote connection request failed (${status})`);
+    this.name = "RemoteWorkspaceRequestError";
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
+function retryAfter(response: Response): number | null {
+  const value = response.headers.get("Retry-After")?.trim();
+  if (!value || value.length > 128) return null;
+  const seconds = /^\d+$/.test(value) ? Number(value) : Math.ceil((Date.parse(value) - Date.now()) / 1000);
+  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 86400 ? seconds : null;
 }
 
 async function request(path: string, body?: unknown): Promise<RemoteWorkspaceStatus> {
@@ -31,9 +51,8 @@ async function request(path: string, body?: unknown): Promise<RemoteWorkspaceSta
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    const detail = payload?.detail;
-    throw new Error(typeof detail === "string" ? detail : detail?.message ?? `Remote connection request failed (${response.status})`);
+    // Error bodies may echo enrollment input. Only expose the bounded HTTP contract.
+    throw new RemoteWorkspaceRequestError(response.status, response.status === 429 ? retryAfter(response) : null);
   }
   return response.json();
 }

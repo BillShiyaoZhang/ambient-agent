@@ -7,11 +7,14 @@ import base64
 import binascii
 import contextlib
 import json
+import math
 import os
+import random
 import re
 import tempfile
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -19,7 +22,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
 from websockets.asyncio.client import connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import InvalidStatus, WebSocketException
 
 MAX_HTTP_BYTES = 2 * 1024 * 1024
 MAX_WS_BYTES = 256 * 1024
@@ -27,6 +30,24 @@ MAX_TUNNEL_BYTES = 3 * 1024 * 1024
 MAX_CONNECTIONS = 16
 SCOPES = frozenset({"workspace.control", "workspace.manage"})
 IDENTITY_FIELDS = ("node_id", "account_id", "grant_id", "scopes", "workspace_origin")
+PUBLIC_STATE_FIELDS = (
+    "status",
+    "node_id",
+    "name",
+    "gateway_url",
+    "portal_url",
+    "scopes",
+    "expires_at",
+    "account_id",
+    "account_label",
+    "grant_id",
+    "pairing_code",
+    "pairing_expires_at",
+    "workspace_origin",
+    "last_error",
+)
+PRIVATE_STATE_FIELDS = frozenset((*PUBLIC_STATE_FIELDS, "connector_token", "approved"))
+MAX_RETRY_AFTER = 86400
 UPSTREAMS = {
     "frontend": "http://127.0.0.1:5173",
     "backend": "http://127.0.0.1:8000",
@@ -88,6 +109,41 @@ WS_PATH = re.compile(r"^/ws/(?:chat|runs|run-live|widgets/[^/]+/(?:client-runtim
 
 class RemoteWorkspaceDenied(ValueError):
     """A request is outside the locally approved workspace grant."""
+
+
+class RemoteWorkspaceGatewayError(ValueError):
+    """A safe control-plane failure; never retain Gateway bodies or request secrets."""
+
+    def __init__(self, status_code: int, *, retry_after: int | None = None):
+        self.status_code = status_code if status_code in {401, 403, 409, 410, 422, 429} else 502
+        self.retry_after = retry_after if self.status_code == 429 else None
+        descriptions = {
+            401: "The saved device credential is no longer valid. Generate a new enrollment token in the portal.",
+            403: "The device authorization ended. Generate a new enrollment token in the portal.",
+            409: "The enrollment token expired, was already used, or the pairing state changed. Generate a new token in the portal.",
+            410: "The account or workspace authorization ended. Sign in and authorize a new connection.",
+            422: "Check the enrollment token and connection settings.",
+            429: "The workspace gateway is temporarily busy or its connection quota is reached. Wait before trying again.",
+            502: "Workspace gateway is unavailable.",
+        }
+        super().__init__(descriptions[self.status_code])
+
+
+def _retry_after(value: str | None, now: datetime) -> int | None:
+    if not value or len(value) > 128:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]{1,6}", value):
+        delay = int(value)
+    else:
+        try:
+            instant = parsedate_to_datetime(value)
+            if instant.tzinfo is None:
+                return None
+            delay = math.ceil((instant - now).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(1, delay) if 0 <= delay <= MAX_RETRY_AFTER else None
 
 
 def _expiry(value: Any) -> datetime:
@@ -214,6 +270,7 @@ class RemoteWorkspaceNodeStore:
                 self._state = {"status": "invalid", "last_error": "Saved connection cannot be read safely"}
 
     def save(self, state: dict[str, Any]) -> None:
+        state = {key: value for key, value in state.items() if key in PRIVATE_STATE_FIELDS}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, filename = tempfile.mkstemp(prefix=".node-", dir=self.path.parent)
         try:
@@ -229,28 +286,15 @@ class RemoteWorkspaceNodeStore:
                 os.unlink(filename)
 
     def status(self) -> dict[str, Any]:
-        fields = (
-            "status",
-            "node_id",
-            "name",
-            "gateway_url",
-            "portal_url",
-            "scopes",
-            "expires_at",
-            "account_id",
-            "account_label",
-            "grant_id",
-            "pairing_code",
-            "pairing_expires_at",
-            "workspace_origin",
-            "last_error",
-        )
-        result = {key: self._state[key] for key in fields if key in self._state}
+        result = {key: self._state[key] for key in PUBLIC_STATE_FIELDS if key in self._state}
         result.setdefault("status", "disconnected")
         result.setdefault("scopes", [])
-        if result["status"] == "paired":
+        if result["status"] in {"pending", "claimed", "paired"}:
             with contextlib.suppress(RemoteWorkspaceDenied):
-                if _expiry(result.get("expires_at")) <= self.now():
+                deadlines = [_expiry(result.get("expires_at"))]
+                if result["status"] == "pending" and result.get("pairing_expires_at"):
+                    deadlines.append(_expiry(result["pairing_expires_at"]))
+                if min(deadlines) <= self.now():
                     result["status"] = "expired"
         return result
 
@@ -289,6 +333,8 @@ class RemoteWorkspaceConnector:
         gateway_http: httpx.AsyncClient | None = None,
         local_ws_connect: Callable[..., Awaitable[Any]] | None = None,
         tunnel_connect: Callable[..., Any] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        jitter: Callable[[], float] | None = None,
     ):
         upstream_mode = os.getenv("AMBIENT_REMOTE_UPSTREAM_MODE", "loopback")
         if upstream_mode not in {"loopback", "docker"}:
@@ -299,6 +345,10 @@ class RemoteWorkspaceConnector:
         self.gateway_http = gateway_http
         self.local_ws_connect = local_ws_connect or connect
         self.tunnel_connect = tunnel_connect or connect
+        self._sleep = sleep or asyncio.sleep
+        self._jitter = jitter or random.random
+        self._cooldown_until: datetime | None = None
+        self._failure_count = 0
         self.online = False
         self.last_error: str | None = None
         self._runner: asyncio.Task | None = None
@@ -308,16 +358,65 @@ class RemoteWorkspaceConnector:
         self._mutation = asyncio.Lock()
 
     def status(self) -> dict[str, Any]:
-        return {**self.store.status(), "online": self.online, "last_error": self.last_error}
+        state = self.store.status()
+        return {
+            **state,
+            "online": self.online,
+            "last_error": self.last_error or state.get("last_error"),
+            "retry_after": self._cooldown_remaining(),
+        }
+
+    def _cooldown_remaining(self) -> int:
+        return (
+            max(0, math.ceil((self._cooldown_until - self.store.now()).total_seconds())) if self._cooldown_until else 0
+        )
+
+    async def _terminate(self, status: str, error: str | None = None) -> None:
+        self.store.save({**self.store.status(), "status": status, "approved": False, "pairing_code": None})
+        self.last_error = error
+        await self.stop()
+
+    async def _expire_if_due(self) -> bool:
+        state = self.store._state
+        if state.get("status") not in {"pending", "claimed", "paired"}:
+            return False
+        try:
+            deadlines = [_expiry(state.get("expires_at"))]
+            if state.get("status") == "pending" and state.get("pairing_expires_at"):
+                deadlines.append(_expiry(state["pairing_expires_at"]))
+            if min(deadlines) > self.store.now():
+                return False
+        except RemoteWorkspaceDenied:
+            await self._terminate("revoked", "Saved workspace authorization is invalid. Authorize a new connection.")
+            return True
+        await self._terminate(
+            "expired", "Workspace authorization expired. Generate a new enrollment token in the portal."
+        )
+        return True
 
     async def _gateway(self, method: str, path: str, **kwargs) -> dict[str, Any]:
+        if delay := self._cooldown_remaining():
+            raise RemoteWorkspaceGatewayError(429, retry_after=delay)
         state = self.store._state
         headers = {"Authorization": "Bearer " + state["connector_token"]} if state.get("connector_token") else {}
         own = self.gateway_http is None
         client = self.gateway_http or httpx.AsyncClient(timeout=30, trust_env=False)
         try:
             response = await client.request(method, state["gateway_url"] + path, headers=headers, **kwargs)
-            response.raise_for_status()
+            if not response.is_success:
+                if self.store._state is not state:
+                    raise RemoteWorkspaceDenied("Workspace connection changed while the request was pending")
+                retry = (
+                    _retry_after(response.headers.get("retry-after"), self.store.now())
+                    if response.status_code == 429
+                    else None
+                )
+                if retry:
+                    self._cooldown_until = self.store.now() + timedelta(seconds=retry)
+                error = RemoteWorkspaceGatewayError(response.status_code, retry_after=retry)
+                if response.status_code == 410 or (headers and response.status_code in {401, 403}):
+                    await self._terminate("revoked", str(error))
+                raise error
             if len(response.content) > 64 * 1024:
                 raise RemoteWorkspaceDenied("Gateway response exceeds the limit")
             result = response.json()
@@ -330,6 +429,11 @@ class RemoteWorkspaceConnector:
 
     async def pair(self, data: dict[str, Any]) -> dict[str, Any]:
         async with self._mutation:
+            token = data.get("enrollment_token")
+            if not isinstance(token, str) or not 20 <= len(token) <= 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+                raise RemoteWorkspaceDenied("A valid one-time enrollment token from the portal is required")
+            if delay := self._cooldown_remaining():
+                raise RemoteWorkspaceGatewayError(429, retry_after=delay)
             gateway_url = normalize_gateway_url(data["gateway_url"])
             portal_url = normalize_gateway_url(data["portal_url"])
             scopes = data["scopes"]
@@ -343,6 +447,7 @@ class RemoteWorkspaceConnector:
                 "POST",
                 "/v1/connector/pairings",
                 json={
+                    "enrollment_token": token,
                     "name": data["name"],
                     "scopes": scopes,
                     "expires_in": data["expires_in"],
@@ -365,7 +470,17 @@ class RemoteWorkspaceConnector:
             _expiry(remote["pairing_expires_at"])
             self.store.save(
                 {
-                    **remote,
+                    **{
+                        key: remote[key]
+                        for key in (
+                            "node_id",
+                            "connector_token",
+                            "pairing_code",
+                            "pairing_expires_at",
+                            "workspace_origin",
+                            "expires_at",
+                        )
+                    },
                     "gateway_url": gateway_url,
                     "portal_url": portal_url,
                     "name": data["name"],
@@ -378,15 +493,23 @@ class RemoteWorkspaceConnector:
             return self.status()
 
     async def refresh(self) -> dict[str, Any]:
+        if await self._expire_if_due():
+            return self.status()
         state = self.store._state
         if not state.get("connector_token") or state.get("status") in {"revoked", "invalid"}:
             return self.status()
-        remote = await self._gateway("GET", "/v1/connector/state")
+        try:
+            remote = await self._gateway("GET", "/v1/connector/state")
+        except RemoteWorkspaceDenied:
+            if self.store._state is not state:
+                return self.status()
+            raise
+        if self.store._state is not state:
+            return self.status()
         if remote.get("node_id") != state.get("node_id") or remote.get("scopes") != state.get("scopes"):
             raise RemoteWorkspaceDenied("Gateway changed node or scopes")
         if remote.get("status") in {"revoked", "expired"}:
-            self.store.revoke()
-            await self._close_connections()
+            await self._terminate(remote["status"])
             return self.status()
         if state.get("approved"):
             self.store.authorize(remote)
@@ -412,6 +535,7 @@ class RemoteWorkspaceConnector:
                     "status": "claimed",
                 }
             )
+        self.last_error = None
         return self.status()
 
     async def approve(self, account_id: str, grant_id: str) -> dict[str, Any]:
@@ -444,6 +568,9 @@ class RemoteWorkspaceConnector:
             self.store.revoke()
             await self.stop()
             if previous.get("connector_token"):
+                if self._cooldown_remaining():
+                    self.last_error = "Local access revoked; cloud notification postponed by gateway cooldown"
+                    return self.status()
                 own = self.gateway_http is None
                 client = self.gateway_http or httpx.AsyncClient(timeout=10, trust_env=False)
                 try:
@@ -460,6 +587,8 @@ class RemoteWorkspaceConnector:
             return self.status()
 
     async def start(self) -> None:
+        if await self._expire_if_due():
+            return
         if self._runner is None or self._runner.done():
             if self.store._state.get("connector_token") and self.store.status()["status"] in {
                 "pending",
@@ -496,6 +625,7 @@ class RemoteWorkspaceConnector:
                 await tunnel.close()
 
     async def _run(self) -> None:
+        self._failure_count = 0
         try:
             while self.store._state.get("connector_token"):
                 try:
@@ -504,14 +634,55 @@ class RemoteWorkspaceConnector:
                         return
                     if self.store._state.get("approved"):
                         await self._serve_tunnel()
+                        if not self.store._state.get("connector_token"):
+                            return
+                        raise OSError("Workspace tunnel ended")
                     else:
-                        await asyncio.sleep(2)
-                except (OSError, ValueError, httpx.HTTPError, TimeoutError, WebSocketException):
+                        self._failure_count = 0
+                        await self._sleep(2)
+                except InvalidStatus as exc:
+                    status = exc.response.status_code
+                    if status in {401, 410}:
+                        await self._terminate("revoked", str(RemoteWorkspaceGatewayError(status)))
+                        return
+                    if status == 403:
+                        # A pre-accept capacity close also appears as 403. Device HTTP state is authoritative.
+                        try:
+                            await self.refresh()
+                        except (ValueError, httpx.HTTPError, OSError, TimeoutError):
+                            pass
+                        if not self.store._state.get("connector_token") or await self._expire_if_due():
+                            return
+                    retry = (
+                        _retry_after(exc.response.headers.get("retry-after"), self.store.now())
+                        if status == 429
+                        else None
+                    )
+                    if retry:
+                        self._cooldown_until = self.store.now() + timedelta(seconds=retry)
                     self.last_error = "Workspace gateway is unavailable or rejected the connection"
                     await self._close_connections()
-                    await asyncio.sleep(3)
+                    self._failure_count += 1
+                    await self._retry_wait(self._failure_count)
+                except (OSError, ValueError, httpx.HTTPError, TimeoutError, WebSocketException):
+                    if not self.store._state.get("connector_token") or await self._expire_if_due():
+                        return
+                    self.last_error = "Workspace gateway is unavailable or rejected the connection"
+                    await self._close_connections()
+                    self._failure_count += 1
+                    await self._retry_wait(self._failure_count)
         finally:
             await self._close_connections()
+
+    async def _retry_wait(self, failures: int) -> None:
+        base = min(60, 3 * 2 ** min(failures - 1, 5))
+        delay = max(base + base * 0.25 * self._jitter(), self._cooldown_remaining())
+        state = self.store._state
+        deadlines = [_expiry(state["expires_at"])]
+        if state.get("status") == "pending" and state.get("pairing_expires_at"):
+            deadlines.append(_expiry(state["pairing_expires_at"]))
+        remaining = max(0, (min(deadlines) - self.store.now()).total_seconds())
+        await self._sleep(min(delay, remaining))
 
     async def _serve_tunnel(self) -> None:
         state = self.store._state
@@ -533,6 +704,7 @@ class RemoteWorkspaceConnector:
                 raise RemoteWorkspaceDenied("Tunnel hello is missing")
             self.online = True
             self.last_error = None
+            self._failure_count = 0
             send_lock = asyncio.Lock()
 
             async def send(message):
@@ -541,7 +713,11 @@ class RemoteWorkspaceConnector:
 
             async def heartbeat():
                 while True:
-                    await asyncio.sleep(5)
+                    await self._sleep(
+                        min(
+                            5, max(0, (_expiry(self.store._state.get("expires_at")) - self.store.now()).total_seconds())
+                        )
+                    )
                     self.store.authorize(identity)
                     await send({"type": "ping"})
 
@@ -564,7 +740,7 @@ class RemoteWorkspaceConnector:
                     if not isinstance(message, dict):
                         raise RemoteWorkspaceDenied("Tunnel message is invalid")
                     if message.get("type") == "revoked":
-                        self.store.revoke()
+                        await self._terminate("revoked")
                         return
                     await self.handle_message(message, send)
             finally:

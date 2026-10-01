@@ -9,10 +9,12 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from backend.client_widget_runtime import ClientWidgetRuntimeTicketError, client_runtime_origin
-from backend.remote_workspace import RemoteWorkspaceConnector, RemoteWorkspaceDenied
+from backend.remote_workspace import RemoteWorkspaceConnector, RemoteWorkspaceDenied, RemoteWorkspaceGatewayError
 
 
 class RemoteWorkspacePair(BaseModel):
@@ -22,12 +24,31 @@ class RemoteWorkspacePair(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     scopes: list[Literal["workspace.control", "workspace.manage"]] = Field(min_length=1, max_length=2)
     expires_in: int = Field(default=86400, ge=300, le=30 * 86400)
+    enrollment_token: SecretStr = Field(min_length=20, max_length=128, exclude=True, repr=False)
 
 
 class RemoteWorkspaceApprove(BaseModel):
     model_config = ConfigDict(extra="forbid")
     account_id: str = Field(min_length=1, max_length=256)
     grant_id: str = Field(min_length=1, max_length=256)
+
+
+class _SafeRemoteWorkspaceRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def safe_handler(request: Request):
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                raise HTTPException(422, detail="Check the enrollment token and connection settings") from None
+
+        return safe_handler
+
+
+def _gateway_failure(exc: RemoteWorkspaceGatewayError) -> HTTPException:
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+    return HTTPException(status_code=exc.status_code, detail=str(exc), headers=headers)
 
 
 def _require_local(request: Request) -> None:
@@ -49,7 +70,7 @@ def _require_local(request: Request) -> None:
 
 
 def create_remote_workspace_router(connector: Callable[[], RemoteWorkspaceConnector]) -> APIRouter:
-    router = APIRouter(prefix="/api/remote-workspace")
+    router = APIRouter(prefix="/api/remote-workspace", route_class=_SafeRemoteWorkspaceRoute)
 
     @router.get("/status")
     async def status(request: Request):
@@ -60,9 +81,13 @@ def create_remote_workspace_router(connector: Callable[[], RemoteWorkspaceConnec
     async def pair(request: Request, data: RemoteWorkspacePair):
         _require_local(request)
         try:
-            return await connector().pair(data.model_dump())
+            return await connector().pair(
+                {**data.model_dump(), "enrollment_token": data.enrollment_token.get_secret_value()}
+            )
+        except RemoteWorkspaceGatewayError as exc:
+            raise _gateway_failure(exc) from None
         except (RemoteWorkspaceDenied, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail="Check the enrollment token and connection settings") from None
         except (httpx.HTTPError, OSError) as exc:
             raise HTTPException(status_code=502, detail="Workspace gateway is unavailable") from exc
 
@@ -71,8 +96,13 @@ def create_remote_workspace_router(connector: Callable[[], RemoteWorkspaceConnec
         _require_local(request)
         try:
             return await connector().approve(data.account_id, data.grant_id)
+        except RemoteWorkspaceGatewayError as exc:
+            raise _gateway_failure(exc) from None
         except (RemoteWorkspaceDenied, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail="The claimed account or grant changed. Review the local connection before approving",
+            ) from None
         except (httpx.HTTPError, OSError) as exc:
             raise HTTPException(status_code=502, detail="Workspace gateway is unavailable") from exc
 

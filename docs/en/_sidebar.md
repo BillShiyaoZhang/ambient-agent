@@ -33,3 +33,7 @@
   - [LLM Providers and Models](/en/integrations/llm-providers.md)
   - [MCP Integration](/en/integrations/mcp.md)
   - [Permissions and Audit](/en/integrations/permissions.md)
+
+- **Verification Records**
+  - [First Remote Workspace Verification](/en/verification/remote-workspace.md)
+  - [Remote Workspace Handoff · 2026-10-01](/en/verification/remote-workspace-handoff-2026-10-01.md)

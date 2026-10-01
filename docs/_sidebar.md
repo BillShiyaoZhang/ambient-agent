@@ -33,3 +33,7 @@
   - [LLM Provider 与模型](/integrations/llm-providers.md)
   - [MCP 工具集成](/integrations/mcp.md)
   - [权限与审计](/integrations/permissions.md)
+
+- **验证记录**
+  - [远程工作区首版验收](/verification/remote-workspace.md)
+  - [远程工作区交接验收 · 2026-10-01](/verification/remote-workspace-handoff-2026-10-01.md)

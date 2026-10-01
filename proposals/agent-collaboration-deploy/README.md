@@ -1,5 +1,7 @@
 # Agent Collaboration 云入口建议包
 
+此目录是旧首版建议的历史快照。当前 Ambient 接入码适配使用 [2026-10-01 云交接分支](https://github.com/BillShiyaoZhang/agent-collaboration-deploy/tree/codex/ambient-workspace-review-20261001)，固定 Deploy `d6dd823f1b379440616a2dc2e866ce9d9bac7729`、Web `fa55096cc66f88f17f1b6191a5bc41d046cd08e8`。下面的旧分支及 bundle 仅供审阅首版历史；当前客户端与云端联调见 Ambient `docs/guide/remote-workspace.md`。
+
 此目录保存独立建议分支的改动，供原项目侧审阅、决定是否合并。Ambient 不使用 submodule，也不在运行时依赖此源代码。云端建议分支已发布到 GitHub，尚未合入云项目 `main`，也未部署；原 `agent-collaboration-deploy` 工作目录未修改。
 
 ## 改动内容

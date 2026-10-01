@@ -5,6 +5,7 @@ import base64
 import gzip
 import json
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 
 import httpx
 import pytest
@@ -12,6 +13,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from websockets.asyncio.client import connect as connect_local_socket
 from websockets.asyncio.server import serve
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response as WebSocketHandshakeResponse
 
 from backend.remote_workspace import (
     MAX_HTTP_BYTES,
@@ -25,6 +29,7 @@ from backend.remote_workspace_api import create_remote_workspace_router
 
 
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
+ENROLLMENT = "enrollment-once-secret-abcdefghijklmnopqrstuvwxyz"
 IDENTITY = {
     "node_id": "node-test",
     "account_id": "account-one",
@@ -69,6 +74,584 @@ def request_message(**updates):
         "body": "",
         **updates,
     }
+
+
+def pair_input(**updates):
+    return {
+        "gateway_url": "http://localhost:8787",
+        "portal_url": "http://localhost:3000",
+        "name": "My computer",
+        "scopes": ["workspace.control"],
+        "expires_in": 3600,
+        "enrollment_token": ENROLLMENT,
+        **updates,
+    }
+
+
+def pairing_response(**updates):
+    return {
+        "node_id": IDENTITY["node_id"],
+        "connector_token": "device-secret",
+        "pairing_code": "one-time-code",
+        "pairing_expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+        "workspace_origin": IDENTITY["workspace_origin"],
+        **updates,
+    }
+
+
+@pytest.mark.asyncio
+async def test_enrollment_sent_once_without_persisting_response_secret_or_unknown_fields(tmp_path, monkeypatch):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        return httpx.Response(200, json=pairing_response(enrollment_token=ENROLLMENT, unexpected="not-a-device-field"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+
+        async def no_background():
+            pass
+
+        monkeypatch.setattr(connector, "start", no_background)
+        status = await connector.pair(pair_input())
+    assert len(requests) == 1
+    assert json.loads(requests[0].content)["enrollment_token"] == ENROLLMENT
+    assert status["status"] == "pending" and not status["online"]
+    assert ENROLLMENT not in connector.store.path.read_text(encoding="utf-8")
+    assert "unexpected" not in connector.store._state
+    assert ENROLLMENT not in json.dumps(status)
+
+
+@pytest.mark.parametrize("update", [{"enrollment_token": None}, {"enrollment_token": "short"}, {"extra": ENROLLMENT}])
+def test_pair_api_requires_enrollment_and_sanitizes_validation_inputs(tmp_path, update):
+    class PairStub:
+        async def pair(self, data):
+            return {"status": "pending", "online": False, "scopes": []}
+
+    app = FastAPI()
+    app.include_router(create_remote_workspace_router(lambda: PairStub()))
+    payload = pair_input(**update)
+    if payload["enrollment_token"] is None:
+        del payload["enrollment_token"]
+    with TestClient(app, client=("127.0.0.1", 4444)) as client:
+        response = client.post("/api/remote-workspace/pair", json=payload)
+    assert response.status_code == 422
+    assert ENROLLMENT not in response.text and "short" not in response.text
+    assert "input" not in response.text
+
+
+def test_pair_api_sanitizes_untrusted_exception_text(tmp_path):
+    class PairStub:
+        async def pair(self, data):
+            raise ValueError(ENROLLMENT)
+
+    app = FastAPI()
+    app.include_router(create_remote_workspace_router(lambda: PairStub()))
+    with TestClient(app, client=("127.0.0.1", 4444)) as client:
+        response = client.post("/api/remote-workspace/pair", json=pair_input())
+    assert response.status_code == 422
+    assert ENROLLMENT not in response.text
+
+
+@pytest.mark.asyncio
+async def test_pending_poll_success_clears_previous_network_error(tmp_path, monkeypatch):
+    store = paired_store(tmp_path)
+    store.save(
+        {
+            **store._state,
+            "status": "pending",
+            "approved": False,
+            "pairing_expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        }
+    )
+    remote = {**IDENTITY, "status": "pending", "expires_at": store._state["expires_at"]}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=remote))
+    ) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client)
+        connector.last_error = "Workspace gateway is unavailable or rejected the connection"
+        assert (await connector.refresh())["last_error"] is None
+
+
+@pytest.mark.parametrize("status", [409, 422, 429, 410])
+def test_pair_api_preserves_safe_gateway_error_and_retry_after(tmp_path, status):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        return httpx.Response(status, json={"detail": ENROLLMENT}, headers={"Retry-After": "45"})
+
+    async def call_pair(data):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as gateway_client:
+            connector = RemoteWorkspaceConnector(
+                RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=gateway_client
+            )
+            return await connector.pair(data)
+
+    class PairStub:
+        pair = staticmethod(call_pair)
+
+    app = FastAPI()
+    app.include_router(create_remote_workspace_router(lambda: PairStub()))
+    with TestClient(app, client=("127.0.0.1", 4444)) as client:
+        response = client.post("/api/remote-workspace/pair", json=pair_input())
+    assert response.status_code == status
+    assert isinstance(response.json()["detail"], str)
+    assert ENROLLMENT not in response.text
+    assert response.headers.get("retry-after") == ("45" if status == 429 else None)
+    assert len(requests) == 1
+    assert ENROLLMENT not in (tmp_path / ".ambient/remote-workspace/node.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 410])
+async def test_terminal_device_response_clears_permission_and_stops_polling(tmp_path, status):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        return httpx.Response(status, json={"detail": "private gateway rejection"})
+
+    socket = LocalSocket()
+    task = asyncio.create_task(asyncio.sleep(60))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(paired_store(tmp_path), gateway_http=client)
+        connector._ws["request-one"] = (socket, task, request_message())
+        with pytest.raises(ValueError):
+            await connector.refresh()
+        assert socket.closed and not connector.online
+        assert connector.status()["status"] == "revoked"
+        assert "connector_token" not in connector.store._state
+        assert "device-secret" not in connector.store.path.read_text(encoding="utf-8")
+        assert "private gateway rejection" not in json.dumps(connector.status())
+        await connector.start()
+        await connector.refresh()
+    assert len(requests) == 1
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["pending", "claimed", "paired"])
+async def test_local_grant_and_pending_code_expiry_stop_before_gateway_request(tmp_path, state):
+    store = paired_store(tmp_path)
+    store.save(
+        {
+            **store._state,
+            "status": state,
+            "pairing_expires_at": (NOW - timedelta(seconds=1)).isoformat(),
+            "expires_at": (NOW - timedelta(seconds=1)).isoformat()
+            if state != "pending"
+            else (NOW + timedelta(hours=1)).isoformat(),
+        }
+    )
+    calls = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request))) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client)
+        await connector.start()
+        await asyncio.sleep(0)
+        await connector.refresh()
+        await connector.stop()
+    assert calls == []
+    assert store.status()["status"] == "expired"
+    assert "connector_token" not in store._state
+
+
+@pytest.mark.asyncio
+async def test_cloud_expiry_preserves_expired_status_and_removes_device_credential(tmp_path):
+    remote = {**IDENTITY, "status": "expired", "expires_at": (NOW - timedelta(seconds=1)).isoformat()}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=remote))
+    ) as client:
+        connector = RemoteWorkspaceConnector(paired_store(tmp_path), gateway_http=client)
+        assert (await connector.refresh())["status"] == "expired"
+    assert "connector_token" not in connector.store._state
+
+
+@pytest.mark.asyncio
+async def test_runner_backoff_grows_and_success_resets_without_replaying_requests(tmp_path):
+    current = [NOW]
+    delays, requests = [], []
+    responses = iter([500, 500, 200, 500, 401])
+    store = paired_store(tmp_path)
+    store.now = lambda: current[0]
+    store.save(
+        {
+            **store._state,
+            "status": "pending",
+            "approved": False,
+            "pairing_expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        }
+    )
+
+    def gateway(request):
+        requests.append(request)
+        status = next(responses)
+        remote = {**IDENTITY, "status": "pending", "expires_at": store._state["expires_at"]}
+        return httpx.Response(status, json=remote)
+
+    async def sleep(delay):
+        delays.append(delay)
+        current[0] += timedelta(seconds=delay)
+        await asyncio.sleep(0)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client, sleep=sleep, jitter=lambda: 0)
+        await connector.start()
+        try:
+            await asyncio.wait_for(connector._runner, timeout=1)
+        finally:
+            await connector.stop()
+    assert delays == [3, 6, 2, 3]
+    assert [request.method for request in requests] == ["GET"] * 5
+    assert store.status()["status"] == "revoked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_after", ["45", format_datetime(NOW + timedelta(seconds=45), usegmt=True)])
+async def test_retry_after_blocks_early_device_calls_but_local_revoke_is_immediate(tmp_path, retry_after):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        return httpx.Response(429, json={"detail": ENROLLMENT}, headers={"Retry-After": retry_after})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(paired_store(tmp_path), gateway_http=client)
+        with pytest.raises(ValueError):
+            await connector.refresh()
+        assert connector.status()["retry_after"] == 45
+        with pytest.raises(ValueError):
+            await connector.approve("account-one", "grant-one")
+        assert len(requests) == 1
+        assert (await connector.revoke())["status"] == "revoked"
+        assert "connector_token" not in connector.store._state
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_after", ["-1", "100000000", "wrong", '"45"'])
+async def test_untrusted_retry_after_is_not_reflected_in_public_status(tmp_path, retry_after):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, headers={"Retry-After": retry_after}))
+    ) as client:
+        connector = RemoteWorkspaceConnector(paired_store(tmp_path), gateway_http=client)
+        with pytest.raises(ValueError):
+            await connector.refresh()
+        assert connector.status().get("retry_after", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_lost_pair_response_does_not_retry_create_or_start_transport(tmp_path):
+    calls = []
+
+    def gateway(request):
+        calls.append(request)
+        raise httpx.ReadError("response lost")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+        with pytest.raises(httpx.ReadError):
+            await connector.pair(pair_input())
+        await connector.start()
+        await asyncio.sleep(0)
+        await connector.stop()
+    assert len(calls) == 1 and calls[0].method == "POST"
+    assert "connector_token" not in connector.store._state
+    assert ENROLLMENT not in connector.store.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_paired_failed_tunnel_handshakes_use_exponential_backoff_until_terminal(tmp_path):
+    current, delays, attempts = [NOW], [], []
+    statuses = iter([503, 503, 401])
+    store = paired_store(tmp_path)
+    store.now = lambda: current[0]
+    remote = {**IDENTITY, "status": "paired", "expires_at": store._state["expires_at"]}
+
+    class RejectedHandshake:
+        async def __aenter__(self):
+            status = next(statuses)
+            attempts.append(status)
+            raise InvalidStatus(WebSocketHandshakeResponse(status, "Rejected", Headers()))
+
+        async def __aexit__(self, *args):
+            pass
+
+    async def sleep(delay):
+        delays.append(delay)
+        current[0] += timedelta(seconds=delay)
+        await asyncio.sleep(0)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=remote))
+    ) as client:
+        connector = RemoteWorkspaceConnector(
+            store,
+            gateway_http=client,
+            tunnel_connect=lambda *args, **kwargs: RejectedHandshake(),
+            sleep=sleep,
+            jitter=lambda: 0,
+        )
+        await connector.start()
+        runner = connector._runner
+        try:
+            await asyncio.wait_for(runner, timeout=1)
+        finally:
+            await connector.stop()
+    assert attempts == [503, 503, 401]
+    assert delays == [3, 6]
+    assert store.status()["status"] == "revoked" and "connector_token" not in store._state
+
+
+@pytest.mark.asyncio
+async def test_live_tunnel_grant_expiry_closes_existing_resources_and_stops_runner(tmp_path):
+    current = [NOW]
+    store = paired_store(tmp_path)
+    store.now = lambda: current[0]
+    store.save({**store._state, "expires_at": (NOW + timedelta(seconds=2)).isoformat()})
+    remote = {**IDENTITY, "status": "paired", "expires_at": store._state["expires_at"]}
+    tunnel = TunnelSocket()
+    socket = LocalSocket()
+    request_task = asyncio.create_task(asyncio.sleep(60))
+
+    async def sleep(delay):
+        current[0] += timedelta(seconds=delay)
+        await asyncio.sleep(0)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=remote))
+    ) as client:
+        connector = RemoteWorkspaceConnector(
+            store, gateway_http=client, tunnel_connect=lambda *args, **kwargs: tunnel, sleep=sleep
+        )
+        connector._ws["request-one"] = (socket, request_task, request_message())
+        await connector.start()
+        runner = connector._runner
+        try:
+            await asyncio.wait_for(runner, timeout=1)
+        finally:
+            await connector.stop()
+    assert store.status()["status"] == "expired" and "connector_token" not in store._state
+    assert socket.closed and not connector.online and tunnel.receives == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_obeys_retry_after_and_adds_positive_jitter(tmp_path):
+    current, delays, calls = [NOW], [], []
+    statuses = iter([500, 429, 401])
+    store = paired_store(tmp_path)
+    store.now = lambda: current[0]
+
+    def gateway(request):
+        calls.append(request)
+        return httpx.Response(next(statuses), headers={"Retry-After": "45"})
+
+    async def sleep(delay):
+        delays.append(delay)
+        current[0] += timedelta(seconds=delay)
+        await asyncio.sleep(0)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client, sleep=sleep, jitter=lambda: 1)
+        await connector.start()
+        runner = connector._runner
+        try:
+            await asyncio.wait_for(runner, timeout=1)
+        finally:
+            await connector.stop()
+    assert delays == [3.75, 45]
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "revoke"])
+async def test_late_claimed_refresh_cannot_undo_local_approval_or_revocation(tmp_path, monkeypatch, action):
+    store = paired_store(tmp_path)
+    store.save({**store._state, "status": "claimed", "approved": False})
+    claimed = {**IDENTITY, "status": "claimed", "expires_at": store._state["expires_at"]}
+    entered, release = asyncio.Event(), asyncio.Event()
+    state_requests = 0
+
+    async def gateway(request):
+        nonlocal state_requests
+        if request.url.path.endswith("/state"):
+            state_requests += 1
+            if state_requests == 1:
+                entered.set()
+                await release.wait()
+            return httpx.Response(200, json=claimed)
+        if request.url.path.endswith("/approve"):
+            return httpx.Response(200, json={**claimed, "status": "paired"})
+        assert request.url.path.endswith("/revoke")
+        return httpx.Response(200, json={"status": "revoked"})
+
+    async def no_background():
+        pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client)
+        monkeypatch.setattr(connector, "start", no_background)
+        late_refresh = asyncio.create_task(connector.refresh())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        try:
+            if action == "approve":
+                assert (await connector.approve("account-one", "grant-one"))["status"] == "paired"
+            else:
+                assert (await connector.revoke())["status"] == "revoked"
+            current_state = store._state
+        finally:
+            release.set()
+        result = await asyncio.wait_for(late_refresh, timeout=1)
+    assert store._state is current_state
+    assert result["status"] == ("paired" if action == "approve" else "revoked")
+    assert (store._state.get("approved") is True) == (action == "approve")
+    if action == "revoke":
+        assert "connector_token" not in store._state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_status", [401, 403, 410])
+async def test_old_terminal_response_cannot_terminate_replacement_pairing(tmp_path, monkeypatch, late_status):
+    store = paired_store(tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+    requests = []
+
+    async def gateway(request):
+        requests.append(request)
+        if request.url.path.endswith("/state"):
+            assert request.headers["authorization"] == "Bearer device-secret"
+            entered.set()
+            await release.wait()
+            return httpx.Response(late_status, json={"detail": "old credential rejected"})
+        if request.url.path.endswith("/revoke"):
+            return httpx.Response(200, json={"status": "revoked"})
+        assert request.url.path.endswith("/pairings")
+        return httpx.Response(
+            200,
+            json=pairing_response(
+                node_id="new-node",
+                connector_token="new-device-secret",
+                workspace_origin="http://new-node.localhost:8787",
+            ),
+        )
+
+    async def no_background():
+        pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client)
+        monkeypatch.setattr(connector, "start", no_background)
+        late_refresh = asyncio.create_task(connector.refresh())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        try:
+            await connector.revoke()
+            assert (await connector.pair(pair_input()))["status"] == "pending"
+            replacement = store._state
+        finally:
+            release.set()
+        result = await asyncio.wait_for(late_refresh, timeout=1)
+    assert store._state is replacement
+    assert result["status"] == "pending" and result["node_id"] == "new-node"
+    assert store._state["connector_token"] == "new-device-secret"
+    assert len([request for request in requests if request.method == "POST"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe_failure", [None, 500, 429, "network"])
+async def test_capacity_tunnel_403_preserves_paired_identity_and_recovers_after_backoff(tmp_path, probe_failure):
+    current, delays, requests, attempts = [NOW], [], [], []
+    store = paired_store(tmp_path)
+    store.now = lambda: current[0]
+    approved_identity = store.identity()
+    remote = {**IDENTITY, "status": "paired", "expires_at": store._state["expires_at"]}
+    online, block_heartbeat = asyncio.Event(), asyncio.Event()
+    state_requests = 0
+
+    async def gateway(request):
+        nonlocal state_requests
+        requests.append(request)
+        assert request.method == "GET"
+        state_requests += 1
+        if state_requests == 2 and probe_failure is not None:
+            if probe_failure == "network":
+                raise httpx.ConnectError("temporary state lookup failure")
+            return httpx.Response(probe_failure, headers={"Retry-After": "45"})
+        return httpx.Response(200, json=remote)
+
+    class CapacityHandshake:
+        async def __aenter__(self):
+            attempts.append(1)
+            if len(attempts) <= 2:
+                raise InvalidStatus(WebSocketHandshakeResponse(403, "Forbidden", Headers()))
+            self.tunnel = TunnelSocket()
+            return self.tunnel
+
+        async def __aexit__(self, *args):
+            await self.tunnel.close()
+
+    async def sleep(delay):
+        if connector.online:
+            online.set()
+            await block_heartbeat.wait()
+        else:
+            delays.append(delay)
+            current[0] += timedelta(seconds=delay)
+            await asyncio.sleep(0)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(
+            store,
+            gateway_http=client,
+            tunnel_connect=lambda *args, **kwargs: CapacityHandshake(),
+            sleep=sleep,
+            jitter=lambda: 0,
+        )
+        await connector.start()
+        try:
+            await asyncio.wait_for(online.wait(), timeout=1)
+            assert connector.online and store.identity() == approved_identity
+            assert store._state["connector_token"] == "device-secret"
+            assert delays == ([45, 6] if probe_failure == 429 else [3, 6])
+        finally:
+            await connector.stop()
+    assert len(attempts) == 3
+    assert len(requests) == 5
+    assert store.status()["status"] == "paired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe_status", [401, 403, 410])
+async def test_tunnel_403_with_invalid_device_state_stops_and_clears_permission(tmp_path, probe_status):
+    calls = []
+    remote = {**IDENTITY, "status": "paired", "expires_at": (NOW + timedelta(hours=1)).isoformat()}
+
+    def gateway(request):
+        calls.append(request)
+        return httpx.Response(200, json=remote) if len(calls) == 1 else httpx.Response(probe_status)
+
+    class RejectedHandshake:
+        async def __aenter__(self):
+            raise InvalidStatus(WebSocketHandshakeResponse(403, "Forbidden", Headers()))
+
+        async def __aexit__(self, *args):
+            pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(
+            paired_store(tmp_path), gateway_http=client, tunnel_connect=lambda *args, **kwargs: RejectedHandshake()
+        )
+        await connector.start()
+        runner = connector._runner
+        try:
+            await asyncio.wait_for(runner, timeout=1)
+        finally:
+            await connector.stop()
+    assert len(calls) == 2
+    assert connector.status()["status"] == "revoked"
+    assert "connector_token" not in connector.store._state
 
 
 def test_persistent_state_hides_credential_and_fails_closed_after_expiry(tmp_path):
@@ -354,6 +937,7 @@ async def test_pair_claim_local_approve_and_revoke_with_offline_cloud(tmp_path, 
                 "name": "My computer",
                 "scopes": ["workspace.control"],
                 "expires_in": 3600,
+                "enrollment_token": ENROLLMENT,
             }
         )
         assert status["status"] == "pending" and status["pairing_code"] == "one-time"
@@ -396,6 +980,7 @@ async def test_pair_gateway_cannot_extend_locally_requested_expiry(tmp_path, mon
                     "name": "Node",
                     "scopes": ["workspace.control"],
                     "expires_in": 3600,
+                    "enrollment_token": ENROLLMENT,
                 }
             )
 
@@ -620,6 +1205,7 @@ def test_local_management_api_rejects_remote_peer_and_never_discloses_secret(tmp
                     "name": "Node",
                     "scopes": ["workspace.control"],
                     "expires_in": 3600,
+                    "enrollment_token": ENROLLMENT,
                 },
             ).status_code
             == 422
