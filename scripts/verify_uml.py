@@ -60,6 +60,8 @@ CLASS_TO_FILE = {
     "SkillMarket": "backend/skill_market.py",
     "SkillManager": "backend/skill_manager.py",
     "SkillStore": "backend/skill_store.py",
+    "RemoteWorkspaceNodeStore": "backend/remote_workspace.py",
+    "RemoteWorkspaceConnector": "backend/remote_workspace.py",
 }
 
 

@@ -1,6 +1,7 @@
 - **从这里开始**
   - [项目介绍](/guide/introduction.md)
   - [快速开始](/guide/quick-start.md)
+  - [远程连接工作区](/guide/remote-workspace.md)
   - [项目结构](/architecture/project-structure.md)
 
 - **理解系统**
@@ -14,6 +15,7 @@
   - [持久 Run 与 Runtime](/architecture/runs.md)
   - [图数据库](/architecture/graph-db.md)
   - [图数据可视化](/architecture/graph-visualization.md)
+  - [云入口与本地工作区](/architecture/remote-workspace.md)
   - [后端 UML](/architecture/uml.md)
 
 - **智能体引擎**

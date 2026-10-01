@@ -157,3 +157,7 @@ Plan, schema, verification, and MCP/Agent permission all use Run interactions ra
 ## 6. Deterministic evaluation
 
 `RunStoreTraceAdapter` derives `EvaluationTrace` from real Runs, step attempts, canonical events, and LLM audit records, including unsafe trajectory signals from unknown effects, policy violations, and unapproved effectful tools. Scripted CI scenarios execute through production `RunCoordinator + DurableAgentWorkflow`; reported metrics cover outcome/trajectory, success rate, unsafe action rate, tool calls, tokens, cost, latency, and recovery rate. Real-model scenarios remain separate and require at least three repetitions.
+
+## 7. Remote workspace entry
+
+`RemoteWorkspaceConnector` provides bounded transport into the local frontend and API and uses `RemoteWorkspaceNodeStore` to persist and verify local grants. It preserves `RunCoordinator`, tool effects, approvals, and recovery semantics. The cloud platform claims nodes, issues single-use entry links, and relays traffic. Remote requests enter the existing local API and Run paths and remain subject to the same application, capability, and durable execution boundaries. See the [remote workspace design](../architecture/remote-workspace.md) for scopes and protocol.

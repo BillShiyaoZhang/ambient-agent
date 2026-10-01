@@ -3,6 +3,8 @@
 .devcontainer
 .venv
 .tmp-uv-cache
+.cache
+proposals
 .agents
 .codex
 .aws

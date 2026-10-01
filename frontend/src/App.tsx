@@ -17,6 +17,7 @@ import { AgentChatOverlay } from "./components/AgentChatOverlay";
 import type { RunInteractionAction } from "./components/ChatRunCard";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { LLMSettingsDialog } from "./components/LLMSettings";
+import { RemoteWorkspaceDialog } from "./components/RemoteWorkspace";
 import { SystemDialog, SystemIconButton } from "./components/system/SystemUI";
 import { createThemeController, type ThemeSnapshot } from "./services/theme";
 import { EMPTY_CANVAS, migrateCanvasConfig, type CanvasConfigV3 } from "./lib/windowManager";
@@ -43,7 +44,7 @@ import {
   type WidgetSchemaProposal,
 } from "./lib/widgetDesign";
 import { schemaProposalToGraph } from "./lib/graphScenes";
-import { Languages, ListTodo, Moon, Network, Settings2, ShieldCheck, Sun } from "lucide-react";
+import { Cloud, Languages, ListTodo, Moon, Network, Settings2, ShieldCheck, Sun } from "lucide-react";
 import { runService, type AmbientRun } from "./services/runs";
 import {
   clearCodingAgentAuth,
@@ -71,10 +72,11 @@ import {
   type ModelSelection,
   type ProviderPreset,
 } from "./services/llm";
-import { getApiBaseUrl, webSocketUrl } from "./services/apiBase";
+import { getApiBaseUrl, getRemoteWorkspaceContext, webSocketUrl } from "./services/apiBase";
 import type { SocketConnectionState } from "./services/socketReconnect";
 
 const API_BASE = getApiBaseUrl();
+const IS_REMOTE_WORKSPACE = getRemoteWorkspaceContext() !== null;
 
 const AppWorkspace = lazy(async () => {
   const module = await import("./components/AppWorkspace");
@@ -185,6 +187,7 @@ function App() {
     },
   });
   const [isLLMSettingsOpen, setIsLLMSettingsOpen] = useState(false);
+  const [isRemoteWorkspaceOpen, setIsRemoteWorkspaceOpen] = useState(false);
   const [commandConnectionState, setCommandConnectionState] = useState<SocketConnectionState>("disconnected");
   const [runConnectionState, setRunConnectionState] = useState<SocketConnectionState | null>(null);
   const [runLiveConnectionState, setRunLiveConnectionState] = useState<SocketConnectionState | null>(null);
@@ -1158,6 +1161,7 @@ function App() {
         <SystemIconButton label={language === "zh" ? "图谱探索" : "Graph Explorer"} onClick={() => setIsGraphOpen(true)}><Network size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "审计日志" : "Audit log"} onClick={() => setIsAuditOpen(true)}><ShieldCheck size={17} /></SystemIconButton>
         <SystemIconButton label={language === "zh" ? "模型与 Provider" : "Models & Providers"} onClick={() => { setIsLLMSettingsOpen(true); void refreshLLMConfiguration(); }}><Settings2 size={17} /></SystemIconButton>
+        {!IS_REMOTE_WORKSPACE ? <SystemIconButton label={language === "zh" ? "连接云平台" : "Connect a cloud platform"} onClick={() => setIsRemoteWorkspaceOpen(true)}><Cloud size={17} /></SystemIconButton> : null}
         <SystemIconButton label={language === "zh" ? "切换为英文" : "Switch to Chinese"} onClick={() => handleLanguageChange(language === "zh" ? "en" : "zh")}><Languages size={17} /></SystemIconButton>
         <label className="system-theme-select" aria-label={language === "zh" ? "主题" : "Theme"}>
           {theme.effective === "dark" ? <Moon size={16} /> : <Sun size={16} />}
@@ -1267,6 +1271,8 @@ function App() {
         onClearCodingAgentAuth={(agentId) => clearCodingAgentAuth(API_BASE, agentId)}
         onUpdateCodingAgentModel={(agentId, config) => updateCodingAgentModel(API_BASE, agentId, config)}
       />
+
+      {!IS_REMOTE_WORKSPACE ? <RemoteWorkspaceDialog open={isRemoteWorkspaceOpen} language={language} onClose={() => setIsRemoteWorkspaceOpen(false)} /> : null}
 
       {/* Audit Log Panel Overlay */}
       <AuditLogPanel

@@ -362,3 +362,34 @@ ACP 是唯一的代码生成 orchestration 边界。内置 Adapter 只声明受�
 OpenCode CLI 由系统镜像提供；Codex 只有在用户选择安装时才下载到独立持久卷。Codex 的安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
 
 Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。
+
+## 本地工作区远程入口
+云入口只管理账户、节点和授权。Connector 主动连接 Gateway，逐次验证本机批准的账户、grant、范围与期限，再将有界 HTTP / WebSocket 流量发送到固定 loopback 服务。撤销先在本机关闭转发和连接。Run、App、Graph 与 Widget 的执行和数据仍由本地工作区管理。
+
+```mermaid
+classDiagram
+    class RemoteWorkspaceNodeStore {
+        +path
+        +now
+        +save(state)
+        +status()
+        +identity()
+        +authorize(message)
+        +revoke()
+    }
+    class RemoteWorkspaceConnector {
+        +store
+        +online
+        +last_error
+        +status()
+        +pair(data)
+        +refresh()
+        +approve(account_id, grant_id)
+        +revoke()
+        +start()
+        +stop()
+        +handle_http(message)
+        +handle_message(message, send)
+    }
+    RemoteWorkspaceConnector --> RemoteWorkspaceNodeStore : verifies each request
+```

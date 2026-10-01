@@ -1,0 +1,14 @@
+.remote-workspace-body { display: grid; gap: 14px; }
+.remote-workspace-body p { margin: 0; line-height: 1.6; }
+.remote-workspace-body form { display: grid; gap: 14px; }
+.remote-workspace-body label { display: grid; gap: 7px; font-size: 13px; }
+.remote-workspace-body input:not([type="checkbox"]), .remote-workspace-body select { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; color: var(--text-primary); background: var(--window-surface); }
+.remote-workspace-body button { cursor: pointer; padding: 10px 14px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--window-surface); color: var(--text-primary); }
+.remote-workspace-body button:disabled { cursor: wait; opacity: .6; }
+.remote-workspace-body a { color: var(--accent, #6366f1); }
+.remote-workspace-status { font-weight: 600; }
+.remote-workspace-hint { color: var(--text-muted); font-size: 12px; }
+.remote-workspace-body .remote-workspace-check { display: flex; align-items: center; gap: 8px; }
+.remote-workspace-grant { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border-subtle); border-radius: 10px; }
+.remote-workspace-error, .remote-workspace-body .remote-workspace-revoke { color: #dc5656; }
+.remote-workspace-close { justify-self: end; }

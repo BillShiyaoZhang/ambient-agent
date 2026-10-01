@@ -55,6 +55,7 @@ services:
       # Browser traffic reaches Uvicorn through Docker's bridge gateway while
       # the published Backend port remains loopback-only on the Host.
       AMBIENT_TRUSTED_HOST_PEERS: ${AMBIENT_TRUSTED_HOST_PEERS:-172.16.0.0/12}
+      AMBIENT_REMOTE_UPSTREAM_MODE: docker
       WIDGET_RUNTIME_SOCKET_PATH: /run/ambient-widget-runtime/runtime.sock
       WIDGET_RUNTIME_SMOKE_ENABLED: ${WIDGET_RUNTIME_SMOKE_ENABLED:-1}
     security_opt:

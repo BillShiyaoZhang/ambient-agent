@@ -372,3 +372,34 @@ ACP is the only code-generation orchestration boundary. A built-in adapter decla
 The system image supplies the OpenCode CLI. Codex is downloaded to a dedicated persistent volume only after the user requests installation. Codex installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
 
 Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.
+
+## Remote entry to the local workspace
+The cloud entry manages accounts, nodes, and grants. The Connector connects outbound to the Gateway and checks the locally approved account, grant, scopes, and expiry for each request before forwarding bounded HTTP / WebSocket traffic to fixed loopback services. Revocation closes local forwarding and connections first. Runs, Apps, Graph, and Widgets still execute and store data in the local workspace.
+
+```mermaid
+classDiagram
+    class RemoteWorkspaceNodeStore {
+        +path
+        +now
+        +save(state)
+        +status()
+        +identity()
+        +authorize(message)
+        +revoke()
+    }
+    class RemoteWorkspaceConnector {
+        +store
+        +online
+        +last_error
+        +status()
+        +pair(data)
+        +refresh()
+        +approve(account_id, grant_id)
+        +revoke()
+        +start()
+        +stop()
+        +handle_http(message)
+        +handle_message(message, send)
+    }
+    RemoteWorkspaceConnector --> RemoteWorkspaceNodeStore : verifies each request
+```

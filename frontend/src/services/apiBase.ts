@@ -6,6 +6,26 @@ export interface BrowserLocation {
 
 const withoutTrailingSlashes = (value: string) => value.replace(/\/+$/, "");
 
+export interface RemoteWorkspaceContext {
+  apiBaseUrl: string;
+  nodeId: string;
+}
+
+declare global {
+  interface Window {
+    __AMBIENT_REMOTE__?: RemoteWorkspaceContext;
+  }
+}
+
+export function getRemoteWorkspaceContext(): RemoteWorkspaceContext | null {
+  const context = window.__AMBIENT_REMOTE__;
+  if (context === undefined) return null;
+  if (context.apiBaseUrl !== "/" || !/^[a-zA-Z0-9-]{1,80}$/.test(context.nodeId)) {
+    throw new Error("Invalid remote workspace routing configuration");
+  }
+  return context;
+}
+
 export function resolveApiBaseUrl(
   configured: string | undefined,
   location: BrowserLocation = window.location,
@@ -25,6 +45,7 @@ export function resolveApiBaseUrl(
 }
 
 export function getApiBaseUrl(): string {
+  if (getRemoteWorkspaceContext()) return withoutTrailingSlashes(window.location.origin);
   return resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL, window.location);
 }
 

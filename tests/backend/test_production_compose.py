@@ -58,6 +58,11 @@ def test_backend_uses_init_to_reap_coding_agent_and_mcp_children() -> None:
     assert backend["init"] is True
 
 
+def test_backend_remote_connector_uses_fixed_docker_service_targets() -> None:
+    backend = _compose("docker-compose.yml")["services"]["backend"]
+    assert backend["environment"]["AMBIENT_REMOTE_UPSTREAM_MODE"] == "docker"
+
+
 def test_production_compose_does_not_mount_project_source_or_dependencies() -> None:
     services = _compose("docker-compose.yml")["services"]
     mounts = [mount for service in services.values() for mount in service.get("volumes", [])]

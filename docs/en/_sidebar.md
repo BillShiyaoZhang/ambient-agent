@@ -1,6 +1,7 @@
 - **Start Here**
   - [Introduction](/en/guide/introduction.md)
   - [Quick Start](/en/guide/quick-start.md)
+  - [Remote Workspace Access](/en/guide/remote-workspace.md)
   - [Project Structure](/en/architecture/project-structure.md)
 
 - **Understand the System**
@@ -14,6 +15,7 @@
   - [Durable Runs and Runtimes](/en/architecture/runs.md)
   - [Graph Database](/en/architecture/graph-db.md)
   - [Graph Data Visualization](/en/architecture/graph-visualization.md)
+  - [Cloud Entry and Local Workspaces](/en/architecture/remote-workspace.md)
   - [Backend UML](/en/architecture/uml.md)
 
 - **Agent Engine**

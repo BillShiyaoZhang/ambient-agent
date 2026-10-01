@@ -151,3 +151,7 @@ Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction�
 ## 6. 确定性评测
 
 `RunStoreTraceAdapter` 从真实 Run、step attempt、canonical event 和 LLM audit 生成 `EvaluationTrace`，并从未知 effect、policy violation 和未批准 effectful tool 等持久信号推导 unsafe trajectory。CI 的 scripted fake 场景走生产 `RunCoordinator + DurableAgentWorkflow`；指标同时包含 outcome/trajectory、成功率、unsafe action rate、tool calls、tokens、cost、latency 与恢复率。真实模型场景仍要求至少三次重复，且与确定性门禁分开运行。
+
+## 7. 远程工作区入口
+
+`RemoteWorkspaceConnector` 是本地前台与 API 的受限传输入口，使用 `RemoteWorkspaceNodeStore` 保存并验证本机授权。它不改变 `RunCoordinator`、tool effect、审批或恢复语义。云平台只领取节点、签发一次性入口并中转；远程请求进入原有本地 API 和 Run 路径，仍受相同应用、能力和持久执行边界约束。完整范围和协议见 [远程工作区设计](../architecture/remote-workspace.md)。

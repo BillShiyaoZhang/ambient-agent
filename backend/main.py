@@ -63,6 +63,8 @@ from backend.client_widget_runtime import (
     client_runtime_origin,
 )
 from backend.models import ChatMessage, ChatSession
+from backend.remote_workspace import RemoteWorkspaceConnector, RemoteWorkspaceNodeStore
+from backend.remote_workspace_api import create_remote_workspace_router
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
 from backend.llm_discovery import discover_models, test_provider
 from backend.llm_service import set_default_llm_store
@@ -188,6 +190,7 @@ app_manager = AppManager()
 
 # Initialize workspace storage
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "workspace")
+remote_workspace_connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(WORKSPACE_DIR))
 app_data_source_gateway = AppDataSourceGateway(app_manager, WORKSPACE_DIR)
 db_storage = WorkspaceStorage(WORKSPACE_DIR)
 llm_config_store = LLMConfigStore(WORKSPACE_DIR)
@@ -541,11 +544,13 @@ async def lifespan(app: FastAPI):
             if active_data.get("capability_catalog_id"):
                 app_store.generating_ids.add(str(active_data["capability_catalog_id"]))
         await run_coordinator.start()
+        await remote_workspace_connector.start()
         yield
     except BaseException as exc:
         primary_error = exc
         raise
     finally:
+        await remote_workspace_connector.stop()
         cleanup_errors = await _shutdown_application_resources()
         if cleanup_errors:
             if primary_error is not None:
@@ -565,6 +570,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ambient Agent API", lifespan=lifespan)
+app.include_router(create_remote_workspace_router(lambda: remote_workspace_connector))
 
 
 @app.exception_handler(WorkspaceStorageCorruptionError)
