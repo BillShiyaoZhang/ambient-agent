@@ -34,23 +34,62 @@ _BYTE_LIMIT = 2 * 1024 * 1024
 _INPUT_LIMIT = 512 * 1024
 _MESSAGE_LIMIT = 1024
 _ITEM_LIMIT = 64
-_REJECTION_REASONS = frozenset({
-    "configuration", "model_metadata", "input_limit", "output_limit", "native_item", "native_notification",
-    "known_upstream_error", "callback", "protocol", "thread_policy", "identity", "final_output",
-})
+_REJECTION_REASONS = frozenset(
+    {
+        "configuration",
+        "model_metadata",
+        "input_limit",
+        "output_limit",
+        "native_item",
+        "native_notification",
+        "known_upstream_error",
+        "callback",
+        "protocol",
+        "thread_policy",
+        "identity",
+        "final_output",
+    }
+)
 _BUNDLED_BWRAP_WARNING = (
     "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. "
     "See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. "
     "Codex will use the bundled bubblewrap in the meantime."
 )
 _DISABLED_FEATURES = (
-    "shell_tool", "multi_agent", "multi_agent_v2", "apps", "enable_mcp_apps", "plugins", "remote_plugin",
-    "tool_suggest", "hooks", "memories", "goals", "image_generation", "standalone_web_search",
-    "skill_mcp_dependency_install", "skill_search", "deferred_executor", "request_permissions_tool",
-    "token_budget", "current_time_reminder", "executor_capability_discovery", "code_mode_host",
-    "in_app_browser", "browser_use", "browser_use_full_cdp_access", "browser_use_external", "computer_use",
-    "artifact", "workspace_dependencies", "chronicle", "external_agent_memory_import", "network_proxy",
-    "default_mode_request_user_input", "guardian_approval", "realtime_conversation",
+    "shell_tool",
+    "multi_agent",
+    "multi_agent_v2",
+    "apps",
+    "enable_mcp_apps",
+    "plugins",
+    "remote_plugin",
+    "tool_suggest",
+    "hooks",
+    "memories",
+    "goals",
+    "image_generation",
+    "standalone_web_search",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "deferred_executor",
+    "request_permissions_tool",
+    "token_budget",
+    "current_time_reminder",
+    "executor_capability_discovery",
+    "code_mode_host",
+    "in_app_browser",
+    "browser_use",
+    "browser_use_full_cdp_access",
+    "browser_use_external",
+    "computer_use",
+    "artifact",
+    "workspace_dependencies",
+    "chronicle",
+    "external_agent_memory_import",
+    "network_proxy",
+    "default_mode_request_user_input",
+    "guardian_approval",
+    "realtime_conversation",
 )
 _SAFE_CONFIG: dict[str, Any] = {
     "approval_policy": "never",
@@ -88,7 +127,13 @@ def _error(code: str = "llm_provider_error", *, reason: str | None = None) -> LL
         "llm_provider_error": "Native Codex inference failed",
     }
     if reason is None:
-        reason = "configuration" if code in {"llm_capability_unsupported", "llm_invalid_configuration", "llm_auth_failed"} else "model_metadata" if code == "llm_model_not_found" else "protocol"
+        reason = (
+            "configuration"
+            if code in {"llm_capability_unsupported", "llm_invalid_configuration", "llm_auth_failed"}
+            else "model_metadata"
+            if code == "llm_model_not_found"
+            else "protocol"
+        )
     safe_reason = reason if reason in _REJECTION_REASONS else "protocol"
     error = LLMTransportError(messages[code] + f" [native:{safe_reason}]", code=code)
     error.details = {"native_reason": safe_reason}
@@ -97,9 +142,11 @@ def _error(code: str = "llm_provider_error", *, reason: str | None = None) -> LL
 
 def _config_matches(actual: Any, expected: Any) -> bool:
     if isinstance(expected, dict):
-        return isinstance(actual, dict) and all(
-            key in actual and _config_matches(actual[key], value) for key, value in expected.items()
-        ) and (bool(expected) or not actual)
+        return (
+            isinstance(actual, dict)
+            and all(key in actual and _config_matches(actual[key], value) for key, value in expected.items())
+            and (bool(expected) or not actual)
+        )
     return type(actual) is type(expected) and actual == expected
 
 
@@ -121,8 +168,21 @@ def _deny_resource(uri: str):
 def _closed_schema(schema: dict[str, Any]) -> Any:
     # Only subschema positions are schemas. Property names, const and enum are data.
     mappings = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
-    singles = {"additionalProperties", "additionalItems", "contains", "propertyNames", "not", "if", "then", "else", "unevaluatedProperties", "unevaluatedItems", "contentSchema"}
+    singles = {
+        "additionalProperties",
+        "additionalItems",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "contentSchema",
+    }
     sequences = {"allOf", "anyOf", "oneOf", "prefixItems"}
+
     def check(value: Any) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
@@ -147,6 +207,7 @@ def _closed_schema(schema: dict[str, Any]) -> Any:
                     for child in item.values():
                         if isinstance(child, dict):
                             check(child)
+
     check(schema)
     validator = validator_for(schema, default=Draft202012Validator)
     if "$schema" in schema and validator_for(schema, default=None) is None:
@@ -172,7 +233,12 @@ def _safe_effective_config(response: dict[str, Any]) -> bool:
         if any(candidate["config"].get(key) is not None for key in ("openai_base_url", "chatgpt_base_url")):
             return False
     layer = layers[0]
-    return isinstance(layer, dict) and (layer.get("name") or {}).get("type") == "sessionFlags" and layer.get("disabledReason") is None and _config_matches((layer.get("config") or {}).get("tools"), _SAFE_CONFIG["tools"])
+    return (
+        isinstance(layer, dict)
+        and (layer.get("name") or {}).get("type") == "sessionFlags"
+        and layer.get("disabledReason") is None
+        and _config_matches((layer.get("config") or {}).get("tools"), _SAFE_CONFIG["tools"])
+    )
 
 
 async def _finish_owned(task: asyncio.Task, *, propagate_cancel: bool = True):
@@ -194,6 +260,7 @@ async def _finish_owned(task: asyncio.Task, *, propagate_cancel: bool = True):
 def _json_object(raw: str) -> dict[str, Any]:
     def reject_constant(_value: str):
         raise _error(reason="final_output")
+
     try:
         value = json.loads(raw, parse_constant=reject_constant)
     except (ValueError, TypeError):
@@ -208,7 +275,19 @@ def _upstream_error_code(info: Any) -> str:
     if info is None:
         return "llm_provider_error"
     if isinstance(info, str):
-        known = {"contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded", "serverOverloaded", "cyberPolicy", "internalServerError", "unauthorized", "badRequest", "threadRollbackFailed", "sandboxError", "other"}
+        known = {
+            "contextWindowExceeded",
+            "sessionBudgetExceeded",
+            "usageLimitExceeded",
+            "serverOverloaded",
+            "cyberPolicy",
+            "internalServerError",
+            "unauthorized",
+            "badRequest",
+            "threadRollbackFailed",
+            "sandboxError",
+            "other",
+        }
         if info not in known:
             raise _error("llm_capability_unsupported", reason="known_upstream_error")
         if info in {"sessionBudgetExceeded", "usageLimitExceeded"}:
@@ -223,7 +302,12 @@ def _upstream_error_code(info: Any) -> str:
         if set(value) != {"turnKind"} or value["turnKind"] not in {"review", "compact"}:
             raise _error("llm_capability_unsupported", reason="known_upstream_error")
         return "llm_provider_error"
-    if variant not in {"httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"} or set(value) - {"httpStatusCode"}:
+    if variant not in {
+        "httpConnectionFailed",
+        "responseStreamConnectionFailed",
+        "responseStreamDisconnected",
+        "responseTooManyFailedAttempts",
+    } or set(value) - {"httpStatusCode"}:
         raise _error("llm_capability_unsupported", reason="known_upstream_error")
     status = value.get("httpStatusCode")
     if status is not None and (type(status) is not int or not 0 <= status <= 65535):
@@ -250,8 +334,13 @@ async def _stop_process(proc: asyncio.subprocess.Process) -> None:
         # A Windows process group alone does not kill descendants.
         with contextlib.suppress(OSError):
             killer = await asyncio.create_subprocess_exec(
-                "taskkill", "/PID", str(proc.pid), "/T", "/F",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                "taskkill",
+                "/PID",
+                str(proc.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             try:
                 await asyncio.wait_for(killer.wait(), 2)
@@ -352,7 +441,11 @@ class _Connection:
             total = (params.get("tokenUsage") or {}).get("total")
             if not isinstance(total, dict):
                 raise _error()
-            for upstream, local in (("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"), ("totalTokens", "total_tokens")):
+            for upstream, local in (
+                ("inputTokens", "input_tokens"),
+                ("outputTokens", "output_tokens"),
+                ("totalTokens", "total_tokens"),
+            ):
                 value = total.get(upstream)
                 if type(value) is not int or value < 0:
                     raise _error()
@@ -371,16 +464,34 @@ class _Connection:
         elif method == "turn/started":
             turn = params.get("turn") or {}
             identifier = turn.get("id")
-            if not self.pending_turn or params.get("threadId") != self.thread_id or not isinstance(identifier, str) or not identifier or len(identifier) > 256:
+            if (
+                not self.pending_turn
+                or params.get("threadId") != self.thread_id
+                or not isinstance(identifier, str)
+                or not identifier
+                or len(identifier) > 256
+            ):
                 raise _error(reason="identity")
             if self.turn_id is not None and identifier != self.turn_id:
                 raise _error(reason="identity")
             self.turn_id = identifier
         elif method == "error":
-            if self.thread_id is None or self.turn_id is None or params.get("threadId") != self.thread_id or params.get("turnId") != self.turn_id:
+            if (
+                self.thread_id is None
+                or self.turn_id is None
+                or params.get("threadId") != self.thread_id
+                or params.get("turnId") != self.turn_id
+            ):
                 raise _error(reason="identity")
             error = params.get("error")
-            if set(params) != {"error", "threadId", "turnId", "willRetry"} or type(params["willRetry"]) is not bool or not isinstance(error, dict) or set(error) - {"message", "additionalDetails", "codexErrorInfo"} or not isinstance(error.get("message"), str) or (error.get("additionalDetails") is not None and not isinstance(error["additionalDetails"], str)):
+            if (
+                set(params) != {"error", "threadId", "turnId", "willRetry"}
+                or type(params["willRetry"]) is not bool
+                or not isinstance(error, dict)
+                or set(error) - {"message", "additionalDetails", "codexErrorInfo"}
+                or not isinstance(error.get("message"), str)
+                or (error.get("additionalDetails") is not None and not isinstance(error["additionalDetails"], str))
+            ):
                 raise _error("llm_capability_unsupported", reason="known_upstream_error")
             code = _upstream_error_code(error.get("codexErrorInfo"))
             if not params["willRetry"]:
@@ -388,16 +499,25 @@ class _Connection:
             # The official server is retrying the existing turn. No new request
             # is sent; receive byte/message bounds and the original deadline hold.
         elif method == "configWarning":
-            if params.get("summary") != _BUNDLED_BWRAP_WARNING or any(params.get(key) is not None for key in ("details", "path", "range")):
+            if params.get("summary") != _BUNDLED_BWRAP_WARNING or any(
+                params.get(key) is not None for key in ("details", "path", "range")
+            ):
                 raise _error("llm_capability_unsupported", reason="native_notification")
         elif method == "remoteControl/status/changed":
             if params.get("status") != "disabled" or params.get("environmentId") is not None:
                 raise _error("llm_capability_unsupported", reason="native_notification")
         elif method in {
-            "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
-            "item/reasoning/summaryPartAdded", "item/plan/delta", "turn/plan/updated",
-            "thread/status/changed", "account/rateLimits/updated", "model/verification",
-            "model/safetyBuffering/updated", "turn/moderationMetadata",
+            "item/agentMessage/delta",
+            "item/reasoning/summaryTextDelta",
+            "item/reasoning/textDelta",
+            "item/reasoning/summaryPartAdded",
+            "item/plan/delta",
+            "turn/plan/updated",
+            "thread/status/changed",
+            "account/rateLimits/updated",
+            "model/verification",
+            "model/safetyBuffering/updated",
+            "turn/moderationMetadata",
         }:
             pass
         else:
@@ -455,13 +575,21 @@ class NativeCodexTransport:
         if len(matches) != 1:
             raise _error("llm_capability_unsupported", reason="model_metadata")
         item = matches[0]
-        if item.get("tool_mode") != "code_mode_only" or item.get("experimental_supported_tools") != [] or item.get("multi_agent_version") != "v1":
+        if (
+            item.get("tool_mode") != "code_mode_only"
+            or item.get("experimental_supported_tools") != []
+            or item.get("multi_agent_version") != "v1"
+        ):
             raise _error("llm_capability_unsupported", reason="model_metadata")
 
     async def _owned_process(self, argv: list[str], cwd: str, environment: dict[str, str]):
         kwargs: dict[str, Any] = {
-            "stdin": asyncio.subprocess.PIPE, "stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.DEVNULL,
-            "cwd": cwd, "env": environment, "limit": _BYTE_LIMIT,
+            "stdin": asyncio.subprocess.PIPE,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.DEVNULL,
+            "cwd": cwd,
+            "env": environment,
+            "limit": _BYTE_LIMIT,
         }
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -503,9 +631,19 @@ class NativeCodexTransport:
                         await self._stop(proc)
                         proc = None
                         self._guard_home()
-                        proc = await self._owned_process([*command, "app-server", "--stdio", "--strict-config", *_overrides(_SAFE_CONFIG)], cwd, environment)
+                        proc = await self._owned_process(
+                            [*command, "app-server", "--stdio", "--strict-config", *_overrides(_SAFE_CONFIG)],
+                            cwd,
+                            environment,
+                        )
                         connection = _Connection(proc)
-                        initialized = await connection.request("initialize", {"clientInfo": {"name": "ambient-native-inference", "version": "1"}, "capabilities": {"experimentalApi": True}})
+                        initialized = await connection.request(
+                            "initialize",
+                            {
+                                "clientInfo": {"name": "ambient-native-inference", "version": "1"},
+                                "capabilities": {"experimentalApi": True},
+                            },
+                        )
                         if not re.search(r"\b0\.145\.0\b", str(initialized.get("userAgent", ""))):
                             raise _error("llm_capability_unsupported")
                         await connection.send("initialized", {})
@@ -576,9 +714,12 @@ class NativeCodexTransport:
     async def discover_models(self) -> list[dict[str, Any]]:
         async def discover(connection: _Connection, _home: Path, _cwd: str):
             return await self._catalog(connection)
+
         return await self._with_connection(discover)
 
-    async def generate(self, selection: ResolvedModel, messages: list[dict], tools: list[dict] | None = None) -> LLMResult:
+    async def generate(
+        self, selection: ResolvedModel, messages: list[dict], tools: list[dict] | None = None
+    ) -> LLMResult:
         if selection.api_mode != "codex_native" or selection.connection or selection.credentials:
             raise _error("llm_invalid_configuration")
         tools = tools or []
@@ -588,22 +729,42 @@ class NativeCodexTransport:
                 function = tool.get("function") if isinstance(tool, dict) and tool.get("type") == "function" else None
                 name = function.get("name") if isinstance(function, dict) else None
                 parameters = function.get("parameters") if isinstance(function, dict) else None
-                if not isinstance(name, str) or not name or name in validators or len(name) > 128 or not isinstance(parameters, dict):
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or name in validators
+                    or len(name) > 128
+                    or not isinstance(parameters, dict)
+                ):
                     raise _error("llm_invalid_configuration")
                 validators[name] = _closed_schema(parameters)
-            envelope = json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            envelope = json.dumps(
+                {"messages": messages, "tools": tools}, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            )
         except LLMTransportError:
             raise
         except Exception:
             raise _error("llm_invalid_configuration") from None
         if len(envelope.encode()) > _INPUT_LIMIT - 4096:
             raise _error("llm_capability_unsupported", reason="input_limit")
-        schema = {"type": "object", "required": ["text", "tool_calls"], "additionalProperties": False, "properties": {
-            "text": {"type": "string"}, "tool_calls": {"type": "array", "maxItems": 16, "items": {
-                "type": "object", "required": ["name", "arguments"], "additionalProperties": False,
-                "properties": {"name": {"type": "string"}, "arguments": {"type": "string"}},
-            }},
-        }}
+        schema = {
+            "type": "object",
+            "required": ["text", "tool_calls"],
+            "additionalProperties": False,
+            "properties": {
+                "text": {"type": "string"},
+                "tool_calls": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "arguments"],
+                        "additionalProperties": False,
+                        "properties": {"name": {"type": "string"}, "arguments": {"type": "string"}},
+                    },
+                },
+            },
+        }
 
         async def infer(connection: _Connection, home: Path, cwd: str):
             account = await connection.request("account/read", {"refreshToken": False})
@@ -613,46 +774,112 @@ class NativeCodexTransport:
             if selection.model_id not in {item["id"] for item in catalog}:
                 raise _error("llm_model_not_found")
             self._model_metadata(home, selection.model_id)
-            response = await connection.request("thread/start", {
-                "cwd": cwd, "model": selection.model_id, "modelProvider": "openai", "environments": [],
-                "dynamicTools": [], "selectedCapabilityRoots": [], "runtimeWorkspaceRoots": [], "ephemeral": True,
-                "sandbox": "read-only", "approvalPolicy": "never", "approvalsReviewer": "user",
-                "baseInstructions": _INSTRUCTIONS, "developerInstructions": "", "config": _SAFE_CONFIG,
-                "allowProviderModelFallback": False, "experimentalRawEvents": False,
-            })
+            response = await connection.request(
+                "thread/start",
+                {
+                    "cwd": cwd,
+                    "model": selection.model_id,
+                    "modelProvider": "openai",
+                    "environments": [],
+                    "dynamicTools": [],
+                    "selectedCapabilityRoots": [],
+                    "runtimeWorkspaceRoots": [],
+                    "ephemeral": True,
+                    "sandbox": "read-only",
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": "user",
+                    "baseInstructions": _INSTRUCTIONS,
+                    "developerInstructions": "",
+                    "config": _SAFE_CONFIG,
+                    "allowProviderModelFallback": False,
+                    "experimentalRawEvents": False,
+                },
+            )
             connection.thread_id = (response.get("thread") or {}).get("id")
             sandbox = response.get("sandbox")
-            if not isinstance(connection.thread_id, str) or not connection.thread_id or len(connection.thread_id) > 256 or response.get("model") != selection.model_id or response.get("modelProvider") != "openai" or response.get("cwd") != cwd or response.get("approvalPolicy") != "never" or response.get("approvalsReviewer") != "user" or not isinstance(sandbox, dict) or sandbox.get("type") != "readOnly" or sandbox.get("networkAccess", False) is not False or response.get("runtimeWorkspaceRoots") or response.get("instructionSources"):
+            if (
+                not isinstance(connection.thread_id, str)
+                or not connection.thread_id
+                or len(connection.thread_id) > 256
+                or response.get("model") != selection.model_id
+                or response.get("modelProvider") != "openai"
+                or response.get("cwd") != cwd
+                or response.get("approvalPolicy") != "never"
+                or response.get("approvalsReviewer") != "user"
+                or not isinstance(sandbox, dict)
+                or sandbox.get("type") != "readOnly"
+                or sandbox.get("networkAccess", False) is not False
+                or response.get("runtimeWorkspaceRoots")
+                or response.get("instructionSources")
+            ):
                 raise _error("llm_capability_unsupported", reason="thread_policy")
             connection.pending_turn = True
-            turn = await connection.request("turn/start", {
-                "threadId": connection.thread_id, "input": [{"type": "text", "text": envelope, "text_elements": []}],
-                "model": selection.model_id, "environments": [], "runtimeWorkspaceRoots": [],
-                "approvalPolicy": "never", "outputSchema": schema,
-            })
+            turn = await connection.request(
+                "turn/start",
+                {
+                    "threadId": connection.thread_id,
+                    "input": [{"type": "text", "text": envelope, "text_elements": []}],
+                    "model": selection.model_id,
+                    "environments": [],
+                    "runtimeWorkspaceRoots": [],
+                    "approvalPolicy": "never",
+                    "outputSchema": schema,
+                },
+            )
             identifier = (turn.get("turn") or {}).get("id")
-            if not isinstance(identifier, str) or not identifier or len(identifier) > 256 or (connection.turn_id is not None and connection.turn_id != identifier):
+            if (
+                not isinstance(identifier, str)
+                or not identifier
+                or len(identifier) > 256
+                or (connection.turn_id is not None and connection.turn_id != identifier)
+            ):
                 raise _error(reason="identity")
             connection.turn_id = identifier
             while connection.completed is None:
                 connection.notification(await connection.receive())
-            finals = [item for item in connection.items.values() if item.get("type") == "agentMessage" and item.get("phase") != "commentary"]
+            finals = [
+                item
+                for item in connection.items.values()
+                if item.get("type") == "agentMessage" and item.get("phase") != "commentary"
+            ]
             if len(finals) != 1 or not isinstance(finals[0].get("text"), str):
                 raise _error(reason="final_output")
             value = _json_object(finals[0]["text"])
-            if not isinstance(value, dict) or set(value) != {"text", "tool_calls"} or not isinstance(value["text"], str) or not isinstance(value["tool_calls"], list) or len(value["tool_calls"]) > 16:
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"text", "tool_calls"}
+                or not isinstance(value["text"], str)
+                or not isinstance(value["tool_calls"], list)
+                or len(value["tool_calls"]) > 16
+            ):
                 raise _error(reason="final_output")
             calls = []
             for call in value["tool_calls"]:
-                if not isinstance(call, dict) or set(call) != {"name", "arguments"} or not isinstance(call["name"], str) or call["name"] not in validators or not isinstance(call["arguments"], str):
+                if (
+                    not isinstance(call, dict)
+                    or set(call) != {"name", "arguments"}
+                    or not isinstance(call["name"], str)
+                    or call["name"] not in validators
+                    or not isinstance(call["arguments"], str)
+                ):
                     raise _error(reason="final_output")
                 arguments = _json_object(call["arguments"])
                 try:
                     validators[call["name"]].validate(arguments)
                 except Exception:
                     raise _error(reason="final_output") from None
-                calls.append({"id": "ambient-native-" + uuid.uuid4().hex, "type": "function", "function": {
-                    "name": call["name"], "arguments": json.dumps(arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
-                }})
+                calls.append(
+                    {
+                        "id": "ambient-native-" + uuid.uuid4().hex,
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(
+                                arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                            ),
+                        },
+                    }
+                )
             return LLMResult(text=value["text"], tool_calls=calls or None, usage=connection.usage)
+
         return await self._with_connection(infer)

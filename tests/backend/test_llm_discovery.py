@@ -188,8 +188,10 @@ async def test_codex_native_discovery_uses_managed_cli_catalog_without_http(tmp_
             seen.append(runtime.state_dir("codex"))
 
         async def discover_models(self):
-            return [{"id": "gpt-5.6-luna", "name": "GPT 5.6 Luna", "capabilities": {"tool_calling": True}},
-                    {"id": "gpt-5.6-luna", "name": "duplicate"}]
+            return [
+                {"id": "gpt-5.6-luna", "name": "GPT 5.6 Luna", "capabilities": {"tool_calling": True}},
+                {"id": "gpt-5.6-luna", "name": "duplicate"},
+            ]
 
     def no_http(**_kwargs):
         pytest.fail("Native discovery must not create an API HTTP client")
@@ -213,8 +215,9 @@ async def test_codex_native_discovery_failure_has_no_api_catalog_fallback(tmp_pa
     from backend.llm_service import LLMTransportError
 
     store = LLMConfigStore(str(tmp_path))
-    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native",
-                           "models": [{"id": "gpt-5.6-luna"}]}, {})
+    store.create_provider(
+        {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}, {}
+    )
     before = store.config_path.read_bytes()
 
     class NativeTransport:

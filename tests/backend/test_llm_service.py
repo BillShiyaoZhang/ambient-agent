@@ -141,7 +141,9 @@ async def test_native_selection_bypasses_sdk_kwargs_and_uses_trusted_runtime(tmp
 
     monkeypatch.setattr(codex_llm, "NativeCodexTransport", Native)
     monkeypatch.setattr(LLMService, "_request_kwargs", lambda *_: pytest.fail("Native request reached SDK kwargs"))
-    resolved = ResolvedModel.model_construct(provider_id="native", model_id="gpt-5.6-luna", api_mode="codex_native", connection={}, credentials={})
+    resolved = ResolvedModel.model_construct(
+        provider_id="native", model_id="gpt-5.6-luna", api_mode="codex_native", connection={}, credentials={}
+    )
     result = await LLMService(LLMConfigStore(str(tmp_path))).generate(resolved, [{"role": "user", "content": "hello"}])
     assert result.text == "native"
     assert captured["runtime_root"] == tmp_path / "coding_agents" / "runtime"

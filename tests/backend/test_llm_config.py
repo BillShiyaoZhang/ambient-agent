@@ -65,17 +65,20 @@ def test_codex_native_catalog_and_defaults_need_no_api_configuration(tmp_path, m
     assert json.loads(store.secrets_path.read_text()) == {}
 
 
-@pytest.mark.parametrize("changes", [
-    {"connection": {"base_url": "https://example.test"}},
-    {"connection": {"command": "unsafe"}},
-    {"connection": {"auth_path": "unsafe"}},
-    {"connection": {"headers": {"Authorization": "private"}}},
-    {"credential_refs": {"api_key": {"source": "env", "env_var": "OPENAI_API_KEY"}}},
-    {"command": "unsafe"},
-    {"auth_path": "unsafe"},
-    {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]},
-    {"models": [{"id": "gpt-5.6-luna", "api_mode": "chat_completions"}]},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"connection": {"base_url": "https://example.test"}},
+        {"connection": {"command": "unsafe"}},
+        {"connection": {"auth_path": "unsafe"}},
+        {"connection": {"headers": {"Authorization": "private"}}},
+        {"credential_refs": {"api_key": {"source": "env", "env_var": "OPENAI_API_KEY"}}},
+        {"command": "unsafe"},
+        {"auth_path": "unsafe"},
+        {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]},
+        {"models": [{"id": "gpt-5.6-luna", "api_mode": "chat_completions"}]},
+    ],
+)
 def test_codex_native_rejects_configuration_injections_before_writing(tmp_path, changes):
     store = LLMConfigStore(str(tmp_path))
     profile = {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}
@@ -87,11 +90,14 @@ def test_codex_native_rejects_configuration_injections_before_writing(tmp_path, 
     assert (store.config_path.read_bytes(), store.secrets_path.read_bytes()) == before
 
 
-@pytest.mark.parametrize("credential", [
-    {"api_key": {"source": "stored", "value": "never-store"}},
-    {"api_key": {"source": "env", "env_var": "OPENAI_API_KEY"}},
-    {"auth_json": {"source": "stored", "value": "never-store"}},
-])
+@pytest.mark.parametrize(
+    "credential",
+    [
+        {"api_key": {"source": "stored", "value": "never-store"}},
+        {"api_key": {"source": "env", "env_var": "OPENAI_API_KEY"}},
+        {"auth_json": {"source": "stored", "value": "never-store"}},
+    ],
+)
 def test_codex_native_rejects_credentials_on_create_and_update(tmp_path, credential):
     store = LLMConfigStore(str(tmp_path))
     profile = {"id": "native", "name": "Native", "preset": "codex_native"}
@@ -110,18 +116,27 @@ def test_api_provider_cannot_spoof_codex_native_transport(tmp_path):
     store = LLMConfigStore(str(tmp_path))
     with pytest.raises(LLMConfigError) as failure:
         store.create_provider(
-            {"id": "api", "name": "API", "preset": "openai", "models": [{"id": "gpt-5.6-luna", "api_mode": "codex_native"}]}, {}
+            {
+                "id": "api",
+                "name": "API",
+                "preset": "openai",
+                "models": [{"id": "gpt-5.6-luna", "api_mode": "codex_native"}],
+            },
+            {},
         )
     assert failure.value.code == "llm_invalid_configuration"
     assert store.list_providers() == []
 
 
-@pytest.mark.parametrize("changes", [
-    {"connection": {"command": "private-marker"}},
-    {"credential_refs": {"api_key": {"source": "stored"}}},
-    {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]},
-    {"auth_path": "private-marker"},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"connection": {"command": "private-marker"}},
+        {"credential_refs": {"api_key": {"source": "stored"}}},
+        {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]},
+        {"auth_path": "private-marker"},
+    ],
+)
 def test_persisted_codex_native_configuration_fails_closed_without_rewrite(tmp_path, changes):
     store = LLMConfigStore(str(tmp_path))
     store.create_provider({"id": "native", "name": "Native", "preset": "codex_native"}, {})

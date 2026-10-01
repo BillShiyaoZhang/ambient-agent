@@ -147,24 +147,35 @@ def test_codex_native_provider_api_and_primary_selection(tmp_path, monkeypatch):
         catalog = client.get("/api/llm/catalog").json()
         native = next(item for item in catalog if item["id"] == "codex_native")
         assert native["fields"] == native["advanced_fields"] == []
-        response = client.post("/api/llm/providers", json={"profile": {
-            "id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]
-        }})
+        response = client.post(
+            "/api/llm/providers",
+            json={
+                "profile": {
+                    "id": "native",
+                    "name": "Native",
+                    "preset": "codex_native",
+                    "models": [{"id": "gpt-5.6-luna"}],
+                }
+            },
+        )
         assert response.status_code == 201
         assert response.json()["credentials"] == response.json()["connection"] == {}
-        selected = client.patch("/api/llm/settings", json={"default_model": {
-            "provider_id": "native", "model_id": "gpt-5.6-luna"
-        }})
+        selected = client.patch(
+            "/api/llm/settings", json={"default_model": {"provider_id": "native", "model_id": "gpt-5.6-luna"}}
+        )
         assert selected.status_code == 200
     assert store.resolve_default().api_mode == "codex_native"
 
 
-@pytest.mark.parametrize("injection", [
-    {"profile": {"connection": {"auth_path": "private-marker"}}},
-    {"profile": {"command": "private-marker"}},
-    {"profile": {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]}},
-    {"credentials": {"api_key": {"source": "stored", "value": "private-marker"}}},
-])
+@pytest.mark.parametrize(
+    "injection",
+    [
+        {"profile": {"connection": {"auth_path": "private-marker"}}},
+        {"profile": {"command": "private-marker"}},
+        {"profile": {"models": [{"id": "gpt-5.6-luna", "api_mode": "responses"}]}},
+        {"credentials": {"api_key": {"source": "stored", "value": "private-marker"}}},
+    ],
+)
 def test_codex_native_provider_api_rejects_injections_safely(tmp_path, monkeypatch, injection):
     _, store = _isolate_llm(tmp_path, monkeypatch)
     payload = {"profile": {"id": "native", "name": "Native", "preset": "codex_native"}}
@@ -181,8 +192,9 @@ def test_codex_native_provider_api_rejects_injections_safely(tmp_path, monkeypat
 
 def test_codex_native_primary_cannot_be_inherited_by_opencode_before_run(tmp_path, monkeypatch):
     _, store = _isolate_llm(tmp_path, monkeypatch)
-    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native",
-                           "models": [{"id": "gpt-5.6-luna"}]}, {})
+    store.create_provider(
+        {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}, {}
+    )
     store.update_settings({"default_model": {"provider_id": "native", "model_id": "gpt-5.6-luna"}})
     coding = CodingAgentConfigStore(store.workspace_dir)
     monkeypatch.setattr(main_module, "coding_agent_config_store", coding)
@@ -197,20 +209,24 @@ def test_codex_native_primary_cannot_be_inherited_by_opencode_before_run(tmp_pat
 
 def test_explicit_opencode_codex_native_binding_is_rejected_by_api(tmp_path, monkeypatch):
     _, store = _isolate_llm(tmp_path, monkeypatch)
-    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native",
-                           "models": [{"id": "gpt-5.6-luna"}]}, {})
+    store.create_provider(
+        {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}, {}
+    )
     monkeypatch.setattr(main_module, "coding_agent_config_store", CodingAgentConfigStore(store.workspace_dir))
     with TestClient(main_module.app) as client:
-        response = client.patch("/api/coding-agents/opencode/model", json={"mode": "shared_binding",
-                                "provider_id": "native", "model_id": "gpt-5.6-luna"})
+        response = client.patch(
+            "/api/coding-agents/opencode/model",
+            json={"mode": "shared_binding", "provider_id": "native", "model_id": "gpt-5.6-luna"},
+        )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "coding_agent_model_binding_unsupported"
 
 
 def test_opencode_native_chat_rejection_creates_no_run(tmp_path, monkeypatch):
     storage, store = _isolate_llm(tmp_path, monkeypatch)
-    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native",
-                           "models": [{"id": "gpt-5.6-luna"}]}, {})
+    store.create_provider(
+        {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}, {}
+    )
     store.update_settings({"default_model": {"provider_id": "native", "model_id": "gpt-5.6-luna"}})
     monkeypatch.setattr(main_module, "coding_agent_config_store", CodingAgentConfigStore(store.workspace_dir))
     session_id = f"native-binding-{uuid4().hex}"

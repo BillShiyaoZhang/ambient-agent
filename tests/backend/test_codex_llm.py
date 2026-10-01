@@ -22,7 +22,12 @@ class Runtime:
         self.metadata()
 
     def metadata(self, **changes):
-        model = {"slug": "gpt-5.6-luna", "tool_mode": "code_mode_only", "experimental_supported_tools": [], "multi_agent_version": "v1"}
+        model = {
+            "slug": "gpt-5.6-luna",
+            "tool_mode": "code_mode_only",
+            "experimental_supported_tools": [],
+            "multi_agent_version": "v1",
+        }
         model.update(changes)
         (self.root / "models_cache.json").write_text(json.dumps({"models": [model]}), encoding="utf-8")
 
@@ -40,7 +45,17 @@ class Runtime:
 
 
 def selection(**changes):
-    values = {"provider_id": "native", "provider_name": "Native", "provider_preset": "codex_native", "model_id": "gpt-5.6-luna", "litellm_model": "gpt-5.6-luna", "api_mode": "codex_native", "connection": {}, "credentials": {}, "capabilities": {}}
+    values = {
+        "provider_id": "native",
+        "provider_name": "Native",
+        "provider_preset": "codex_native",
+        "model_id": "gpt-5.6-luna",
+        "litellm_model": "gpt-5.6-luna",
+        "api_mode": "codex_native",
+        "connection": {},
+        "credentials": {},
+        "capabilities": {},
+    }
     values.update(changes)
     return ResolvedModel.model_construct(**values)
 
@@ -68,12 +83,32 @@ class NativeProcess:
         if "id" not in request:
             return
         result = {
-            "initialize": {"userAgent": "codex_cli_rs/0.145.0", "codexHome": "/managed", "platformFamily": "unix", "platformOs": "linux"},
-            "config/read": {"config": dict(_SAFE_CONFIG), "origins": {}, "layers": [{"name": {"type": "sessionFlags"}, "config": dict(_SAFE_CONFIG), "disabledReason": None}]},
+            "initialize": {
+                "userAgent": "codex_cli_rs/0.145.0",
+                "codexHome": "/managed",
+                "platformFamily": "unix",
+                "platformOs": "linux",
+            },
+            "config/read": {
+                "config": dict(_SAFE_CONFIG),
+                "origins": {},
+                "layers": [{"name": {"type": "sessionFlags"}, "config": dict(_SAFE_CONFIG), "disabledReason": None}],
+            },
             "account/read": {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True},
-            "model/list": {"data": [{"id": "gpt-5.6-luna", "model": "gpt-5.6-luna", "displayName": "Luna", "hidden": False}], "nextCursor": None},
+            "model/list": {
+                "data": [{"id": "gpt-5.6-luna", "model": "gpt-5.6-luna", "displayName": "Luna", "hidden": False}],
+                "nextCursor": None,
+            },
             "mcpServerStatus/list": {"data": [], "nextCursor": None},
-            "thread/start": {"thread": {"id": "thread-1"}, "model": "gpt-5.6-luna", "modelProvider": "openai", "cwd": request["params"].get("cwd"), "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": {"type": "readOnly"}},
+            "thread/start": {
+                "thread": {"id": "thread-1"},
+                "model": "gpt-5.6-luna",
+                "modelProvider": "openai",
+                "cwd": request["params"].get("cwd"),
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "sandbox": {"type": "readOnly"},
+            },
             "turn/start": {"turn": {"id": "turn-1", "status": "inProgress", "items": []}},
         }.get(method, {})
         if method == "account/read" and self.scenario == "no_auth":
@@ -84,7 +119,12 @@ class NativeProcess:
             result["config"]["notify"] = ["unsafe-command"]
         if method == "config/read" and self.scenario.startswith("endpoint_"):
             lower = {"name": {"type": "system"}, "config": {}, "disabledReason": None}
-            if self.scenario in {"endpoint_null", "endpoint_null_config", "endpoint_list_config", "endpoint_list_layer"}:
+            if self.scenario in {
+                "endpoint_null",
+                "endpoint_null_config",
+                "endpoint_list_config",
+                "endpoint_list_layer",
+            }:
                 if self.scenario == "endpoint_null":
                     lower["config"] = {"openai_base_url": None, "chatgpt_base_url": None}
                 elif self.scenario == "endpoint_null_config":
@@ -95,14 +135,25 @@ class NativeProcess:
                     lower = []
             else:
                 key = "chatgpt_base_url" if "chatgpt" in self.scenario else "openai_base_url"
-                lower["config"][key] = {} if "map" in self.scenario else "" if "empty" in self.scenario else "https://private-secret.invalid"
+                lower["config"][key] = (
+                    {}
+                    if "map" in self.scenario
+                    else ""
+                    if "empty" in self.scenario
+                    else "https://private-secret.invalid"
+                )
                 if "disabled" in self.scenario:
                     lower["disabledReason"] = "disabled"
             if "session" in self.scenario:
                 result["layers"][0]["config"] = {**_SAFE_CONFIG, **lower["config"]}
             else:
                 result["layers"].append(lower)
-        if method == "config/read" and self.scenario in {"typed_tools", "raw_tools_enabled", "raw_tools_disabled", "raw_tools_missing"}:
+        if method == "config/read" and self.scenario in {
+            "typed_tools",
+            "raw_tools_enabled",
+            "raw_tools_disabled",
+            "raw_tools_missing",
+        }:
             result["config"].pop("tools")
             if self.scenario == "raw_tools_enabled":
                 result["layers"][0]["config"] = {"tools": {"experimental_request_user_input": {"enabled": True}}}
@@ -111,23 +162,83 @@ class NativeProcess:
             elif self.scenario == "raw_tools_missing":
                 result["layers"] = []
         if method == "thread/start" and self.scenario.startswith("thread_"):
-            changes = {"thread_write": {"sandbox": {"type": "workspaceWrite"}}, "thread_network": {"sandbox": {"type": "readOnly", "networkAccess": True}}, "thread_approval": {"approvalPolicy": "on-request"}, "thread_reviewer": {"approvalsReviewer": "guardian_subagent"}, "thread_cwd": {"cwd": "/user/workspace"}, "thread_provider": {"modelProvider": "proxy"}, "thread_roots": {"runtimeWorkspaceRoots": ["/user/workspace"]}, "thread_instructions": {"instructionSources": [{"type": "project"}]}}
+            changes = {
+                "thread_write": {"sandbox": {"type": "workspaceWrite"}},
+                "thread_network": {"sandbox": {"type": "readOnly", "networkAccess": True}},
+                "thread_approval": {"approvalPolicy": "on-request"},
+                "thread_reviewer": {"approvalsReviewer": "guardian_subagent"},
+                "thread_cwd": {"cwd": "/user/workspace"},
+                "thread_provider": {"modelProvider": "proxy"},
+                "thread_roots": {"runtimeWorkspaceRoots": ["/user/workspace"]},
+                "thread_instructions": {"instructionSources": [{"type": "project"}]},
+            }
             result.update(changes[self.scenario])
-        if method == "config/read" and self.scenario in {"bwrap_warning", "unsafe_warning", "generic_warning", "remote_disabled", "remote_connected"}:
+        if method == "config/read" and self.scenario in {
+            "bwrap_warning",
+            "unsafe_warning",
+            "generic_warning",
+            "remote_disabled",
+            "remote_connected",
+        }:
             if self.scenario in {"remote_disabled", "remote_connected"}:
-                self.emit({"method": "remoteControl/status/changed", "params": {"status": "disabled" if self.scenario == "remote_disabled" else "connected", "installationId": "hidden", "serverName": "hidden", "environmentId": None}})
+                self.emit(
+                    {
+                        "method": "remoteControl/status/changed",
+                        "params": {
+                            "status": "disabled" if self.scenario == "remote_disabled" else "connected",
+                            "installationId": "hidden",
+                            "serverName": "hidden",
+                            "environmentId": None,
+                        },
+                    }
+                )
             elif self.scenario == "generic_warning":
                 self.emit({"method": "warning", "params": {"message": "unsafe sandbox downgrade"}})
             else:
-                summary = "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime." if self.scenario == "bwrap_warning" else "Invalid configuration: secret"
+                summary = (
+                    "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime."
+                    if self.scenario == "bwrap_warning"
+                    else "Invalid configuration: secret"
+                )
                 self.emit({"method": "configWarning", "params": {"summary": summary}})
-        if method == "turn/start" and self.scenario in {"early_turn", "wrong_thread", "rebind_turn", "conflict_reply", "unbound_item"}:
+        if method == "turn/start" and self.scenario in {
+            "early_turn",
+            "wrong_thread",
+            "rebind_turn",
+            "conflict_reply",
+            "unbound_item",
+        }:
             if self.scenario == "unbound_item":
-                self.emit({"method": "item/started", "params": {"threadId": "thread-1", "turnId": "turn-1", "item": {"id": "early", "type": "reasoning"}}})
+                self.emit(
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "item": {"id": "early", "type": "reasoning"},
+                        },
+                    }
+                )
             else:
-                self.emit({"method": "turn/started", "params": {"threadId": "wrong" if self.scenario == "wrong_thread" else "thread-1", "turn": {"id": "turn-1", "status": "inProgress", "items": []}}})
+                self.emit(
+                    {
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "wrong" if self.scenario == "wrong_thread" else "thread-1",
+                            "turn": {"id": "turn-1", "status": "inProgress", "items": []},
+                        },
+                    }
+                )
                 if self.scenario == "rebind_turn":
-                    self.emit({"method": "turn/started", "params": {"threadId": "thread-1", "turn": {"id": "turn-2", "status": "inProgress", "items": []}}})
+                    self.emit(
+                        {
+                            "method": "turn/started",
+                            "params": {
+                                "threadId": "thread-1",
+                                "turn": {"id": "turn-2", "status": "inProgress", "items": []},
+                            },
+                        }
+                    )
                 if self.scenario == "conflict_reply":
                     result["turn"]["id"] = "turn-2"
         self.emit({"id": request["id"], "result": result})
@@ -136,14 +247,57 @@ class NativeProcess:
         if self.scenario == "hang":
             return
         if self.scenario == "approval":
-            self.emit({"id": "approval-1", "method": "item/commandExecution/requestApproval", "params": {"command": "secret command"}})
+            self.emit(
+                {
+                    "id": "approval-1",
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"command": "secret command"},
+                }
+            )
             return
         if self.scenario in {"upstream_error", "unknown_notification"}:
-            self.emit({"method": "error" if self.scenario == "upstream_error" else "private-secret/notification", "params": {"threadId": "thread-1", "turnId": "turn-1", "error": {"message": "private-secret", "codexErrorInfo": "other"}, "willRetry": False}})
+            self.emit(
+                {
+                    "method": "error" if self.scenario == "upstream_error" else "private-secret/notification",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "error": {"message": "private-secret", "codexErrorInfo": "other"},
+                        "willRetry": False,
+                    },
+                }
+            )
             return
         if self.scenario.startswith("error_"):
-            infos = {"error_rate": "usageLimitExceeded", "error_session_budget": "sessionBudgetExceeded", "error_auth": "unauthorized", "error_provider": "serverOverloaded", "error_http_rate": {"httpConnectionFailed": {"httpStatusCode": 429}}, "error_http_timeout": {"responseStreamConnectionFailed": {"httpStatusCode": 504}}, "error_http_auth": {"responseTooManyFailedAttempts": {"httpStatusCode": 403}}, "error_stream": {"responseStreamDisconnected": {}}, "error_active": {"activeTurnNotSteerable": {"turnKind": "review"}}, "error_null_info": None, "error_unknown_info": "private-secret", "error_unknown_variant": {"private-secret": {}}, "error_bad_status": {"httpConnectionFailed": {"httpStatusCode": "private-secret"}}, "error_bad_kind": {"activeTurnNotSteerable": {"turnKind": "private-secret"}}, "error_extra_inner": {"httpConnectionFailed": {"httpStatusCode": 429, "private-secret": "private-secret"}}}
-            params = {"threadId": "thread-1", "turnId": "turn-1", "error": {"message": "private-secret", "additionalDetails": "private-secret", "codexErrorInfo": infos.get(self.scenario, "other")}, "willRetry": self.scenario in {"error_retry", "error_retry_hang", "error_retry_budget"}}
+            infos = {
+                "error_rate": "usageLimitExceeded",
+                "error_session_budget": "sessionBudgetExceeded",
+                "error_auth": "unauthorized",
+                "error_provider": "serverOverloaded",
+                "error_http_rate": {"httpConnectionFailed": {"httpStatusCode": 429}},
+                "error_http_timeout": {"responseStreamConnectionFailed": {"httpStatusCode": 504}},
+                "error_http_auth": {"responseTooManyFailedAttempts": {"httpStatusCode": 403}},
+                "error_stream": {"responseStreamDisconnected": {}},
+                "error_active": {"activeTurnNotSteerable": {"turnKind": "review"}},
+                "error_null_info": None,
+                "error_unknown_info": "private-secret",
+                "error_unknown_variant": {"private-secret": {}},
+                "error_bad_status": {"httpConnectionFailed": {"httpStatusCode": "private-secret"}},
+                "error_bad_kind": {"activeTurnNotSteerable": {"turnKind": "private-secret"}},
+                "error_extra_inner": {
+                    "httpConnectionFailed": {"httpStatusCode": 429, "private-secret": "private-secret"}
+                },
+            }
+            params = {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "error": {
+                    "message": "private-secret",
+                    "additionalDetails": "private-secret",
+                    "codexErrorInfo": infos.get(self.scenario, "other"),
+                },
+                "willRetry": self.scenario in {"error_retry", "error_retry_hang", "error_retry_budget"},
+            }
             if self.scenario == "error_wrong_thread":
                 params["threadId"] = "wrong"
             if self.scenario == "error_wrong_turn":
@@ -168,7 +322,16 @@ class NativeProcess:
             self.stdout.feed_data(b"x" * (2 * 1024 * 1024) + b"\n")
             return
         if self.scenario == "native_tool":
-            self.emit({"method": "item/started", "params": {"threadId": "thread-1", "turnId": "turn-1", "item": {"id": "bad", "type": "commandExecution"}}})
+            self.emit(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {"id": "bad", "type": "commandExecution"},
+                    },
+                }
+            )
             return
         arguments = {"value": 1}
         if self.scenario == "wrong_type":
@@ -203,8 +366,22 @@ class NativeProcess:
         if self.scenario == "missing_final":
             items = []
         if self.scenario != "no_usage":
-            self.emit({"method": "thread/tokenUsage/updated", "params": {"threadId": "thread-1", "turnId": "turn-1", "tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}}}})
-        self.emit({"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": items}}})
+            self.emit(
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}},
+                    },
+                }
+            )
+        self.emit(
+            {
+                "method": "turn/completed",
+                "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": items}},
+            }
+        )
 
     async def drain(self):
         await asyncio.sleep(0)
@@ -249,8 +426,27 @@ def adapter(tmp_path, scenario="ok", *, timeout=1, version="0.145.0"):
     return transport, runtime, processes, spawns
 
 
-TOOLS = [{"type": "function", "function": {"name": "lookup", "description": "Lookup", "parameters": {"type": "object", "properties": {"value": {"type": "integer", "minimum": 0, "enum": [0, 1]}}, "required": ["value"], "additionalProperties": False}}}]
-HISTORY = [{"role": "system", "content": "System"}, {"role": "user", "content": "hello"}, {"role": "assistant", "tool_calls": [{"id": "previous", "function": {"name": "lookup", "arguments": "{}"}}]}, {"role": "tool", "tool_call_id": "previous", "content": "result"}]
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup",
+            "description": "Lookup",
+            "parameters": {
+                "type": "object",
+                "properties": {"value": {"type": "integer", "minimum": 0, "enum": [0, 1]}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        },
+    }
+]
+HISTORY = [
+    {"role": "system", "content": "System"},
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "tool_calls": [{"id": "previous", "function": {"name": "lookup", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "previous", "content": "result"},
+]
 
 
 @pytest.mark.asyncio
@@ -283,7 +479,21 @@ async def test_native_final_preserves_history_tool_choice_and_upstream_usage(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["mcp", "unsafe_config", "approval", "native_tool", "oversize", "invalid_json", "unknown_tool", "bad_args", "extra_key", "missing_final"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "mcp",
+        "unsafe_config",
+        "approval",
+        "native_tool",
+        "oversize",
+        "invalid_json",
+        "unknown_tool",
+        "bad_args",
+        "extra_key",
+        "missing_final",
+    ],
+)
 async def test_unsafe_protocol_fails_closed_with_bounded_sanitized_error_and_cleanup(tmp_path, scenario):
     transport, _, processes, spawns = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError) as caught:
@@ -308,7 +518,10 @@ async def test_native_auth_required_and_discovery_does_not_require_auth(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("metadata", [{"experimental_supported_tools": ["test_sync_tool"]}, {"multi_agent_version": "v2"}, {"tool_mode": "unknown"}])
+@pytest.mark.parametrize(
+    "metadata",
+    [{"experimental_supported_tools": ["test_sync_tool"]}, {"multi_agent_version": "v2"}, {"tool_mode": "unknown"}],
+)
 async def test_unsafe_model_metadata_prevents_turn(tmp_path, metadata):
     transport, runtime, processes, _ = adapter(tmp_path)
     runtime.metadata(**metadata)
@@ -358,7 +571,19 @@ async def test_native_timeout_and_cancellation_stop_process_and_remove_cwd(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["object_args", "double_encoded", "array_args", "wrong_type", "constraint", "missing_required", "unknown_argument", "partial_calls"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "object_args",
+        "double_encoded",
+        "array_args",
+        "wrong_type",
+        "constraint",
+        "missing_required",
+        "unknown_argument",
+        "partial_calls",
+    ],
+)
 async def test_wire_arguments_decode_once_and_all_tool_schemas_validate_before_return(tmp_path, scenario):
     transport, _, processes, _ = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError) as caught:
@@ -370,11 +595,30 @@ async def test_wire_arguments_decode_once_and_all_tool_schemas_validate_before_r
 @pytest.mark.asyncio
 async def test_internal_refs_validate_without_network_and_external_refs_fail_before_spawn(tmp_path):
     transport, _, _, _ = adapter(tmp_path)
-    internal = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "$defs": {"number": {"type": "integer", "const": 1}}, "properties": {"value": {"$ref": "#/$defs/number"}}, "required": ["value"], "additionalProperties": False}}}]
+    internal = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {"number": {"type": "integer", "const": 1}},
+                    "properties": {"value": {"$ref": "#/$defs/number"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
     result = await transport.generate(selection(), HISTORY, internal)
     assert result.tool_calls[0]["function"]["name"] == "lookup"
     transport2, _, processes2, _ = adapter(tmp_path / "other")
-    external = [{"type": "function", "function": {"name": "lookup", "parameters": {"$ref": "https://private-secret.invalid/schema"}}}]
+    external = [
+        {
+            "type": "function",
+            "function": {"name": "lookup", "parameters": {"$ref": "https://private-secret.invalid/schema"}},
+        }
+    ]
     with pytest.raises(LLMTransportError) as caught:
         await transport2.generate(selection(), HISTORY, external)
     assert "private-secret" not in str(caught.value)
@@ -403,8 +647,19 @@ async def test_call_without_supplied_tool_fails_closed(tmp_path):
 @pytest.mark.asyncio
 async def test_cleanup_kills_owned_group_after_leader_exit_with_term_ignoring_child():
     child = "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(30)"
-    parent = "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c'," + repr(child) + "],stdout=subprocess.PIPE); print(child.stdout.readline().decode().strip(),flush=True)"
-    proc = await asyncio.create_subprocess_exec(sys.executable, "-c", parent, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+    parent = (
+        "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c',"
+        + repr(child)
+        + "],stdout=subprocess.PIPE); print(child.stdout.readline().decode().strip(),flush=True)"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        parent,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
     child_pid = int(await asyncio.wait_for(proc.stdout.readline(), 3))
     await asyncio.wait_for(proc.wait(), 3)
 
@@ -436,18 +691,47 @@ async def test_verified_0145_projection_and_notification_order_are_supported(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["raw_tools_enabled", "raw_tools_disabled", "raw_tools_missing", "unsafe_warning", "generic_warning", "remote_connected", "thread_write", "thread_network", "thread_approval", "thread_reviewer", "thread_cwd", "thread_provider", "thread_roots", "thread_instructions", "wrong_thread", "rebind_turn", "conflict_reply", "unbound_item"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "raw_tools_enabled",
+        "raw_tools_disabled",
+        "raw_tools_missing",
+        "unsafe_warning",
+        "generic_warning",
+        "remote_connected",
+        "thread_write",
+        "thread_network",
+        "thread_approval",
+        "thread_reviewer",
+        "thread_cwd",
+        "thread_provider",
+        "thread_roots",
+        "thread_instructions",
+        "wrong_thread",
+        "rebind_turn",
+        "conflict_reply",
+        "unbound_item",
+    ],
+)
 async def test_effective_configuration_thread_and_pending_turn_fail_closed(tmp_path, scenario):
     transport, _, processes, _ = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError):
         await transport.generate(selection(), HISTORY, TOOLS)
     assert processes[-1].stopped
-    if scenario.startswith(("raw_", "thread_")) or scenario in {"unsafe_warning", "generic_warning", "remote_connected"}:
+    if scenario.startswith(("raw_", "thread_")) or scenario in {
+        "unsafe_warning",
+        "generic_warning",
+        "remote_connected",
+    }:
         assert not any(x["method"] == "turn/start" for x in processes[-1].requests)
 
 
 def test_schema_business_keys_and_literals_are_not_interpreted_as_schema_keywords():
-    schema = {"type": "object", "properties": {"$id": {"type": "string"}, "literal": {"const": {"$ref": "https://literal.invalid"}}}}
+    schema = {
+        "type": "object",
+        "properties": {"$id": {"type": "string"}, "literal": {"const": {"$ref": "https://literal.invalid"}}},
+    }
     validator = _closed_schema(schema)
     validator.validate({"$id": "name", "literal": {"$ref": "https://literal.invalid"}})
 
@@ -494,14 +778,33 @@ async def test_repeated_cancellation_waits_for_owned_cleanup_before_removing_cwd
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["endpoint_openai_session", "endpoint_chatgpt_session", "endpoint_openai_lower", "endpoint_chatgpt_lower", "endpoint_openai_disabled", "endpoint_chatgpt_disabled", "endpoint_openai_empty", "endpoint_chatgpt_map", "endpoint_null_config", "endpoint_list_config", "endpoint_list_layer"])
-async def test_any_raw_layer_endpoint_override_or_malformed_layer_rejects_before_account_and_inference(tmp_path, scenario):
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "endpoint_openai_session",
+        "endpoint_chatgpt_session",
+        "endpoint_openai_lower",
+        "endpoint_chatgpt_lower",
+        "endpoint_openai_disabled",
+        "endpoint_chatgpt_disabled",
+        "endpoint_openai_empty",
+        "endpoint_chatgpt_map",
+        "endpoint_null_config",
+        "endpoint_list_config",
+        "endpoint_list_layer",
+    ],
+)
+async def test_any_raw_layer_endpoint_override_or_malformed_layer_rejects_before_account_and_inference(
+    tmp_path, scenario
+):
     transport, _, processes, _ = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError) as caught:
         await transport.generate(selection(), HISTORY, TOOLS)
     assert "private-secret" not in str(caught.value)
     assert processes[-1].stopped
-    assert not any(request["method"] in {"account/read", "thread/start", "turn/start"} for request in processes[-1].requests)
+    assert not any(
+        request["method"] in {"account/read", "thread/start", "turn/start"} for request in processes[-1].requests
+    )
 
 
 @pytest.mark.asyncio
@@ -511,8 +814,28 @@ async def test_absent_and_explicit_null_endpoints_preserve_native_defaults(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,reason", [("native_tool", "native_item"), ("approval", "callback"), ("generic_warning", "native_notification"), ("unknown_notification", "native_notification"), ("upstream_error", "known_upstream_error"), ("mcp", "configuration"), ("thread_network", "thread_policy"), ("wrong_thread", "identity"), ("rebind_turn", "identity"), ("conflict_reply", "identity"), ("unbound_item", "identity"), ("invalid_json", "final_output"), ("wrong_type", "final_output"), ("oversize", "output_limit")])
-async def test_fixed_rejection_reason_survives_existing_audit_string_without_private_protocol(tmp_path, scenario, reason):
+@pytest.mark.parametrize(
+    "scenario,reason",
+    [
+        ("native_tool", "native_item"),
+        ("approval", "callback"),
+        ("generic_warning", "native_notification"),
+        ("unknown_notification", "native_notification"),
+        ("upstream_error", "known_upstream_error"),
+        ("mcp", "configuration"),
+        ("thread_network", "thread_policy"),
+        ("wrong_thread", "identity"),
+        ("rebind_turn", "identity"),
+        ("conflict_reply", "identity"),
+        ("unbound_item", "identity"),
+        ("invalid_json", "final_output"),
+        ("wrong_type", "final_output"),
+        ("oversize", "output_limit"),
+    ],
+)
+async def test_fixed_rejection_reason_survives_existing_audit_string_without_private_protocol(
+    tmp_path, scenario, reason
+):
     transport, _, processes, _ = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError) as caught:
         await transport.generate(selection(), HISTORY, TOOLS)
@@ -555,7 +878,22 @@ async def test_official_retry_notice_waits_for_same_turn_without_new_rpc(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,code", [("error_rate", "llm_rate_limited"), ("error_session_budget", "llm_rate_limited"), ("error_auth", "llm_auth_failed"), ("error_provider", "llm_provider_error"), ("error_http_rate", "llm_rate_limited"), ("error_http_timeout", "llm_timeout"), ("error_http_auth", "llm_auth_failed"), ("error_stream", "llm_provider_error"), ("error_active", "llm_provider_error"), ("error_null_info", "llm_provider_error"), ("error_omitted_info", "llm_provider_error")])
+@pytest.mark.parametrize(
+    "scenario,code",
+    [
+        ("error_rate", "llm_rate_limited"),
+        ("error_session_budget", "llm_rate_limited"),
+        ("error_auth", "llm_auth_failed"),
+        ("error_provider", "llm_provider_error"),
+        ("error_http_rate", "llm_rate_limited"),
+        ("error_http_timeout", "llm_timeout"),
+        ("error_http_auth", "llm_auth_failed"),
+        ("error_stream", "llm_provider_error"),
+        ("error_active", "llm_provider_error"),
+        ("error_null_info", "llm_provider_error"),
+        ("error_omitted_info", "llm_provider_error"),
+    ],
+)
 async def test_terminal_typed_upstream_error_uses_fixed_codes_without_content(tmp_path, scenario, code):
     transport, _, processes, _ = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError) as caught:
@@ -568,7 +906,23 @@ async def test_terminal_typed_upstream_error_uses_fixed_codes_without_content(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["error_unknown_info", "error_unknown_variant", "error_bad_status", "error_bad_kind", "error_extra_inner", "error_bad_retry", "error_bad_message", "error_bad_details", "error_missing_turn", "error_extra", "error_wrong_thread", "error_wrong_turn"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "error_unknown_info",
+        "error_unknown_variant",
+        "error_bad_status",
+        "error_bad_kind",
+        "error_extra_inner",
+        "error_bad_retry",
+        "error_bad_message",
+        "error_bad_details",
+        "error_missing_turn",
+        "error_extra",
+        "error_wrong_thread",
+        "error_wrong_turn",
+    ],
+)
 async def test_unknown_upstream_shape_or_foreign_turn_remains_fail_closed(tmp_path, scenario):
     transport, _, processes, _ = adapter(tmp_path, scenario)
     with pytest.raises(LLMTransportError) as caught:
@@ -579,7 +933,10 @@ async def test_unknown_upstream_shape_or_foreign_turn_remains_fail_closed(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,code,reason", [("error_retry_hang", "llm_timeout", "protocol"), ("error_retry_budget", "llm_provider_error", "output_limit")])
+@pytest.mark.parametrize(
+    "scenario,code,reason",
+    [("error_retry_hang", "llm_timeout", "protocol"), ("error_retry_budget", "llm_provider_error", "output_limit")],
+)
 async def test_retry_notices_obey_existing_deadline_and_message_budget(tmp_path, scenario, code, reason):
     transport, _, processes, _ = adapter(tmp_path, scenario, timeout=0.03 if scenario == "error_retry_hang" else 1)
     with pytest.raises(LLMTransportError) as caught:

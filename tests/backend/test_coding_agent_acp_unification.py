@@ -115,8 +115,9 @@ async def test_direct_opencode_runner_rejects_native_model_before_acp_launch(tmp
     from backend.llm_runtime import use_model_selections
 
     store = LLMConfigStore(str(tmp_path))
-    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native",
-                           "models": [{"id": "gpt-5.6-luna"}]}, {})
+    store.create_provider(
+        {"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "gpt-5.6-luna"}]}, {}
+    )
     monkeypatch.setattr("backend.llm_service.get_default_llm_store", lambda: store)
     runtime = CodingAgentRuntime(tmp_path)
     launch = MagicMock(return_value=SimpleNamespace(agent_id="opencode"))

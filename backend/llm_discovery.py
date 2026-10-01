@@ -47,10 +47,17 @@ async def discover_models(store: LLMConfigStore, provider_id: str) -> list[dict[
                 raise LLMConfigError("Native model catalog is invalid", code="llm_provider_error")
             model_id = item["id"].strip()
             name = item.get("name") if isinstance(item.get("name"), str) else model_id
-            merged.setdefault(model_id, ModelRef(
-                id=model_id, provider_id=provider_id, model_id=model_id,
-                display_name=name, api_mode="codex_native", source="discovered",
-            ).model_dump(mode="json"))
+            merged.setdefault(
+                model_id,
+                ModelRef(
+                    id=model_id,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    display_name=name,
+                    api_mode="codex_native",
+                    source="discovered",
+                ).model_dump(mode="json"),
+            )
         models = list(merged.values())
         store.update_provider(provider_id, {"models": models}, None)
         return models

@@ -170,8 +170,14 @@ def _preset(
 
 PROVIDER_CATALOG = [
     _preset(
-        "codex_native", "Codex Native", "local", "", [],
-        api_mode="codex_native", discovery="codex_native", advanced_fields=[],
+        "codex_native",
+        "Codex Native",
+        "local",
+        "",
+        [],
+        api_mode="codex_native",
+        discovery="codex_native",
+        advanced_fields=[],
     ),
     _preset("openai", "OpenAI", "global", "openai", discovery="openai"),
     _preset("anthropic", "Anthropic", "global", "anthropic", discovery="anthropic"),
