@@ -30,6 +30,36 @@ function fillPairForm(token = enrollment) {
 }
 
 describe("local remote workspace consent", () => {
+  it("requires explicit until-revoked selection without adding management scope", async () => {
+    vi.mocked(remote.loadRemoteWorkspace).mockResolvedValue({ status: "disconnected", online: false, scopes: [] });
+    vi.mocked(remote.pairRemoteWorkspace).mockResolvedValue({ ...claimed, status: "pending", expires_at: "9999-01-01T00:00:00Z" });
+    render(<RemoteWorkspaceDialog open language="zh" onClose={vi.fn()} />);
+    await screen.findByText("尚未连接");
+    fillPairForm();
+    fireEvent.change(screen.getByLabelText("允许访问的时间"), { target: { value: "until_revoked" } });
+    expect(screen.getByText(/持续允许访问，直到你在本机或平台撤销/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "生成连接链接" }));
+    await waitFor(() => expect(remote.pairRemoteWorkspace).toHaveBeenCalledWith({
+      portal_url: "http://localhost:3001", gateway_url: "http://localhost:8788", name: "我的电脑",
+      scopes: ["workspace.control"], expires_in: 86400, until_revoked: true, enrollment_token: enrollment,
+    }));
+  });
+
+  it.each([
+    { language: "zh" as const, duration: "直到撤销", notice: /持续允许访问，直到你在本机或平台撤销/, confirm: "确认允许此账户访问" },
+    { language: "en" as const, duration: "Until revoked", notice: /Access continues until you revoke it locally or on the platform/, confirm: "Confirm access for this account" },
+  ])("reviews the explicit long permission before approval in $language", async (labels) => {
+    vi.mocked(remote.loadRemoteWorkspace).mockResolvedValue({ ...claimed, expires_at: "9999-01-01T00:00:00Z" });
+    vi.mocked(remote.approveRemoteWorkspace).mockResolvedValue({ ...claimed, status: "paired", online: true, expires_at: "9999-01-01T00:00:00Z" });
+    render(<RemoteWorkspaceDialog open language={labels.language} onClose={vi.fn()} />);
+    await screen.findByText(labels.duration);
+    expect(screen.getByText(labels.notice)).toBeTruthy();
+    expect(screen.queryByText(/9999/)).toBeNull();
+    expect(remote.approveRemoteWorkspace).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: labels.confirm }));
+    await waitFor(() => expect(remote.approveRemoteWorkspace).toHaveBeenCalledWith({ account_id: "account-one", grant_id: "grant-one" }));
+  });
+
   it("shows the claimed account and submits the exact displayed grant only after confirmation", async () => {
     vi.mocked(remote.approveRemoteWorkspace).mockResolvedValue({ ...claimed, status: "paired", online: true });
     render(<RemoteWorkspaceDialog open language="zh" onClose={vi.fn()} />);

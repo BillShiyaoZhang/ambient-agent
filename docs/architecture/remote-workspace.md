@@ -28,6 +28,14 @@ Gateway 使用独立 SQLite 状态库，保存节点、一次性码摘要、设�
 
 ## 通道契约
 
+### 直到撤销的显式授权
+
+本机与 Gateway 的配对请求新增可选严格布尔值 `until_revoked`，缺省为 false；`expires_in` 仍须为 300 至 30 天，有限期请求继续发送原有 payload。只有用户明确选择“直到撤销”才发送 `until_revoked=true`。该模式先无凭据、Cookie、接入码或正文地 GET Gateway `/v1/connector/capabilities`，不跟随重定向，要求 `supported_grant_modes` 列表包含 `until_revoked`，再提交一次配对 POST；旧网关不支持或能力查询失败时不得消费接入码，也不自动重试 POST。原私有 `/health` 与账户、metrics 路径的入口边界不变。
+
+长期期限唯一线格式为 `9999-01-01T00:00:00Z`，保存到既有 `expires_at` ISO 字段；不使用 null、Infinity、datetime.max 或修改旧记录。首次响应及未批准 claimed 刷新都须字面匹配该值，拒绝等价 offset、缩短、延长或缺失值。已批准后的身份、账户、grant、scopes、origin 与 expiry 不变检查及两端撤销保持。有限期维持现有未来期限与 requested duration+10 秒上界，以 datetime 差值校验避免 year 9999 加法溢出；不新增有限期下界或升级旧 paired 期限。
+
+本机选择和账户批准复核均明确显示“直到撤销”，提醒持续访问须主动撤销；权限范围不因此扩大。浏览器会话与 launch 仍保持原短期上限，可从门户重新打开。该模式必须由支持能力的云版本部署后才能使用，历史公网验收不是本模式的部署证明。
+
 Connector 的握手收到 `{type:"hello",node_id,grant_id,account_id,scopes,workspace_origin}`，必须与本机已确认授权完全匹配。Gateway 为每个请求附带同一身份上下文；Connector 逐次复核有效期、身份、范围、目标与路径。客户端不能通过代理头声明身份。设备密钥、Cookie、Authorization、Host 和 hop-by-hop 头不透传到 Ambient；Connector 设置固定可信本机 Origin，不扩大 Backend Origin 或 peer 白名单。
 
 消息是有界 JSON：HTTP 正文和二进制 WS 帧使用 base64。`http.request` 包含 `id`、身份上下文、`service`（frontend/backend/frame）、`method`、`path`（含 query）、`headers`（二元数组）、`body`。`http.response` 包含 `id`、`status`、`headers`、`body`。`ws.open` 包含相同上下文及 `subprotocols`；响应 `ws.accept` 包含选定 `subprotocol`。双向 `ws.data` 包含 `id`、`kind`（text/bytes）和 `data`；`ws.close` 包含 `id`、`code`、`reason`。Connector 定时 `ping`，Gateway `pong`；撤销发送 `revoked` 并关闭所有在途连接。

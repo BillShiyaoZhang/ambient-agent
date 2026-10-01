@@ -12,6 +12,8 @@ Enrollment codes exist only for the current submission and are cleared after eve
 
 ## Revocation and recovery
 
+The duration selector also offers explicit “Until revoked”. It continues access for the selected account under the original scopes until local or platform revocation; local account review displays this duration again. A supporting Cloud Gateway is required. The client checks capability first, so unsupported old Gateways receive no pairing POST and consume no enrollment; select a bounded duration instead. Existing connections retain their deadlines and never become long-lived through an upgrade. Browser sessions still last at most one hour; reopen an authorized node from Portal after session expiry.
+
 Local revocation stops local forwarding immediately even when the cloud is unavailable. Portal revocation invalidates existing workspace sessions and connections. Account deletion first permanently revokes its Gateway nodes and preserves the account if that fails. Expiry requires a fresh connection. Temporary network loss shows offline; the Connector reconnects and never blindly replays writes.
 
 Workspace browser sessions last at most one hour and never exceed the local grant. Portal sign-out and already-opened workspace sessions are independent. Use revocation to stop remote access immediately. The relay can read traffic bodies; this implementation does not persist them. Existing chat RPC policy signatures do not cover the independent HTTP/WebSocket channel.

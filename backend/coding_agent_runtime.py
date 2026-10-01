@@ -49,6 +49,14 @@ _CODEX_RELEASES = {
         "bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a",
     ),
 }
+# Exact regular-file sizes from the SHA-256-verified 0.145.0 release archives.
+# The compressed download budget is separate from the expanded CLI payload.
+_CODEX_BINARY_SIZES = {
+    "aarch64-apple-darwin": 271134288,
+    "x86_64-apple-darwin": 294456976,
+    "aarch64-unknown-linux-musl": 269360944,
+    "x86_64-unknown-linux-musl": 310730800,
+}
 _OUTPUT_LIMIT = 64 * 1024
 _APP_SERVER_OUTPUT_LIMIT = 1024 * 1024
 _APP_SERVER_TIMEOUT = 15.0
@@ -689,6 +697,7 @@ class CodingAgentRuntime:
                     code="install_unsupported",
                 )
             target, expected_sha256 = release
+            expected_binary_size = _CODEX_BINARY_SIZES[target]
             asset_name = f"codex-{target}.tar.gz"
             asset_url = f"https://github.com/openai/codex/releases/download/{_CODEX_RELEASE_TAG}/{asset_name}"
             archive_path = staging / asset_name
@@ -720,7 +729,7 @@ class CodingAgentRuntime:
             try:
                 with tarfile.open(archive_path, mode="r:gz") as archive:
                     member = archive.getmember(expected_member)
-                    if not member.isfile() or member.size > _CODEX_ARCHIVE_LIMIT:
+                    if not member.isfile() or member.size != expected_binary_size:
                         raise CodingAgentRuntimeError(
                             "Codex release did not contain the expected CLI binary",
                             code="install_failed",
@@ -733,6 +742,10 @@ class CodingAgentRuntime:
                         )
                     with source, binary.open("xb") as destination_file:
                         shutil.copyfileobj(source, destination_file)
+                    if binary.stat().st_size != expected_binary_size:
+                        raise CodingAgentRuntimeError(
+                            "Codex release binary size verification failed", code="install_failed"
+                        )
             except (KeyError, tarfile.TarError, OSError) as exc:
                 raise CodingAgentRuntimeError(
                     "Codex release archive was invalid",

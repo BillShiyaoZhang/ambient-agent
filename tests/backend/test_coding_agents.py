@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 import backend.coding_agent_runtime as coding_agent_runtime_module
 from backend.coding_agent import CodingAgentConfigStore
-from backend.coding_agent_runtime import CodingAgentRuntime
+from backend.coding_agent_runtime import CodingAgentRuntime, CodingAgentRuntimeError
 from backend.codex_service import _codex_environment, _codex_prompt, run_codex_agent
 
 
@@ -164,15 +164,29 @@ async def test_runtime_probe_success_preserves_output_and_closes_stdio(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, monkeypatch):
+@pytest.mark.parametrize("binary_size", [None, 310730800], ids=["small-fixture", "official-expanded-size"])
+async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, monkeypatch, binary_size):
     target = "x86_64-unknown-linux-musl"
     binary_payload = b"#!/bin/sh\necho 'codex-cli 0.145.0'\n"
+    binary_size = binary_size or len(binary_payload)
+
+    class BinarySource:
+        prefix = binary_payload
+        remaining = binary_size
+
+        def read(self, count):
+            size = min(count, self.remaining)
+            prefix = self.prefix[:size]
+            self.prefix = self.prefix[size:]
+            self.remaining -= size
+            return prefix + b"\0" * (size - len(prefix))
+
     archive_buffer = io.BytesIO()
     with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
         member = tarfile.TarInfo(f"codex-{target}")
-        member.size = len(binary_payload)
+        member.size = binary_size
         member.mode = 0o755
-        archive.addfile(member, io.BytesIO(binary_payload))
+        archive.addfile(member, BinarySource())
     archive_payload = archive_buffer.getvalue()
 
     class FakeResponse:
@@ -215,6 +229,7 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
         "_CODEX_RELEASES",
         {("linux", "x86_64"): (target, hashlib.sha256(archive_payload).hexdigest())},
     )
+    monkeypatch.setattr(coding_agent_runtime_module, "_CODEX_BINARY_SIZES", {target: binary_size}, raising=False)
     monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", FakeClient)
     runtime = CodingAgentRuntime(tmp_path / "workspace")
     monkeypatch.setattr(runtime, "managed_command", lambda _agent_id: runtime.agent_root("codex") / "bin" / "codex")
@@ -223,7 +238,9 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
     async def probe_verified_binary(argv, *, agent_id):
         assert agent_id == "codex"
         assert argv[1:] == ["--version"]
-        assert Path(argv[0]).read_bytes() == binary_payload
+        assert Path(argv[0]).stat().st_size == binary_size
+        with Path(argv[0]).open("rb") as source:
+            assert source.read(len(binary_payload)) == binary_payload
         verified_paths.append(Path(argv[0]))
         return 0, "codex-cli 0.145.0"
 
@@ -240,9 +257,77 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(tmp_path, mo
     await runtime._install_codex("verified-release")
 
     binary = runtime.managed_command("codex")
-    assert binary.read_bytes() == binary_payload
+    assert binary.stat().st_size == binary_size
+    with binary.open("rb") as source:
+        assert source.read(len(binary_payload)) == binary_payload
     assert len(verified_paths) == 1
     assert chmod_calls[verified_paths[0]] == 0o700
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid", ["size-minus-one", "size-plus-one", "oversize", "path", "symlink", "hardlink", "version"]
+)
+async def test_managed_codex_install_rejects_invalid_binary_and_cleans_staging(tmp_path, monkeypatch, invalid):
+    target = "x86_64-unknown-linux-musl"
+    prefix = b"test-only-pinned-binary"
+    expected_size = len(prefix)
+    sizes = {"size-minus-one": expected_size - 1, "size-plus-one": expected_size + 1, "oversize": 160 * 1024 * 1024 + 1}
+    member_size = sizes.get(invalid, expected_size)
+    archive_buffer = io.BytesIO()
+
+    class BinarySource:
+        remaining = member_size
+        pending = prefix
+
+        def read(self, count):
+            size = min(count, self.remaining)
+            data = self.pending[:size]
+            self.pending = self.pending[size:]
+            self.remaining -= size
+            return data + b"\0" * (size - len(data))
+
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        member = tarfile.TarInfo(("../" if invalid == "path" else "") + f"codex-{target}")
+        member.size = member_size
+        if invalid in {"symlink", "hardlink"}:
+            member.type = tarfile.SYMTYPE if invalid == "symlink" else tarfile.LNKTYPE
+            member.linkname = "../outside"
+            member.size = 0
+        archive.addfile(member, BinarySource() if member.isfile() else None)
+    payload = archive_buffer.getvalue()
+    actual_client = coding_agent_runtime_module.httpx.AsyncClient
+
+    def respond(request):
+        assert request.method == "GET"
+        assert str(request.url).endswith(f"/rust-v0.145.0/codex-{target}.tar.gz")
+        return coding_agent_runtime_module.httpx.Response(200, content=payload)
+
+    def client_factory(**kwargs):
+        return actual_client(transport=coding_agent_runtime_module.httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(coding_agent_runtime_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(coding_agent_runtime_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        coding_agent_runtime_module,
+        "_CODEX_RELEASES",
+        {("linux", "x86_64"): (target, hashlib.sha256(payload).hexdigest())},
+    )
+    monkeypatch.setattr(coding_agent_runtime_module, "_CODEX_BINARY_SIZES", {target: expected_size}, raising=False)
+    monkeypatch.setattr(coding_agent_runtime_module.httpx, "AsyncClient", client_factory)
+    runtime = CodingAgentRuntime(tmp_path / "workspace")
+    probes = []
+
+    async def probe(argv, *, agent_id):
+        probes.append(argv)
+        return 0, "codex-cli 0.144.0" if invalid == "version" else "codex-cli 0.145.0"
+
+    monkeypatch.setattr(runtime, "_run_probe", probe)
+    with pytest.raises(CodingAgentRuntimeError):
+        await runtime._install_codex("invalid-binary")
+    assert len(probes) == (1 if invalid == "version" else 0)
+    assert not (runtime.agent_root("codex") / "bin").exists()
+    assert not (runtime.agent_root("codex") / ".install-invalid-binary").exists()
 
 
 @pytest.mark.asyncio

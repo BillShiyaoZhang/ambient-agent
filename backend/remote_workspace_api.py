@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
 
 from backend.client_widget_runtime import ClientWidgetRuntimeTicketError, client_runtime_origin
 from backend.remote_workspace import RemoteWorkspaceConnector, RemoteWorkspaceDenied, RemoteWorkspaceGatewayError
@@ -24,6 +24,7 @@ class RemoteWorkspacePair(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     scopes: list[Literal["workspace.control", "workspace.manage"]] = Field(min_length=1, max_length=2)
     expires_in: int = Field(default=86400, ge=300, le=30 * 86400)
+    until_revoked: StrictBool = False
     enrollment_token: SecretStr = Field(min_length=20, max_length=128, exclude=True, repr=False)
 
 

@@ -68,6 +68,12 @@ and video models from the chat model picker.
 Deleting a referenced provider or model returns `409`. An LLM request without a usable default returns
 `llm_configuration_required`, prompting the client to open provider settings.
 
+## Managed Codex installation verification
+
+Web installation pins the official `0.145.0` CLI, verifies the platform-specific archive SHA-256, and copies only its exact named regular-file member. Compressed downloads retain the 160MiB bound and streamed byte accounting; the expanded file must match an independently recorded exact size for each pinned release artifact. The compressed bound must not be reused for the expanded CLI. The verified Linux x86_64 artifact is 113,724,150 compressed bytes and 310,730,800 CLI bytes, so legitimate installation must not be rejected by a 160MiB expanded-size threshold.
+
+Size mismatches, including one byte, incorrect paths, symbolic or hard links, excessive downloads, checksum mismatches, and incorrect probed versions fail and clean this operation's staging directory. Validated installation retains `0700` permissions, the managed destination, and pinned version probing, without extracting other members, changing versions/models, or reading/writing native authentication. Acceptance first uses isolated synthetic archives for the valid expanded size and negative cases, followed by normal web installation into the real Docker persistent volume.
+
 ## Native Codex primary-model integration contract
 
 This integration and acceptance contract addresses the capability gap found during 2026-10-01 public acceptance and precedes product code. Each capability is supported only after implementation, Red/Green, and its corresponding real acceptance; see staged results in [public acceptance](../verification/remote-workspace-production-2026-10-01.md). Short Chat success does not replace full App or recovery acceptance. The local web UI creates a `codex_native` Provider, selects an exact model ID such as `gpt-5.6-luna`, and configures existing default/fast models and session overrides. It uses official Codex independent login/subscription; Coding Agent native-model settings and Ambient primary selection do not overwrite one another.

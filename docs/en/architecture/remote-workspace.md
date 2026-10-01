@@ -16,6 +16,14 @@ Local routes under `/api/remote-workspace` are `GET /status`, `POST /pair` (requ
 
 ## Channel contract
 
+### Explicit until-revoked authorization
+
+Local and Gateway pairing requests add optional strict boolean `until_revoked`, defaulting to false; `expires_in` remains constrained to 300 seconds through 30 days, and bounded requests keep the legacy payload. Only explicit selection of “Until revoked” sends `until_revoked=true`. This mode first performs a credential-free, Cookie-free, enrollment-free, body-free GET to Gateway `/v1/connector/capabilities`, without following redirects, requiring its `supported_grant_modes` list to contain `until_revoked`, before one pairing POST. Unsupported old Gateways or failed capability checks must not consume enrollment or automatically retry POST. Existing ingress boundaries for private `/health`, account, and metrics paths remain.
+
+The sole long-grant wire value is `9999-01-01T00:00:00Z`, persisted in the existing ISO `expires_at` field, without null, Infinity, datetime.max, or old-record migration. The initial response and unapproved claimed refresh must match that literal value, rejecting equivalent offsets, shorter/longer deadlines, and missing values. Approved identity/account/grant/scopes/origin/expiry checks and both revocation paths remain. Bounded expiry retains its existing future deadline and requested-duration-plus-ten-second upper bound, using datetime subtraction to avoid year-9999 addition overflow; no new bounded lower limit or old paired-deadline extension is introduced.
+
+Selection and local account review clearly show “Until revoked” and the need for active revocation, without widening scopes. Browser sessions and launch retain their short limits and may be reopened from Portal. This mode requires deployment of a capability-supporting Cloud version; historical public acceptance does not establish deployment of this mode.
+
 The Connector verifies `{type:"hello",node_id,grant_id,account_id,scopes,workspace_origin}` against its locally approved grant. Every Gateway request carries the same identity context, revalidated locally against expiry, scopes, target and path. Untrusted proxy headers cannot supply identity. Device secrets, cookies, authorization, Host and hop-by-hop headers are not forwarded. The upstream uses a fixed trusted local Origin without broadening Ambient's peer or Origin allowlists.
 
 Bounded JSON carries HTTP bodies and binary WS frames as base64. `http.request` carries `id`, identity, `service` (frontend/backend/frame), `method`, `path` including query, header pairs and `body`. `http.response` carries `id`, `status`, header pairs and `body`. `ws.open` adds `subprotocols`; `ws.accept` returns the selected `subprotocol`. Bidirectional `ws.data` carries `id`, `kind` (text/bytes) and `data`; `ws.close` carries `id`, `code`, `reason`. Connector `ping` receives Gateway `pong`; revocation sends `revoked` and closes in-flight channels.

@@ -300,6 +300,8 @@ function App() {
 
   interface PermissionRequest {
     request_id: string;
+    run_id?: string;
+    permission_type?: string;
     tool_call: string;
     details: string;
   }
@@ -735,8 +737,45 @@ function App() {
     if (messagesSessionIdRef.current !== activeSessionId) {
       messagesSessionIdRef.current = activeSessionId;
       setMessages([]);
+      setPendingPermission(null);
+      setPendingBackendPermission(null);
+      setMutationPreview(null);
     }
     setChatProjection(EMPTY_CONVERSATION_PROJECTION);
+    const permissionRevisions = new Map<string, number>();
+    const clearRunPermissions = (runId: string) => {
+      permissionRevisions.set(runId, (permissionRevisions.get(runId) ?? 0) + 1);
+      setPendingPermission((current) => current?.run_id === runId ? null : current);
+      setPendingBackendPermission((current: any) => current?.run_id === runId ? null : current);
+    };
+    const refreshRunPermissions = (runId: string) => {
+      const revision = (permissionRevisions.get(runId) ?? 0) + 1;
+      permissionRevisions.set(runId, revision);
+      // Durable events are history, not proof that a permission is still actionable.
+      void runService.get(runId).then((run) => {
+        if (disposed || permissionRevisions.get(runId) !== revision) return;
+        if (!run || run.id !== runId || run.source_type !== "chat" || run.source_id !== activeSessionId) return;
+        if (run.status !== "waiting_user") {
+          clearRunPermissions(runId);
+          return;
+        }
+        const pending = (run.interactions ?? []).filter((interaction) => (
+          interaction.status === "pending" && interaction.run_id === runId
+        ));
+        setPendingPermission((current) => current?.run_id === runId
+          && !pending.some((interaction) => interaction.id === current.request_id) ? null : current);
+        setPendingBackendPermission((current: any) => current?.run_id === runId
+          && !pending.some((interaction) => interaction.id === current.request_id) ? null : current);
+        for (const interaction of pending) {
+          const payload = interaction.payload;
+          if (payload.type === "permission_request" || payload.type === "backend_permission_request") {
+            handleProjection({ ...payload, request_id: interaction.id, run_id: runId });
+          }
+        }
+      }).catch(() => {
+        // A failed lookup cannot establish a new permission or discard an existing one.
+      });
+    };
 
     // Load message history from DB
     const loadSessionHistory = async () => {
@@ -775,6 +814,11 @@ function App() {
         .filter((run) => run.source_type === "chat" && run.source_id === activeSessionId)
         .sort((left, right) => left.created_at.localeCompare(right.created_at));
       setChatProjection((current) => sessionRuns.reduce(projectRunSnapshot, current));
+      for (const run of sessionRuns) {
+        if (run.status === "waiting_user" && !permissionRevisions.has(run.id)) {
+          refreshRunPermissions(run.id);
+        }
+      }
     }).catch((error) => {
       console.error("Error loading chat runs:", error);
     });
@@ -859,6 +903,7 @@ function App() {
           void refreshLLMConfiguration();
         }
       } else if (data.type === "mutation_preview") {
+        if (data.committed === false || typeof data.ticket_id !== "string" || !data.ticket_id) return;
         setMutationPreview({
           ticket_id: data.ticket_id,
           session_id: data.session_id,
@@ -889,7 +934,6 @@ function App() {
     const projectedTypes = new Set([
       "reply",
       "widget",
-      "permission_request",
       "mutation_preview",
       "mutation_committed",
     ]);
@@ -912,6 +956,22 @@ function App() {
       const payload = event.payload;
       if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
       const type = (payload as Record<string, unknown>).type;
+      if (event.type === "interaction_resolved" || (
+        event.type === "status_changed" && (payload as Record<string, unknown>).to !== "waiting_user"
+      )) {
+        clearRunPermissions(event.run_id);
+      }
+      if (event.type === "interaction_requested" || type === "permission_request" || type === "backend_permission_request") {
+        refreshRunPermissions(event.run_id);
+        return;
+      }
+      if (type === "mutation_preview") {
+        const windowSeconds = Number((payload as Record<string, unknown>).soft_window_seconds ?? 60);
+        const remaining = Math.ceil((Date.parse(event.created_at) + windowSeconds * 1000 - Date.now()) / 1000);
+        if (!Number.isFinite(windowSeconds) || windowSeconds <= 0 || !Number.isFinite(remaining) || remaining <= 0) return;
+        handleProjection({ ...payload, soft_window_seconds: Math.min(windowSeconds, remaining) });
+        return;
+      }
       if (typeof type === "string" && projectedTypes.has(type)) {
         handleProjection(payload);
       }

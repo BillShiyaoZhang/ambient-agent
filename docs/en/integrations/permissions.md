@@ -48,6 +48,10 @@ Coding Agent version and login-status probes retain their five-second deadline. 
 
 ## 5. Audit and sensitive data
 
+When the frontend restores Run history, historical permission events only describe execution. An approval dialog must re-read the current Run and confirm that it remains `waiting_user`, belongs to the current conversation, and has the same `pending` interaction. Genuine pending permissions recover after refresh; resolved interactions, terminal Runs, and stale asynchronous lookups cannot reopen a dialog. A disconnected connection preserves a valid request for retry. Switching conversations clears only frontend presentation without approving, denying, or changing the original Run.
+
+A pre-approval `mutation_preview` (`committed: false`) cannot expose rollback of committed data. A restored rollback notification needs a valid ticket and must remain inside the original event's soft window. Replaying history never renews that deadline.
+
 - Integrated Run effect, Tool Gateway, adapter, and LLM paths record events according to their contracts. `CapabilityAuthorizer`, App file operations, and Graph queries do not yet record every capability allow/deny through a shared hook; complete access auditing remains unimplemented. New hooks should record only App, Manifest revision, category, operation, resource summary, and stable code, never file content, secrets, or a full upstream body.
 - Run events use a versioned envelope with Run/session/step/attempt/trace correlation.
 - Tool and adapter events redact sensitive arguments and bound size. LLM audit stores bounded previews, hashes, usage, and latency.

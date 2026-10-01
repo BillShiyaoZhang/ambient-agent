@@ -1,5 +1,7 @@
 import { apiUrl } from "./apiBase";
 
+export const UNTIL_REVOKED_EXPIRY = "9999-01-01T00:00:00Z";
+
 export interface RemoteWorkspaceStatus {
   status: string;
   online: boolean;
@@ -25,6 +27,7 @@ export interface RemoteWorkspacePair {
   name: string;
   scopes: string[];
   expires_in: number;
+  until_revoked?: boolean;
   enrollment_token: string;
 }
 

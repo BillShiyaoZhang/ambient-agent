@@ -29,6 +29,7 @@ MAX_WS_BYTES = 256 * 1024
 MAX_TUNNEL_BYTES = 3 * 1024 * 1024
 MAX_CONNECTIONS = 16
 SCOPES = frozenset({"workspace.control", "workspace.manage"})
+UNTIL_REVOKED_EXPIRY = "9999-01-01T00:00:00Z"
 IDENTITY_FIELDS = ("node_id", "account_id", "grant_id", "scopes", "workspace_origin")
 PUBLIC_STATE_FIELDS = (
     "status",
@@ -394,15 +395,25 @@ class RemoteWorkspaceConnector:
         )
         return True
 
-    async def _gateway(self, method: str, path: str, **kwargs) -> dict[str, Any]:
+    async def _gateway(self, method: str, path: str, *, anonymous: bool = False, **kwargs) -> dict[str, Any]:
         if delay := self._cooldown_remaining():
             raise RemoteWorkspaceGatewayError(429, retry_after=delay)
         state = self.store._state
-        headers = {"Authorization": "Bearer " + state["connector_token"]} if state.get("connector_token") else {}
+        headers = (
+            {"Authorization": "Bearer " + state["connector_token"]}
+            if state.get("connector_token") and not anonymous
+            else {}
+        )
         own = self.gateway_http is None
         client = self.gateway_http or httpx.AsyncClient(timeout=30, trust_env=False)
         try:
-            response = await client.request(method, state["gateway_url"] + path, headers=headers, **kwargs)
+            if anonymous:
+                # A standalone Request omits client cookies/default headers; auth=None disables client auth.
+                response = await client.send(
+                    httpx.Request(method, state["gateway_url"] + path), auth=None, follow_redirects=False
+                )
+            else:
+                response = await client.request(method, state["gateway_url"] + path, headers=headers, **kwargs)
             if not response.is_success:
                 if self.store._state is not state:
                     raise RemoteWorkspaceDenied("Workspace connection changed while the request was pending")
@@ -439,10 +450,25 @@ class RemoteWorkspaceConnector:
             scopes = data["scopes"]
             if not isinstance(scopes, list) or "workspace.control" not in scopes or not set(scopes) <= SCOPES:
                 raise ValueError("Select workspace.control and optionally workspace.manage")
+            until_revoked = data.get("until_revoked", False)
+            if type(until_revoked) is not bool:
+                raise RemoteWorkspaceDenied("Grant mode must be a boolean")
+            duration = data.get("expires_in")
+            if type(duration) is not int or not 300 <= duration <= 30 * 86400:
+                raise RemoteWorkspaceDenied("Select a grant duration from five minutes through thirty days")
             if self.store.status()["status"] not in {"disconnected", "revoked", "expired", "invalid"}:
                 raise ValueError("Revoke the existing connection before pairing another account")
             await self.stop()
             self.store.save({"gateway_url": gateway_url, "portal_url": portal_url, "status": "disconnected"})
+            if until_revoked:
+                capabilities = await self._gateway("GET", "/v1/connector/capabilities", anonymous=True)
+                modes = capabilities.get("supported_grant_modes")
+                if (
+                    not isinstance(modes, list)
+                    or not all(isinstance(mode, str) for mode in modes)
+                    or "until_revoked" not in modes
+                ):
+                    raise RemoteWorkspaceDenied("Gateway does not support until-revoked grants")
             remote = await self._gateway(
                 "POST",
                 "/v1/connector/pairings",
@@ -450,7 +476,8 @@ class RemoteWorkspaceConnector:
                     "enrollment_token": token,
                     "name": data["name"],
                     "scopes": scopes,
-                    "expires_in": data["expires_in"],
+                    "expires_in": duration,
+                    **({"until_revoked": True} if until_revoked else {}),
                 },
             )
             for key in (
@@ -465,7 +492,10 @@ class RemoteWorkspaceConnector:
                     raise RemoteWorkspaceDenied("Pairing response is incomplete")
             normalize_gateway_url(remote["workspace_origin"])
             expiry = _expiry(remote["expires_at"])
-            if expiry <= self.store.now() or expiry > self.store.now() + timedelta(seconds=data["expires_in"] + 10):
+            remaining = (expiry - self.store.now()).total_seconds()
+            if until_revoked and remote["expires_at"] != UNTIL_REVOKED_EXPIRY:
+                raise RemoteWorkspaceDenied("Gateway changed the requested until-revoked deadline")
+            if remaining <= 0 or (not until_revoked and remaining > duration + 10):
                 raise RemoteWorkspaceDenied("Gateway expiry exceeds the locally requested duration")
             _expiry(remote["pairing_expires_at"])
             self.store.save(
@@ -522,6 +552,8 @@ class RemoteWorkspaceConnector:
                 raise RemoteWorkspaceDenied("Claimed identity is incomplete")
             if remote.get("workspace_origin") != state.get("workspace_origin"):
                 raise RemoteWorkspaceDenied("Gateway changed workspace origin")
+            if state.get("expires_at") == UNTIL_REVOKED_EXPIRY and remote.get("expires_at") != UNTIL_REVOKED_EXPIRY:
+                raise RemoteWorkspaceDenied("Gateway changed the requested until-revoked deadline")
             if _expiry(remote.get("expires_at")) > _expiry(state.get("expires_at")):
                 raise RemoteWorkspaceDenied("Gateway extended the requested grant")
             self.store.save(

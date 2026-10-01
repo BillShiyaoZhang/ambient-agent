@@ -48,6 +48,10 @@ Coding Agent 的版本与登录状态探针保留五秒期限。探针超时仍�
 
 ## 5. 审计与敏感数据
 
+前端恢复 Run 历史时，历史权限事件只用于展示执行记录。授权弹窗必须重新读取当前 Run，确认它仍为 `waiting_user`、属于当前会话，且同一 interaction 仍为 `pending`。刷新后真实待处理权限可以恢复；已处理、终态 Run 或过时的异步查询不能重新打开弹窗。断线保留有效请求，用户恢复连接后可继续响应。切换会话只清理前端显示，不批准、拒绝或修改原 Run。
+
+预审批的 `mutation_preview`（`committed: false`）不能显示撤销已写入数据的操作；历史撤销提示须具有有效 ticket，且仍在原事件的 soft window 内。重放记录不会刷新这个时限。
+
 - 已接入的 Run effect、Tool Gateway、adapter 与 LLM 路径按各自契约记录事件。`CapabilityAuthorizer`、App 文件操作与 Graph query 尚未统一记录每次 capability allow/deny；完整访问审计仍是未实施的覆盖项。新增 hook 应只记录 App、Manifest revision、类目、operation、resource 摘要和稳定 code，不记录文件内容、secret 或完整上游 body。
 - Run events 使用版本化 envelope，并带 Run/session/step/attempt/trace 关联。
 - Tool/adapter events 对敏感参数脱敏并限制大小；LLM audit 保存有界 preview、hash、usage 与 latency。

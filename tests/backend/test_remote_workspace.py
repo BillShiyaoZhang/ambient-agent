@@ -100,6 +100,282 @@ def pairing_response(**updates):
     }
 
 
+@pytest.mark.parametrize("mode", [None, False, True])
+def test_until_revoked_api_is_optional_and_passes_only_strict_booleans(mode):
+    calls = []
+
+    class PairStub:
+        async def pair(self, data):
+            calls.append(data)
+            return {"status": "pending", "online": False, "scopes": []}
+
+    app = FastAPI()
+    app.include_router(create_remote_workspace_router(lambda: PairStub()))
+    payload = pair_input(**({"until_revoked": mode} if mode is not None else {}))
+    with TestClient(app, client=("127.0.0.1", 4444)) as client:
+        response = client.post("/api/remote-workspace/pair", json=payload)
+    assert response.status_code == 200
+    assert calls[0]["until_revoked"] is (mode is True)
+
+
+@pytest.mark.parametrize("mode", [0, 1, "true", "false", None, [], {}])
+def test_until_revoked_api_rejects_coerced_boolean_without_calling_connector(mode):
+    class PairStub:
+        async def pair(self, data):
+            pytest.fail("Invalid mode must not reach the connector")
+
+    app = FastAPI()
+    app.include_router(create_remote_workspace_router(lambda: PairStub()))
+    with TestClient(app, client=("127.0.0.1", 4444)) as client:
+        response = client.post("/api/remote-workspace/pair", json=pair_input(until_revoked=mode))
+    assert response.status_code == 422
+    assert ENROLLMENT not in response.text
+
+
+@pytest.mark.parametrize("seconds", [299, 30 * 86400 + 1])
+def test_until_revoked_api_keeps_finite_duration_bounds(seconds):
+    class PairStub:
+        async def pair(self, data):
+            pytest.fail("Invalid duration must not reach the connector")
+
+    app = FastAPI()
+    app.include_router(create_remote_workspace_router(lambda: PairStub()))
+    with TestClient(app, client=("127.0.0.1", 4444)) as client:
+        response = client.post("/api/remote-workspace/pair", json=pair_input(until_revoked=True, expires_in=seconds))
+    assert response.status_code == 422 and ENROLLMENT not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", [None, True, "3600", 300.5, 299, 30 * 86400 + 1])
+async def test_until_revoked_connector_rejects_invalid_duration_before_capability_request(tmp_path, seconds):
+    store = RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW)
+    original = dict(store._state)
+
+    def gateway(request):
+        pytest.fail("Invalid duration must not consume enrollment or request capabilities")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client)
+        with pytest.raises(RemoteWorkspaceDenied):
+            await connector.pair(pair_input(until_revoked=True, expires_in=seconds))
+    assert store._state == original
+
+
+@pytest.mark.asyncio
+async def test_until_revoked_preflight_pair_claim_approve_restart_and_offline_revoke(tmp_path, monkeypatch):
+    sentinel = "9999-01-01T00:00:00Z"
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        if request.url.path == "/v1/connector/capabilities":
+            assert request.method == "GET" and not request.content
+            assert "authorization" not in request.headers
+            return httpx.Response(200, json={"supported_grant_modes": ["bounded", "until_revoked"]})
+        if request.url.path.endswith("/pairings"):
+            assert json.loads(request.content) == {
+                "enrollment_token": ENROLLMENT,
+                "name": "My computer",
+                "scopes": ["workspace.control"],
+                "expires_in": 3600,
+                "until_revoked": True,
+            }
+            return httpx.Response(200, json=pairing_response(expires_at=sentinel))
+        if request.url.path.endswith("/revoke"):
+            raise httpx.ConnectError("Synthetic offline gateway", request=request)
+        return httpx.Response(
+            200,
+            json={**IDENTITY, "status": "paired" if request.method == "POST" else "claimed", "expires_at": sentinel},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+
+        async def no_background():
+            pass
+
+        monkeypatch.setattr(connector, "start", no_background)
+        assert (await connector.pair(pair_input(until_revoked=True)))["expires_at"] == sentinel
+        assert [request.method for request in requests] == ["GET", "POST"]
+        await connector.refresh()
+        with pytest.raises(RemoteWorkspaceDenied):
+            await connector.approve("different-account", "grant-one")
+        assert (await connector.approve("account-one", "grant-one"))["status"] == "paired"
+        reloaded = RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW + timedelta(days=365))
+        assert reloaded.identity() == IDENTITY
+        assert reloaded.status()["expires_at"] == sentinel
+        with pytest.raises(RemoteWorkspaceDenied):
+            reloaded.authorize({**IDENTITY, "grant_id": "different-grant"})
+        assert not allowed_route("backend", "PATCH", "/api/llm/settings", reloaded.identity()["scopes"])
+        revoked = await connector.revoke()
+        assert revoked["status"] == "revoked" and not revoked["online"]
+        assert "connector_token" not in connector.store._state and connector.store._state["approved"] is False
+        with pytest.raises(RemoteWorkspaceDenied):
+            RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW).identity()
+    assert ENROLLMENT not in connector.store.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "health",
+    [
+        {},
+        {"supported_grant_modes": ["bounded"]},
+        {"supported_grant_modes": "until_revoked"},
+        {"supported_grant_modes": [True]},
+        None,
+    ],
+)
+async def test_until_revoked_unsupported_gateway_never_consumes_enrollment(tmp_path, monkeypatch, health):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        if request.url.path == "/v1/connector/capabilities":
+            return httpx.Response(404 if health is None else 200, json=health)
+        return httpx.Response(200, json=pairing_response())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+
+        async def no_background():
+            pass
+
+        monkeypatch.setattr(connector, "start", no_background)
+        with pytest.raises(ValueError):
+            await connector.pair(pair_input(until_revoked=True))
+    assert len(requests) == 1 and requests[0].method == "GET" and requests[0].url.path == "/v1/connector/capabilities"
+    assert not requests[0].content and ENROLLMENT not in str(requests[0].url)
+    assert "connector_token" not in connector.store._state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redirect", [False, True])
+async def test_until_revoked_capability_never_sends_client_credentials_or_follows_redirect(
+    tmp_path, monkeypatch, redirect
+):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        if request.url.path.endswith("/capabilities"):
+            assert "cookie" not in request.headers and "authorization" not in request.headers
+            assert not request.content
+            if redirect:
+                return httpx.Response(307, headers={"Location": "https://other.example/capabilities"})
+            return httpx.Response(200, json={"supported_grant_modes": ["bounded", "until_revoked"]})
+        return httpx.Response(200, json=pairing_response(expires_at="9999-01-01T00:00:00Z"))
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(gateway),
+        cookies={"synthetic": "test-only"},
+        auth=("test-only", "test-only"),
+        follow_redirects=True,
+    ) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+
+        async def no_background():
+            pass
+
+        monkeypatch.setattr(connector, "start", no_background)
+        if redirect:
+            with pytest.raises(ValueError):
+                await connector.pair(pair_input(until_revoked=True))
+        else:
+            assert (await connector.pair(pair_input(until_revoked=True)))["status"] == "pending"
+    assert requests[0].url.path == "/v1/connector/capabilities"
+    assert len(requests) == (1 if redirect else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "expiry", ["9999-01-01T00:00:00+00:00", "9998-01-01T00:00:00Z", "9999-01-02T00:00:00Z", "2099-01-01T00:00:00Z"]
+)
+async def test_until_revoked_pairing_rejects_nonliteral_or_clipped_sentinel(tmp_path, monkeypatch, expiry):
+    requests = []
+
+    def gateway(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"supported_grant_modes": ["bounded", "until_revoked"]}
+            if request.method == "GET"
+            else pairing_response(expires_at=expiry),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+        with pytest.raises(RemoteWorkspaceDenied):
+            await connector.pair(pair_input(until_revoked=True))
+    assert [request.method for request in requests] == ["GET", "POST"]
+    assert connector._runner is None and "connector_token" not in connector.store._state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expiry", ["9999-01-01T00:00:00+00:00", "2099-01-01T00:00:00Z", "9999-01-02T00:00:00Z"])
+async def test_until_revoked_claim_cannot_replace_exact_sentinel(tmp_path, expiry):
+    store = paired_store(tmp_path)
+    store.save(
+        {
+            **store._state,
+            "status": "pending",
+            "approved": False,
+            "expires_at": "9999-01-01T00:00:00Z",
+            "pairing_expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        }
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={**IDENTITY, "status": "claimed", "expires_at": expiry})
+        )
+    ) as client:
+        connector = RemoteWorkspaceConnector(store, gateway_http=client)
+        with pytest.raises(RemoteWorkspaceDenied):
+            await connector.refresh()
+    assert store.status()["status"] == "pending" and store._state["expires_at"] == "9999-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift, accepted", [(-10, True), (10, True), (10.001, False), (-3600, False)])
+async def test_bounded_expiry_keeps_existing_ten_second_upper_tolerance(tmp_path, monkeypatch, drift, accepted):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json=pairing_response(expires_at=(NOW + timedelta(seconds=3600 + drift)).isoformat())
+            )
+        )
+    ) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: NOW), gateway_http=client)
+
+        async def no_background():
+            pass
+
+        monkeypatch.setattr(connector, "start", no_background)
+        if accepted:
+            assert (await connector.pair(pair_input(until_revoked=False)))["status"] == "pending"
+        else:
+            with pytest.raises(RemoteWorkspaceDenied):
+                await connector.pair(pair_input(until_revoked=False))
+
+
+@pytest.mark.asyncio
+async def test_bounded_expiry_check_does_not_overflow_near_datetime_max(tmp_path, monkeypatch):
+    now = datetime(9999, 12, 31, 23, 59, 55, tzinfo=UTC)
+    expiry = "9999-12-31T23:59:59Z"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=pairing_response(expires_at=expiry, pairing_expires_at=expiry))
+        )
+    ) as client:
+        connector = RemoteWorkspaceConnector(RemoteWorkspaceNodeStore(tmp_path, now=lambda: now), gateway_http=client)
+
+        async def no_background():
+            pass
+
+        monkeypatch.setattr(connector, "start", no_background)
+        assert (await connector.pair(pair_input(expires_in=300)))["expires_at"] == expiry
+
+
 @pytest.mark.asyncio
 async def test_enrollment_sent_once_without_persisting_response_secret_or_unknown_fields(tmp_path, monkeypatch):
     requests = []
@@ -118,6 +394,7 @@ async def test_enrollment_sent_once_without_persisting_response_secret_or_unknow
         status = await connector.pair(pair_input())
     assert len(requests) == 1
     assert json.loads(requests[0].content)["enrollment_token"] == ENROLLMENT
+    assert "until_revoked" not in json.loads(requests[0].content)
     assert status["status"] == "pending" and not status["online"]
     assert ENROLLMENT not in connector.store.path.read_text(encoding="utf-8")
     assert "unexpected" not in connector.store._state

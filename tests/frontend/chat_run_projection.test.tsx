@@ -72,6 +72,7 @@ vi.mock("../../frontend/src/services/runLive", async (importOriginal) => {
 });
 
 import App from "../../frontend/src/App";
+import { runService, type AmbientRun } from "../../frontend/src/services/runs";
 
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
 
@@ -125,6 +126,18 @@ function canonicalProgress(sessionId: string, sequence: number, type: string, pa
   };
 }
 
+function permissionRun(status = "waiting_user", interactionStatus = "pending"): AmbientRun {
+  return {
+    id: "run-progress", source_type: "chat", source_id: "session-one", status,
+    created_at: "2026-07-19T00:00:00Z", updated_at: "2026-07-19T00:00:01Z",
+    interactions: [{
+      id: "permission-one", run_id: "run-progress", type: "permission", status: interactionStatus,
+      created_at: "2026-07-19T00:00:00Z", prompt: "Approve terminal",
+      payload: { type: "permission_request", request_id: "permission-one", tool_call: "terminal", details: "npm publish" },
+    }],
+  } as AmbientRun;
+}
+
 describe("canonical RunEvent chat projection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -134,6 +147,8 @@ describe("canonical RunEvent chat projection", () => {
     harness.connectionListeners.clear();
     harness.chatSend.mockReset();
     harness.chatSend.mockReturnValue(true);
+    vi.mocked(runService.list).mockResolvedValue([]);
+    vi.mocked(runService.get).mockReset();
     localStorage.clear();
     sessionStorage.clear();
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
@@ -562,7 +577,176 @@ describe("canonical RunEvent chat projection", () => {
     });
   });
 
+  it("does not reopen resolved historical permissions or pre-approval mutation commands", async () => {
+    vi.mocked(runService.get).mockResolvedValue(permissionRun("succeeded", "resolved"));
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    await act(async () => {
+      harness.runListeners.forEach((listener) => {
+        listener(canonicalProgress("session-one", 1, "permission_request", permissionRun().interactions![0].payload));
+        listener(canonicalProgress("session-one", 2, "mutation_preview", {
+          type: "mutation_preview", committed: false, ticket_id: "historical-ticket", summary: "TaskMut1",
+        }));
+      });
+    });
+    expect(screen.queryByText("OpenCode 授权请求")).toBeNull();
+    expect(screen.queryByTestId("mutation-rollback")).toBeNull();
+    expect(screen.queryByTestId("mutation-pin")).toBeNull();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("restores a genuinely pending permission after refresh and preserves it while disconnected", async () => {
+    vi.mocked(runService.list).mockResolvedValue([permissionRun()]);
+    vi.mocked(runService.get).mockResolvedValue(permissionRun());
+    render(<App />);
+    expect(await screen.findByText("OpenCode 授权请求")).toBeDefined();
+    act(() => {
+      window.dispatchEvent(new CustomEvent("ambient_run_stream_status", { detail: { state: "unavailable" } }));
+    });
+    expect(screen.getByText("npm publish")).toBeDefined();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pending-looking event when the current interaction is resolved or belongs to another session", async () => {
+    vi.mocked(runService.get).mockResolvedValueOnce(permissionRun("waiting_user", "resolved"))
+      .mockResolvedValueOnce({ ...permissionRun(), source_id: "another-session" });
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    for (const sequence of [1, 2]) {
+      await act(async () => {
+        harness.runListeners.forEach((listener) => listener(
+          canonicalProgress("session-one", sequence, "permission_request", permissionRun().interactions![0].payload),
+        ));
+      });
+      expect(screen.queryByText("OpenCode 授权请求")).toBeNull();
+    }
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("does not reopen a permission from a lookup overtaken by Run completion", async () => {
+    let finishLookup!: (run: AmbientRun) => void;
+    vi.mocked(runService.get).mockReturnValue(new Promise((resolve) => { finishLookup = resolve; }));
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "permission_request", permissionRun().interactions![0].payload),
+      ));
+    });
+    await act(async () => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 2, "status_changed", { from: "waiting_user", to: "succeeded" }),
+      ));
+      finishLookup(permissionRun());
+    });
+    expect(screen.queryByText("OpenCode 授权请求")).toBeNull();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("does not restore an outdated bootstrap snapshot after a terminal event", async () => {
+    let finishList!: (runs: AmbientRun[]) => void;
+    vi.mocked(runService.list).mockReturnValue(new Promise((resolve) => { finishList = resolve; }));
+    vi.mocked(runService.get).mockResolvedValue(permissionRun());
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    await act(async () => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "status_changed", { to: "succeeded" }),
+      ));
+      finishList([permissionRun()]);
+    });
+    expect(screen.queryByText("OpenCode 授权请求")).toBeNull();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("restores the current pending permission from interaction_requested and keeps it when a later lookup fails", async () => {
+    vi.mocked(runService.get).mockResolvedValueOnce(permissionRun()).mockRejectedValueOnce(new Error("Connection unavailable"));
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    await act(async () => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "interaction_requested", { interaction_id: "permission-one", type: "permission" }),
+      ));
+    });
+    expect(await screen.findByText("OpenCode 授权请求")).toBeDefined();
+    await act(async () => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 2, "permission_request", permissionRun().interactions![0].payload),
+      ));
+    });
+    expect(screen.getByText("npm publish")).toBeDefined();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("does not apply a permission lookup after its conversation effect was disposed", async () => {
+    let finishLookup!: (run: AmbientRun) => void;
+    vi.mocked(runService.get).mockReturnValue(new Promise((resolve) => { finishLookup = resolve; }));
+    const view = render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "permission_request", permissionRun().interactions![0].payload),
+      ));
+    });
+    view.unmount();
+    render(<App />);
+    await act(async () => { finishLookup(permissionRun()); });
+    expect(screen.queryByText("OpenCode 授权请求")).toBeNull();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("closes only frontend permission presentation when its interaction resolves", async () => {
+    vi.mocked(runService.get).mockResolvedValue(permissionRun());
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    await act(async () => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "permission_request", permissionRun().interactions![0].payload),
+      ));
+    });
+    expect(await screen.findByText("OpenCode 授权请求")).toBeDefined();
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 2, "interaction_resolved", { interaction_id: "permission-one", status: "running" }),
+      ));
+    });
+    expect(screen.queryByText("OpenCode 授权请求")).toBeNull();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("does not renew an expired mutation rollback window when replaying history", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    act(() => {
+      harness.runListeners.forEach((listener) => listener(
+        canonicalProgress("session-one", 1, "mutation_preview", {
+          type: "mutation_preview", ticket_id: "historical-ticket", summary: "Old mutation", soft_window_seconds: 60,
+        }),
+      ));
+    });
+    expect(screen.queryByTestId("mutation-rollback")).toBeNull();
+    expect(screen.queryByTestId("mutation-pin")).toBeNull();
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
+  it("preserves only the remaining soft window for a recent committed mutation", async () => {
+    render(<App />);
+    await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
+    act(() => {
+      const event = canonicalProgress("session-one", 1, "mutation_preview", {
+        type: "mutation_preview", ticket_id: "recent-ticket", summary: "Recent mutation", soft_window_seconds: 60,
+      });
+      event.created_at = new Date(Date.now() - 30_000).toISOString();
+      harness.runListeners.forEach((listener) => listener(event));
+    });
+    const rollback = await screen.findByTestId("mutation-rollback");
+    expect(rollback.textContent).not.toContain("60s");
+    expect(rollback.textContent).toMatch(/\((29|30)s\)/);
+    expect(harness.chatSend).not.toHaveBeenCalled();
+  });
+
   it("keeps a sensitive permission pending when its response cannot be delivered", async () => {
+    vi.mocked(runService.get).mockResolvedValue(permissionRun());
     render(<App />);
     await waitFor(() => expect(harness.chatConnect).toHaveBeenCalled());
 
