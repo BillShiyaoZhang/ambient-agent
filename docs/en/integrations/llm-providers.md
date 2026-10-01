@@ -68,6 +68,18 @@ and video models from the chat model picker.
 Deleting a referenced provider or model returns `409`. An LLM request without a usable default returns
 `llm_configuration_required`, prompting the client to open provider settings.
 
+## Automatic Codex model catalog refresh
+
+The model list comes from `model/list` on the Codex `app-server` actually used by the Ambient backend. The UI does not hard-code model names or substitute the general OpenAI API model catalog. Connections send `initialize`, then `initialized`, then paginated `model/list`, displaying visible entries and the returned default. Ambient owns this Codex login and state directory; container deployments read their managed directory rather than the Windows desktop Codex account or cache.
+
+With Codex installed and signed in, opening model settings, completing installation or login, and changing the installed version refresh the coding agent's native catalog. Enabled Codex Native Providers also sync through the existing `discover-models` endpoint, then reload default/fast model choices. Newly created native Providers trigger discovery as well. API Providers retain manual discovery, and model merging follows the reference and capability preservation rules above. Automatic refresh keeps default, fast, and coding-agent bindings unchanged and retains manual refresh controls.
+
+After closing settings or signing out, old coding-agent catalog requests cannot overwrite a later open or login. Signing out clears the UI's coding-agent catalog. Refresh failures display an error and retain existing displayed data; the next open or manual refresh can retry without an automatic request loop. Mocked acceptance covers newly listed models after reopening or signing in, and ignores obsolete results after closing or signing out during a refresh.
+
+Closing settings does not cancel an active login: its device-code result remains available when settings reopen, while cancellation, sign-out, a new login, or an account-state change invalidates obsolete results. Parent configuration updates reporting an active login preserve the device code and polling, so closing or synchronizing state does not strand the login UI.
+
+`model/list` may use Codex's own cached or bundled catalog, so it is not a live entitlement check. Listing a model does not prove it satisfies Ambient native inference's version, platform, and capability checks; actual calls follow the native contract below and require testing the selected model.
+
 ## Managed Codex installation verification
 
 Web installation pins the official `0.145.0` CLI, verifies the platform-specific archive SHA-256, and copies only its exact named regular-file member. Compressed downloads retain the 160MiB bound and streamed byte accounting; the expanded file must match an independently recorded exact size for each pinned release artifact. The compressed bound must not be reused for the expanded CLI. The verified Linux x86_64 artifact is 113,724,150 compressed bytes and 310,730,800 CLI bytes, so legitimate installation must not be rejected by a 160MiB expanded-size threshold.

@@ -545,10 +545,18 @@ class CodingAgentRuntime:
                 1,
                 "initialize",
                 {
-                    "clientInfo": {"name": "ambient-agent", "version": "1"},
+                    "clientInfo": {"name": "ambient-agent", "title": "Ambient Agent", "version": "1"},
                     "capabilities": {"experimentalApi": True},
                 },
             )
+            try:
+                proc.stdin.write(b'{"method":"initialized","params":{}}\n')
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                raise CodingAgentRuntimeError(
+                    "Model catalog process closed before completing initialization",
+                    code="model_catalog_failed",
+                ) from exc
             request_id = 2
             cursor: str | None = None
             raw_models: list[dict[str, Any]] = []

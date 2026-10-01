@@ -1,8 +1,8 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LLMSettingsDialog, ModelPicker } from "../../frontend/src/components/LLMSettings";
-import type { CodingAgentDefinition, CodingAgentModelCatalog, CodingAgentSettings } from "../../frontend/src/services/codingAgents";
+import type { CodingAgentAuthSession, CodingAgentDefinition, CodingAgentModelCatalog, CodingAgentSettings } from "../../frontend/src/services/codingAgents";
 
 const providers = [{
   id: "openai-main",
@@ -49,6 +49,331 @@ const codexModels: CodingAgentModelCatalog = {
     { id: "gpt-fast", model: "gpt-fast", display_name: "GPT Fast", description: "Fast model", is_default: false, default_reasoning_effort: "low", supported_reasoning_efforts: ["low"] },
   ],
 };
+
+const nativeProvider = { id: "local-codex", name: "Local Codex", preset: "codex_native", enabled: true, connection: {}, models: [{ id: "gpt-old", display_name: "GPT Old" }] };
+const providerCatalog = [
+  { id: "openai", name: "OpenAI", category: "global", fields: [] },
+  { id: "codex_native", name: "Codex Native", category: "local", api_mode: "codex_native", fields: [] },
+];
+const dialogProps = {
+  open: true,
+  language: "en" as const,
+  catalog: providerCatalog,
+  providers,
+  settings: { default_model: { provider_id: "openai-main", model_id: "gpt-a" }, fast_model: null },
+  codingAgents: [codexAgent],
+  codingAgentSettings: codingSettings,
+  onClose: vi.fn(),
+  onRefresh: vi.fn().mockResolvedValue(undefined),
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
+const latestCodexModels: CodingAgentModelCatalog = {
+  ...codexModels,
+  models: [...codexModels.models, { ...codexModels.models[1], id: "gpt-new", model: "gpt-new", display_name: "GPT New" }],
+};
+const waitingAuth: CodingAgentAuthSession = {
+  id: "auth-1", agent_id: "codex", status: "waiting", method: "device_code", verification_uri: "https://auth.openai.com/codex/device", user_code: "TEST-123", expires_at: null, error: "",
+};
+
+describe("Codex model catalog refresh", () => {
+  it("refreshes on every open and version change without refetching for new prop identities or changing selections", async () => {
+    const listModels = vi.fn().mockResolvedValueOnce(codexModels).mockResolvedValue(latestCodexModels);
+    const updateSettings = vi.fn();
+    const updateModel = vi.fn();
+    const props = { ...dialogProps, onListCodingAgentModels: listModels, onUpdateSettings: updateSettings, onUpdateCodingAgentModel: updateModel };
+    const { rerender } = render(<LLMSettingsDialog {...props} />);
+    await screen.findByRole("option", { name: "GPT Fast · Fast model" });
+    rerender(<LLMSettingsDialog {...props} providers={[...providers]} codingAgents={[{ ...codexAgent }]} onRefresh={vi.fn()} onListCodingAgentModels={(id) => listModels(id)} />);
+    await act(async () => {});
+    expect(listModels).toHaveBeenCalledTimes(1);
+    rerender(<LLMSettingsDialog {...props} open={false} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    expect(listModels).toHaveBeenCalledTimes(2);
+    rerender(<LLMSettingsDialog {...props} codingAgents={[{ ...codexAgent, version: "codex-cli 2.0" }]} />);
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(3));
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(updateModel).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "GPT A" })).toBeDefined();
+  });
+
+  it("preserves previous models on failure, explains retry, and retries manually or on the next open", async () => {
+    const listModels = vi.fn().mockResolvedValueOnce(codexModels).mockRejectedValueOnce(new Error("Codex offline")).mockResolvedValueOnce(latestCodexModels).mockResolvedValue(codexModels);
+    const props = { ...dialogProps, onListCodingAgentModels: listModels };
+    const { rerender } = render(<LLMSettingsDialog {...props} />);
+    await screen.findByRole("option", { name: "GPT Fast · Fast model" });
+    rerender(<LLMSettingsDialog {...props} open={false} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/Codex offline.*Use Refresh or reopen settings to retry/));
+    expect(screen.getByRole("option", { name: "GPT Fast · Fast model" })).toBeDefined();
+    expect(listModels).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Codex models" }));
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    rerender(<LLMSettingsDialog {...props} open={false} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(4));
+  });
+
+  it("clears the signed-out catalog, ignores an old request, and refreshes after installation and login", async () => {
+    const oldRequest = deferred<CodingAgentModelCatalog>();
+    const listModels = vi.fn().mockResolvedValueOnce(codexModels).mockReturnValueOnce(oldRequest.promise).mockResolvedValue(latestCodexModels);
+    const props = { ...dialogProps, onListCodingAgentModels: listModels };
+    const { rerender } = render(<LLMSettingsDialog {...props} />);
+    await screen.findByRole("option", { name: "GPT Fast · Fast model" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Codex models" }));
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(2));
+    const signedOut = { ...codexAgent, authenticated: false, auth_state: "signed_out" as const };
+    rerender(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+    expect(screen.queryByRole("option", { name: "GPT Fast · Fast model" })).toBeNull();
+    await act(async () => oldRequest.resolve(codexModels));
+    expect(screen.queryByRole("option", { name: "GPT Fast · Fast model" })).toBeNull();
+    rerender(<LLMSettingsDialog {...props} codingAgents={[{ ...signedOut, installed: false }]} />);
+    await act(async () => {});
+    expect(listModels).toHaveBeenCalledTimes(2);
+    rerender(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+    await act(async () => {});
+    expect(listModels).toHaveBeenCalledTimes(2);
+    rerender(<LLMSettingsDialog {...props} />);
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    expect(listModels).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores a request from a previous opening when it finishes after a newer request", async () => {
+    const oldRequest = deferred<CodingAgentModelCatalog>();
+    const listModels = vi.fn().mockReturnValueOnce(oldRequest.promise).mockResolvedValue(latestCodexModels);
+    const props = { ...dialogProps, onListCodingAgentModels: listModels };
+    const { rerender } = render(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(1));
+    rerender(<LLMSettingsDialog {...props} open={false} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    await act(async () => oldRequest.resolve(codexModels));
+    expect(screen.getByRole("option", { name: "GPT New · Fast model" })).toBeDefined();
+  });
+
+  it("clears native agent models after Sign out even before refreshed parent state arrives", async () => {
+    const oldRequest = deferred<CodingAgentModelCatalog>();
+    const oldDiscovery = deferred<unknown>();
+    const listModels = vi.fn().mockResolvedValueOnce(codexModels).mockReturnValueOnce(oldRequest.promise);
+    const clearAuth = vi.fn().mockResolvedValue({});
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(<LLMSettingsDialog {...dialogProps} providers={[nativeProvider]} onRefresh={refresh} onListCodingAgentModels={listModels} onClearCodingAgentAuth={clearAuth} onDiscoverModels={vi.fn().mockReturnValue(oldDiscovery.promise)} />);
+    await screen.findByRole("option", { name: "GPT Fast · Fast model" });
+    expect(screen.getByRole("button", { name: "Discover" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Codex models" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(clearAuth).toHaveBeenCalledWith("codex"));
+    await waitFor(() => expect(screen.queryByRole("option", { name: "GPT Fast · Fast model" })).toBeNull());
+    expect(screen.getByRole("button", { name: "Discover" }).hasAttribute("disabled")).toBe(false);
+    await act(async () => oldRequest.resolve(codexModels));
+    await act(async () => oldDiscovery.resolve({}));
+    expect(screen.queryByRole("option", { name: "GPT Fast · Fast model" })).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("discovers only enabled native providers when ready, and once per open, login, or new eligible provider", async () => {
+    const discover = vi.fn().mockResolvedValue({});
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const disabled = { ...nativeProvider, id: "disabled-codex", enabled: false };
+    const props = { ...dialogProps, providers: [...providers, nativeProvider, disabled], onDiscoverModels: discover, onRefresh: refresh };
+    const signedOut = { ...codexAgent, authenticated: false, auth_state: "signed_out" as const };
+    const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+    await act(async () => {});
+    expect(discover).not.toHaveBeenCalled();
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(discover).toHaveBeenCalledExactlyOnceWith("local-codex");
+    rerender(<LLMSettingsDialog {...props} providers={props.providers.map((provider) => ({ ...provider }))} onDiscoverModels={(id) => discover(id)} onRefresh={() => refresh()} />);
+    await act(async () => {});
+    expect(discover).toHaveBeenCalledTimes(1);
+    rerender(<LLMSettingsDialog {...props} providers={[...props.providers, { ...nativeProvider, id: "new-codex" }]} />);
+    await waitFor(() => expect(discover).toHaveBeenCalledWith("new-codex"));
+    expect(discover).toHaveBeenCalledTimes(2);
+    rerender(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(3));
+    rerender(<LLMSettingsDialog {...props} open={false} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(4));
+    rerender(<LLMSettingsDialog {...props} providers={[...providers, { ...nativeProvider, enabled: false }, disabled]} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(5));
+    expect(discover.mock.calls.every(([id]) => id === "local-codex" || id === "new-codex")).toBe(true);
+  });
+
+  it("keeps native provider models after discovery fails and offers manual or next-open retry", async () => {
+    const discover = vi.fn().mockRejectedValueOnce(new Error("Catalog unavailable")).mockResolvedValue({});
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const props = { ...dialogProps, providers: [nativeProvider], onDiscoverModels: discover, onRefresh: refresh };
+    const { rerender } = render(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/Catalog unavailable.*Use Discover or reopen settings to retry/));
+    expect(screen.getByText("GPT Old")).toBeDefined();
+    expect(refresh).not.toHaveBeenCalled();
+    rerender(<LLMSettingsDialog {...props} />);
+    await act(async () => {});
+    expect(discover).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Discover" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(discover).toHaveBeenCalledTimes(2);
+    rerender(<LLMSettingsDialog {...props} open={false} />);
+    rerender(<LLMSettingsDialog {...props} />);
+    await waitFor(() => expect(discover).toHaveBeenCalledTimes(3));
+  });
+
+  it("refreshes immediately after successful login and does not repeat when parent authentication catches up", async () => {
+    const listModels = vi.fn().mockResolvedValue(latestCodexModels);
+    const discover = vi.fn().mockResolvedValue({});
+    const startAuth = vi.fn().mockResolvedValue({ ...waitingAuth, status: "signed_in" });
+    const props = { ...dialogProps, providers: [nativeProvider], onListCodingAgentModels: listModels, onDiscoverModels: discover, onStartCodingAgentAuth: startAuth };
+    const signedOut = { ...codexAgent, authenticated: false, auth_state: "signed_out" as const };
+    const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+    await screen.findByRole("option", { name: "GPT New · Fast model" });
+    expect(discover).toHaveBeenCalledExactlyOnceWith(nativeProvider.id);
+    rerender(<LLMSettingsDialog {...props} />);
+    await act(async () => {});
+    expect(listModels).toHaveBeenCalledTimes(1);
+    expect(discover).toHaveBeenCalledTimes(1);
+    rerender(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+    expect(screen.queryByRole("option", { name: "GPT New · Fast model" })).toBeNull();
+  });
+
+  it("accepts a new login poll after reopen while ignoring the previous opening's auth response", async () => {
+    vi.useFakeTimers();
+    try {
+      const oldPoll = deferred<CodingAgentAuthSession>();
+      const getAuth = vi.fn().mockReturnValueOnce(oldPoll.promise).mockResolvedValue({ ...waitingAuth, status: "signed_in" });
+      const listModels = vi.fn().mockResolvedValue(latestCodexModels);
+      const props = { ...dialogProps, codingAgents: [{ ...codexAgent, authenticated: false, auth_state: "signed_out" as const }], onStartCodingAgentAuth: vi.fn().mockResolvedValue(waitingAuth), onGetCodingAgentAuth: getAuth, onListCodingAgentModels: listModels };
+      const { rerender } = render(<LLMSettingsDialog {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+      await act(async () => {});
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      expect(getAuth).toHaveBeenCalledTimes(1);
+      rerender(<LLMSettingsDialog {...props} open={false} />);
+      rerender(<LLMSettingsDialog {...props} />);
+      await act(async () => oldPoll.resolve({ ...waitingAuth, status: "signed_in" }));
+      expect(listModels).not.toHaveBeenCalled();
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      expect(getAuth).toHaveBeenCalledTimes(2);
+      expect(listModels).toHaveBeenCalledExactlyOnceWith("codex");
+      expect(screen.getByRole("option", { name: "GPT New · Fast model" })).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a pending device login when parent status catches up and continues polling to signed in", async () => {
+    vi.useFakeTimers();
+    try {
+      const listModels = vi.fn().mockResolvedValue(latestCodexModels);
+      const getAuth = vi.fn().mockResolvedValue({ ...waitingAuth, status: "signed_in" });
+      const signedOut = { ...codexAgent, authenticated: false, auth_state: "signed_out" as const };
+      const props = { ...dialogProps, onStartCodingAgentAuth: vi.fn().mockResolvedValue(waitingAuth), onGetCodingAgentAuth: getAuth, onListCodingAgentModels: listModels };
+      const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+      await act(async () => {});
+      expect(screen.getByText("TEST-123")).toBeDefined();
+      rerender(<LLMSettingsDialog {...props} codingAgents={[{ ...signedOut, auth_state: "waiting" }]} />);
+      expect(screen.getByText("TEST-123")).toBeDefined();
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      expect(getAuth).toHaveBeenCalledExactlyOnceWith("codex");
+      expect(listModels).toHaveBeenCalledExactlyOnceWith("codex");
+      expect(screen.getByRole("option", { name: "GPT New · Fast model" })).toBeDefined();
+      rerender(<LLMSettingsDialog {...props} />);
+      await act(async () => {});
+      expect(listModels).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the login response when parent reports waiting before the device-code request finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = deferred<CodingAgentAuthSession>();
+      const listModels = vi.fn().mockResolvedValue(latestCodexModels);
+      const getAuth = vi.fn().mockResolvedValue({ ...waitingAuth, status: "signed_in" });
+      const signedOut = { ...codexAgent, authenticated: false, auth_state: "signed_out" as const };
+      const props = { ...dialogProps, onStartCodingAgentAuth: vi.fn().mockReturnValue(start.promise), onGetCodingAgentAuth: getAuth, onListCodingAgentModels: listModels };
+      const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+      rerender(<LLMSettingsDialog {...props} codingAgents={[{ ...signedOut, auth_state: "waiting" }]} />);
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      expect(getAuth).not.toHaveBeenCalled();
+      await act(async () => start.resolve(waitingAuth));
+      expect(screen.getByText("TEST-123")).toBeDefined();
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      expect(getAuth).toHaveBeenCalledExactlyOnceWith("codex");
+      expect(listModels).toHaveBeenCalledExactlyOnceWith("codex");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("allows retry after the initial device login request fails", async () => {
+    const startAuth = vi.fn().mockRejectedValueOnce(new Error("Login unavailable")).mockResolvedValue(waitingAuth);
+    render(<LLMSettingsDialog {...dialogProps} codingAgents={[{ ...codexAgent, authenticated: false, auth_state: "signed_out" }]} onStartCodingAgentAuth={startAuth} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Login unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+    await screen.findByText("TEST-123");
+    expect(startAuth).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["while closed", "after reopening"])("keeps the device login request when it completes %s", async (completion) => {
+    vi.useFakeTimers();
+    try {
+      const start = deferred<CodingAgentAuthSession>();
+      const listModels = vi.fn().mockResolvedValue(latestCodexModels);
+      const getAuth = vi.fn().mockResolvedValue({ ...waitingAuth, status: "signed_in" });
+      const refresh = vi.fn().mockResolvedValue(undefined);
+      const props = { ...dialogProps, codingAgents: [{ ...codexAgent, authenticated: false, auth_state: "signed_out" as const }], onRefresh: refresh, onStartCodingAgentAuth: vi.fn().mockReturnValue(start.promise), onGetCodingAgentAuth: getAuth, onListCodingAgentModels: listModels };
+      const { rerender } = render(<LLMSettingsDialog {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+      rerender(<LLMSettingsDialog {...props} open={false} />);
+      if (completion === "after reopening") rerender(<LLMSettingsDialog {...props} />);
+      await act(async () => start.resolve(waitingAuth));
+      expect(refresh).not.toHaveBeenCalled();
+      if (completion === "while closed") rerender(<LLMSettingsDialog {...props} />);
+      expect(screen.getByText("TEST-123")).toBeDefined();
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      expect(getAuth).toHaveBeenCalledExactlyOnceWith("codex");
+      expect(listModels).toHaveBeenCalledExactlyOnceWith("codex");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores an old login poll after authoritative authentication changes to signed out", async () => {
+    vi.useFakeTimers();
+    try {
+      const oldPoll = deferred<CodingAgentAuthSession>();
+      const listModels = vi.fn().mockResolvedValue(latestCodexModels);
+      const signedOut = { ...codexAgent, authenticated: false, auth_state: "signed_out" as const };
+      const props = { ...dialogProps, onStartCodingAgentAuth: vi.fn().mockResolvedValue(waitingAuth), onGetCodingAgentAuth: vi.fn().mockReturnValue(oldPoll.promise), onListCodingAgentModels: listModels };
+      const { rerender } = render(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in with ChatGPT" }));
+      await act(async () => {});
+      await act(async () => vi.advanceTimersByTimeAsync(1200));
+      rerender(<LLMSettingsDialog {...props} />);
+      await act(async () => {});
+      expect(listModels).toHaveBeenCalledTimes(1);
+      rerender(<LLMSettingsDialog {...props} codingAgents={[signedOut]} />);
+      await act(async () => oldPoll.resolve({ ...waitingAuth, status: "signed_in" }));
+      expect(listModels).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("option", { name: "GPT New · Fast model" })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("LLM provider settings", () => {
   it("explains managed native login and creates a Codex provider without API credentials", async () => {
