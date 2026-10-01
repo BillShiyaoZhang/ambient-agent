@@ -18,7 +18,7 @@
 
 Ambient 无需任何 Agent Collaboration submodule。默认原生 Connector 使用固定 loopback 服务端口 5173、8000、8001；现有 Compose 配置选择固定 docker 服务地址。连接仅由显式配对启用，未配置时不联网。
 
-云端建议实现位于独立副本 `.cache/agent-collaboration-proposal`，分支 `codex/ambient-workspace-proposal`；原有 `agent-collaboration-deploy` 工作目录不受影响。可审阅的 patch 与 Git bundle 保存在仓库根 `proposals/agent-collaboration-deploy`，按其中 README 在新的检出中应用。Web 建议复用原账户，Gateway 建议新增独立服务，Platform 和 SDK 不变。
+云端建议实现位于独立副本 `.cache/agent-collaboration-proposal`，分支 `codex/ambient-workspace-proposal`；原有 `agent-collaboration-deploy` 工作目录不受影响。建议分支已发布到 GitHub：[Deploy](https://github.com/BillShiyaoZhang/agent-collaboration-deploy/tree/codex/ambient-workspace-proposal)、[Web](https://github.com/BillShiyaoZhang/agent-collaboration-web/tree/codex/ambient-workspace-proposal)，尚未合入云项目 `main`。可用 `git clone --branch codex/ambient-workspace-proposal --recurse-submodules https://github.com/BillShiyaoZhang/agent-collaboration-deploy.git cloud-proposal-review` 获取。可审阅的 patch 与 Git bundle 保存在仓库根 `proposals/agent-collaboration-deploy`，其中 README 也保留快照恢复流程。Web 建议复用原账户，Gateway 建议新增独立服务，Platform 和 SDK 不变。
 
 在独立建议检出的 `workspace-gateway` 目录按其 README 安装依赖。本地运行 Gateway 设置 `WORKSPACE_GATEWAY_SECRET`（独立服务密钥）、`WORKSPACE_GATEWAY_DATABASE`（隔离 SQLite 路径）、`WORKSPACE_GATEWAY_DOMAIN=localhost:8788`、`WORKSPACE_GATEWAY_SCHEME=http`，以 `uvicorn workspace_gateway.app:create_app --factory --host 127.0.0.1 --port 8788 --no-proxy-headers --no-access-log` 启动。Web 设置相同服务密钥、`WORKSPACE_GATEWAY_URL=http://127.0.0.1:8788`、独立数据库和 NextAuth URL/secret。数据库、设备凭据、服务密钥和联调账号均不属于建议包。
 
