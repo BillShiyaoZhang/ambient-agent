@@ -28,11 +28,14 @@ UI and network acceptance use synthetic accounts and temporary SQLite workspaces
 | Cross-repository networking | `uv run python scripts/verify_remote_workspace_handoff.py --gateway-root <workspace-gateway-directory>`: six phases PASS; temporary services and databases are cleaned up |
 | Real local and Portal UI | Explicit enrollment, pairing, same-account claim, continued requirement for local confirmation, scopes and one-hour expiry review, then approval and online status; administration remains unchecked |
 | Backend restart | Node, grant, and origin are preserved; the new backend recovers paired/online status. The local Widget obtains a new ticket and Count changes 0→1 |
+| Real local revocation UI | Local status becomes revoked with an empty enrollment input; Portal removes the current connection and shows revoked history with opening disabled; Gateway Tunnel count returns to zero |
 | Real node-page UI | The in-app browser rejects `<node>.localhost` with `ERR_BLOCKED_BY_CLIENT`, and no Chrome connection is available. Portal opening generates one launch audit, but navigation and a manual new tab are blocked. Remote Widget/chat UI acceptance is not claimed |
 
 The cross-repository tool covers a real Tunnel, bidirectional text/binary WS and subprotocols, a single write and no timeout replay, in-flight revocation, expired/replayed enrollment, non-consuming wrong-account claims and quota rejection, 429 cooldown, expiry/deletion/invalid-device termination, and legacy paired identity/origin restoration after both restarts. Phase six sets real Gateway Tunnel capacity to one, preserves the second node's credentials, and restores the same identity after the first node releases its Tunnel.
 
 ![Locally approved account, scopes, and expiry](../../verification/remote-workspace-handoff/local-approved.jpg)
+
+![Revoked access with an empty enrollment input](../../verification/remote-workspace-handoff/local-revoked.jpg)
 
 ## Cloud capacity and release gates
 
@@ -41,3 +44,5 @@ The production overlay's default 128 MiB reservation budget is a real compatibil
 Proceed with client contract adaptation, while cloud merge/release must select budgets, container limits, and initial scale from full UI and actual RSS measurements. Real DNS, trusted wildcard TLS/renewal, registrable-domain isolation, production nginx/proxies, shared-host capacity, online backup restore, and rollback remain release gates. Local integration is not a production deployment.
 
 Another reproduced compatibility issue is Gateway's pre-accept Tunnel capacity close code 1008, presented as HTTP 403 during the network handshake. Ambient now checks device state to distinguish temporary capacity from termination and preserve valid identities. Cloud should subsequently return an explicit 429/Retry-After handshake denial; this task does not change Cloud source.
+
+Continuous sampling of the local Windows Gateway process records idle WorkingSet of 53,104,640 bytes, sampled maximum 58,052,608, process PeakWorkingSet 58,056,704, and maximum PrivateMemory 43,995,136. This stage includes account controls, Connector, and blocked node navigation without browser WS channels; Tunnel count is zero after revocation. These measurements cannot replace capacity acceptance for the full remote UI, multiple nodes, or the 384 MiB production container.

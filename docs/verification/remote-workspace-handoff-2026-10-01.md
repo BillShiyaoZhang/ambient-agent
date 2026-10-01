@@ -28,11 +28,14 @@
 | 跨仓网络验收 | `uv run python scripts/verify_remote_workspace_handoff.py --gateway-root <workspace-gateway目录>`：6 组 PASS；测试服务与临时数据库已清理 |
 | 真实本机与门户 UI | 明确生成接入码、配对、同账户领取、仍等待本机确认、核对范围和一小时期限、批准后在线；管理权限默认关闭 |
 | 后端重启 | 原节点、grant 和 origin 保持不变，新后端恢复 paired/online；本机 Widget 重取票据后 Count 0→1 |
+| 真实本机撤销 UI | 本机显示 revoked，接入码为空；门户当前连接消失，历史页显示已撤销且打开按钮禁用；Gateway Tunnel 计数归零 |
 | 真实节点页面 UI | 当前内置浏览器拒绝 `<node>.localhost`，返回 `ERR_BLOCKED_BY_CLIENT`；Chrome 连接不可用。门户打开操作已产生一次 launch 审计，但导航与手动新 tab 均受阻；不能声称远程 Widget/聊天页已通过 |
 
 跨仓工具覆盖真实 Tunnel、双向文本/二进制 WS 和子协议、单次写及超时不重放、在途撤销、接入码过期/重放、错误账户不消耗码、配额不消费码、429 冷却、到期/删除/无效设备终止，以及旧 paired 身份与 origin 双端重启恢复。第六组在真实 Gateway Tunnel 容量为一时验证第二节点保持凭据，第一节点释放后第二节点按退避恢复原身份。
 
 ![本机批准后显示账户、范围与期限](remote-workspace-handoff/local-approved.jpg)
+
+![撤销后接入码为空且可主动重新接入](remote-workspace-handoff/local-revoked.jpg)
 
 ## 云侧容量与发布门禁
 
@@ -41,3 +44,5 @@
 本次继续完成客户端契约适配；云侧合并/上线前应按完整界面及实际 RSS 决定预算、容器上限与初期规模。真实 DNS、可信 wildcard TLS/续期、可注册域隔离、生产 nginx/反代、共享主机容量、在线备份恢复和回滚仍须发布前验证；本地联调不能冒充已上线。
 
 另一个已复现的兼容问题是 Gateway 在 Tunnel 接受前将容量拒绝统一关闭为 1008，网络握手呈 HTTP 403。Ambient 已通过设备 state 查询区分暂时容量不足和真正失效，避免丢失有效身份。建议云侧后续明确返回 429/Retry-After 的握手拒绝；此次没有修改云源代码。
+
+本机 Windows Gateway 进程连续采样的空闲 WorkingSet 为 53,104,640 字节，采样最大值 58,052,608，进程 PeakWorkingSet 58,056,704，PrivateMemory 最大值 43,995,136。这个阶段仅有账户控制、Connector 和受阻的节点导航，未出现浏览器 WS；撤销后 Tunnel 为零。上述实测不能替代远程完整界面、多节点或 384 MiB 生产容器的容量验收。
