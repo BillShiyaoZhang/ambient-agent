@@ -28,7 +28,7 @@ from backend.app_manifest import AppManifest, ManifestValidationError, validate_
 from backend.app_types import get_app_type_catalog
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.capabilities.models import RuntimeContract, normalize_grants
-from backend.coding_agent_repair import decide_widget_repair
+from backend.coding_agent_repair import app_spec_declaration_rules, decide_widget_repair
 from backend.coding_agent_runtime import CodingAgentRuntimeError, spec_for
 from backend.context_manager import ContextManager
 from backend.graph_db import GraphCompensationConflict, GraphDatabase
@@ -1905,18 +1905,10 @@ class DurableAgentWorkflow:
             "\n\n[APP TYPE STANDARD]\n"
             f"{json.dumps(get_app_type_catalog(), ensure_ascii=False, sort_keys=True, indent=2)}"
             "\n\n[APP TYPE DECLARATION RULES]\n"
-            "Declare optional `app_spec` using `spec_version: 1`, an ordered non-empty `types` array "
-            "(primary type first), and a `features` array. Choose types and features from actually delivered "
-            "behavior; a capability grant alone never proves a feature is implemented. For an existing App, "
-            "preserve and adjust its declarations to match the resulting implementation. The initial template "
-            "may be unclassified; do not infer classification from its title, schemas, or grants. "
-            "Each feature has `id`, `status` (`implemented`, `partial`, or `planned`), `surfaces`, and optional "
-            "`notes`. Implemented and partial features list at least one actual surface: `data`, `tools`, or "
-            "`ui`. Planned features use empty surfaces. Standard feature IDs must belong to a declared type; "
-            "undeclared features are not required. Custom types use `custom:<namespace>` and custom feature IDs "
-            "use `custom:<namespace>.<feature>` with lowercase kebab-case names; declare their corresponding "
-            "custom type. Use unique IDs and surfaces. These are author declarations, not verified behavior; "
-            "declaring `tools` never creates a callable tool or changes the immutable Runtime Contract."
+            f"{app_spec_declaration_rules()}\n"
+            "The initial template may be unclassified; do not infer classification from its title, schemas, "
+            "or grants. These are author declarations, not verified behavior; declaring `tools` never creates "
+            "a callable tool or changes the immutable Runtime Contract."
             "\n\n[SYSTEM CAPABILITIES]\n"
             f"{self.capability_catalog_factory().render(AgentRole.CODING_AGENT)}"
         )

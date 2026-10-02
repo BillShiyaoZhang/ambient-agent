@@ -5,6 +5,7 @@ import pytest
 from backend.app_manifest import AppManifest, ManifestValidationError
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest
+from backend.app_types import AppSpecificationError, validate_app_spec
 
 
 def app_spec(**overrides):
@@ -113,6 +114,111 @@ def test_legacy_manifest_and_explicit_null_remain_unclassified():
 def test_invalid_app_specs_are_rejected(spec):
     with pytest.raises(ManifestValidationError, match="app_spec"):
         AppManifest.from_dict(manifest_data(app_spec=spec), expected_app_id="planner")
+
+
+def test_catalog_type_objects_are_rejected_with_exact_path_without_copying_contents():
+    spec = app_spec(
+        types=[
+            {"id": "custom:weather-app", "title": {"en": "Weather", "zh": "天气"}, "secret": "private-metadata-value"}
+        ],
+        features=[{"id": "custom:weather-app.display", "status": "partial", "surfaces": ["ui"]}],
+    )
+    original = deepcopy(spec)
+    with pytest.raises(AppSpecificationError) as failure:
+        validate_app_spec(spec)
+    error = failure.value
+    assert error.path == "app_spec.types[0]"
+    assert error.expected == "non-empty type ID string (max 200 characters)"
+    assert error.observed == "object"
+    assert "app_spec.types[0]" in str(error)
+    assert "use the ID string, not a catalog object" in str(error)
+    assert "private-metadata-value" not in str(error)
+    assert "custom:weather-app" not in str(error)
+    assert spec == original
+
+
+@pytest.mark.parametrize(
+    ("spec", "path", "observed"),
+    [
+        (app_spec(types=["calendar", {"id": "tasks"}]), "app_spec.types[1]", "object"),
+        (app_spec(types=[[]]), "app_spec.types[0]", "array"),
+        (app_spec(types=[None]), "app_spec.types[0]", "null"),
+        (app_spec(types=[True]), "app_spec.types[0]", "boolean"),
+        (app_spec(types=[1]), "app_spec.types[0]", "integer"),
+        (app_spec(types=[1.5]), "app_spec.types[0]", "number"),
+        (app_spec(types=[""]), "app_spec.types[0]", "string"),
+        (app_spec(types=["x" * 201]), "app_spec.types[0]", "string"),
+        (app_spec(types=["calendar", "calendar"]), "app_spec.types[1]", "duplicate string"),
+        (app_spec(spec_version=True), "app_spec.spec_version", "boolean"),
+        (app_spec(types="calendar"), "app_spec.types", "string"),
+        (app_spec(features={}), "app_spec.features", "object"),
+        (app_spec(features=[[]]), "app_spec.features[0]", "array"),
+        (
+            app_spec(features=[{"id": {"id": "calendar.events"}, "status": "partial", "surfaces": ["ui"]}]),
+            "app_spec.features[0].id",
+            "object",
+        ),
+        (
+            app_spec(features=[{"id": "calendar.events", "status": [], "surfaces": ["ui"]}]),
+            "app_spec.features[0].status",
+            "array",
+        ),
+        (
+            app_spec(features=[{"id": "calendar.events", "status": "partial", "surfaces": "ui"}]),
+            "app_spec.features[0].surfaces",
+            "string",
+        ),
+        (
+            app_spec(features=[{"id": "calendar.events", "status": "partial", "surfaces": ["ui", {}]}]),
+            "app_spec.features[0].surfaces[1]",
+            "object",
+        ),
+        (
+            app_spec(features=[{"id": "calendar.events", "status": "planned", "surfaces": ["ui"]}]),
+            "app_spec.features[0].surfaces",
+            "non-empty array",
+        ),
+        (
+            app_spec(features=[{"id": "calendar.events", "status": "partial", "surfaces": []}]),
+            "app_spec.features[0].surfaces",
+            "empty array",
+        ),
+        (
+            app_spec(
+                features=[
+                    {
+                        "id": "calendar.events",
+                        "status": "partial",
+                        "surfaces": ["ui"],
+                        "notes": {"secret": "private-value"},
+                    }
+                ]
+            ),
+            "app_spec.features[0].notes",
+            "object",
+        ),
+    ],
+)
+def test_app_spec_shape_diagnostics_report_precise_paths_and_safe_observed_types(spec, path, observed):
+    with pytest.raises(AppSpecificationError) as failure:
+        validate_app_spec(spec)
+    error = failure.value
+    assert error.path == path
+    assert error.observed == observed
+    assert error.expected
+    assert path in str(error)
+    assert "private-value" not in str(error)
+
+
+def test_custom_weather_type_id_string_with_declared_features_remains_valid():
+    spec = app_spec(
+        types=["custom:weather-app"],
+        features=[
+            {"id": "custom:weather-app.display", "status": "partial", "surfaces": ["ui"]},
+            {"id": "custom:weather-app.retry", "status": "partial", "surfaces": ["ui"]},
+        ],
+    )
+    assert validate_app_spec(spec).to_dict() == spec
 
 
 def test_type_catalog_is_bilingual_complete_and_returns_independent_copies():

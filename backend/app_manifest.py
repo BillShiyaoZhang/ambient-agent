@@ -66,6 +66,12 @@ _FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
 class ManifestValidationError(ValueError):
     """Raised when an App Manifest does not satisfy the V2 contract."""
 
+    def __init__(self, message: str, *, path: str = "", expected: str = "", observed: str = ""):
+        super().__init__(message)
+        self.path = path
+        self.expected = expected
+        self.observed = observed
+
 
 def validate_app_id(app_id: Any) -> str:
     if not isinstance(app_id, str):
@@ -189,7 +195,9 @@ class AppManifest:
         try:
             app_spec = validate_app_spec(data.get("app_spec"))
         except AppSpecificationError as exc:
-            raise ManifestValidationError(str(exc)) from exc
+            raise ManifestValidationError(
+                str(exc), path=exc.path, expected=exc.expected, observed=exc.observed
+            ) from exc
 
         return cls(
             manifest_version=APP_MANIFEST_VERSION,

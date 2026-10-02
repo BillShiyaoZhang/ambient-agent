@@ -22,6 +22,10 @@ Manifest V2 新增可选 `app_spec`。缺少该字段的旧 App 保持可读、�
 
 `types` 是非空、有序、不重复的类型 ID 列表；首项为主要展示类型。标准类型包含 calendar、tasks、notes、contacts、documents、messaging、finance、media、dashboard、utility。自定义类型使用 `custom:<namespace>`，自定义功能使用 `custom:<namespace>.<feature>`（小写 kebab-case namespace/feature），且必须声明对应 namespace 的自定义类型。标准功能必须属于已声明类型；未知的标准 ID、重复 ID、不支持的版本及未知字段均拒绝。每份声明最多 20 个类型、100 个功能，ID 最多 200 字符，单项 notes 最多 2000 字符。
 
+Manifest 的 `types` 每项必须是字符串，例如 `["custom:weather"]`；不能复制类型目录中的 `{id, title, description, features}` 对象。`features` 则是功能声明对象数组。单词 namespace（如 `custom:weather`）合法，不必包含连字符。生成和修复共用这一实例形状规则与完整合法示例。
+
+声明校验错误提供精确路径、期望格式和实际 JSON 类型，例如 `app_spec.types[0]`、`type ID string`、`object`。这些字段通过 Manifest、产物验证和结构化修复诊断保留；诊断不复制非法对象内容。修复只纠正格式，仍须保留合法分类并遵守获批 Runtime Contract。
+
 功能状态为 `implemented`、`partial`、`planned`。已实现与部分实现至少声明一个实际提供的 surface：`data`（存储/数据）、`tools`（Agent 可调用的处理工具）、`ui`（可视化交互）。仅计划中的功能必须使用空 surfaces，避免将未来功能计为已实现。`notes` 为可选说明。未声明的标准功能显示为 `not_declared`，不意味着整个 App 不合格；类型标准是比较词汇，不要求实现该类型的所有功能。
 
 功能状态与 surfaces 是作者声明，校验确保结构与分类一致，不证明功能运行正确。应用详情必须清楚标注“实现声明”，不显示认证徽章。权限继续使用 `capabilities` grants，数据继续复用 canonical `schema_refs`。声明 `tools` 不会创建工具或扩大权限。

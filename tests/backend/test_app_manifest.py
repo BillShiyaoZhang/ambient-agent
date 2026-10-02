@@ -278,3 +278,36 @@ def test_new_fields_validation_and_roundtrip():
     # Test invalid command items
     with pytest.raises(ManifestValidationError, match="mcp_server command items must be non-empty strings"):
         AppManifest.from_dict(valid_manifest(mcp_server={"command": [""]}), expected_app_id="morning-planner")
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+def test_manifest_preserves_structured_app_spec_diagnostic_without_leaking_catalog_object(tmp_path, from_file):
+    data = valid_manifest(
+        app_spec={
+            "spec_version": 1,
+            "types": [{"id": "custom:weather-app", "secret": "private-metadata-value"}],
+            "features": [{"id": "custom:weather-app.display", "status": "partial", "surfaces": ["ui"]}],
+        }
+    )
+    if from_file:
+        path = tmp_path / "manifest.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ManifestValidationError) as failure:
+        if from_file:
+            AppManifest.read(path, expected_app_id="morning-planner")
+        else:
+            AppManifest.from_dict(data, expected_app_id="morning-planner")
+    error = failure.value
+    assert error.path == "app_spec.types[0]"
+    assert error.expected == "non-empty type ID string (max 200 characters)"
+    assert error.observed == "object"
+    assert error.__cause__.path == error.path
+    assert error.__cause__.expected == error.expected
+    assert error.__cause__.observed == error.observed
+    assert "private-metadata-value" not in str(error)
+
+
+def test_existing_manifest_error_constructor_remains_compatible():
+    error = ManifestValidationError("existing validation message")
+    assert str(error) == "existing validation message"
+    assert error.path == error.expected == error.observed == ""

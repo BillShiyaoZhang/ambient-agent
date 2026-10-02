@@ -309,6 +309,12 @@ def get_app_type_catalog() -> dict[str, Any]:
 class AppSpecificationError(ValueError):
     """An App implementation declaration does not match the standard."""
 
+    def __init__(self, message: str, *, path: str = "app_spec", expected: str = "", observed: str = ""):
+        super().__init__(message)
+        self.path = path
+        self.expected = expected
+        self.observed = observed
+
 
 @dataclass(frozen=True, slots=True)
 class AppFeatureDeclaration:
@@ -338,13 +344,39 @@ class AppSpecification:
         }
 
 
-def _error(message: str) -> AppSpecificationError:
-    return AppSpecificationError(f"app_spec: {message}")
+def _observed_shape(value: Any) -> str:
+    """Describe malformed metadata without copying its contents into diagnostics."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "non-JSON value"
 
 
-def _identifier(value: Any, field: str) -> str:
+def _error(message: str, *, path: str = "app_spec", expected: str = "", observed: str = "") -> AppSpecificationError:
+    detail = f". Expected {expected}; observed {observed}" if expected or observed else ""
+    return AppSpecificationError(f"{path}: {message}{detail}", path=path, expected=expected, observed=observed)
+
+
+def _identifier(value: Any, field: str, path: str) -> str:
     if not isinstance(value, str) or not value or len(value) > MAX_SPEC_ID_LENGTH:
-        raise _error(f"{field} must be a non-empty string of at most {MAX_SPEC_ID_LENGTH} characters")
+        hint = "; use the ID string, not a catalog object" if isinstance(value, dict) else ""
+        raise _error(
+            f"{field} must be a non-empty string of at most {MAX_SPEC_ID_LENGTH} characters{hint}",
+            path=path,
+            expected=f"non-empty {field} string (max {MAX_SPEC_ID_LENGTH} characters)",
+            observed=_observed_shape(value),
+        )
     return value
 
 
@@ -353,65 +385,151 @@ def validate_app_spec(value: Any) -> AppSpecification | None:
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise _error("must be an object or null")
+        raise _error("must be an object or null", expected="object or null", observed=_observed_shape(value))
     if set(value) != {"spec_version", "types", "features"}:
-        raise _error("requires only spec_version, types, and features")
+        raise _error(
+            "requires only spec_version, types, and features",
+            expected="object with exactly spec_version, types, features",
+            observed="object with missing or extra fields",
+        )
     if type(value["spec_version"]) is not int or value["spec_version"] != APP_SPEC_VERSION:
-        raise _error(f"spec_version must be the supported integer {APP_SPEC_VERSION}")
+        raise _error(
+            f"spec_version must be the supported integer {APP_SPEC_VERSION}",
+            path="app_spec.spec_version",
+            expected=f"integer {APP_SPEC_VERSION}",
+            observed=_observed_shape(value["spec_version"]),
+        )
     raw_types = value["types"]
     if not isinstance(raw_types, list) or not 1 <= len(raw_types) <= MAX_APP_TYPES:
-        raise _error(f"types must be a non-empty array of at most {MAX_APP_TYPES} type IDs")
+        raise _error(
+            f"types must be a non-empty array of at most {MAX_APP_TYPES} type IDs",
+            path="app_spec.types",
+            expected=f"array of 1 to {MAX_APP_TYPES} type ID strings",
+            observed=_observed_shape(raw_types),
+        )
     types: list[str] = []
-    for raw_type in raw_types:
-        type_id = _identifier(raw_type, "type ID")
+    for type_index, raw_type in enumerate(raw_types):
+        path = f"app_spec.types[{type_index}]"
+        type_id = _identifier(raw_type, "type ID", path)
         if type_id not in _TYPE_IDS and not _CUSTOM_TYPE.fullmatch(type_id):
-            raise _error(f"unknown type ID: {type_id}")
+            raise _error(
+                "unknown type ID",
+                path=path,
+                expected="standard type ID or custom:<lowercase-kebab-case-namespace>",
+                observed="unrecognized string",
+            )
         if type_id in types:
-            raise _error("types must not contain duplicate IDs")
+            raise _error(
+                "types must not contain duplicate IDs",
+                path=path,
+                expected="unique type ID string",
+                observed="duplicate string",
+            )
         types.append(type_id)
     raw_features = value["features"]
     if not isinstance(raw_features, list) or len(raw_features) > MAX_APP_FEATURES:
-        raise _error(f"features must be an array of at most {MAX_APP_FEATURES} declarations")
+        raise _error(
+            f"features must be an array of at most {MAX_APP_FEATURES} declarations",
+            path="app_spec.features",
+            expected=f"array of at most {MAX_APP_FEATURES} feature objects",
+            observed=_observed_shape(raw_features),
+        )
     seen_features: set[str] = set()
     features: list[AppFeatureDeclaration] = []
-    for feature in raw_features:
+    for feature_index, feature in enumerate(raw_features):
+        path = f"app_spec.features[{feature_index}]"
         if (
             not isinstance(feature, dict)
             or not {"id", "status", "surfaces"} <= set(feature)
             or set(feature) - {"id", "status", "surfaces", "notes"}
         ):
-            raise _error("each feature requires id, status, surfaces and optional notes only")
-        feature_id = _identifier(feature["id"], "feature ID")
+            raise _error(
+                "each feature requires id, status, surfaces and optional notes only",
+                path=path,
+                expected="object with id, status, surfaces and optional notes only",
+                observed=_observed_shape(feature),
+            )
+        feature_id = _identifier(feature["id"], "feature ID", f"{path}.id")
         feature_type = _FEATURE_TYPES.get(feature_id)
         if feature_type is None:
             custom_feature = _CUSTOM_FEATURE.fullmatch(feature_id)
             if custom_feature is None:
-                raise _error(f"unknown feature ID: {feature_id}")
+                raise _error(
+                    "unknown feature ID",
+                    path=f"{path}.id",
+                    expected="standard feature ID or custom:<namespace>.<lowercase-kebab-case-feature>",
+                    observed="unrecognized string",
+                )
             feature_type = f"custom:{custom_feature.group(1)}"
         if feature_type not in types:
-            raise _error(f"feature {feature_id} requires declared type {feature_type}")
+            raise _error(
+                f"feature requires declared type {feature_type}",
+                path=f"{path}.id",
+                expected="feature namespace declared in app_spec.types",
+                observed="undeclared feature type",
+            )
         if feature_id in seen_features:
-            raise _error("features must not contain duplicate IDs")
+            raise _error(
+                "features must not contain duplicate IDs",
+                path=f"{path}.id",
+                expected="unique feature ID string",
+                observed="duplicate string",
+            )
         seen_features.add(feature_id)
         status = feature["status"]
         if not isinstance(status, str) or status not in _STATUSES:
-            raise _error("feature status must be implemented, partial, or planned")
+            raise _error(
+                "feature status must be implemented, partial, or planned",
+                path=f"{path}.status",
+                expected="implemented, partial, or planned",
+                observed=_observed_shape(status),
+            )
         raw_surfaces = feature["surfaces"]
         if not isinstance(raw_surfaces, list) or len(raw_surfaces) > len(_SURFACES):
-            raise _error("surfaces must be an array containing data, tools, or ui")
+            raise _error(
+                "surfaces must be an array containing data, tools, or ui",
+                path=f"{path}.surfaces",
+                expected="array containing at most data, tools, ui",
+                observed=_observed_shape(raw_surfaces),
+            )
         surfaces: list[str] = []
-        for surface in raw_surfaces:
+        for surface_index, surface in enumerate(raw_surfaces):
             if not isinstance(surface, str) or surface not in _SURFACES:
-                raise _error("unknown feature surface; use data, tools, or ui")
+                raise _error(
+                    "unknown feature surface; use data, tools, or ui",
+                    path=f"{path}.surfaces[{surface_index}]",
+                    expected="data, tools, or ui",
+                    observed=_observed_shape(surface),
+                )
             if surface in surfaces:
-                raise _error("surfaces must not contain duplicates")
+                raise _error(
+                    "surfaces must not contain duplicates",
+                    path=f"{path}.surfaces[{surface_index}]",
+                    expected="unique surface string",
+                    observed="duplicate string",
+                )
             surfaces.append(surface)
         if status == "planned" and surfaces:
-            raise _error("planned features must have empty surfaces")
+            raise _error(
+                "planned features must have empty surfaces",
+                path=f"{path}.surfaces",
+                expected="empty array for planned feature",
+                observed="non-empty array",
+            )
         if status != "planned" and not surfaces:
-            raise _error("implemented and partial features require at least one surface")
+            raise _error(
+                "implemented and partial features require at least one surface",
+                path=f"{path}.surfaces",
+                expected="at least one surface for implemented or partial feature",
+                observed="empty array",
+            )
         notes = feature.get("notes")
         if "notes" in feature and (not isinstance(notes, str) or len(notes) > MAX_FEATURE_NOTES_LENGTH):
-            raise _error(f"feature notes must be a string of at most {MAX_FEATURE_NOTES_LENGTH} characters")
+            raise _error(
+                f"feature notes must be a string of at most {MAX_FEATURE_NOTES_LENGTH} characters",
+                path=f"{path}.notes",
+                expected=f"string of at most {MAX_FEATURE_NOTES_LENGTH} characters",
+                observed=_observed_shape(notes),
+            )
         features.append(AppFeatureDeclaration(feature_id, status, tuple(surfaces), notes))
     return AppSpecification(APP_SPEC_VERSION, tuple(types), tuple(features))

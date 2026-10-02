@@ -27,6 +27,61 @@ _DESIGN_CODES = {
     "schema_extension_required",
 }
 _NORMALIZE_DIAGNOSTIC_WHITESPACE = re.compile(r"\s+")
+_MAX_REPAIR_METADATA_CHARS = 512
+_MAX_REPAIR_LOCATIONS = 16
+
+
+def app_spec_declaration_rules() -> str:
+    """One manifest-instance shape contract for generation and repair prompts."""
+
+    return (
+        "Optional `app_spec` is an implementation declaration with exactly `spec_version`, `types`, and `features`. "
+        "`spec_version` is the integer 1. `types` is an ordered, non-empty array of unique type ID strings "
+        "(primary type first), never objects. The App Type Standard catalog's `types` entries are metadata objects: "
+        "copy only each selected `id` string, never its `title`, `description`, or `features` object into `types`. "
+        "`features` is an array of declaration objects with `id`, `status`, `surfaces`, and optional string `notes`; "
+        "never an array of ID strings or catalog feature metadata. Status is `implemented`, `partial`, or `planned`. "
+        "Implemented and partial features require at least one actual surface (`data`, `tools`, or `ui`); "
+        "planned features use an empty surfaces array. IDs and surfaces must be unique. Standard feature IDs "
+        "must belong to a declared type. Custom types use `custom:<namespace>` and their feature IDs use "
+        "`custom:<namespace>.<feature>`, with lowercase alphanumeric or kebab-case names; a single word such as "
+        "`custom:weather` is valid and does not require a hyphen. Choose declarations from actually delivered "
+        "behavior; a capability grant alone proves no implemented feature. For an existing App, preserve and adjust "
+        "its declaration to match the delivered implementation; correct a repairable declaration rather than "
+        "deleting it to evade validation. Declarations do not grant permissions or change "
+        "the approved Runtime Contract. This complete valid custom example illustrates shape only; select the "
+        "appropriate IDs and truthful statuses for the actual App:\n\n"
+        "```json\n"
+        '{"spec_version":1,"types":["custom:weather"],"features":[{"id":"custom:weather.forecast",'
+        '"status":"partial","surfaces":["ui"]}]}\n'
+        "```"
+    )
+
+
+def _diagnostic_text(value: object) -> str:
+    # Structured diagnostics carry shape names, never stringify raw model data.
+    return value.strip()[:_MAX_REPAIR_METADATA_CHARS] if isinstance(value, str) else ""
+
+
+def _finding_locations(exc: Exception) -> tuple[str, ...]:
+    raw = getattr(exc, "locations", ())
+    if isinstance(raw, str):
+        raw = (raw,)
+    locations: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw[:_MAX_REPAIR_LOCATIONS]:
+            location = _diagnostic_text(item)
+            if location and location not in locations:
+                locations.append(location)
+    if not locations:
+        path = _diagnostic_text(getattr(exc, "path", ""))
+        if path:
+            if path.startswith("app_spec"):
+                path = f"manifest.json:$.{path}"
+            elif path.startswith("$"):
+                path = f"manifest.json:{path}"
+            locations.append(path[:_MAX_REPAIR_METADATA_CHARS])
+    return tuple(locations)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +200,9 @@ def finding_from_exception(
         repairability=repairability,
         contract_impact=contract_impact,
         artifact_hash=artifact_revision,
+        expected=_diagnostic_text(getattr(exc, "expected", "")),
+        observed=_diagnostic_text(getattr(exc, "observed", "")),
+        locations=_finding_locations(exc),
     )
 
 
@@ -171,18 +229,110 @@ def decide_widget_repair(
     return RepairDirective("repair", "The finding is local to code and preserves the approved Runtime Contract.")
 
 
+_INSTRUCTION_SECTION = re.compile(r"(?m)^\[[A-Z][A-Z0-9 _—-]*\][ \t]*(?:\n|$)")
+
+
+def _instruction_section(instruction: str, marker: str) -> str:
+    start = re.search(rf"(?m)^{re.escape(marker)}[ \t]*\n", instruction)
+    if start is None:
+        return ""
+    end = _INSTRUCTION_SECTION.search(instruction, start.end())
+    return instruction[start.end() : end.start() if end else None].strip()
+
+
+def _bounded_context(marker: str, text: str, *, max_chars: int) -> str:
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        # Do not hand the model a truncated contract, JSON object, or request.
+        # Repairs share the original ACP session, where the complete approved
+        # instruction remains authoritative and can be consulted unchanged.
+        text = "Consult the complete original section in this ACP session; all of its constraints still apply."
+    return f"{marker}\n{text}"
+
+
 def approved_runtime_contract_excerpt(instruction: str) -> str:
     marker = "[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]"
-    start = instruction.find(marker)
-    if start < 0:
+    return _bounded_context(marker, _instruction_section(instruction, marker), max_chars=8_000)
+
+
+def _manifest_template_context(instruction: str) -> str:
+    marker = "[REQUIRED MANIFEST V2 TEMPLATE]"
+    raw = _instruction_section(instruction, marker)
+    if not raw:
         return ""
-    end = instruction.find("\n\n[SYSTEM CAPABILITIES]", start)
-    return instruction[start : end if end >= 0 else None][:24_000]
+    try:
+        template = json.loads(raw)
+    except (ValueError, TypeError):
+        template = None
+    if isinstance(template, dict):
+        fields = (
+            "manifest_version",
+            "id",
+            "title",
+            "description",
+            "app_version",
+            "intents",
+            "schema_refs",
+            "capabilities",
+            "app_spec",
+        )
+        raw = json.dumps(
+            {key: template[key] for key in fields if key in template}, ensure_ascii=False, separators=(",", ":")
+        )
+    return _bounded_context(marker, raw, max_chars=8_000)
+
+
+def _app_type_catalog_context(instruction: str) -> str:
+    marker = "[APP TYPE STANDARD]"
+    raw = _instruction_section(instruction, marker)
+    if not raw:
+        return ""
+    try:
+        catalog = json.loads(raw)
+        entries = catalog["types"]
+        if not isinstance(entries, list):
+            raise ValueError("Invalid catalog")
+        types: list[str] = []
+        features: dict[str, list[str]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                raise ValueError("Invalid catalog type")
+            declared_features = entry.get("features", [])
+            if not isinstance(declared_features, list) or any(
+                not isinstance(feature, dict) or not isinstance(feature.get("id"), str) for feature in declared_features
+            ):
+                raise ValueError("Invalid catalog features")
+            types.append(entry["id"])
+            features[entry["id"]] = [feature["id"] for feature in declared_features]
+        raw = json.dumps(
+            {"type_ids": types, "feature_ids_by_type": features}, ensure_ascii=False, separators=(",", ":")
+        )
+    except (ValueError, TypeError, KeyError):
+        raw = "Consult the complete App Type Standard in the original ACP instruction; do not invent standard IDs."
+    return _bounded_context("[APP TYPE STANDARD — ID REFERENCE]", raw, max_chars=6_000)
+
+
+def _repair_instruction_context(instruction: str) -> str:
+    first_section = _INSTRUCTION_SECTION.search(instruction)
+    request = instruction[: first_section.start() if first_section else None].strip()
+    sections = (
+        _bounded_context("[ORIGINAL APPROVED REQUEST]", request, max_chars=4_000),
+        _bounded_context(
+            "[APPROVED DEVELOPMENT PLAN]",
+            _instruction_section(instruction, "[APPROVED DEVELOPMENT PLAN]"),
+            max_chars=4_000,
+        ),
+        approved_runtime_contract_excerpt(instruction),
+        _manifest_template_context(instruction),
+        _app_type_catalog_context(instruction),
+    )
+    return "\n\n".join(section for section in sections if section)
 
 
 def build_repair_prompt(finding: RepairFinding, *, instruction: str) -> str:
-    contract = approved_runtime_contract_excerpt(instruction)
-    contract_context = f"\n\n{contract}" if contract else ""
+    context = _repair_instruction_context(instruction)
+    contract_context = f"\n\n{context}" if context else ""
     finding_payload = json.dumps(finding.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)
     return (
         "The staged Widget failed mandatory independent validation. Repair controller.js and/or manifest.json "
@@ -192,5 +342,6 @@ def build_repair_prompt(finding: RepairFinding, *, instruction: str) -> str:
         "Manifest schema; map only its approved Manifest fields. If the requested behavior cannot be implemented "
         "within the approved contract, leave the contract unchanged and explain the blocker. Do not claim success "
         "until the files themselves are repaired.\n\n"
-        f"[STRUCTURED REPAIR FINDING]\n{finding_payload}{contract_context}"
+        f"[STRUCTURED REPAIR FINDING]\n{finding_payload}\n\n"
+        f"[APP TYPE DECLARATION RULES]\n{app_spec_declaration_rules()}{contract_context}"
     )

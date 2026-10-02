@@ -130,10 +130,18 @@ class CodingAgentArtifactError(CodingAgentACPError):
         *,
         code: str = "artifact_validation_failed",
         stage: str = "artifact_validation",
+        path: str = "",
+        expected: str = "",
+        observed: str = "",
+        locations: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.code = code
         self.stage = stage
+        self.path = path
+        self.expected = expected
+        self.observed = observed
+        self.locations = locations
 
 
 @dataclass(frozen=True, slots=True)
@@ -826,7 +834,11 @@ def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
         AppManifest.read(manifest_path, expected_app_id=app_id)
     except ManifestValidationError as exc:
         raise CodingAgentArtifactError(
-            f"App manifest validation failed: {exc!s}. Fix manifest.json according to the App Runtime Contract."
+            f"App manifest validation failed: {exc!s}. Fix manifest.json according to the App Runtime Contract.",
+            path=exc.path,
+            expected=exc.expected,
+            observed=exc.observed,
+            locations=(f"manifest.json:$.{exc.path}",) if exc.path else (),
         ) from exc
 
     allowed_names = {".ambient-promotion.json", "README.md", "controller.js", "data", "manifest.json"}
