@@ -8,6 +8,8 @@ from backend.agent.decisions import DecisionBundle, DecisionService
 from backend.agent.errors import BudgetExhaustedError
 from backend.agent.providers import ToolLoopBudget
 from backend.agent import feature_review
+from backend.capabilities.catalog import SystemCapabilityCatalog
+from backend.widget_requirements import validate_feature_requirements
 
 
 FEATURES = [
@@ -20,6 +22,60 @@ FEATURES = [
 ]
 REQUEST = "增加真实天气、设备定位和地名搜索并可以选择地点"
 PLAN = "提供当前位置天气和城市搜索，选择真实搜索结果后刷新天气。"
+FULL_DESIGN = [
+    {
+        "id": "custom:weather.current",
+        "description": "取得所选地点坐标后调用天气来源，展示真实当前天气；选择地点后重新读取。",
+        "capability_ids": ["network.request"],
+        "network_sources": [{"source_id": "weather", "path": "/v1/forecast"}],
+    },
+    {
+        "id": "custom:weather.location",
+        "description": "用户点击定位后通过设备 SDK 取得当前位置，使用返回坐标读取并展示真实天气。",
+        "capability_ids": ["device.location", "network.request"],
+        "network_sources": [{"source_id": "weather", "path": "/v1/forecast"}],
+    },
+    {
+        "id": "custom:weather.search",
+        "description": "搜索城市，通过地名来源取得真实候选；用户选择候选后用候选坐标刷新天气。",
+        "capability_ids": ["network.request"],
+        "network_sources": [
+            {"source_id": "places", "path": "/v1/search"},
+            {"source_id": "weather", "path": "/v1/forecast"},
+        ],
+    },
+    {
+        "id": "custom:weather.recovery",
+        "description": "定位拒绝后仍可搜索地点，查询失败允许重试；保留最后成功天气并区分失败状态。",
+        "capability_ids": ["device.location", "network.request"],
+        "network_sources": [
+            {"source_id": "places", "path": "/v1/search"},
+            {"source_id": "weather", "path": "/v1/forecast"},
+        ],
+    },
+]
+FULL_CAPABILITIES = [
+    {"id": "device.location", "scope": {"operations": ["current"]}},
+    {
+        "id": "network.request",
+        "scope": {
+            "sources": {
+                "weather": {
+                    "base_url": "https://api.open-meteo.com",
+                    "paths": ["/v1/forecast"],
+                    "methods": ["GET"],
+                    "response_limit": 1048576,
+                },
+                "places": {
+                    "base_url": "https://geocoding-api.open-meteo.com",
+                    "paths": ["/v1/search"],
+                    "methods": ["GET"],
+                    "response_limit": 1048576,
+                },
+            }
+        },
+    },
+]
 
 
 def noul(value):
@@ -213,3 +269,68 @@ async def test_fallback_uses_fast_selection_and_bounded_call(monkeypatch, provid
     assert arguments["audit_context"]["stage"] == "feature_coverage_review_fallback"
     assert arguments["budget"].max_iterations == 1
     assert arguments["budget"].max_tool_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_each_noul_question_names_proposed_criteria_and_preapproval_boundary(monkeypatch, provider):
+    assert validate_feature_requirements(FULL_DESIGN, SystemCapabilityCatalog.build(), FULL_CAPABILITIES) == FULL_DESIGN
+    evaluation = AsyncMock(return_value=bundle())
+    monkeypatch.setattr(DecisionService, "evaluate", evaluation)
+    result = await feature_review.review_feature_coverage(
+        REQUEST, PLAN, FULL_DESIGN, capabilities=FULL_CAPABILITIES, decision_config={"mode": "cascade"}
+    )
+    assert result.action == "complete"
+    questions = evaluation.call_args.args[2]
+    for question in questions.values():
+        rubric = question["instructions"]
+        assert "preapproval design coverage review" in rubric
+        assert "required_features array IS the proposed acceptance criteria" in rubric
+        for definition in (
+            "id is its stable feature identifier",
+            "description specifies the observable behavior",
+            "capability_ids names its dependencies",
+            "network_sources lists exact {source_id,path} dependencies",
+        ):
+            assert definition in rubric
+        assert (
+            "Controller code, runtime traces, test results and already-obtained device permissions are not expected"
+            in rubric
+        )
+        assert "later staging gates verify implementation" in rubric
+    dependencies = questions["enforceable_dependencies"]["instructions"]
+    assert "empty/irrelevant dependencies must answer no" in dependencies
+    assert "device location needs its device SDK dependency" in dependencies
+    assert (
+        "unavailable/error notice replacing a requested action must answer no"
+        in questions["all_objectives"]["instructions"]
+    )
+    assert (
+        "cannot replace a criterion requiring the actual requested action"
+        in questions["no_silent_downgrade"]["instructions"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_fallback_receives_four_criteria_as_design_without_code_or_execution_evidence(provider):
+    assert validate_feature_requirements(FULL_DESIGN, SystemCapabilityCatalog.build(), FULL_CAPABILITIES) == FULL_DESIGN
+    provider.generate.return_value = '{"action":"complete","missing":[]}'
+    result = await feature_review.review_feature_coverage(
+        REQUEST, PLAN, FULL_DESIGN, capabilities=FULL_CAPABILITIES, decision_config={"mode": "off"}
+    )
+    assert result.action == "complete"
+    messages = provider.generate.call_args.args[0]
+    rubric, state = messages[0]["content"], json.loads(messages[1]["content"])
+    assert state["required_features"] == FULL_DESIGN
+    assert state["capabilities"] == FULL_CAPABILITIES
+    assert len(state["required_features"]) == 4
+    assert "controller" not in state and "test_results" not in state
+    assert "required_features array IS the proposed acceptance criteria" in rubric
+    assert (
+        "Controller code, runtime traces, test results and already-obtained device permissions are not expected"
+        in rubric
+    )
+    assert "Complete means this proposed design covers the requested objectives with enforceable dependencies" in rubric
+    assert "does not mean the app already runs, passes tests or has device permission" in rubric
+    assert "external live data, device actions or services need actual supported dependencies" in rubric
+    assert "fake results or a TODO as final behavior cannot replace a requested live action" in rubric
+    assert "This judgment grants no authority" in rubric

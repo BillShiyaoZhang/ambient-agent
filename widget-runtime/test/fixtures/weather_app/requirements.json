@@ -1,5 +1,64 @@
 [
-  {"id": "custom:weather.forecast", "description": "获取并展示所选地点的真实天气", "capability_ids": ["network.request"], "network_sources": [{"source_id": "open-meteo", "path": "/v1/forecast"}]},
-  {"id": "custom:weather.search", "description": "搜索真实地点并选择结果查看天气", "capability_ids": ["network.request"], "network_sources": [{"source_id": "geocoding", "path": "/v1/search"}]},
-  {"id": "custom:weather.location", "description": "用户点击后请求一次设备定位并展示当前位置天气", "capability_ids": ["device.location", "network.request"], "network_sources": [{"source_id": "open-meteo", "path": "/v1/forecast"}]}
+  {
+    "id": "custom:weather.forecast",
+    "description": "通过 ambient.net.request 调用 Open-Meteo /v1/forecast，用所选地点的经纬度获取真实天气并展示温度、天气状况、湿度、风速与观测时间。",
+    "capability_ids": [
+      "network.request"
+    ],
+    "network_sources": [
+      {
+        "source_id": "open-meteo",
+        "path": "/v1/forecast"
+      }
+    ]
+  },
+  {
+    "id": "custom:weather.search",
+    "description": "用 /v1/search 搜索真实地点，展示地点名称和地区并允许选择搜索结果，再用结果经纬度查询 /v1/forecast 显示该地点真实天气。",
+    "capability_ids": [
+      "network.request"
+    ],
+    "network_sources": [
+      {
+        "source_id": "geocoding",
+        "path": "/v1/search"
+      },
+      {
+        "source_id": "open-meteo",
+        "path": "/v1/forecast"
+      }
+    ]
+  },
+  {
+    "id": "custom:weather.location",
+    "description": "用户点击当前位置按钮后调用 ambient.location.getCurrentPosition 一次，在浏览器获许可时将设备返回的经纬度传给 Open-Meteo /v1/forecast 并展示当前位置真实天气。",
+    "capability_ids": [
+      "device.location",
+      "network.request"
+    ],
+    "network_sources": [
+      {
+        "source_id": "open-meteo",
+        "path": "/v1/forecast"
+      }
+    ]
+  },
+  {
+    "id": "custom:weather.recovery",
+    "description": "设备定位拒绝或超时后仍可搜索并选择地点查看天气；天气与地点搜索请求失败时显示明确错误并可重试；丢弃过期搜索、天气或定位响应，避免覆盖新选择。",
+    "capability_ids": [
+      "device.location",
+      "network.request"
+    ],
+    "network_sources": [
+      {
+        "source_id": "geocoding",
+        "path": "/v1/search"
+      },
+      {
+        "source_id": "open-meteo",
+        "path": "/v1/forecast"
+      }
+    ]
+  }
 ]

@@ -4,18 +4,83 @@
   "title": "天气",
   "description": "通过 Open-Meteo 查询所选地点或用户授权的当前位置天气。",
   "app_version": "0.2.0",
-  "intents": ["查看天气", "搜索地点", "当前位置天气"],
+  "intents": [
+    "查看天气",
+    "搜索地点",
+    "当前位置天气"
+  ],
   "schema_refs": [],
   "capabilities": [
-    {"id": "device.location", "scope": {"operations": ["current"]}},
-    {"id": "network.request", "scope": {"sources": {
-      "open-meteo": {"base_url": "https://api.open-meteo.com", "paths": ["/v1/forecast"], "methods": ["GET"], "response_limit": 1048576},
-      "geocoding": {"base_url": "https://geocoding-api.open-meteo.com", "paths": ["/v1/search"], "methods": ["GET"], "response_limit": 1048576}
-    }}}
+    {
+      "id": "device.location",
+      "scope": {
+        "operations": [
+          "current"
+        ]
+      }
+    },
+    {
+      "id": "network.request",
+      "scope": {
+        "sources": {
+          "open-meteo": {
+            "base_url": "https://api.open-meteo.com",
+            "paths": [
+              "/v1/forecast"
+            ],
+            "methods": [
+              "GET"
+            ],
+            "response_limit": 1048576
+          },
+          "geocoding": {
+            "base_url": "https://geocoding-api.open-meteo.com",
+            "paths": [
+              "/v1/search"
+            ],
+            "methods": [
+              "GET"
+            ],
+            "response_limit": 1048576
+          }
+        }
+      }
+    }
   ],
-  "app_spec": {"spec_version": 1, "types": ["custom:weather"], "features": [
-    {"id": "custom:weather.forecast", "status": "implemented", "surfaces": ["ui"]},
-    {"id": "custom:weather.search", "status": "implemented", "surfaces": ["ui"]},
-    {"id": "custom:weather.location", "status": "implemented", "surfaces": ["ui"]}
-  ]}
+  "app_spec": {
+    "spec_version": 1,
+    "types": [
+      "custom:weather"
+    ],
+    "features": [
+      {
+        "id": "custom:weather.forecast",
+        "status": "implemented",
+        "surfaces": [
+          "ui"
+        ]
+      },
+      {
+        "id": "custom:weather.search",
+        "status": "implemented",
+        "surfaces": [
+          "ui"
+        ]
+      },
+      {
+        "id": "custom:weather.location",
+        "status": "implemented",
+        "surfaces": [
+          "ui"
+        ]
+      },
+      {
+        "id": "custom:weather.recovery",
+        "status": "implemented",
+        "surfaces": [
+          "ui"
+        ]
+      }
+    ]
+  }
 }
