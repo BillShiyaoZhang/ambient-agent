@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +21,7 @@ from acp.schema import (
     EnvVariable,
     FileEditToolCallContent,
     InitializeResponse,
+    Implementation,
     NewSessionResponse,
     PermissionOption,
     PromptResponse,
@@ -27,6 +29,7 @@ from acp.schema import (
     RequestPermissionResponse,
     TerminalOutputResponse,
     ToolCall,
+    ToolCallLocation,
     ToolCallProgress,
     ToolCallStart,
     WaitForTerminalExitResponse,
@@ -48,6 +51,7 @@ from backend.coding_agent_acp import (
     promote_opencode_staging,
     recover_interrupted_opencode_promotions,
     run_opencode_agent_acp,
+    run_coding_agent_acp,
     validate_opencode_promotion,
     validate_opencode_staging,
 )
@@ -1816,6 +1820,484 @@ async def test_acp_can_retain_validate_and_promote_staging(monkeypatch, tmp_path
     assert promoted_path == live_dir
     assert (live_dir / "controller.js").read_text(encoding="utf-8") == new_source
     assert not result.staging_dir.exists()
+
+
+# Pinned codex-acp 2.1.1 fixtures mirror FileChangeReporter, GitPatch, and
+# CodexApprovalHandler: permissions have locations and no legacy codex.params.
+def _codex_v2_initialize(version="2.1.1", *, capabilities=None):
+    return InitializeResponse(
+        protocolVersion=1,
+        agent_info=Implementation(name="@agentclientprotocol/codex-acp", version=version),
+        field_meta={
+            "jetbrains": {
+                "air": {"version": 1, "capabilities": ["diffPatch"] if capabilities is None else capabilities}
+            }
+        },
+    )
+
+
+def _codex_v2_client(tmp_path):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda _: None)
+    client.configure_agent(_codex_v2_initialize(), agent_id="codex")
+    assert client.codex_diff_patch
+    return client
+
+
+def _codex_v2_patch_start(tool_id, path, kind, patch):
+    return ToolCallStart(
+        session_update="tool_call",
+        tool_call_id=tool_id,
+        title="Editing files",
+        kind="edit",
+        status="pending",
+        content=[
+            FileEditToolCallContent(
+                type="diff",
+                path=path,
+                old_text=None,
+                new_text="",
+                field_meta={
+                    "kind": kind,
+                    "jetbrains": {
+                        "air": {"version": 1, "diffPatch": {"version": 1, "format": "git_patch", "text": patch}}
+                    },
+                },
+            )
+        ],
+    )
+
+
+def _codex_v2_whole_patch(path, text, kind="add"):
+    name = path.lstrip("/")
+    lines = text.split("\n")
+    newline = lines[-1] == ""
+    if newline:
+        lines.pop()
+    count = str(len(lines))
+    headers = [f"diff --git a/{name} b/{name}"]
+    if kind == "add":
+        headers += ["new file mode 100644", "--- /dev/null", f"+++ b/{name}", f"@@ -0,0 +1,{count} @@"]
+        sign = "+"
+    else:
+        headers += ["deleted file mode 100644", f"--- a/{name}", "+++ /dev/null", f"@@ -1,{count} +0,0 @@"]
+        sign = "-"
+    return "\n".join(
+        headers + [sign + line for line in lines] + ([] if newline else [r"\ No newline at end of file"]) + [""]
+    )
+
+
+def _codex_v2_permission(tool_id, *paths):
+    return ToolCall(
+        tool_call_id=tool_id,
+        title="Editing files",
+        locations=[ToolCallLocation(path=path) for path in paths],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("text", ["generated\n", "generated", "one\r\ntwo\r\n"])
+async def test_codex_v2_added_artifact_patch_is_allowed_without_legacy_metadata(tmp_path, absolute, text):
+    client = _codex_v2_client(tmp_path)
+    path = str(tmp_path / "controller.js") if absolute else "controller.js"
+    await client.session_update("session", _codex_v2_patch_start("add", path, "add", _codex_v2_whole_patch(path, text)))
+    response = await client.request_permission("session", _codex_v2_permission("add", path), _file_permission_options())
+    assert isinstance(response.outcome, AllowedOutcome)
+    repeated = await client.request_permission("session", _codex_v2_permission("add", path), _file_permission_options())
+    assert isinstance(repeated.outcome, DeniedOutcome)
+    assert not (tmp_path / "controller.js").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "hunks"),
+    [
+        ("one\ntwo\nthree\n", "@@ -2 +2 @@\n-two\n+changed\n"),
+        ("one\ntwo\nthree\nfour\n", "@@ -1 +1 @@\n-one\n+first\n@@ -4 +4 @@\n-four\n+last\n"),
+        ("one\ntwo\nthree\n", "@@ -1 +1,2 @@\n one\n+inserted\n@@ -3 +4 @@\n-three\n+third\n"),
+        ("one\ntwo", "@@ -2 +2 @@\n-two\n\\ No newline at end of file\n+changed\n\\ No newline at end of file\n"),
+        ("one\r\ntwo\r\n", "@@ -2 +2 @@\n-two\r\n+changed\r\n"),
+        ("one\ntwo\n", "@@ -1,0 +2 @@\n+inserted\n"),
+    ],
+)
+async def test_codex_v2_update_proves_exact_hunks_and_positions(tmp_path, current, hunks):
+    (tmp_path / "controller.js").write_bytes(current.encode())
+    client = _codex_v2_client(tmp_path)
+    patch = "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n" + hunks
+    await client.session_update("session", _codex_v2_patch_start("update", "controller.js", "update", patch))
+    response = await client.request_permission(
+        "session", _codex_v2_permission("update", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, AllowedOutcome)
+    assert (tmp_path / "controller.js").read_bytes() == current.encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "diff --git a/controller.js b/controller.js\nrename from secrets.txt\nrename to controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\n",
+        "diff --git a/secrets.txt b/controller.js\n--- a/secrets.txt\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -1 +1 @@\n-two\n+changed\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2,2 +2 @@\n-two\n+changed\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +3 @@\n-two\n+changed\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\n@@ -2 +2 @@\n-two\n+again\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\ndiff --git a/secrets.txt b/secrets.txt\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-wrong\n+changed\n",
+        "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\x00\n",
+    ],
+)
+async def test_codex_v2_update_rejects_rename_extra_paths_stale_hunks_and_malformed_patch(tmp_path, patch):
+    (tmp_path / "controller.js").write_bytes(b"one\ntwo\nthree\n")
+    client = _codex_v2_client(tmp_path)
+    await client.session_update("session", _codex_v2_patch_start("update", "controller.js", "update", patch))
+    response = await client.request_permission(
+        "session", _codex_v2_permission("update", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "paths",
+    [(), ("manifest.json",), ("controller.js", "secrets.txt"), ("../controller.js",), ("nested/controller.js",)],
+)
+async def test_codex_v2_permission_paths_must_completely_match_pending_patch(tmp_path, paths):
+    client = _codex_v2_client(tmp_path)
+    await client.session_update(
+        "session", _codex_v2_patch_start("add", "controller.js", "add", _codex_v2_whole_patch("controller.js", "new\n"))
+    )
+    response = await client.request_permission(
+        "session", _codex_v2_permission("add", *paths), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+    retried = await client.request_permission(
+        "session", _codex_v2_permission("add", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(retried.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_permission_rejects_file_change_after_evidence_and_unknown_protocol(tmp_path):
+    client = _codex_v2_client(tmp_path)
+    await client.session_update(
+        "session", _codex_v2_patch_start("add", "controller.js", "add", _codex_v2_whole_patch("controller.js", "new\n"))
+    )
+    (tmp_path / "controller.js").write_bytes(b"other writer\n")
+    response = await client.request_permission(
+        "session", _codex_v2_permission("add", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+    client.configure_agent(_codex_v2_initialize("2.1.2"), agent_id="codex")
+    assert not client.codex_diff_patch
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_batch_permission_checks_all_artifacts_before_grant(tmp_path):
+    client = _codex_v2_client(tmp_path)
+    update = _codex_v2_patch_start("batch", "controller.js", "add", _codex_v2_whole_patch("controller.js", "new\n"))
+    update.content += _codex_v2_patch_start(
+        "batch", "manifest.json", "add", _codex_v2_whole_patch("manifest.json", "{}\n")
+    ).content
+    await client.session_update("session", update)
+    response = await client.request_permission(
+        "session", _codex_v2_permission("batch", "controller.js", "manifest.json"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, AllowedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_delete_requires_complete_existing_artifact(tmp_path):
+    (tmp_path / "README.md").write_bytes(b"old\nnotes\n")
+    client = _codex_v2_client(tmp_path)
+    await client.session_update(
+        "session",
+        _codex_v2_patch_start(
+            "delete", "README.md", "delete", _codex_v2_whole_patch("README.md", "old\nnotes\n", "delete")
+        ),
+    )
+    response = await client.request_permission(
+        "session", _codex_v2_permission("delete", "README.md"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, AllowedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_standard_partial_oldtext_fails_closed_without_move_proof(tmp_path):
+    (tmp_path / "controller.js").write_bytes(b"one\ntwo\nthree\n")
+    client = _codex_v2_client(tmp_path)
+    await client.session_update(
+        "session",
+        _codex_file_operation_start("update", "controller.js", kind="update", old_text="two\n", new_text="changed\n"),
+    )
+    response = await client.request_permission(
+        "session", _codex_v2_permission("update", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.parametrize(
+    ("agent_id", "version", "capabilities"),
+    [
+        ("opencode", "2.1.1", ["diffPatch"]),
+        ("codex", "2.1.2", ["diffPatch"]),
+        ("codex", "2.1.1", []),
+        ("codex", "1.1.1", ["diffPatch"]),
+    ],
+)
+def test_codex_v2_contract_requires_exact_version_and_negotiated_capability(tmp_path, agent_id, version, capabilities):
+    client = FastAPIACPClient(workspace_root=tmp_path, on_update_callback=lambda _: None)
+    client.configure_agent(_codex_v2_initialize(version, capabilities=capabilities), agent_id=agent_id)
+    assert not client.codex_diff_patch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper", ["wrong_version", "boolean_version", "wrong_format", "oversized", "invalid_utf8", "missing_patch"]
+)
+async def test_codex_v2_malformed_extension_fails_closed(tmp_path, tamper):
+    client = _codex_v2_client(tmp_path)
+    update = _codex_v2_patch_start("add", "controller.js", "add", _codex_v2_whole_patch("controller.js", "new\n"))
+    extension = update.content[0].field_meta["jetbrains"]["air"]["diffPatch"]
+    if tamper == "wrong_version":
+        extension["version"] = 2
+    elif tamper == "boolean_version":
+        extension["version"] = True
+    elif tamper == "wrong_format":
+        extension["format"] = "text"
+    elif tamper == "oversized":
+        extension["text"] = "x" * (1024 * 1024 + 1)
+    elif tamper == "invalid_utf8":
+        extension["text"] = "\ud800"
+    else:
+        del update.content[0].field_meta["jetbrains"]["air"]["diffPatch"]
+        update.content[0].new_text = "new\n"
+    await client.session_update("session", update)
+    response = await client.request_permission(
+        "session", _codex_v2_permission("add", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_near_bridge_patch_limit_is_allowed(tmp_path):
+    client = _codex_v2_client(tmp_path)
+    text = "x" * (1024 * 1024 - 200) + "\n"
+    patch = _codex_v2_whole_patch("controller.js", text)
+    assert 1024 * 1024 - 100 < len(patch.encode()) <= 1024 * 1024
+    await client.session_update("session", _codex_v2_patch_start("add", "controller.js", "add", patch))
+    response = await client.request_permission(
+        "session", _codex_v2_permission("add", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, AllowedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["outside_hunk", "oversized_file", "conflicting_patch"])
+async def test_codex_v2_update_requires_unchanged_whole_artifact_revision(tmp_path, tamper):
+    path = tmp_path / "controller.js"
+    path.write_bytes(b"one\ntwo\nthree\n")
+    client = _codex_v2_client(tmp_path)
+    patch = "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\n"
+    update = _codex_v2_patch_start("update", "controller.js", "update", patch)
+    if tamper == "oversized_file":
+        path.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    elif tamper == "conflicting_patch":
+        update.content += _codex_v2_patch_start(
+            "update", "controller.js", "update", patch.replace("+changed", "+different")
+        ).content
+    await client.session_update("session", update)
+    if tamper == "outside_hunk":
+        path.write_bytes(b"unrelated change\ntwo\nthree\n")
+    response = await client.request_permission(
+        "session", _codex_v2_permission("update", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper", ["raw_input", "content", "legacy_meta", "missing_start", "wrong_session", "no_allow_once"]
+)
+async def test_codex_v2_permission_requires_correlated_evidence_and_exact_wire_shape(tmp_path, tamper):
+    client = _codex_v2_client(tmp_path)
+    await client.session_update(
+        "session", _codex_v2_patch_start("add", "controller.js", "add", _codex_v2_whole_patch("controller.js", "new\n"))
+    )
+    permission = _codex_v2_permission("add", "controller.js")
+    kwargs = {}
+    options = _file_permission_options()
+    session = "session"
+    if tamper == "raw_input":
+        permission.raw_input = {"path": "controller.js"}
+    elif tamper == "content":
+        permission.content = []
+    elif tamper == "legacy_meta":
+        kwargs = _codex_permission_kwargs("add")
+    elif tamper == "missing_start":
+        permission.tool_call_id = "unreported"
+    elif tamper == "wrong_session":
+        session = "unreported"
+    else:
+        options = [PermissionOption(option_id="always", kind="allow_always", name="Allow forever")]
+    response = await client.request_permission(session, permission, options, **kwargs)
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["move", "delete", "other", None])
+async def test_codex_v2_non_edit_start_cannot_be_downgraded_by_kind_omitted_permission(tmp_path, kind):
+    (tmp_path / "controller.js").write_bytes(b"one\ntwo\nthree\n")
+    client = _codex_v2_client(tmp_path)
+    patch = "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-two\n+changed\n"
+    update = _codex_v2_patch_start("update", "controller.js", "update", patch)
+    update.kind = kind
+    await client.session_update("session", update)
+    response = await client.request_permission(
+        "session", _codex_v2_permission("update", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, DeniedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_read_permission_preserves_read_policy_without_edit_evidence(tmp_path):
+    client = _codex_v2_client(tmp_path)
+    read = ToolCallStart(
+        session_update="tool_call",
+        tool_call_id="read",
+        title="Read controller.js",
+        kind="read",
+        status="pending",
+        raw_input={"path": "controller.js"},
+    )
+    await client.session_update("session", read)
+    permission = ToolCall(
+        tool_call_id="read", title="Read controller.js", kind="read", raw_input={"path": "controller.js"}
+    )
+    response = await client.request_permission("session", permission, _file_permission_options())
+    assert isinstance(response.outcome, AllowedOutcome)
+    assert not client.pending_file_changes
+
+
+@pytest.mark.asyncio
+async def test_codex_v2_progress_without_kind_does_not_poison_edit_start(tmp_path):
+    client = _codex_v2_client(tmp_path)
+    await client.session_update(
+        "session", _codex_v2_patch_start("add", "controller.js", "add", _codex_v2_whole_patch("controller.js", "new\n"))
+    )
+    await client.session_update(
+        "session", ToolCallProgress(session_update="tool_call_update", tool_call_id="add", status="in_progress")
+    )
+    response = await client.request_permission(
+        "session", _codex_v2_permission("add", "controller.js"), _file_permission_options()
+    )
+    assert isinstance(response.outcome, AllowedOutcome)
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_two_empty_turns_stop_and_retain_draft_without_publish(tmp_path, monkeypatch):
+    connection = AsyncMock()
+    connection.initialize = AsyncMock(return_value=_codex_v2_initialize())
+    connection.new_session = AsyncMock(return_value=NewSessionResponse(session_id="codex-empty"))
+    connection.prompt = AsyncMock(return_value=PromptResponse(stop_reason="end_turn"))
+    clients = []
+
+    @contextlib.asynccontextmanager
+    async def spawn(client, *_args, **_kwargs):
+        clients.append(client)
+        client.on_connect(connection)
+        yield connection, MagicMock(returncode=0)
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+    launch = SimpleNamespace(
+        agent_id="codex", agent_name="Codex", argv=("codex-acp",), environment={}, timeout_seconds=5
+    )
+    with pytest.raises(CodingAgentDraftError) as failure:
+        await run_coding_agent_acp("weather-app", "build within approved contract", launch=launch, promote=False)
+    error = failure.value
+    assert connection.prompt.await_count == 2
+    assert clients[0].codex_diff_patch
+    assert connection.initialize.call_args.kwargs["client_capabilities"].field_meta["jetbrains"]["air"][
+        "capabilities"
+    ] == ["diffPatch"]
+    assert error.repair_action == "human"
+    assert error.staged_result.repair_attempts == 1
+    assert len(error.staged_result.repair_findings) == 2
+    assert error.staged_result.staging_dir.is_dir()
+    assert list(error.staged_result.staging_dir.iterdir()) == []
+    assert not (tmp_path / "weather-app").exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_negotiates_creates_and_repairs_with_pinned_permission_fixtures(tmp_path, monkeypatch):
+    connection = AsyncMock()
+    connection.initialize = AsyncMock(return_value=_codex_v2_initialize())
+    connection.new_session = AsyncMock(return_value=NewSessionResponse(session_id="codex-repair"))
+    holder = {}
+    turns = 0
+    initial = "export default function App() {\n  return null;\n}\n"
+    repaired = initial.replace("return null;", "return null; // repaired")
+
+    async def write_via_permission(tool_id, name, kind, patch, content):
+        client = holder["client"]
+        await client.session_update("codex-repair", _codex_v2_patch_start(tool_id, name, kind, patch))
+        response = await client.request_permission(
+            "codex-repair", _codex_v2_permission(tool_id, name), _file_permission_options()
+        )
+        assert isinstance(response.outcome, AllowedOutcome)
+        await client.write_text_file("codex-repair", name, content)
+
+    async def generate(**_kwargs):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            await write_via_permission(
+                "add-controller", "controller.js", "add", _codex_v2_whole_patch("controller.js", initial), initial
+            )
+        else:
+            patch = "diff --git a/controller.js b/controller.js\n--- a/controller.js\n+++ b/controller.js\n@@ -2 +2 @@\n-  return null;\n+  return null; // repaired\n"
+            await write_via_permission("update-controller", "controller.js", "update", patch, repaired)
+            manifest = (
+                json.dumps(
+                    {
+                        "manifest_version": 2,
+                        "id": "weather-app",
+                        "title": "Weather",
+                        "description": "",
+                        "app_version": "0.1.0",
+                        "intents": [],
+                        "schema_refs": [],
+                        "capabilities": [],
+                    }
+                )
+                + "\n"
+            )
+            await write_via_permission(
+                "add-manifest", "manifest.json", "add", _codex_v2_whole_patch("manifest.json", manifest), manifest
+            )
+        return PromptResponse(stop_reason="end_turn")
+
+    connection.prompt = AsyncMock(side_effect=generate)
+
+    @contextlib.asynccontextmanager
+    async def spawn(client, *_args, **_kwargs):
+        holder["client"] = client
+        client.on_connect(connection)
+        yield connection, MagicMock(returncode=0)
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", spawn)
+    monkeypatch.setenv("APPS_DIR", str(tmp_path))
+    launch = SimpleNamespace(
+        agent_id="codex", agent_name="Codex", argv=("codex-acp",), environment={}, timeout_seconds=5
+    )
+    result = await run_coding_agent_acp("weather-app", "build within approved contract", launch=launch, promote=False)
+    assert result.repair_attempts == 1
+    assert connection.new_session.await_count == 1
+    assert connection.prompt.await_count == 2
+    assert (result.staging_dir / "controller.js").read_text() == repaired
+    assert validate_opencode_staging(result).is_file()
+    assert not (tmp_path / "weather-app").exists()
 
 
 @pytest.mark.asyncio

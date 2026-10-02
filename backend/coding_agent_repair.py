@@ -15,6 +15,7 @@ ContractImpact = Literal["none", "subset_only", "expansion", "unknown"]
 RepairAction = Literal["repair", "design", "operator", "human"]
 
 _OPERATOR_CODES = {
+    "coding_agent_code_mode_unavailable",
     "widget_runtime_budget_exceeded",
     "widget_runtime_unavailable",
     "widget_verifier_execution_failed",

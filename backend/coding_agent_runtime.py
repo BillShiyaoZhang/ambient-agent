@@ -81,6 +81,32 @@ _CODEX_CODING_BINARY_SIZES = {
     "aarch64-unknown-linux-musl": 247459224,
     "x86_64-unknown-linux-musl": 287086056,
 }
+_CODEX_CODE_MODE_HOST_ARCHIVE_LIMIT = 32 * 1024 * 1024
+_CODEX_CODE_MODE_HOST_RELEASES = {
+    ("darwin", "arm64"): (
+        "aarch64-apple-darwin",
+        "d1a3254374b733fff1fa31cbeb20f65e3ef871e3431c196353dea189df15d4c5",
+    ),
+    ("darwin", "x86_64"): (
+        "x86_64-apple-darwin",
+        "d27385b2c5bc0cd9537154c84abafeeddba38f93e135257f1cf6ca4e862fcb9f",
+    ),
+    ("linux", "arm64"): (
+        "aarch64-unknown-linux-musl",
+        "7cbb47c472c2dc115abfeebf52ff11bf66eb364bf8f5d14659742615919b8e6f",
+    ),
+    ("linux", "x86_64"): (
+        "x86_64-unknown-linux-musl",
+        "0f58dd9848c717382e5223e39c1fc8f43a8f4a8cbe20d7af0c0dee0ef3abd438",
+    ),
+}
+# Exact regular-file sizes from the SHA-256-verified companion archives.
+_CODEX_CODE_MODE_HOST_BINARY_SIZES = {
+    "aarch64-apple-darwin": 65392880,
+    "x86_64-apple-darwin": 69395776,
+    "aarch64-unknown-linux-musl": 66921472,
+    "x86_64-unknown-linux-musl": 74072976,
+}
 _OUTPUT_LIMIT = 64 * 1024
 _APP_SERVER_OUTPUT_LIMIT = 1024 * 1024
 _APP_SERVER_TIMEOUT = 15.0
@@ -216,6 +242,16 @@ def _safe_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     return environment
 
 
+def _platform_release(releases: dict[tuple[str, str], tuple[str, str]]) -> tuple[str, str] | None:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x64"}:
+        machine = "x86_64"
+    elif machine in {"aarch64", "arm64"}:
+        machine = "arm64"
+    return releases.get((system, machine))
+
+
 class CodingAgentRuntime:
     """Owns managed CLI binaries, native credentials, and lifecycle operations."""
 
@@ -282,6 +318,39 @@ class CodingAgentRuntime:
 
     def _managed_coding_command(self) -> Path:
         return self._coding_root() / "bin" / self.managed_command("codex").name
+
+    def _managed_code_mode_host(self) -> Path:
+        return self._coding_root() / "bin" / "codex-code-mode-host"
+
+    def _code_mode_host_file_ready(self) -> bool:
+        host = self._managed_code_mode_host()
+        release = _platform_release(_CODEX_CODE_MODE_HOST_RELEASES)
+        if release is None or host.parent.is_symlink() or host.is_symlink():
+            return False
+        try:
+            return (
+                host.is_file()
+                and host.stat().st_size == _CODEX_CODE_MODE_HOST_BINARY_SIZES[release[0]]
+                and os.access(host, os.X_OK)
+            )
+        except OSError:
+            return False
+
+    async def _probe_code_mode_host(self, host: Path) -> bool:
+        # The companion does not implement --version. Its pinned archive
+        # establishes identity; --help verifies that the executable can run.
+        code, output = await self._run_probe([str(host), "--help"], agent_id="codex")
+        return code == 0 and output.startswith("Usage: codex-code-mode-host [OPTIONS]") and "--listen <URL>" in output
+
+    async def _code_mode_host_ready(self) -> bool:
+        return self._code_mode_host_file_ready() and await self._probe_code_mode_host(self._managed_code_mode_host())
+
+    def _uses_managed_coding_cli(self, agent_id: str, command: list[str]) -> bool:
+        return (
+            agent_id == "codex"
+            and not os.getenv("CODEX_COMMAND", "").strip()
+            and Path(command[0]) == self._managed_coding_command()
+        )
 
     def coding_command(self, agent_id: str) -> list[str] | None:
         """Select coding execution without changing the pinned primary command."""
@@ -438,6 +507,11 @@ class CodingAgentRuntime:
         command = self.coding_command(agent_id)
         if command is None:
             raise CodingAgentRuntimeError("Coding agent is not installed", code="coding_agent_not_installed")
+        if self._uses_managed_coding_cli(agent_id, command) and not self._code_mode_host_file_ready():
+            raise CodingAgentRuntimeError(
+                "Codex code mode is unavailable; repair the managed Codex installation before running coding tasks",
+                code="coding_agent_code_mode_unavailable",
+            )
 
         if spec.acp_transport == "native":
             argv = [*command, "acp"]
@@ -514,7 +588,9 @@ class CodingAgentRuntime:
         command = self.coding_command(agent_id)
         managed_codex = agent_id == "codex" and not os.getenv("CODEX_COMMAND", "").strip()
         update_available = (
-            managed_codex and self.command(agent_id) is not None and not self._managed_coding_command().is_file()
+            managed_codex
+            and self.command(agent_id) is not None
+            and (not self._managed_coding_command().is_file() or not self._code_mode_host_file_ready())
         )
         update = {
             "update_available": update_available,
@@ -556,12 +632,17 @@ class CodingAgentRuntime:
                 authenticated = False
                 auth_state = "signed_out"
         available = installed
+        if installed and self._uses_managed_coding_cli(agent_id, command) and not await self._code_mode_host_ready():
+            available = False
+            detail = "Codex code mode is unavailable; repair the managed Codex installation"
+            update["update_available"] = True
         if installed and spec.acp_transport == "bridge":
             try:
                 self._bridge_command(spec)
             except CodingAgentRuntimeError as exc:
+                if available:
+                    detail = str(exc)
                 available = False
-                detail = str(exc)
         operation = self._active_install(agent_id)
         install_state = "installed" if installed else "failed"
         if agent_id in self._install_tasks:
@@ -797,7 +878,8 @@ class CodingAgentRuntime:
             if task and not task.done():
                 return self._active_install(agent_id) or {}
             if self.command(agent_id) and (
-                os.getenv(spec.command_env, "").strip() or self._managed_coding_command().is_file()
+                os.getenv(spec.command_env, "").strip()
+                or (self._managed_coding_command().is_file() and await self._code_mode_host_ready())
             ):
                 return {
                     "id": "installed",
@@ -846,12 +928,26 @@ class CodingAgentRuntime:
     async def _install_coding_codex(self, operation_id: str) -> None:
         self.process_environment("codex")
         self._prepare_coding_home()
+        if not self._managed_coding_command().is_file():
+            await self._install_codex_release(
+                operation_id + "-coding",
+                self._coding_root(),
+                _CODEX_CODING_VERSION,
+                _CODEX_CODING_RELEASES,
+                _CODEX_CODING_BINARY_SIZES,
+            )
+        if not await self._code_mode_host_ready():
+            await self._install_code_mode_host(operation_id)
+
+    async def _install_code_mode_host(self, operation_id: str) -> None:
         await self._install_codex_release(
-            operation_id + "-coding",
+            operation_id + "-code-mode-host",
             self._coding_root(),
             _CODEX_CODING_VERSION,
-            _CODEX_CODING_RELEASES,
-            _CODEX_CODING_BINARY_SIZES,
+            _CODEX_CODE_MODE_HOST_RELEASES,
+            _CODEX_CODE_MODE_HOST_BINARY_SIZES,
+            binary_name="codex-code-mode-host",
+            archive_limit=_CODEX_CODE_MODE_HOST_ARCHIVE_LIMIT,
         )
 
     async def _install_codex_release(
@@ -861,6 +957,9 @@ class CodingAgentRuntime:
         release_version: str,
         releases: dict[tuple[str, str], tuple[str, str]],
         binary_sizes: dict[str, int],
+        *,
+        binary_name: str = "codex",
+        archive_limit: int = _CODEX_ARCHIVE_LIMIT,
     ) -> None:
         agent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging = agent_root / f".install-{operation_id}"
@@ -868,21 +967,15 @@ class CodingAgentRuntime:
         install_dir = staging / "bin"
         install_dir.mkdir(mode=0o700)
         try:
-            system = platform.system().lower()
-            machine = platform.machine().lower()
-            if machine in {"amd64", "x64"}:
-                machine = "x86_64"
-            elif machine in {"aarch64", "arm64"}:
-                machine = "arm64"
-            release = releases.get((system, machine))
+            release = _platform_release(releases)
             if release is None:
                 raise CodingAgentRuntimeError(
-                    f"Codex managed installation does not support {system}/{machine}",
+                    "Codex managed installation does not support this operating system or architecture",
                     code="install_unsupported",
                 )
             target, expected_sha256 = release
             expected_binary_size = binary_sizes[target]
-            asset_name = f"codex-{target}.tar.gz"
+            asset_name = f"{binary_name}-{target}.tar.gz"
             asset_url = f"https://github.com/openai/codex/releases/download/rust-v{release_version}/{asset_name}"
             archive_path = staging / asset_name
             digest = hashlib.sha256()
@@ -891,12 +984,12 @@ class CodingAgentRuntime:
                 async with client.stream("GET", asset_url) as response:
                     response.raise_for_status()
                     content_length = response.headers.get("content-length")
-                    if content_length and int(content_length) > _CODEX_ARCHIVE_LIMIT:
+                    if content_length and int(content_length) > archive_limit:
                         raise CodingAgentRuntimeError("Codex release asset is too large", code="install_failed")
                     with archive_path.open("xb") as archive_file:
                         async for chunk in response.aiter_bytes():
                             size += len(chunk)
-                            if size > _CODEX_ARCHIVE_LIMIT:
+                            if size > archive_limit:
                                 raise CodingAgentRuntimeError("Codex release asset is too large", code="install_failed")
                             digest.update(chunk)
                             archive_file.write(chunk)
@@ -908,10 +1001,14 @@ class CodingAgentRuntime:
                     code="install_failed",
                 )
 
-            binary = install_dir / "codex"
-            expected_member = f"codex-{target}"
+            binary = install_dir / binary_name
+            expected_member = f"{binary_name}-{target}"
             try:
                 with tarfile.open(archive_path, mode="r:gz") as archive:
+                    if binary_name == "codex-code-mode-host" and (
+                        len(archive.getmembers()) != 1 or archive.getmembers()[0].name != expected_member
+                    ):
+                        raise CodingAgentRuntimeError("Codex companion archive was invalid", code="install_failed")
                     member = archive.getmember(expected_member)
                     if not member.isfile() or member.size != expected_binary_size:
                         raise CodingAgentRuntimeError(
@@ -936,13 +1033,27 @@ class CodingAgentRuntime:
                     code="install_failed",
                 ) from exc
             binary.chmod(0o700)
-            code, version = await self._run_probe([str(binary), "--version"], agent_id="codex")
-            if code != 0 or version != f"codex-cli {release_version}":
-                raise CodingAgentRuntimeError(f"Installed Codex failed validation: {version}", code="install_failed")
+            if binary_name == "codex-code-mode-host":
+                if not await self._probe_code_mode_host(binary):
+                    raise CodingAgentRuntimeError("Installed Codex companion failed validation", code="install_failed")
+            else:
+                code, version = await self._run_probe([str(binary), "--version"], agent_id="codex")
+                if code != 0 or version != f"codex-cli {release_version}":
+                    raise CodingAgentRuntimeError(
+                        f"Installed Codex failed validation: {version}", code="install_failed"
+                    )
             destination = agent_root / "bin"
-            if destination.exists():
-                raise CodingAgentRuntimeError("Codex became installed concurrently", code="install_conflict")
-            install_dir.replace(destination)
+            if binary_name == "codex-code-mode-host":
+                if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+                    raise CodingAgentRuntimeError("Invalid managed Codex binary directory", code="install_failed")
+                destination.mkdir(exist_ok=True, mode=0o700)
+                # Atomic replacement repairs a missing/damaged companion without
+                # replacing the already installed CLI or touching shared login.
+                binary.replace(destination / binary_name)
+            else:
+                if destination.exists():
+                    raise CodingAgentRuntimeError("Codex became installed concurrently", code="install_conflict")
+                install_dir.replace(destination)
         finally:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)

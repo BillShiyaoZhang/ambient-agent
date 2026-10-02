@@ -331,6 +331,9 @@ async def test_coding_upgrade_status_keeps_existing_install_ready_and_reports_ta
     monkeypatch.setattr(runtime, "_bridge_command", lambda _spec: ["bridge"])
 
     async def probe(argv, *, agent_id):
+        if argv[-1] == "--help":
+            assert Path(argv[0]) == runtime._managed_code_mode_host()
+            return 0, "Usage: codex-code-mode-host [OPTIONS]\n--listen <URL>"
         if "--version" in argv:
             version = "0.159.3" if Path(argv[0]) == runtime._managed_coding_command() else "0.145.0"
             return 0, f"codex-cli {version}"
@@ -345,6 +348,14 @@ async def test_coding_upgrade_status_keeps_existing_install_ready_and_reports_ta
     upgraded = runtime._managed_coding_command()
     upgraded.parent.mkdir(parents=True)
     upgraded.write_bytes(b"coding-cli")
+    host = runtime._managed_code_mode_host()
+    host.write_bytes(b"coding-companion")
+    host.chmod(0o700)
+    monkeypatch.setattr(
+        coding_agent_runtime_module,
+        "_CODEX_CODE_MODE_HOST_BINARY_SIZES",
+        {target: len(b"coding-companion") for target in coding_agent_runtime_module._CODEX_CODE_MODE_HOST_BINARY_SIZES},
+    )
     after = await runtime.status("codex")
     assert after["version"] == "codex-cli 0.159.3"
     assert after["update_available"] is False
@@ -556,7 +567,15 @@ async def test_managed_codex_install_uses_a_pinned_verified_release(
     if purpose == "primary":
         await runtime._install_codex("verified-release")
     else:
-        await runtime._install_coding_codex("verified-release")
+        # This unit verifies the CLI archive. The complete CLI + companion
+        # installer and repair path have separate runtime integration tapes.
+        await runtime._install_codex_release(
+            "verified-release-coding",
+            runtime._coding_root(),
+            release_version,
+            coding_agent_runtime_module._CODEX_CODING_RELEASES,
+            coding_agent_runtime_module._CODEX_CODING_BINARY_SIZES,
+        )
         assert primary.read_bytes() == b"original-primary"
         assert runtime.command("codex") == [str(primary)]
 

@@ -29,7 +29,7 @@ from backend.app_types import get_app_type_catalog
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.capabilities.models import RuntimeContract, normalize_grants
 from backend.coding_agent_repair import decide_widget_repair
-from backend.coding_agent_runtime import spec_for
+from backend.coding_agent_runtime import CodingAgentRuntimeError, spec_for
 from backend.context_manager import ContextManager
 from backend.graph_db import GraphCompensationConflict, GraphDatabase
 from backend.graph_query_engine import execute_graph_query
@@ -80,6 +80,20 @@ logger = logging.getLogger("agent.durable_workflow")
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 LiveEventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 CodingAgentRunner = Callable[..., Awaitable[Any]]
+_CODING_AGENT_ENVIRONMENT_ERROR_CODES = frozenset(
+    {
+        "coding_agent_code_mode_unavailable",
+        "coding_agent_acp_unavailable",
+        "coding_agent_not_installed",
+        "coding_agent_not_found",
+        "coding_agent_command_invalid",
+        "coding_agent_configuration_error",
+        "coding_agent_auth_invalid",
+        "coding_agent_auth_required",
+        "CodingAgentACPStartupError",
+        "OpenCodeACPStartupError",
+    }
+)
 
 
 class DurableAgentWorkflow:
@@ -157,7 +171,9 @@ class DurableAgentWorkflow:
         finally:
             self._live_stream_state.reset(live_token)
             self._event_buffer.reset(token)
-        outcome.events.extend(events)
+        # Phase activities happened before a terminal diagnostic constructed
+        # by _failure. Preserve that order when both are committed together.
+        outcome.events[:0] = events
         return outcome
 
     async def _reduce_once(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
@@ -233,6 +249,15 @@ class DurableAgentWorkflow:
                 message=str(exc),
                 retryable=exc.retryable,
                 effect_state=exc.effect_state,
+            )
+        except CodingAgentRuntimeError as exc:
+            return await self._failure(
+                state,
+                run=run,
+                code=exc.code,
+                message=str(exc),
+                retryable=False,
+                effect_state="none",
             )
         except Exception as exc:
             logger.exception("Durable workflow phase %s failed", state.phase)
@@ -858,6 +883,28 @@ class DurableAgentWorkflow:
         retryable: bool,
         effect_state: str,
     ) -> Failed:
+        buffered_events = self._event_buffer.get()
+        if run is not None and state.phase == "stage_code" and buffered_events is not None:
+            generation_activity = next(
+                (
+                    event
+                    for event in reversed(buffered_events)
+                    if event.type == "activity_updated" and event.payload.get("activity_id") == "code:generation"
+                ),
+                None,
+            )
+            if generation_activity is not None and generation_activity.payload.get("status") == "running":
+                metadata = dict(generation_activity.payload.get("metadata") or {})
+                metadata["error_code"] = code
+                await self._emit_activity(
+                    run,
+                    activity_id="code:generation",
+                    activity_type="code",
+                    status="failed",
+                    summary="Staged App generation failed",
+                    detail=message,
+                    metadata=metadata,
+                )
         retries = state.data.setdefault("phase_retries", {})
         phase_retries = int(retries.get(state.phase, 0))
         may_retry = retryable and phase_retries < 2 and effect_state == "none"
@@ -936,9 +983,17 @@ class DurableAgentWorkflow:
                     "retryable": False,
                 }
 
+        repair_decision = (
+            state.data.get("repair_decision") if isinstance(state.data.get("repair_decision"), dict) else {}
+        )
+        requires_operator = repair_decision.get("action") == "operator" or code in _CODING_AGENT_ENVIRONMENT_ERROR_CODES
         failure = Failed(
             summary=(
-                "任务失败；生成草稿已保留，可重试继续验证"
+                "任务失败；草稿已保留，需先修复运行环境"
+                if retained_staged_app and requires_operator and state.data.get("language") == "zh"
+                else "Agent task failed; repair the runtime environment before resuming the retained App draft"
+                if retained_staged_app and requires_operator
+                else "任务失败；生成草稿已保留，可重试继续验证"
                 if retained_staged_app and state.data.get("language") == "zh"
                 else "Agent task failed; staged App retained"
                 if retained_staged_app
@@ -949,23 +1004,37 @@ class DurableAgentWorkflow:
             retryable=False,
             effect_state=effect_state if effect_state in {"none", "committed", "unknown"} else "unknown",
         )
-        if retained_staged_app and run is not None:
-            app_id = str(staged.get("app_id") or "")
+        report_environment_failure = (
+            requires_operator and state.phase == "stage_code" and state.workflow_type.startswith("widget")
+        )
+        if (retained_staged_app or report_environment_failure) and run is not None:
+            staged_data = staged if isinstance(staged, dict) else {}
+            app_id = str(staged_data.get("app_id") or "")
             if not app_id and isinstance(state.intent, dict):
                 app_id = str(state.intent.get("app_id") or "")
             app_id = app_id or "unknown-app"
             reason = " ".join(str(message).strip().split())[:2_000] or "Unknown generation failure"
-            repair_decision = (
-                state.data.get("repair_decision") if isinstance(state.data.get("repair_decision"), dict) else {}
-            )
             automatic_repair_stalled = repair_decision.get("action") == "human"
             if state.data.get("language") == "zh":
-                repair_guidance = (
-                    "自动修复已停止：同一校验错误连续出现，或修复没有改变受校验文件。"
-                    f"失败草稿已安全保留；如有新的修复思路，可回复 `/repair {app_id} <具体说明>`。"
-                    if automatic_repair_stalled
-                    else f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；也可以在命令后补充具体要求。"
-                )
+                if requires_operator:
+                    environment_guidance = (
+                        "请先修复或更新生成器安装并恢复运行环境"
+                        if code in _CODING_AGENT_ENVIRONMENT_ERROR_CODES
+                        else "请先处理生成或校验运行环境的问题"
+                    )
+                    repair_guidance = (
+                        f"自动代码修复无法解决运行环境故障。失败草稿已安全保留；{environment_guidance}，"
+                        f"再回复 `/repair {app_id}` 继续。"
+                        if retained_staged_app
+                        else f"本次未生成可修复的草稿。{environment_guidance}，然后重试原请求。"
+                    )
+                else:
+                    repair_guidance = (
+                        "自动修复已停止：同一校验错误连续出现，或修复没有改变受校验文件。"
+                        f"失败草稿已安全保留；如有新的修复思路，可回复 `/repair {app_id} <具体说明>`。"
+                        if automatic_repair_stalled
+                        else f"失败草稿已安全保留。请直接回复 `/repair {app_id}` 继续修复；也可以在命令后补充具体要求。"
+                    )
                 content = (
                     f"Widget “{app_id}” 生成失败，尚未发布到应用中心。\n"
                     f"失败阶段：{state.phase}\n"
@@ -974,14 +1043,28 @@ class DurableAgentWorkflow:
                     f"{repair_guidance}"
                 )
             else:
-                repair_guidance = (
-                    "Automatic repair stopped because the same verifier finding repeated or the validated "
-                    f"files did not change. The failed draft was retained; reply with `/repair {app_id} "
-                    "<specific guidance>` only if you have a new repair direction."
-                    if automatic_repair_stalled
-                    else f"The failed draft was retained safely. Reply with `/repair {app_id}` to continue, "
-                    "optionally followed by additional instructions."
-                )
+                if requires_operator:
+                    environment_guidance = (
+                        "Repair or update the coding agent installation and restore its runtime environment"
+                        if code in _CODING_AGENT_ENVIRONMENT_ERROR_CODES
+                        else "Resolve the generation or verification runtime problem"
+                    )
+                    repair_guidance = (
+                        "Automatic code repair cannot resolve a runtime environment failure. "
+                        f"The failed draft was retained safely. {environment_guidance} first, "
+                        f"then reply with `/repair {app_id}` to continue."
+                        if retained_staged_app
+                        else f"No repairable draft was generated. {environment_guidance} first, then retry the original request."
+                    )
+                else:
+                    repair_guidance = (
+                        "Automatic repair stopped because the same verifier finding repeated or the validated "
+                        f"files did not change. The failed draft was retained; reply with `/repair {app_id} "
+                        "<specific guidance>` only if you have a new repair direction."
+                        if automatic_repair_stalled
+                        else f"The failed draft was retained safely. Reply with `/repair {app_id}` to continue, "
+                        "optionally followed by additional instructions."
+                    )
                 content = (
                     f'Widget "{app_id}" failed and was not published to App Center.\n'
                     f"Failed phase: {state.phase}\n"
@@ -1791,6 +1874,10 @@ class DurableAgentWorkflow:
         return template
 
     async def _phase_stage_code(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
+        # A directive describes this attempt. Cross-Run stall detection keeps
+        # its evidence in staged_app.repair_findings, independently of this UI
+        # explanation, so an old operator failure cannot mask a new finding.
+        state.data.pop("repair_decision", None)
         intent = self._current_intent(state)
         if not intent.app_id:
             return Failed(summary="Missing App ID", error_code="app_id_missing", message="Widget intent has no app_id")

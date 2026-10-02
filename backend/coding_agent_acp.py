@@ -14,7 +14,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,8 @@ _MAX_ACP_PATH_LENGTH = 4096
 _ACP_STDERR_RETAIN_BYTES = 16 * 1024
 _ACP_STDERR_DIAGNOSTIC_CHARS = 4096
 _ACP_ARTIFACT_CONTEXT_BYTES = 64 * 1024
+_CODEX_ACP_PATCH_BYTES = 1024 * 1024
+_CODEX_ACP_PATCH_CAPABILITY = {"jetbrains": {"air": {"version": 1, "capabilities": ["diffPatch"]}}}
 _SECRET_KEY_PATTERN = re.compile(
     r"secret|token|password|credential|authorization|cookie|api[_-]?key|access[_-]?key", re.I
 )
@@ -157,6 +159,8 @@ class _FileChangeEvidence:
     old_text_present: bool = False
     new_text_present: bool = False
     new_text_empty: bool = False
+    git_patch: str | None = None
+    workspace_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +259,130 @@ def _valid_acp_path(path: Any) -> bool:
     return isinstance(path, str) and 0 < len(path) <= _MAX_ACP_PATH_LENGTH
 
 
+def _air_metadata(meta: Any) -> Mapping[str, Any]:
+    jetbrains = meta.get("jetbrains") if isinstance(meta, Mapping) else None
+    air = jetbrains.get("air") if isinstance(jetbrains, Mapping) else None
+    return air if isinstance(air, Mapping) else {}
+
+
+def _artifact_evidence_bytes(path: Path) -> bytes | None:
+    if not path.is_file():
+        return None
+    if path.stat().st_size > _MAX_CONTROLLER_BYTES:
+        raise ValueError("Artifact exceeds the file-change evidence limit")
+    with path.open("rb") as stream:
+        raw = stream.read(_MAX_CONTROLLER_BYTES + 1)
+    if len(raw) > _MAX_CONTROLLER_BYTES:
+        raise ValueError("Artifact exceeds the file-change evidence limit")
+    return raw
+
+
+def _git_patch_name(name: str) -> str:
+    """Match the pinned bridge's Git quoting without decoding arbitrary paths."""
+    if not re.search(r'["\\\x00-\x1f\x7f]', name):
+        return name
+    escapes = {"\a": r"\a", "\b": r"\b", "\t": r"\t", "\n": r"\n", "\v": r"\v", "\f": r"\f", "\r": r"\r"}
+    quoted = ""
+    for char in name:
+        if char in {'"', "\\"}:
+            quoted += "\\" + char
+        elif char in escapes:
+            quoted += escapes[char]
+        elif ord(char) < 32 or ord(char) == 127:
+            quoted += f"\\{ord(char):03o}"
+        else:
+            quoted += char
+    return '"' + quoted + '"'
+
+
+def _lf_lines(text: str) -> list[str]:
+    parts = text.split("\n")
+    return [part + "\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+
+
+def _git_patch_proves_change(path: str, kind: str, patch: str, current: str) -> bool:
+    """Prove one artifact's exact old lines and paths, rejecting moves and extra patches.
+
+    Codex ACP 2.1.1's standard oldText is only a hunk. The negotiated diffPatch
+    extension preserves both file headers and line coordinates, so neither a
+    substring match nor a whole-file oldText assumption is needed.
+    """
+    if not patch.endswith("\n") or "\x00" in patch:
+        return False
+    name = path.replace("\\", "/") if re.match(r"^[A-Za-z]:\\", path) else path
+    name = name.lstrip("/")
+    old_name, new_name = _git_patch_name("a/" + name), _git_patch_name("b/" + name)
+    old_header = "--- " + old_name + ("\t" if " " in old_name and not old_name.startswith('"') else "")
+    new_header = "+++ " + new_name + ("\t" if " " in new_name and not new_name.startswith('"') else "")
+    headers = [f"diff --git {old_name} {new_name}"]
+    if kind == "add":
+        headers += ["new file mode 100644", "--- /dev/null", new_header]
+    elif kind == "delete":
+        headers += ["deleted file mode 100644", old_header, "+++ /dev/null"]
+    elif kind == "update":
+        headers += [old_header, new_header]
+    else:
+        return False
+    lines = patch.split("\n")[:-1]
+    if lines[: len(headers)] != headers:
+        return False
+    source = _lf_lines(current)
+    result: list[str] = []
+    source_end = 0
+    index = len(headers)
+    hunk_count = 0
+    while index < len(lines):
+        header = re.fullmatch(r"@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@(?: .*)?", lines[index])
+        if header is None:
+            return False
+        old_start, old_count = int(header[1]), int(header[2] or "1")
+        new_start, new_count = int(header[3]), int(header[4] or "1")
+        old_index = old_start if old_count == 0 else old_start - 1
+        new_index = new_start if new_count == 0 else new_start - 1
+        if (
+            min(old_index, new_index) < 0
+            or old_index < source_end
+            or old_index + old_count > len(source)
+            or max(old_count, new_count) > _MAX_CONTROLLER_BYTES
+            or new_index != len(result) + old_index - source_end
+        ):
+            return False
+        old: list[str] = []
+        new: list[str] = []
+        previous = ""
+        index += 1
+        while index < len(lines) and not lines[index].startswith("@@"):
+            line = lines[index]
+            if line == r"\ No newline at end of file":
+                if previous not in {" ", "+", "-"}:
+                    return False
+                if previous != "+":
+                    old[-1] = old[-1].removesuffix("\n")
+                if previous != "-":
+                    new[-1] = new[-1].removesuffix("\n")
+                previous = ""
+            elif line == "" or line[0] in {" ", "+", "-"}:
+                previous = line[0] if line else " "
+                payload = (line[1:] if line else "") + "\n"
+                if previous != "+":
+                    old.append(payload)
+                if previous != "-":
+                    new.append(payload)
+            else:
+                return False
+            if len(old) > old_count or len(new) > new_count:
+                return False
+            index += 1
+        if len(old) != old_count or len(new) != new_count or old != source[old_index : old_index + old_count]:
+            return False
+        result.extend(source[source_end:old_index])
+        result.extend(new)
+        source_end = old_index + old_count
+        hunk_count += 1
+    result.extend(source[source_end:])
+    return hunk_count > 0 and (kind != "delete" or not result)
+
+
 def _file_change_content(tool_call: Any) -> tuple[list[_FileChangeEvidence], bool]:
     content = getattr(tool_call, "content", None)
     if content is None:
@@ -272,6 +400,28 @@ def _file_change_content(tool_call: Any) -> tuple[list[_FileChangeEvidence], boo
 
         meta = _tool_call_value(item, "field_meta", "_meta")
         kind = meta.get("kind") if isinstance(meta, Mapping) else None
+        air = _air_metadata(meta)
+        patch = air.get("diffPatch")
+        git_patch = None
+        if patch is not None:
+            try:
+                patch_bytes = patch.get("text", "").encode("utf-8") if isinstance(patch, Mapping) else b""
+            except (AttributeError, UnicodeError):
+                patch_bytes = b""
+                malformed = True
+            if (
+                type(air.get("version")) is not int
+                or air.get("version") != 1
+                or not isinstance(patch, Mapping)
+                or type(patch.get("version")) is not int
+                or patch.get("version") != 1
+                or patch.get("format") != "git_patch"
+                or not isinstance(patch.get("text"), str)
+                or len(patch_bytes) > _CODEX_ACP_PATCH_BYTES
+            ):
+                malformed = True
+            else:
+                git_patch = patch["text"]
         if kind is not None and not isinstance(kind, str):
             malformed = True
             kind = None
@@ -295,6 +445,7 @@ def _file_change_content(tool_call: Any) -> tuple[list[_FileChangeEvidence], boo
                 old_text_present=isinstance(old_text, str),
                 new_text_present=isinstance(new_text, str),
                 new_text_empty=new_text == "",
+                git_patch=git_patch,
             )
         )
         if len(changes) > _MAX_FILE_CHANGES_PER_TOOL_CALL:
@@ -361,19 +512,11 @@ def _file_change_raw_input(tool_call: Any) -> tuple[list[_FileChangeEvidence], b
 
 def _deduplicate_file_changes(changes: list[_FileChangeEvidence]) -> tuple[_FileChangeEvidence, ...]:
     unique: list[_FileChangeEvidence] = []
-    seen: set[tuple[str, str | None, str | None, bool, bool, bool]] = set()
+    seen: set[_FileChangeEvidence] = set()
     for change in changes:
-        identity = (
-            change.path,
-            change.kind,
-            change.old_text_digest,
-            change.old_text_present,
-            change.new_text_present,
-            change.new_text_empty,
-        )
-        if identity in seen:
+        if change in seen:
             continue
-        seen.add(identity)
+        seen.add(change)
         unique.append(change)
     return tuple(unique)
 
@@ -1165,6 +1308,21 @@ class FastAPIACPClient(Client):
         self.terminal_process_groups: set[str] = set()
         self.pending_file_changes: dict[tuple[str, str], _PendingFileChange] = {}
         self.output_buffer: list[str] = []
+        self.codex_diff_patch = False
+
+    def configure_agent(self, response: Any, *, agent_id: str) -> None:
+        """Enable the tested new contract only after exact bridge negotiation."""
+        info = getattr(response, "agent_info", None)
+        air = _air_metadata(getattr(response, "field_meta", None))
+        self.codex_diff_patch = (
+            agent_id == "codex"
+            and getattr(info, "name", None) == "@agentclientprotocol/codex-acp"
+            and getattr(info, "version", None) == "2.1.1"
+            and type(air.get("version")) is int
+            and air.get("version") == 1
+            and isinstance(air.get("capabilities"), list)
+            and "diffPatch" in air["capabilities"]
+        )
 
     @staticmethod
     def _pending_file_change_key(session_id: str, tool_call: Any) -> tuple[str, str] | None:
@@ -1186,6 +1344,27 @@ class FastAPIACPClient(Client):
         evidence = _file_change_evidence(tool_call)
         if not evidence.changes:
             evidence = _PendingFileChange(changes=(), malformed=True)
+        if self.codex_diff_patch:
+            # Only the pinned reporter's edit start can authorize file changes.
+            # Keep other starts as poisoned evidence so omitting kind in a
+            # later permission cannot silently turn a move/delete into an edit.
+            if getattr(tool_call, "kind", None) != "edit":
+                evidence = replace(evidence, malformed=True)
+            captured = []
+            affected = set()
+            for change in evidence.changes:
+                try:
+                    path = self._artifact_path(change.path)
+                    if path in affected:
+                        evidence = replace(evidence, malformed=True)
+                    affected.add(path)
+                    raw = _artifact_evidence_bytes(path)
+                    digest = hashlib.sha256(raw).hexdigest() if raw is not None else "missing"
+                    captured.append(replace(change, workspace_digest=digest))
+                except (OSError, ValueError):
+                    evidence = replace(evidence, malformed=True)
+                    captured.append(change)
+            evidence = replace(evidence, changes=tuple(captured))
 
         existing = self.pending_file_changes.get(key)
         if existing is not None:
@@ -1222,6 +1401,42 @@ class FastAPIACPClient(Client):
         policy_mgr: PermissionPolicyManager,
     ) -> bool:
         if not policy_mgr.validate_file_path(change.path, self.workspace_root):
+            return False
+        if self.codex_diff_patch:
+            try:
+                full_path = self._artifact_path(change.path)
+                raw = _artifact_evidence_bytes(full_path)
+                digest = hashlib.sha256(raw).hexdigest() if raw is not None else "missing"
+                if change.workspace_digest != digest or len(raw or b"") > _MAX_CONTROLLER_BYTES:
+                    return False
+                if change.kind == "add":
+                    if full_path.exists():
+                        return False
+                elif change.kind in {"update", "delete"}:
+                    if raw is None:
+                        return False
+                else:
+                    return False
+                if change.git_patch is not None:
+                    return _git_patch_proves_change(
+                        change.path, change.kind, change.git_patch, (raw or b"").decode("utf-8")
+                    )
+                # Empty add and complete delete diffs can lack a Git patch in
+                # the pinned bridge. Their complete text proves scope;
+                # an update hunk cannot prove a move's source and fails closed.
+                if change.kind == "add":
+                    return not change.old_text_present and change.new_text_present and change.new_text_empty
+                if change.kind == "delete":
+                    return (
+                        change.old_text_present
+                        and change.old_text_digest == digest
+                        and change.new_text_present
+                        and change.new_text_empty
+                    )
+                return False
+            except (OSError, UnicodeError, ValueError):
+                return False
+        if change.git_patch is not None:
             return False
         if change.kind is None:
             return True
@@ -1296,6 +1511,14 @@ class FastAPIACPClient(Client):
     ) -> RequestPermissionResponse:
         policy_mgr = PermissionPolicyManager()
         tool_kind = getattr(tool_call, "kind", "other")
+        if (
+            self.codex_diff_patch
+            and tool_kind is None
+            and self._pending_file_change_key(session_id, tool_call) in self.pending_file_changes
+        ):
+            # The negotiated AIR 2.1.1 permission only adds paths to its
+            # previously reported file-change item; it omits kind and status.
+            tool_kind = "edit"
         logger.info(
             "request_permission request received: tool_kind=%s, tool_call_id=%s, title=%s, has_raw_input=%s",
             tool_kind,
@@ -1327,6 +1550,35 @@ class FastAPIACPClient(Client):
             is_allowed = policy_mgr.validate_argv(argv)
 
         elif tool_kind in ("edit", "read", "delete", "move"):
+            if self.codex_diff_patch and tool_kind != "read":
+                pending = self._consume_file_change(session_id, tool_call)
+                locations, malformed = _file_change_locations(tool_call)
+                try:
+                    advertised = {self._artifact_path(change.path) for change in locations}
+                    affected = {self._artifact_path(change.path) for change in pending.changes} if pending else set()
+                    is_allowed = (
+                        tool_kind == "edit"
+                        and pending is not None
+                        and not pending.malformed
+                        and not malformed
+                        and bool(affected)
+                        and advertised == affected
+                        and getattr(tool_call, "raw_input", None) is None
+                        and getattr(tool_call, "content", None) is None
+                        and kwargs.get("codex") is None
+                        and all(self._validate_file_change_evidence(change, policy_mgr) for change in pending.changes)
+                    )
+                except (OSError, ValueError):
+                    is_allowed = False
+                details = "Negotiated Codex file edit: " + ", ".join(change.path for change in locations)
+                if is_allowed:
+                    for option in options:
+                        if option.kind == "allow_once":
+                            return RequestPermissionResponse(
+                                outcome=AllowedOutcome(option_id=option.option_id, outcome="selected")
+                            )
+                logger.warning("Blocking ACP request outside the exact policy: %s", details)
+                return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
             # Codex ACP 1.1.x emits the full file diff as a preceding tool_call
             # notification, then sends a pathless permission request with the
             # same tool-call ID. Consume that evidence exactly once and validate
@@ -1382,7 +1634,12 @@ class FastAPIACPClient(Client):
             is_allowed = (
                 bool(changes)
                 and not malformed
-                and all(self._validate_file_change_evidence(change, policy_mgr) for change in changes)
+                and all(
+                    policy_mgr.validate_file_path(change.path, self.workspace_root)
+                    if tool_kind == "read"
+                    else self._validate_file_change_evidence(change, policy_mgr)
+                    for change in changes
+                )
             )
 
         else:
@@ -1559,7 +1816,11 @@ class FastAPIACPClient(Client):
                 if hasattr(update.content, "text"):
                     content_text = update.content.text
             elif u_type == "tool_call":
-                if getattr(update, "kind", None) in {"edit", "delete", "move"}:
+                kind = getattr(update, "kind", None)
+                key = self._pending_file_change_key(session_id, update)
+                if kind in {"edit", "delete", "move"} or (
+                    self.codex_diff_patch and (kind != "read" or key in self.pending_file_changes)
+                ):
                     self._remember_file_change(session_id, update)
                 content_text = f"\n🛠️ Calling tool: {update.title or update.kind}..."
             elif u_type == "tool_call_update":
@@ -1643,12 +1904,17 @@ async def run_coding_agent_acp(
                 inherit_default_environment=False,
             ) as (conn, spawned_proc):
                 proc = spawned_proc
-                await conn.initialize(
+                initialize_response = await conn.initialize(
                     protocol_version=1,
                     client_capabilities=ClientCapabilities(
-                        fs=FileSystemCapabilities(read_text_file=True, write_text_file=True), terminal=True
+                        fs=FileSystemCapabilities(read_text_file=True, write_text_file=True),
+                        terminal=True,
+                        field_meta=(
+                            _CODEX_ACP_PATCH_CAPABILITY if getattr(launch, "agent_id", None) == "codex" else None
+                        ),
                     ),
                 )
+                client.configure_agent(initialize_response, agent_id=str(getattr(launch, "agent_id", "")))
 
                 session_resp = await conn.new_session(cwd=str(staging_dir))
                 session_id = session_resp.session_id

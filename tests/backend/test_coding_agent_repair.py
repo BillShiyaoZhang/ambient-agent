@@ -53,3 +53,15 @@ def test_persisted_finding_round_trips_for_cross_run_stall_detection() -> None:
     restored = repair_finding_from_dict(original.to_dict())
 
     assert restored == original
+
+
+def test_unavailable_code_mode_host_requires_environment_repair() -> None:
+    from backend.coding_agent_acp import CodingAgentArtifactError
+
+    error = CodingAgentArtifactError("The managed Codex code-mode host is unavailable")
+    error.code = "coding_agent_code_mode_unavailable"
+    current = finding_from_exception(error, attempt=1, artifact_revision="empty-staging")
+
+    assert current.repairability == "operator"
+    assert current.contract_impact == "unknown"
+    assert decide_widget_repair(current, ()).action == "operator"

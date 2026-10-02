@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import shutil
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from functools import partial
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from acp import text_block
+from acp.schema import AgentMessageChunk, InitializeResponse, NewSessionResponse, PromptResponse
 
 import backend.agent.durable_workflow as durable_workflow_module
 from backend.agent.durable_workflow import DurableAgentWorkflow
@@ -20,7 +26,15 @@ from backend.app_manifest import AppManifest
 from backend.capabilities.models import RuntimeContract
 from backend.graph_db import GraphDatabase
 from backend.models import ChatMessage, ChatSession
-from backend.coding_agent_acp import CodingAgentDraftError, OpenCodeStagedResult
+from backend.coding_agent_acp import (
+    CodingAgentArtifactError,
+    CodingAgentDraftError,
+    OpenCodeStagedResult,
+    run_coding_agent_acp,
+)
+from backend.coding_agent import run_coding_agent
+from backend.coding_agent_runtime import CodingAgentRuntime
+from backend.coding_agent_repair import finding_from_exception
 from backend.run_service import AgentRunState, Continue, Failed, RunCoordinator, RunStore, Succeeded, Wait
 from backend.schema_diff import UnknownProperty, VerificationDiff
 from backend.skill_authorization import compute_skill_grant_digest, skill_principal_id
@@ -1216,6 +1230,334 @@ async def test_repeated_automatic_repair_failure_is_reported_as_stalled(tmp_path
     assert "同一校验错误连续出现" in diagnostic.content
     assert "/repair weather-app <具体说明>" in diagnostic.content
     assert failed.events[0].payload["message"]["content"] == diagnostic.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["missing_artifact", "startup_failure"])
+async def test_real_acp_failure_commits_terminal_activity_before_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """Exercise real artifact validation and draft transfer, mocking only ACP I/O."""
+
+    apps_dir = tmp_path / "apps"
+    monkeypatch.setenv("APPS_DIR", str(apps_dir))
+    app_id = "weather-app"
+    store = RunStore(str(tmp_path))
+    connection = AsyncMock()
+    connection.initialize = AsyncMock(return_value=InitializeResponse(protocolVersion=1))
+    connection.new_session = AsyncMock(return_value=NewSessionResponse(session_id="weather-session"))
+    client: Any = None
+
+    async def complete_without_artifacts(*, session_id: str, prompt: Any) -> PromptResponse:
+        del prompt
+        # Canonical events remain fenced until commit_step, even though the
+        # adapter has reported completion and live hints have been delivered.
+        assert not any(event["type"] in {"activity_updated", "reply"} for event in store.events_after(0))
+        await client.session_update(
+            session_id,
+            AgentMessageChunk(session_update="agent_message_chunk", content=text_block("Task completed.")),
+        )
+        return PromptResponse(stop_reason="end_turn")
+
+    connection.prompt = AsyncMock(side_effect=complete_without_artifacts)
+
+    @contextlib.asynccontextmanager
+    async def spawn(to_client: Any, command: str, *args: Any, **kwargs: Any) -> Any:
+        nonlocal client
+        del command, args, kwargs
+        if failure_mode == "startup_failure":
+            raise FileNotFoundError("Coding agent bridge is unavailable")
+        client = to_client
+        client.on_connect(connection)
+        yield connection, MagicMock(returncode=0)
+
+    monkeypatch.setattr("backend.coding_agent_acp.spawn_agent_process", spawn)
+    launch = SimpleNamespace(
+        agent_name="Codex",
+        argv=("unused-test-acp",),
+        environment={},
+        timeout_seconds=2.0,
+    )
+
+    async def runner(
+        requested_app_id: str,
+        instruction: str,
+        *,
+        language: str,
+        on_update: Any,
+        promote: bool,
+        staged_result: Any = None,
+        artifact_validator: Any = None,
+        repair_decider: Any = None,
+    ) -> Any:
+        return await run_coding_agent_acp(
+            requested_app_id,
+            instruction,
+            language=language,
+            on_update=on_update,
+            launch=launch,
+            promote=promote,
+            staged_result=staged_result,
+            artifact_validator=artifact_validator,
+            repair_decider=repair_decider,
+        )
+
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id=app_id, instruction="Build a weather App"),
+        data={
+            "language": "zh",
+            "approved_plan": "Show the weather",
+            "runtime_contract": _runtime_contract(app_id),
+        },
+    )
+    state.model_snapshot = {**MODEL_SNAPSHOT, "coding_agent": "codex"}
+    live_emitted: list[dict[str, Any]] = []
+    projected: list[dict[str, Any]] = []
+    workflow = _workflow(
+        tmp_path,
+        store,
+        GraphDatabase(str(tmp_path)),
+        coding_agent_runner=runner,
+        live_emitted=live_emitted,
+        emitted=projected,
+    )
+    run = _create_run(store, state, content="创建天气应用")
+
+    failed, committed, checkpoint = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker")
+
+    assert isinstance(failed, Failed)
+    assert committed["status"] == "failed"
+    assert failed.effect_state == "none"
+    assert failed.retryable is False
+    assert checkpoint.data["staged_app_status"]["state"] == "failed_draft"
+    draft = Path(checkpoint.data["staged_app"]["staging_dir"])
+    assert draft.is_dir()
+    assert not (draft / "controller.js").exists()
+    assert not (apps_dir / app_id).exists()
+    assert projected == []
+
+    events = [event for event in store.events_after(0) if event["run_id"] == run["id"]]
+    phase_events = [event for event in events if event["type"] in {"activity_updated", "reply"}]
+    assert [event["type"] for event in phase_events] == [
+        "activity_updated",
+        "activity_updated",
+        "activity_updated",
+        "reply",
+    ]
+    assert [(event["payload"].get("activity_id"), event["payload"].get("status")) for event in phase_events[:-1]] == [
+        ("code:generation", "running"),
+        ("repair:auto", "failed"),
+        ("code:generation", "failed"),
+    ]
+    assert phase_events[2]["payload"]["metadata"]["error_code"] == failed.error_code
+    assert phase_events[-1]["payload"]["message"]["content"].startswith(f"Widget “{app_id}” 生成失败")
+    assert [event["sequence"] for event in events] == sorted(event["sequence"] for event in events)
+    generation_hints = [event for event in live_emitted if event["stream_id"].endswith("activity:code:generation")]
+    assert generation_hints[-1]["delta"] != "Codex is generating the staged App"
+
+    if failure_mode == "missing_artifact":
+        assert failed.error_code == "artifact_validation_failed"
+        assert connection.prompt.await_count == 2
+        assert checkpoint.data["repair_decision"]["action"] == "human"
+        assert checkpoint.data["repair_count"] == 1
+        findings = checkpoint.data["staged_app"]["repair_findings"]
+        assert [finding["attempt"] for finding in findings] == [1, 2]
+        assert findings[0]["signature"] == findings[1]["signature"]
+        assert "controller.js" in findings[-1]["message"]
+    else:
+        assert failed.error_code == "CodingAgentACPStartupError"
+        assert connection.prompt.await_count == 0
+        assert checkpoint.data["repair_decision"]["action"] == "operator"
+        assert checkpoint.data["staged_app"]["repair_attempts"] == 0
+        assert "请先修复或更新生成器安装" in phase_events[-1]["payload"]["message"]["content"]
+        assert "同一校验错误连续出现" not in phase_events[-1]["payload"]["message"]["content"]
+
+    await workflow.dispatch_committed_events(committed, failed)
+    assert [event["type"] for event in projected] == ["reply"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["zh", "en"])
+@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize("error_code", ["coding_agent_code_mode_unavailable", "coding_agent_acp_unavailable"])
+async def test_coding_agent_preflight_failure_requires_environment_repair_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    retained: bool,
+    error_code: str,
+) -> None:
+    """Use the coding-agent entry point and real runtime preflight without model I/O."""
+
+    app_id = "weather-app"
+    store = RunStore(str(tmp_path))
+    monkeypatch.setenv("CODING_AGENT_RUNTIME_DIR", str(tmp_path / "managed-runtime"))
+    monkeypatch.setenv("CODEX_ACP_COMMAND", str(tmp_path / "missing-acp-bridge"))
+    runtime = CodingAgentRuntime(tmp_path / "workspace")
+    if error_code == "coding_agent_code_mode_unavailable":
+        monkeypatch.delenv("CODEX_COMMAND", raising=False)
+        cli = runtime._managed_coding_command()
+        cli.parent.mkdir(parents=True)
+        cli.write_bytes(b"managed-cli-with-missing-code-mode-host")
+    else:
+        # An explicit CLI bypasses managed companion validation, then the
+        # genuinely missing bridge fails before any ACP model session starts.
+        monkeypatch.setenv("CODEX_COMMAND", sys.executable)
+    acp_runner = AsyncMock(side_effect=AssertionError("Preflight failure must never start an ACP model session"))
+    monkeypatch.setattr("backend.coding_agent.run_coding_agent_acp", acp_runner)
+    data: dict[str, Any] = {
+        "language": language,
+        "approved_plan": "Show the weather",
+        "runtime_contract": _runtime_contract(app_id),
+    }
+    if retained:
+        draft = tmp_path / "apps" / f".{app_id}.staging-{'d' * 32}"
+        draft.mkdir(parents=True)
+        data["staged_app"] = {
+            "app_id": app_id,
+            "staging_dir": str(draft),
+            "live_dir": str(tmp_path / "apps" / app_id),
+        }
+        # An environment failure during a user retry must supersede the old
+        # draft's stalled-repair explanation without erasing its evidence.
+        data["repair_decision"] = {"action": "human", "reason": "Previous artifact finding repeated"}
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id=app_id, instruction="Build a weather App"),
+        data=data,
+    )
+    state.model_snapshot = {**MODEL_SNAPSHOT, "coding_agent": "codex"}
+    workflow = _workflow(
+        tmp_path,
+        store,
+        GraphDatabase(str(tmp_path)),
+        coding_agent_runner=partial(run_coding_agent, runtime=runtime),
+    )
+    run = _create_run(store, state, content="Build a weather App")
+
+    failed, committed, checkpoint = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker")
+
+    assert isinstance(failed, Failed)
+    assert failed.error_code == error_code
+    assert committed["status"] == "failed"
+    assert failed.effect_state == "none"
+    assert failed.retryable is False
+    acp_runner.assert_not_awaited()
+    assert "repair_count" not in checkpoint.data
+    assert not (tmp_path / "apps" / app_id).exists()
+    if retained:
+        assert draft.is_dir()
+        assert checkpoint.data["staged_app_status"]["state"] == "failed_draft"
+    else:
+        assert "staged_app" not in checkpoint.data
+        assert "staged_app_status" not in checkpoint.data
+
+    events = [event for event in store.events_after(0) if event["run_id"] == run["id"]]
+    phase_events = [event for event in events if event["type"] in {"activity_updated", "reply"}]
+    assert [event["type"] for event in phase_events] == ["activity_updated", "activity_updated", "reply"]
+    assert [event["payload"]["status"] for event in phase_events[:-1]] == ["running", "failed"]
+    assert phase_events[1]["payload"]["metadata"]["error_code"] == error_code
+    diagnostic = phase_events[-1]["payload"]["message"]["content"]
+    assert error_code in diagnostic
+    if language == "zh":
+        assert "请先修复或更新生成器安装并恢复运行环境" in diagnostic
+        assert "同一校验错误连续出现" not in diagnostic
+        assert "草稿已安全保留" in diagnostic if retained else "未生成可修复的草稿" in diagnostic
+        assert "重试原请求" in diagnostic if not retained else f"再回复 `/repair {app_id}`" in diagnostic
+    else:
+        assert "Repair or update the coding agent installation and restore its runtime environment first" in diagnostic
+        assert "same verifier finding repeated" not in diagnostic
+        assert (
+            "draft was retained safely" in diagnostic if retained else "No repairable draft was generated" in diagnostic
+        )
+        assert (
+            "retry the original request" in diagnostic
+            if not retained
+            else f"then reply with `/repair {app_id}`" in diagnostic
+        )
+    if not retained:
+        assert "/repair" not in diagnostic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_action", ["operator", "human"])
+async def test_new_stage_code_validation_failure_clears_stale_directive_but_retains_findings(
+    tmp_path: Path,
+    previous_action: str,
+) -> None:
+    app_id = "weather-app"
+    draft = tmp_path / "apps" / f".{app_id}.staging-{'e' * 32}"
+    draft.mkdir(parents=True)
+    previous_finding = finding_from_exception(
+        CodingAgentArtifactError("A prior verifier finding", code="widget_verification_failed", stage="static_verify"),
+        attempt=1,
+        artifact_revision="previous-revision",
+    ).to_dict()
+    contract = _runtime_contract(app_id)
+    store = RunStore(str(tmp_path))
+
+    async def runner(
+        requested_app_id: str,
+        instruction: str,
+        *,
+        language: str,
+        on_update: Any,
+        promote: bool,
+        staged_result: OpenCodeStagedResult,
+    ) -> OpenCodeStagedResult:
+        del instruction, language, on_update
+        assert requested_app_id == app_id
+        assert promote is False
+        assert staged_result.repair_findings == (previous_finding,)
+        # A compatible adapter can return a draft without doing independent
+        # validation itself. The workflow's real verifier must still reject it.
+        (draft / "controller.js").write_text("const weather = 'invalid generated module';", encoding="utf-8")
+        _write_manifest(draft, app_id, contract)
+        return staged_result
+
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id=app_id, instruction="Repair the weather App"),
+        data={
+            "language": "zh",
+            "approved_plan": "Show the weather",
+            "runtime_contract": contract,
+            "repair_decision": {"action": previous_action, "reason": "Old failure"},
+            "staged_app": {
+                "app_id": app_id,
+                "staging_dir": str(draft),
+                "live_dir": str(tmp_path / "apps" / app_id),
+                "repair_attempts": 1,
+                "repair_findings": [previous_finding],
+                "artifact_hash": "previous-revision",
+            },
+        },
+    )
+    workflow = _workflow(tmp_path, store, GraphDatabase(str(tmp_path)), coding_agent_runner=runner)
+    run = _create_run(store, state, content="Repair the weather App")
+
+    failed, committed, checkpoint = await _execute_fenced_step(store, workflow, run["id"], worker_id="worker")
+
+    assert isinstance(failed, Failed)
+    assert committed["status"] == "failed"
+    assert "must contain a default export" in failed.message
+    assert "repair_decision" not in checkpoint.data
+    assert checkpoint.data["staged_app"]["repair_findings"] == [previous_finding]
+    assert checkpoint.data["staged_app"]["repair_attempts"] == 1
+    assert checkpoint.data["staged_app_status"]["state"] == "failed_draft"
+    assert draft.is_dir()
+    assert not (tmp_path / "apps" / app_id).exists()
+    diagnostic = next(event.payload["message"]["content"] for event in failed.events if event.type == "reply")
+    assert "must contain a default export" in diagnostic
+    assert f"请直接回复 `/repair {app_id}`" in diagnostic
+    assert "先修复或更新生成器安装" not in diagnostic
+    assert "同一校验错误连续出现" not in diagnostic
 
 
 @pytest.mark.asyncio
