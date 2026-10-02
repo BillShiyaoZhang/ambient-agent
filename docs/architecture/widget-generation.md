@@ -126,6 +126,10 @@ Grant operation 与 SDK action 必须分别表达。例如 `graph.mutate.operati
 
 审批前还对比用户原始要求、获批计划和完整功能准则，拒绝把实际功能偷换为不可用提示的提案。Jev 判断不确定或不可用时交给 LLM 审阅；缺项必须修正，不能默认通过。后端回归测试在导入应用前使用独立临时 workspace，Run、审批和聊天数据不会写入本机正在使用的工作区。
 
+开发任务默认没有跨阶段的总模型轮次上限；路由和普通对话仍有限制，显式配置的开发有限上限也继续有效。Coding Agent 启动不扣 Harness 模型轮次，ACP 内部有进展的开发与修复按超时、取消、权限和无进展条件控制。Harness usage 不包含 ACP 的全部费用，不能将其作为完整开发成本。
+
+确定性验证先运行，只有 Schema 解析异常、实际进入模型 fallback 时才获取模型预算。纯验证不能因为前期设计已使用完有限轮次而失败。有 approved contract 和保留草稿的验证失败 retry 无修改 feedback 时从 `verify` 继续；所有功能与安全校验重新执行，不跳过验证或重新申请未改变的权限。预算策略与历史默认 8 次限制的迁移见 [Harness 预算边界](/agent/harness.md#41-开发任务的预算边界)。
+
 验证顺序固定为：
 
 1. Artifact/Manifest shape。

@@ -554,11 +554,13 @@ def test_agent_retry_gets_fresh_time_and_model_allowances_while_keeping_usage_co
     assert retried["state"]["budget"]["model_turns"] == 5
     assert retried["state"]["budget"]["tokens_used"] == 7_033
     assert retried["state"]["budget"]["cost_usd"] == 0.75
-    assert retried["state"]["budget"]["max_model_turns"] == 13
+    # Confirmed development releases the historical routing default while
+    # retrying the other finite allowances with cumulative usage preserved.
+    assert retried["state"]["budget"]["max_model_turns"] is None
     assert retried["state"]["budget"]["max_tokens"] == 71_033
     assert retried["state"]["budget"]["max_cost_usd"] == 5.75
     assert retried["state"]["data"]["retry_budget_window"] == {
-        "model_turns": 8,
+        "model_turns": None,
         "tokens": 64_000,
         "cost_usd": 5.0,
     }

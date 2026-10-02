@@ -199,6 +199,7 @@ class DurableAgentWorkflow:
                     error_code="session_mismatch",
                     message="Checkpoint session does not match Run source",
                 )
+            state.apply_development_budget_policy()
             active_seconds = float(state.data.get("active_seconds", 0.0))
             if active_seconds >= state.budget.max_wall_seconds:
                 raise BudgetExhaustedError("Agent Run exceeded its active wall-clock budget")
@@ -728,9 +729,17 @@ class DurableAgentWorkflow:
         return message, True
 
     def _consume_model_turn(self, state: AgentRunState, count: int = 1) -> None:
-        if state.budget.model_turns + count > state.budget.max_model_turns:
+        self._assert_model_usage_available(state)
+        if state.budget.max_model_turns is not None and state.budget.model_turns + count > state.budget.max_model_turns:
             raise BudgetExhaustedError("Agent Run exceeded its model-turn budget")
         state.budget.model_turns += count
+
+    @staticmethod
+    def _assert_model_usage_available(state: AgentRunState) -> None:
+        if state.budget.max_tokens is not None and state.budget.tokens_used >= state.budget.max_tokens:
+            raise BudgetExhaustedError("Agent Run exceeded its token budget")
+        if state.budget.max_cost_usd is not None and state.budget.cost_usd >= state.budget.max_cost_usd:
+            raise BudgetExhaustedError("Agent Run exceeded its cost budget")
 
     def _consume_usage(self, state: AgentRunState, usage: dict[str, Any]) -> None:
         def number(*keys: str) -> float | None:
@@ -765,7 +774,12 @@ class DurableAgentWorkflow:
         max_iterations: int = 1,
         max_tool_calls: int = 0,
     ) -> ToolLoopBudget:
-        remaining_turns = state.budget.max_model_turns - state.budget.model_turns
+        self._assert_model_usage_available(state)
+        remaining_turns = (
+            max_iterations
+            if state.budget.max_model_turns is None
+            else state.budget.max_model_turns - state.budget.model_turns
+        )
         if remaining_turns < 1:
             raise BudgetExhaustedError("Agent Run exceeded its model-turn budget")
         remaining_wall_seconds = max(
@@ -1188,6 +1202,8 @@ class DurableAgentWorkflow:
             )
         state.intent = intent.to_dict()
         state.workflow_type = intent.kind.value
+        if intent.kind in {IntentKind.WIDGET_CREATE, IntentKind.WIDGET_MODIFY}:
+            state.budget.release_default_model_turn_limit()
         state.data["language"] = session.language or "zh"
         await self._emit(
             run,
@@ -1223,7 +1239,11 @@ class DurableAgentWorkflow:
 
         intent = self._current_intent(state)
         language = str(state.data.get("language") or "zh")
-        remaining_model_turns = state.budget.max_model_turns - state.budget.model_turns
+        remaining_model_turns = (
+            8
+            if state.budget.max_model_turns is None
+            else min(8, state.budget.max_model_turns - state.budget.model_turns)
+        )
         skill_prompt_channels = self._active_skill_prompt_channels(state)
         external_skill_sandbox = bool(skill_prompt_channels.untrusted_user_guidance)
 
@@ -1952,7 +1972,6 @@ class DurableAgentWorkflow:
             raise WorkflowError(
                 f"Required features need a corrected approval: {exc}", code="design_change_required"
             ) from exc
-        self._consume_model_turn(state, 1)
         schemas = list(contract.get("schemas") or [])
         schema_text = "\n".join(f"- Type '{item['id']}': {json.dumps(item.get('properties', {}))}" for item in schemas)
         manifest_template = self._manifest_v2_template(contract)
@@ -2200,6 +2219,7 @@ class DurableAgentWorkflow:
         return manifest
 
     async def _phase_verify(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
+        phase_started = time.monotonic()
         intent = self._current_intent(state)
         staged = state.data.get("staged_app")
         if not staged:
@@ -2224,7 +2244,7 @@ class DurableAgentWorkflow:
             registered_schemas=schemas,
             db_session=self._run_storage(state),
             audit_context=self._run_context(run, state).audit_context(),
-            budget=self._model_budget(state),
+            budget_factory=lambda: remaining_budget(self._model_budget(state), phase_started),
             capability_catalog=self.capability_catalog_factory(),
         )
         report = diff.to_markdown()

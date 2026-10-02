@@ -126,6 +126,10 @@ The proposal records mandatory deliverables as `required_features`, including ma
 
 Before approval, compare the original request, approved plan, and complete criteria; reject proposals that substitute unavailable notices for actual requested features. An uncertain or unavailable Jev judgment falls back to an LLM review. Missing deliverables require correction instead of default acceptance. Backend regression tests use a separate temporary workspace before importing the app, so Runs, approvals, and chat data never enter the active local workspace.
 
+Development workflows default to no aggregate model-turn ceiling across phases; entry routing and ordinary conversation remain bounded, and explicitly configured finite development limits remain effective. Starting a Coding Agent does not consume a Harness model turn. ACP development and repair with actual progress are controlled by timeouts, cancellation, permission checks, and no-progress conditions. Harness usage does not include the full expense of ACP execution and cannot represent total development cost.
+
+Deterministic verification runs first, acquiring model budget only when Schema parsing fails and model fallback is actually required. Pure verification cannot fail merely because earlier design calls exhausted a finite turn allowance. A failed verification with an approved contract and a retained draft resumes at `verify` when no code-change feedback is supplied; all feature and security checks run again, with no skipped verification or reapproval of unchanged permissions. Budget policy and migration of legacy default eight-turn limits are described in [Harness budget boundaries](/agent/harness.md#41-development-budget-boundaries).
+
 Verification order is fixed:
 
 1. Artifact and Manifest shape.

@@ -140,6 +140,16 @@ Capability/MCP/ACP/HTTP adapter 由同一个 `RunCoordinator` effect boundary �
 
 `RunContext` 由 reducer 从当前持久 Run 与 checkpoint 构造，并显式传给路由、计划、Schema、校验和 Converse provider。每个 Agent 角色还接收由结构化 `SystemCapabilityCatalog` 生成的最小投影；Coding Agent 只接收本 App 批准的 Runtime Contract。`ContextManager` 按稳定顺序限制近期消息数、单消息字符数、artifact 字符数和总 prompt；窗口外消息形成 checkpoint 内的确定性摘要，并用 `context_summary_ref=sha256:…` 校验恢复内容。LLM audit 记录 prompt/model/tool-schema hash 和实际读取的 artifact hash。当前裁剪是字符预算，provider 返回的 token/cost 则进入 Run 总预算。Run 的 primary/fast 模型、Coding Agent、Agent 模型绑定与解析后的 shared model 都在提交时快照，恢复后不会因 UI 中途切换设置而漂移。
 
+### 4.1 开发任务的预算边界
+
+入口路由与普通 Converse 默认限制为 8 次模型调用。确认 `widget_create` 或 `widget_modify` 后，默认的总轮次限制改为 `max_model_turns=null`；实际 Harness 模型调用仍累计计数，每次生成的局部尝试上限、active wall clock、token 和费用预算继续生效。`model_turn_limit_explicit` 记录调用方是否明确设置轮次限制，显式的有限值（包括 8）保持有效。历史 checkpoint 没有这个标记时，原默认 8 次按开发默认策略迁移；非默认有限限制继续保留。
+
+启动 Coding Agent 不算一次 Harness 模型调用。ACP session 内部的编码、工具调用与不同错误的自动修复没有固定轮次上限，但仍受超时、取消、允许文件与权限、重复 finding 和文件无变化的停止条件约束。当前 Run 的 token/cost 只覆盖回传 usage 的 Harness 模型调用，不表示 ACP 内部的完整费用。
+
+Manifest、权限、功能依赖、AST 与 Schema 的确定性校验不消耗模型轮次。Schema 解析确实需要模型 fallback 时才惰性申请模型预算；缺少预算不能阻止纯代码校验，fallback 又不能绕过有限预算或失败关闭规则。已批准 contract 和有效草稿都保留的验证预算失败，retry 从 `verify` 继续并重做校验，不为单纯继续验证重新生成代码；明确修改代码的 feedback 仍进入编码阶段。
+
+Jev 可仅用于入口路由；`workflow_decisions=off` 时开发设计复核走 LLM。最终 Runtime Contract 批准后，正常执行路径由 Coding Agent 和确定性验证推进，不再重新路由或用 Jev 决定是否允许发布。最终审批前的目标覆盖复核仍保留，避免将占位提示误报为功能完成。
+
 ## 5. 事件、取消与保留期
 
 Run event envelope 包含 `event_id`、`sequence`、`schema_version`、`stream_epoch`、Run/session/step/attempt/trace 标识、时间、duration、model usage、`redacted` 和 payload。payload 入库前按敏感键脱敏并做尺寸上限；终态 event 默认保留 30 天。前端以 `(stream_epoch, sequence)` 维护 replay cursor，以 `event_id` 去重。

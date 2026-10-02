@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from backend.agent.providers import ToolLoopBudget, get_llm_provider
@@ -76,10 +77,13 @@ class SchemaVerificationService:
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
         capability_catalog: SystemCapabilityCatalog | None = None,
+        budget_factory: Callable[[], ToolLoopBudget] | None = None,
     ) -> VerificationDiff:
         """Compute a deterministic diff between widget JS and registered schemas.
 
         Falls back to an LLM call only when regex parsing fails completely.
+        A supplied factory admits that fallback lazily; deterministic checks
+        never request model allowance. Existing direct budgets remain supported.
         """
         if not isinstance(widget_code, dict):
             raise VerificationError("Widget artifact is missing or malformed")
@@ -112,16 +116,17 @@ class SchemaVerificationService:
         )
         user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source[:8000]}\n```"
 
-        provider_name, model_name = selection_ids(primary_selection())
-        provider = get_llm_provider(provider_name, model_name)
         try:
+            fallback_budget = budget_factory() if budget_factory is not None else budget
+            provider_name, model_name = selection_ids(primary_selection())
+            provider = get_llm_provider(provider_name, model_name)
             raw = await provider.generate(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 db_session=db_session,
-                budget=budget,
+                budget=fallback_budget,
                 audit_context={**(audit_context or {}), "stage": "schema_verification"},
             )
             cleaned = raw.strip()

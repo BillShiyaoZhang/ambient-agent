@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.app_store import AppStoreService, CapabilityAction
 
@@ -55,17 +55,29 @@ class RunBudget(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_model_turns: int = Field(default=8, ge=1)
-    # A full Widget run can include routing, two model-backed proposals,
-    # two approval resumptions, an ACP coding turn, and a verifier-driven
-    # repair turn. The coding-agent timeout alone is 600 seconds, so a shorter
-    # durable-run window can abort a healthy generation before verification.
+    max_model_turns: int | None = Field(default=8, ge=1)
+    model_turn_limit_explicit: bool = False
+    # Independent coding-agent sessions retain their own timeout. Harness
+    # wall/token/cost limits continue to apply after a Widget route releases
+    # the default aggregate model-turn limit.
     max_wall_seconds: float = Field(default=600.0, gt=0)
     max_tokens: int | None = Field(default=64_000, ge=1)
     max_cost_usd: float | None = Field(default=5.0, ge=0)
     model_turns: int = Field(default=0, ge=0)
     tokens_used: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _record_explicit_turn_limit(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "model_turn_limit_explicit" not in value:
+            return {**value, "model_turn_limit_explicit": "max_model_turns" in value}
+        return value
+
+    def release_default_model_turn_limit(self) -> None:
+        """Retain operator-selected limits while removing the routing default."""
+        if not self.model_turn_limit_explicit:
+            self.max_model_turns = None
 
 
 class AgentRunState(BaseModel):
@@ -86,6 +98,34 @@ class AgentRunState(BaseModel):
     pending_interaction_id: str | None = None
     context_summary_ref: str | None = None
     last_error: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_turn_limit(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        budget = value.get("budget")
+        if not isinstance(budget, dict) or "model_turn_limit_explicit" in budget:
+            return value
+        data = value.get("data")
+        window = data.get("retry_budget_window") if isinstance(data, dict) else None
+        original_limit = window.get("model_turns") if isinstance(window, dict) else None
+        # Legacy JSON wrote defaults as well as supplied values. An unmarked
+        # eight-turn limit is therefore the historic default; nondefault
+        # current limits remain operator-selected, unless a retained retry
+        # window identifies their original default eight-turn allowance.
+        source_limit = original_limit if original_limit is not None else budget.get("max_model_turns", 8)
+        explicit = source_limit not in (None, 8)
+        return {**value, "budget": {**budget, "model_turn_limit_explicit": explicit}}
+
+    def apply_development_budget_policy(self) -> None:
+        """Also apply the confirmed route policy to recovered Widget phases."""
+        if self.phase == "route":
+            return
+        current = self.data.get("current_intent") or self.intent
+        kind = current.get("kind") if isinstance(current, dict) else self.workflow_type
+        if kind in {"widget_create", "widget_modify"}:
+            self.budget.release_default_model_turn_limit()
 
 
 class PendingRunEvent(BaseModel):
@@ -3237,16 +3277,28 @@ class RunCoordinator:
             }
             state.data["retry_budget_window"] = stored_window
 
-        turn_window = max(1, int(stored_window.get("model_turns") or state.budget.max_model_turns))
-        state.budget.max_model_turns = state.budget.model_turns + turn_window
+        if state.budget.max_model_turns is None:
+            # A persisted retry window predating Widget admission must not
+            # reinstate the default turn cap on later retries.
+            stored_window["model_turns"] = None
+        else:
+            turn_window = stored_window.get("model_turns", state.budget.max_model_turns)
+            if turn_window is None and state.budget.model_turn_limit_explicit:
+                turn_window = state.budget.max_model_turns
+            if turn_window is None:
+                state.budget.max_model_turns = None
+            else:
+                turn_window = max(1, int(turn_window))
+                state.budget.max_model_turns = state.budget.model_turns + turn_window
+            stored_window["model_turns"] = turn_window
 
-        token_window = stored_window.get("tokens")
+        token_window = stored_window.setdefault("tokens", state.budget.max_tokens)
         if token_window is None:
             state.budget.max_tokens = None
         else:
             state.budget.max_tokens = state.budget.tokens_used + max(1, int(token_window))
 
-        cost_window = stored_window.get("cost_usd")
+        cost_window = stored_window.setdefault("cost_usd", state.budget.max_cost_usd)
         if cost_window is None:
             state.budget.max_cost_usd = None
         else:
@@ -3278,6 +3330,7 @@ class RunCoordinator:
             normalized_retry_state.last_error = None
             normalized_retry_state.data.pop("phase_retries", None)
             normalized_retry_state.data["active_seconds"] = 0.0
+            normalized_retry_state.apply_development_budget_policy()
             self._renew_agent_retry_budget(normalized_retry_state)
             if normalized_retry_state.workflow_type.startswith("widget"):
                 staged = normalized_retry_state.data.get("staged_app")
@@ -3336,6 +3389,7 @@ class RunCoordinator:
                 if isinstance(input_data, dict) and input_data.get("user_message_id") is not None:
                     normalized_retry_state.data["user_message_id"] = input_data["user_message_id"]
             if original["status"] == "cancelled":
+                retry_window = dict(normalized_retry_state.data.get("retry_budget_window") or {})
                 preserved = {
                     key: normalized_retry_state.data[key]
                     for key in ("workspace_dir", "user_message_id", "language")
@@ -3345,6 +3399,12 @@ class RunCoordinator:
                 normalized_retry_state.intent = None
                 normalized_retry_state.artifact_refs = []
                 normalized_retry_state.data = preserved
+                normalized_retry_state.data["retry_budget_window"] = retry_window
+                if not normalized_retry_state.budget.model_turn_limit_explicit:
+                    # Cancellation restarts admission rather than resuming
+                    # the previously confirmed development task.
+                    normalized_retry_state.budget.max_model_turns = normalized_retry_state.budget.model_turns + 8
+                    normalized_retry_state.data["retry_budget_window"]["model_turns"] = 8
             retry_state = normalized_retry_state
         run = self.store.create_run(
             owner_id=original["owner_id"],
