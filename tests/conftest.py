@@ -4,6 +4,21 @@ from backend.main import app_manager
 
 
 @pytest.fixture(autouse=True)
+def isolate_jev_router_configuration(monkeypatch):
+    """Backend tests opt in to Jev explicitly, independent of local .env."""
+    for name in (
+        "TYPESAFE_API_KEY",
+        "JEV_ROUTER_MODEL",
+        "JEV_ROUTER_TIMEOUT_SECONDS",
+        "JEV_ROUTER_MIN_PROBABILITY",
+        "JEV_ROUTER_MIN_MARGIN",
+        "JEV_ROUTER_MAX_STATE_CHARS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("JEV_ROUTER_MODE", "off")
+
+
+@pytest.fixture(autouse=True)
 def isolate_apps_dir(tmp_path, monkeypatch):
     """
     Globally isolates apps directory for all backend tests to prevent

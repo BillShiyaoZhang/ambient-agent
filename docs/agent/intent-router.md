@@ -12,7 +12,9 @@
 - 可用 capability 摘要；
 - fast model（未配置时回退到会话 primary model）。
 
-模型必须通过 `classify_intent` tool schema 返回结构化参数。解析失败、未知 kind、低置信或不安全的旧分类会降级为 `clarify`，不会猜测并执行副作用。
+生成模型必须通过 `classify_intent` tool schema 返回完整参数。未知 kind 转为 `clarify`；未获得可用 tool call 或普通调用异常时，默认回退为 `converse`，其 `confidence` 为 0。旧 Router 的 `confidence` 是模型自评分，没有自动按低分降级的门槛；配置错误与预算耗尽仍由上层处理。标记为 deprecated 的计划被 durable workflow 拒绝。
+
+可选 Jev 分类层返回独立的 `RouteDecision`，不替代上述完整 `IntentPlan`。它的概率门控与旧生成模型的自评分是两个不同机制，见第 6 节。
 
 ## 2. 顶层 IntentKind
 
@@ -61,7 +63,7 @@ flowchart LR
 - Graph action 仍须经过 schema preflight。
 - Widget 仍须经过 staging、controller 验证和 schema verification。
 - Tool/MCP/OpenCode 仍须经过对应权限与 lifecycle policy。
-- 同一 Run 使用启动时冻结的模型选择；中途修改会话模型只影响下一个 Run。
+- 同一 Run 使用启动时冻结的模型选择和非秘密 Jev 配置；中途修改配置只影响下一个 Run。Jev API key 不进入 Run 快照。
 
 ## 5. `/` 显式路由命令
 
@@ -100,3 +102,37 @@ Router、审批或 durable reducer。
   durable 回复，恢复不会重复调用或重复投影。
 
 执行细节见 [Agent Harness](/agent/harness.md) 和[持久 Run](/architecture/runs.md)。
+
+## 6. 可选 Jev 分类层
+
+Jev 通过独立的 TypeSafe API 判断八类顶层 kind，并在已安装 App 候选及 `none`、`multiple` 中选择目标。`RouteDecision` 保留完整概率分布、供应商 confidence、实际模型版本与候选 App 证据；它不生成 Graph 参数、新 App ID、澄清问题或有序子意图。
+
+| 模式 | 行为 |
+| --- | --- |
+| `off`（默认） | 使用现有 Router，不调用 Jev |
+| `shadow` | 先调用 Jev 并记录证据，再由现有 Router 生成完整 `IntentPlan`；增加一次受超时限制的往返 |
+| `cascade` | 只有通过门控的高置信 `converse` 可以省略生成 Router；其余请求交现有 Router |
+
+级联门控检查最高 kind 概率及它与第二名的差值，并验证响应、上下文上限及候选 App 的一致性。直达 `converse` 不能指向某个 App 或 `multiple`；有候选 App 分布时，`none` 也须通过同样的概率与差值门槛。门控未通过时回退生成 Router，不直接向用户请求澄清。`clarify` 是否合适由完整生成计划决定。
+
+`graph_query`、`graph_mutation`、`widget_create`、`widget_modify`、`multi_intent`、`plan_and_act` 和 `clarify` 均保留完整生成路径。Jev 的 `graph_query` 标签不会被包装成 `query={}` 的可执行计划。高置信 `converse` 直达使用原始用户指令，并沿用有界只读对话流程。显式 `/` 命令在 Jev 前编译；`/query` 和 `/mutate` 仍按已明确的 kind 调用生成 Router 补齐参数。外部 Skill 继续先进入只读语义沙箱，绕过 Jev。
+
+后端环境配置如下；将 key 注入后端运行环境，不要写入仓库、Run 快照或日志：
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `TYPESAFE_API_KEY` | 未设置 | TypeSafe API key，仅在调用时读取 |
+| `JEV_ROUTER_MODE` | `off` | `off`、`shadow` 或 `cascade` |
+| `JEV_ROUTER_MODEL` | `jev-1.13.0` | 固定 `jev-x.y.z` 版本；不接受浮动别名 |
+| `JEV_ROUTER_TIMEOUT_SECONDS` | `1.5` | 请求超时，秒 |
+| `JEV_ROUTER_MIN_PROBABILITY` | `0.95` | 直达所需的最高 kind 概率 |
+| `JEV_ROUTER_MIN_MARGIN` | `0.15` | 最高与第二名 kind 概率的最小差值 |
+| `JEV_ROUTER_MAX_STATE_CHARS` | `48000` | Jev state 字符上限；超过上限即回退，不截断后直达 |
+
+非秘密配置和分类规则版本在 Run 启动时冻结于 `model_snapshot.jev_router`，并通过 `RunContext.jev_router` 传递。配置只接受固定 `jev-x.y.z` 版本，拒绝 `jev-latest`、`jev-preview`；响应中的实际版本必须与 Run 配置精确一致。非法环境配置会拒绝创建新 Run；没有 Jev 配置快照的历史 Run 按 `off` 恢复。缺 key、超时、HTTP 错误、非法响应、上下文过大和低置信都沿用旧 Router；错误不会伪造有效概率或完整计划。
+
+`LLMAuditLog` 的 `route_decision` stage 记录 Jev 分类证据、规则及模型版本、usage 和延迟；`response.routing` 保存模式、原因、完整 decision、最高概率与差值、非秘密配置、最终计划 kind 及两条路径的 kind 是否一致。原因包括 `shadow_mode`、`intent_uncertain`、`requires_generated_plan`、`direct_converse`、`target_conflict`、`target_uncertain`，服务失败使用固定错误码。HTTP 200 返回的 decision 无效时，仍保留可验证的安全 usage 和模型字段。生成 Router 的 `route` 与 `route_refine` stage 同时保存供应商返回的 usage；网络超时等情况的未知费用不视为零，Jev `cost_usd` 按官方单价估算。审计不包含认证 header 或 key。
+
+Jev 与后续生成共用本次路由的墙钟预算；生成阶段只接收扣除 Jev 耗时后的剩余时间。两次模型调用均计入原有调用与用量限制，预算耗尽和取消向上层传播，不作为服务故障回退。
+
+建议先在测试环境使用 `shadow`，以相同上下文评估中文、跨轮指代、数据操作与代码修改混淆、复合请求及只读误入副作用路径；记录 coverage、回退率、完整链路延迟和费用。真实数据验收前保持默认 `off`。实现边界和离线评分命令见仓库中的 `proposals/jev-intent-router/IMPLEMENTATION.md`；研究结论及评估用例保留在同目录。

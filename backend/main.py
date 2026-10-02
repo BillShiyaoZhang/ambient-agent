@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
+from backend.agent.jev_router import JevRouterConfig, JevRouterError
 from backend.agent.slash_commands import build_slash_command_catalog
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
@@ -324,10 +325,14 @@ run_coordinator.register_internal_agent_executor(durable_agent_workflow)
 def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
     """Resolve and freeze the model choices used by a newly submitted Run."""
 
+    try:
+        jev_router = JevRouterConfig.from_env().snapshot()
+    except JevRouterError as exc:
+        raise LLMConfigError("Invalid Jev router configuration", code="jev_configuration_invalid") from exc
     settings = llm_config_store.get_settings()
     primary_data = chat_session.model_selection or settings.get("default_model")
     if not primary_data:
-        return {}
+        return {"jev_router": jev_router}
     primary = ModelSelection.model_validate(primary_data)
     fast = ModelSelection.model_validate(settings.get("fast_model") or primary)
     llm_config_store.resolve(primary)
@@ -357,6 +362,7 @@ def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
         "coding_agent": coding_agent,
         "coding_agent_config": coding_config,
         "coding_model": coding_model.model_dump(mode="json") if coding_model else None,
+        "jev_router": jev_router,
     }
 
 
@@ -2753,7 +2759,7 @@ async def websocket_chat(
 
         try:
             model_snapshot = _snapshot_model_config(current_session)
-        except CodingAgentConfigError as exc:
+        except (CodingAgentConfigError, LLMConfigError) as exc:
             await send_to_session(session_id, {"type": "error", "code": exc.code, "message": str(exc)})
             return None
 

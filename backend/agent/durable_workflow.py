@@ -319,6 +319,9 @@ class DurableAgentWorkflow:
             trace_id=str(state.data.get("trace_id") or run["id"]),
             primary_model=dict(state.model_snapshot.get("primary") or {}),
             fast_model=dict(state.model_snapshot.get("fast") or {}),
+            # Runs created before Jev support retain their original routing
+            # behavior even if the deployment enables Jev after a restart.
+            jev_router=dict(state.model_snapshot.get("jev_router") or {"mode": "off"}),
             artifact_hashes=artifact_hashes,
         )
 

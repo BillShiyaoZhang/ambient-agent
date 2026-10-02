@@ -129,6 +129,7 @@ class AgentOrchestrator:
                 audit_context=audit_context,
                 budget=self.tool_loop_budget,
                 capability_catalog=self.capability_catalog,
+                jev_config=self.run_context.jev_router if self.run_context else None,
             )
             if (
                 plan.kind in {IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT}

@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 from sqlmodel import Session
@@ -30,6 +31,7 @@ from backend.agent.intent_plan import (
     SubIntent,
     SubIntentKind,
 )
+from backend.agent.jev_router import JevDecisionClient, JevRouterConfig, JevRouterError, build_request
 from backend.agent.slash_commands import (
     ParsedSlashCommand,
     SlashCommandParseError,
@@ -72,6 +74,7 @@ class IntentRouter:
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
         capability_catalog: SystemCapabilityCatalog | None = None,
+        jev_config: dict[str, Any] | None = None,
     ) -> IntentPlan:
         """Classify a user message.
 
@@ -108,7 +111,89 @@ class IntentRouter:
                 capability_catalog=capability_catalog,
             )
 
-        # 3. LLM-driven routing via function-calling.
+        # Jev classifies only; its labels are never dispatched as incomplete
+        # Graph/App plans. Explicit commands above bypass this stage entirely.
+        route_started = time.monotonic()
+        attempt = None
+        if override_system_prompt is None:
+            attempt = await cls._try_jev_route(
+                content_stripped,
+                ctx,
+                sections,
+                language,
+                jev_config,
+                budget,
+                capability_catalog,
+                include_widget_keyword_hint,
+            )
+        plan = None
+        try:
+            legacy_budget = budget
+            remaining_wall_seconds = None
+            if budget is not None and attempt is not None:
+                remaining_wall_seconds = budget.wall_clock_s - (time.monotonic() - route_started)
+                if remaining_wall_seconds <= 0:
+                    raise BudgetExhaustedError("Intent routing exceeded its wall-clock budget")
+                legacy_budget = replace(
+                    budget,
+                    wall_clock_s=remaining_wall_seconds,
+                    llm_call_timeout_s=min(budget.llm_call_timeout_s, remaining_wall_seconds),
+                )
+            if attempt and attempt.get("direct_plan") is not None:
+                plan = attempt["direct_plan"]
+            else:
+                legacy_invocation = cls._route_legacy(
+                    content_stripped,
+                    ctx,
+                    db_session,
+                    provider_name,
+                    model_name,
+                    language,
+                    override_system_prompt,
+                    sections,
+                    include_widget_keyword_hint,
+                    fallback_keywords,
+                    audit_context,
+                    legacy_budget,
+                    capability_catalog,
+                )
+                if remaining_wall_seconds is None:
+                    plan = await legacy_invocation
+                else:
+                    try:
+                        plan = await asyncio.wait_for(legacy_invocation, timeout=remaining_wall_seconds)
+                    except TimeoutError:
+                        raise BudgetExhaustedError("Intent routing exceeded its wall-clock budget") from None
+                    # The generated plan may return a heuristic fallback after
+                    # an inner timeout. Admit it only while the shared deadline
+                    # still has time left.
+                    if time.monotonic() - route_started >= budget.wall_clock_s:
+                        plan = None
+                        raise BudgetExhaustedError("Intent routing exceeded its wall-clock budget")
+            return plan
+        finally:
+            if attempt is not None:
+                cls._record_jev_audit(db_session, attempt, audit_context, plan)
+
+    @classmethod
+    async def _route_legacy(
+        cls,
+        content_stripped: str,
+        ctx: RouterContext,
+        db_session: Any,
+        provider_name: str | None,
+        model_name: str | None,
+        language: str,
+        override_system_prompt: str | None,
+        sections: list[str],
+        include_widget_keyword_hint: bool,
+        fallback_keywords: list[str] | None,
+        audit_context: dict[str, Any] | None,
+        budget: ToolLoopBudget | None,
+        capability_catalog: SystemCapabilityCatalog | None,
+    ) -> IntentPlan:
+        # Existing generation and fallback semantics remain the authority for
+        # all effect workflows and all uncertain Jev decisions.
         try:
             runtime_provider, runtime_model = selection_ids(fast_selection())
             plan = await cls._route_with_llm(
@@ -144,6 +229,129 @@ class IntentRouter:
             confidence=0.0,
             rationale="fallback heuristic",
             instruction=content_stripped,
+        )
+
+    @classmethod
+    async def _try_jev_route(
+        cls,
+        content: str,
+        context: RouterContext,
+        sections: list[str],
+        language: str,
+        frozen_config: dict[str, Any] | None,
+        budget: ToolLoopBudget | None,
+        capability_catalog: SystemCapabilityCatalog | None,
+        include_widget_keyword_hint: bool,
+    ) -> dict[str, Any] | None:
+        started = time.monotonic()
+        attempt: dict[str, Any] = {"request": {}, "response": None, "error": None}
+        try:
+            config = (
+                JevRouterConfig.model_validate(frozen_config)
+                if frozen_config is not None
+                else JevRouterConfig.from_env()
+            )
+            if config.mode == "off":
+                return None
+            attempt["config"] = config.snapshot()
+            context_text = context.render_for_prompt(
+                sections=sections,
+                include_widget_keyword_hint=include_widget_keyword_hint,
+            )
+            context_text += "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(
+                AgentRole.INTENT_ROUTER
+            )
+            request = build_request(
+                content,
+                context_text,
+                context.app_manifests if "widgets" in sections else [],
+                language,
+                config,
+            )
+            attempt["request"] = request
+            decision, raw = await JevDecisionClient().decide(request, config, budget=budget)
+            attempt["response"] = raw
+            ordered = sorted(decision.probabilities.values(), reverse=True)
+            probability, margin = ordered[0], ordered[0] - ordered[1]
+            reason = "requires_generated_plan"
+            if config.mode == "shadow":
+                reason = "shadow_mode"
+            elif probability < config.min_probability or margin < config.min_margin:
+                reason = "intent_uncertain"
+            elif decision.kind == IntentKind.CONVERSE:
+                target_values = sorted((decision.target_probabilities or {}).values(), reverse=True)
+                if decision.target_choice not in (None, "none"):
+                    reason = "target_conflict"
+                elif target_values and (
+                    target_values[0] < config.min_probability
+                    or (target_values[0] - target_values[1]) < config.min_margin
+                ):
+                    reason = "target_uncertain"
+                else:
+                    reason = "direct_converse"
+                    attempt["direct_plan"] = IntentPlan(
+                        kind=IntentKind.CONVERSE,
+                        confidence=probability,
+                        rationale=(
+                            "Jev classified a read-only conversation" if language == "en" else "Jev 判定为只读对话"
+                        ),
+                        instruction=content,
+                    )
+            attempt["routing"] = {
+                "mode": config.mode,
+                "reason": reason,
+                "decision": decision.model_dump(mode="json"),
+                "top_probability": probability,
+                "margin": margin,
+                "config": config.snapshot(),
+            }
+        except (asyncio.CancelledError, BudgetExhaustedError):
+            raise
+        except JevRouterError as exc:
+            attempt["error"] = exc.code
+            if exc.model is not None or exc.usage:
+                attempt["response"] = {"model": exc.model, "usage": exc.usage}
+        except Exception:
+            # Never persist exception text from a credential-bearing transport
+            # or a malformed environment. Only a fixed diagnostic code escapes.
+            attempt["error"] = "jev_configuration_or_response_invalid"
+        attempt["elapsed_seconds"] = time.monotonic() - started
+        return attempt
+
+    @classmethod
+    def _record_jev_audit(
+        cls,
+        db_session: Any,
+        attempt: dict[str, Any],
+        audit_context: dict[str, Any] | None,
+        plan: IntentPlan | None,
+    ) -> None:
+        request = attempt["request"]
+        response = dict(attempt.get("response") or {})
+        routing = dict(attempt.get("routing") or {})
+        if attempt.get("error"):
+            routing.update(
+                {
+                    "reason": attempt["error"],
+                    "mode": (attempt.get("config") or {}).get("mode"),
+                    "config": attempt.get("config"),
+                }
+            )
+        routing["selected_plan_kind"] = plan.kind.value if plan else None
+        decision = routing.get("decision") or {}
+        routing["kind_agreement"] = decision.get("kind") == plan.kind.value if decision and plan else None
+        response["routing"] = routing
+        cls._record_audit(
+            db_session,
+            "typesafe",
+            response.get("model") or (attempt.get("config") or {}).get("model", "unknown"),
+            [{"role": "user", "content": json.dumps(request.get("state", {}), ensure_ascii=False)}],
+            [{"questions": request.get("questions", {})}],
+            response,
+            attempt["elapsed_seconds"],
+            audit_context,
+            stage="route_decision",
+            error=attempt.get("error"),
         )
 
     @classmethod
@@ -681,6 +889,7 @@ class IntentRouter:
                 attempt=context.get("attempt"),
                 trace_id=context.get("trace_id"),
                 latency_ms=elapsed_seconds * 1000,
+                usage=response.get("usage") if isinstance(response, dict) else None,
                 error=error,
                 prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 tool_schema_hash=hashlib.sha256(tool_payload.encode("utf-8")).hexdigest(),
