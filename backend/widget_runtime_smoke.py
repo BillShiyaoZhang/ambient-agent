@@ -116,6 +116,15 @@ class WidgetRuntimeSmokeTester:
                     binding.grants_digest,
                 )
                 return {"status": "validated", "actions": []}
+            if method == "location.getCurrentPosition":
+                authorizer.authorize_location(
+                    binding.app_id, "current", binding.manifest_revision, binding.grants_digest
+                )
+                from backend.device_location import DeviceLocationError
+
+                raise DeviceLocationError(
+                    "device_location_unavailable", "Headless verification cannot acquire the user's device location"
+                )
             if method == "net.request":
                 source_id = str(params.get("source_id") or "")
                 request = params.get("request")

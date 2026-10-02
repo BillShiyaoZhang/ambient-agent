@@ -120,6 +120,12 @@ Generation and repair share a type-reference projection: `type_ids`, `feature_id
 
 ## 7. Verification and repair loop
 
+App modification passes the existing Manifest baseline into planning and Schema/capability alignment. The proposal preserves approved capabilities, network sources, and Graph dependencies by default; explicit removals or replacements are metadata, with additions, changes, and removals shown for approval. The approved payload alone defines authority; old grants are never merged after approval.
+
+The proposal records mandatory deliverables as `required_features`, including matching `app_spec` feature IDs, required capabilities, and network sources/paths. Before coding, dependencies must exist and be approved. Generated artifacts must declare these features implemented and contain the corresponding SDK calls. An unavailable notice, planned-only feature, or unused required source cannot count as completion or replace the live App. Structural checks and first-frame rendering do not replace acceptance of the user's objective.
+
+Before approval, compare the original request, approved plan, and complete criteria; reject proposals that substitute unavailable notices for actual requested features. An uncertain or unavailable Jev judgment falls back to an LLM review. Missing deliverables require correction instead of default acceptance. Backend regression tests use a separate temporary workspace before importing the app, so Runs, approvals, and chat data never enter the active local workspace.
+
 Verification order is fixed:
 
 1. Artifact and Manifest shape.

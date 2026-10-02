@@ -5,6 +5,7 @@ from backend.capabilities.ontology import CAPABILITY_ONTOLOGY, capability_catego
 
 
 EXPECTED_CATEGORIES = {
+    "device.location",
     "graph.query",
     "graph.mutate",
     "network.request",
@@ -131,7 +132,7 @@ def test_runtime_contract_binds_app_schemas_grants_and_allowed_artifacts():
 
     payload = contract.to_dict()
     assert payload["contract_version"] == 1
-    assert payload["catalog_version"] == 1
+    assert payload["catalog_version"] == 2
     assert payload["app_id"] == "planner"
     assert payload["allowed_files"] == ["README.md", "controller.js", "manifest.json"]
     assert payload["grants_digest"] == grants_digest(contract.capabilities)

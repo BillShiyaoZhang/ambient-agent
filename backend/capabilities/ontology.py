@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 
 CAPABILITY_ONTOLOGY_ID = "ambient-widget-capabilities"
-CAPABILITY_ONTOLOGY_VERSION = 1
+CAPABILITY_ONTOLOGY_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +30,19 @@ class CapabilityCategory:
 
 
 _CATEGORIES = (
+    CapabilityCategory(
+        id="device.location",
+        description="Read the user's current device location once after a user action and browser permission",
+        sdk_methods=("location.getCurrentPosition",),
+        scope_fields=("operations",),
+        scope_contract={
+            "required": ["operations"],
+            "optional": [],
+            "fields": {"operations": {"type": "array", "items_enum": ["current"], "min_items": 1}},
+            "example": {"operations": ["current"]},
+        },
+        effect="read",
+    ),
     CapabilityCategory(
         id="capability.invoke",
         description="Invoke exact installed App Center catalog actions",

@@ -135,6 +135,7 @@ function createPortEndpoint(
   let activeSuspendRequestId;
   let lastSuspendResponse;
   let disposed = false;
+  let locationActivationTime = null;
 
   const sendRpc = createRequestSender(
     port,
@@ -159,6 +160,12 @@ function createPortEndpoint(
         || params === null
       ) {
         return Promise.reject(new Error("Invalid ambient RPC request"));
+      }
+      if (method === "location.getCurrentPosition") {
+        if (locationActivationTime === null || Date.now() - locationActivationTime > 5000) {
+          return Promise.reject(Object.assign(new Error("Device location requires a button or keyboard action"), { code: "device_location_user_action_required" }));
+        }
+        locationActivationTime = null;
       }
       return sendRpc({ method, params });
     },
@@ -206,6 +213,7 @@ function createPortEndpoint(
 
   const reportTrustedActivation = (event) => {
     if (disposed || event?.isTrusted !== true) return;
+    if (["pointerdown", "keydown"].includes(event.type)) locationActivationTime = Date.now();
     try {
       port.postMessage({
         type: "host_event",

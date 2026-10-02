@@ -14,6 +14,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from backend.device_location import DeviceLocationError, normalize_location_options, normalize_location_result
+
 
 CLIENT_WIDGET_RUNTIME_PROTOCOL = "ambient-widget-client-v1"
 CLIENT_WIDGET_RUNTIME_PROTOCOL_VERSION = 1
@@ -332,11 +334,73 @@ class LockedClientWidgetRuntimeConnection:
     def __init__(self, websocket: Any) -> None:
         self.websocket = websocket
         self._send_lock = asyncio.Lock()
+        self._device_requests: dict[str, asyncio.Future[Any]] = {}
 
     async def send_json(self, message: dict[str, Any]) -> None:
         async with self._send_lock:
             await self.websocket.send_json(message)
 
+    async def request_location(self, rpc_request_id: str, options: dict[str, int]) -> dict[str, float | int]:
+        if self._device_requests:
+            raise DeviceLocationError("device_location_busy", "A location request is already pending for this App")
+        options = normalize_location_options(options)
+        request_id = secrets.token_urlsafe(24)
+        future = asyncio.get_running_loop().create_future()
+        self._device_requests[request_id] = future
+        try:
+            try:
+                deadline = options["timeout"] / 1000 + 1
+                async with asyncio.timeout(deadline):
+                    await self.send_json(
+                        {
+                            "type": "device_request",
+                            "request_id": request_id,
+                            "rpc_request_id": rpc_request_id,
+                            "method": "location.current",
+                            "options": options,
+                        }
+                    )
+                    value = await asyncio.wait_for(future, timeout=deadline)
+            except TimeoutError:
+                raise DeviceLocationError("device_location_timeout", "Device location request timed out") from None
+            return normalize_location_result(value)
+        finally:
+            self._device_requests.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+
+    def resolve_device_response(self, message: dict[str, Any]) -> bool:
+        request_id = message.get("request_id")
+        future = self._device_requests.get(request_id) if isinstance(request_id, str) else None
+        if future is None or future.done():
+            return False
+        if "error" in message:
+            error = message["error"]
+            messages = {
+                "device_location_insecure_context": "Device location requires a secure browser context",
+                "device_location_unavailable": "Device location is unavailable",
+                "device_location_denied": "Device location permission was denied",
+                "device_location_timeout": "Device location request timed out",
+                "device_location_invalid": "Device returned an invalid location result",
+                "device_location_request_invalid": "Device location request is invalid",
+                "device_location_user_action_required": "Device location requires a user action",
+            }
+            code = error.get("code") if isinstance(error, dict) else None
+            if code not in messages:
+                code = "device_location_unavailable"
+            future.set_exception(DeviceLocationError(code, messages[code]))
+        else:
+            future.set_result(message.get("result"))
+        return True
+
+    def cancel_device_requests(self) -> None:
+        for future in self._device_requests.values():
+            if not future.done():
+                future.set_exception(
+                    DeviceLocationError("device_location_unavailable", "Device location session closed")
+                )
+
     async def close(self, *, code: int = 1000) -> None:
+        self.cancel_device_requests()
         async with self._send_lock:
             await self.websocket.close(code=code)

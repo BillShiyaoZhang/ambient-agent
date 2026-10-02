@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from backend.agent.decisions import remaining_budget
@@ -15,6 +16,7 @@ from backend.agent.schema_decisions import (
 )
 from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
+from backend.agent.feature_review import review_feature_coverage
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.capabilities.models import normalize_grants
 from backend.graph_db import GraphDatabase
@@ -22,6 +24,161 @@ from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 
 logger = logging.getLogger("schema_alignment")
+
+
+class RequiredFeatureReviewError(ValueError):
+    """A semantic rejection cannot be retried as a Schema-selection conflict."""
+
+
+def capability_change_summary(previous: Any, proposed: Any) -> dict[str, list[dict[str, Any]]]:
+    """Describe the exact grants offered for approval, including scope reductions."""
+    before = {grant.id: grant.to_dict() for grant in normalize_grants(previous)}
+    after = {grant.id: grant.to_dict() for grant in normalize_grants(proposed)}
+    return {
+        "added": [after[key] for key in sorted(after.keys() - before.keys())],
+        "changed": [
+            {"before": before[key], "after": after[key]}
+            for key in sorted(before.keys() & after.keys())
+            if before[key] != after[key]
+        ],
+        "removed": [before[key] for key in sorted(before.keys() - after.keys())],
+    }
+
+
+def existing_app_context(existing_app_manifest: dict[str, Any] | None) -> str:
+    """Project public App metadata without credentials or executable instructions."""
+    if existing_app_manifest is None:
+        return "(New App; no previous approval baseline)"
+    if not isinstance(existing_app_manifest, dict):
+        raise ValueError("Existing App manifest must be an object")
+    public = {
+        field: existing_app_manifest[field]
+        for field in ("id", "title", "description", "schema_refs", "app_spec")
+        if field in existing_app_manifest
+    }
+    public["capabilities"] = [
+        grant.to_dict() for grant in normalize_grants(existing_app_manifest.get("capabilities", []))
+    ]
+    return json.dumps(public, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _revision_ids(proposal: dict[str, Any], field: str, baseline_ids: set[str]) -> set[str]:
+    values = proposal.get(field, [])
+    if not isinstance(values, list) or len(values) > 100:
+        raise ValueError(f"{field} must be an array of at most 100 capability IDs")
+    if any(not isinstance(item, str) or item not in baseline_ids for item in values):
+        raise ValueError(f"{field} entries must identify currently approved capability categories")
+    if len(values) != len(set(values)):
+        raise ValueError(f"{field} must not contain duplicate capability IDs")
+    return set(values)
+
+
+def _merge_grant_scopes(category_id: str, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(before)
+    for field, value in after.items():
+        old = before.get(field)
+        if old is None or old == value:
+            merged[field] = copy.deepcopy(value)
+        elif isinstance(old, list) and isinstance(value, list):
+            merged[field] = sorted(set(old) | set(value))
+        elif category_id == "network.request" and field == "sources":
+            sources = copy.deepcopy(old)
+            for source_id, source in value.items():
+                if source_id not in sources:
+                    sources[source_id] = copy.deepcopy(source)
+                    continue
+                previous = sources[source_id]
+                if previous["base_url"] != source["base_url"]:
+                    raise ValueError(
+                        f"Changing network source '{source_id}' origin requires an explicit "
+                        "network.request capability_replacements entry"
+                    )
+                sources[source_id] = {
+                    "base_url": previous["base_url"],
+                    "methods": sorted(set(previous["methods"]) | set(source["methods"])),
+                    "paths": sorted(set(previous["paths"]) | set(source["paths"])),
+                    "response_limit": max(previous["response_limit"], source["response_limit"]),
+                }
+            merged[field] = sources
+        elif type(old) is int and type(value) is int:
+            merged[field] = max(old, value)
+        else:
+            raise ValueError(f"Changing {category_id}.{field} requires an explicit capability_replacements entry")
+    return merged
+
+
+def preserve_existing_app_grants(
+    proposal: dict[str, Any],
+    existing_app_manifest: dict[str, Any] | None,
+    existing_schemas: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compile a generated proposal before approval, never modify an approved payload.
+
+    Omission in model output is not a request to revoke a prior approval. Explicit
+    removal/replacement directives remain visible alongside the computed diff.
+    Graph dependencies are reused only from the complete real Schema inventory.
+    """
+    result = copy.deepcopy(proposal)
+    if not isinstance(result, dict):
+        raise ValueError("Schema proposal must be a JSON object")
+    result.pop("preserved_schema_refs", None)
+    result.pop("preserved_capability_ids", None)
+    if existing_app_manifest is None:
+        _revision_ids(result, "capability_removals", set())
+        _revision_ids(result, "capability_replacements", set())
+        return result
+    baseline = {grant.id: grant.to_dict() for grant in normalize_grants(existing_app_manifest.get("capabilities", []))}
+    generated = {grant.id: grant.to_dict() for grant in normalize_grants(result.get("capabilities", []))}
+    removals = _revision_ids(result, "capability_removals", set(baseline))
+    replacements = _revision_ids(result, "capability_replacements", set(baseline))
+    if removals & replacements:
+        raise ValueError("A capability cannot be both removed and replaced")
+    if removals & generated.keys():
+        raise ValueError("Removed capability categories must not also appear in proposed capabilities")
+    if replacements - generated.keys():
+        raise ValueError("Every capability_replacements entry requires its complete replacement grant")
+    merged = copy.deepcopy(generated)
+    for category_id, grant in baseline.items():
+        if category_id in removals or category_id in replacements:
+            continue
+        if category_id in merged:
+            merged[category_id]["scope"] = _merge_grant_scopes(
+                category_id, grant["scope"], merged[category_id]["scope"]
+            )
+        else:
+            merged[category_id] = copy.deepcopy(grant)
+    result["capabilities"] = [grant.to_dict() for grant in normalize_grants(list(merged.values()))]
+    schema_entries = [*result.get("reused_schemas", []), *result.get("new_schemas", [])]
+    if any(not isinstance(item, dict) for item in schema_entries):
+        raise ValueError("Schema proposal entries must be objects")
+    declared_ids = {item.get("id") for item in schema_entries}
+    inventory = {item["id"]: item for item in existing_schemas}
+    preserved_entities = {
+        entity
+        for category_id, grant in baseline.items()
+        if category_id in {"graph.query", "graph.mutate"} and category_id not in removals
+        for entity in set(grant["scope"]["entities"]) & set(merged[category_id]["scope"]["entities"])
+    }
+    preserved_refs: list[str] = []
+    for entity_id in sorted(preserved_entities - declared_ids):
+        if entity_id not in inventory:
+            raise ValueError(f"Previously approved Graph entity '{entity_id}' is absent from the Schema inventory")
+        result.setdefault("reused_schemas", []).append(
+            {
+                "id": entity_id,
+                "reason": "Preserves the existing App's approved Graph capability dependency",
+                "extended_properties": {},
+                "data_scope": "user_context",
+            }
+        )
+        preserved_refs.append(entity_id)
+    result["capability_removals"] = sorted(removals)
+    result["capability_replacements"] = sorted(replacements)
+    result["capability_changes"] = capability_change_summary(list(baseline.values()), result["capabilities"])
+    # Host-owned bookkeeping for the generation envelope, never approval authority.
+    result["preserved_schema_refs"] = preserved_refs
+    result["preserved_capability_ids"] = sorted(baseline.keys() - generated.keys() - removals)
+    return result
 
 
 def validate_schema_capability_proposal(
@@ -56,12 +213,33 @@ def validate_schema_capability_proposal(
     normalized_grants = normalize_grants(proposal.get("capabilities", []))
     catalog.validate_grants(normalized_grants, graph_entity_ids=set(schema_ids))
     proposal["capabilities"] = [grant.to_dict() for grant in normalized_grants]
+    if "required_features" in proposal:
+        from backend.widget_requirements import validate_feature_requirements
+
+        proposal["required_features"] = validate_feature_requirements(
+            proposal["required_features"], catalog, normalized_grants
+        )
     return proposal
+
+
+def _prepare_generated_proposal(
+    proposal: dict[str, Any],
+    existing_app_manifest: dict[str, Any] | None,
+    existing_schemas: list[dict[str, Any]],
+    require_feature_requirements: bool,
+) -> dict[str, Any]:
+    result = preserve_existing_app_grants(proposal, existing_app_manifest, existing_schemas)
+    if require_feature_requirements and (
+        not isinstance(result.get("required_features"), list) or not result["required_features"]
+    ):
+        raise ValueError("A new App proposal must declare at least one required_features acceptance criterion")
+    return result
 
 
 def _parse_and_validate_proposal(
     raw_response: str,
     catalog: SystemCapabilityCatalog,
+    prepare_proposal: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cleaned = raw_response.strip()
     code_block_match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
@@ -77,6 +255,8 @@ def _parse_and_validate_proposal(
         cleaned = cleaned[start_idx : end_idx + 1]
 
     proposal = json.loads(cleaned)
+    if prepare_proposal is not None:
+        proposal = prepare_proposal(proposal)
     return validate_schema_capability_proposal(proposal, catalog)
 
 
@@ -88,6 +268,8 @@ async def _generate_validated_proposal(
     db_session: Any,
     budget: ToolLoopBudget | None,
     audit_context: dict[str, Any],
+    prepare_proposal: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    review_proposal: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     started = time.monotonic()
 
@@ -101,15 +283,24 @@ async def _generate_validated_proposal(
         except TimeoutError:
             raise BudgetExhaustedError("Schema generation exceeded its wall-clock budget") from None
 
+    async def validate(raw: str) -> dict[str, Any]:
+        proposal = _parse_and_validate_proposal(raw, catalog, prepare_proposal)
+        if review_proposal is not None:
+            await review_proposal(proposal)
+        return proposal
+
     raw_response = await generate(messages, audit_context)
     try:
-        return _parse_and_validate_proposal(raw_response, catalog), raw_response
+        return await validate(raw_response), raw_response
+    except (LLMConfigError, BudgetExhaustedError):
+        raise
     except Exception as validation_error:
         repair_prompt = (
             "Your previous JSON violated the supplied Capability Ontology scope contract.\n"
             f"Validation error: {str(validation_error)[:1_000]}\n"
             "Return the complete corrected JSON object only. Preserve the requested schemas and least-privilege intent. "
-            "Do not broaden the requested capabilities, invent placeholders, or omit required nested fields."
+            "Declare the precise capabilities needed for the requested behavior before approval; do not add unrelated "
+            "permissions, invent placeholders, silently downgrade required functionality, or omit required nested fields."
         )
         repair_messages = [
             *messages,
@@ -120,7 +311,7 @@ async def _generate_validated_proposal(
             repair_messages,
             {**audit_context, "stage": f"{audit_context.get('stage', 'schema_alignment')}_repair"},
         )
-        return _parse_and_validate_proposal(repaired_response, catalog), repaired_response
+        return await validate(repaired_response), repaired_response
 
 
 def _schema_inventory(schemas: list[dict[str, Any]], *, include_description: bool) -> str:
@@ -145,6 +336,8 @@ async def _generate_schema_task(
     budget: ToolLoopBudget | None,
     started: float,
     audit_context: dict[str, Any],
+    prepare_proposal: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    review_proposal: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     task = SchemaGenerationTask(selection)
     constrained = selection.constrained
@@ -168,10 +361,23 @@ async def _generate_schema_task(
             db_session=db_session,
             budget=remaining_budget(budget, started),
             audit_context=audit_context,
+            prepare_proposal=prepare_proposal,
+            review_proposal=review_proposal,
         )
         remaining_budget(budget, started)
-        task.validate(proposal)
-    except (LLMConfigError, BudgetExhaustedError):
+        envelope_proposal = copy.deepcopy(proposal)
+        preserved_refs = set(proposal.get("preserved_schema_refs", [])) - set(selection.selected_ids)
+        envelope_proposal["reused_schemas"] = [
+            item for item in proposal.get("reused_schemas", []) if item["id"] not in preserved_refs
+        ]
+        if selection.disposition == "NO_GRAPH_DATA":
+            envelope_proposal["capabilities"] = [
+                grant
+                for grant in proposal.get("capabilities", [])
+                if grant["id"] not in proposal.get("preserved_capability_ids", [])
+            ]
+        task.validate(envelope_proposal)
+    except (LLMConfigError, BudgetExhaustedError, RequiredFeatureReviewError):
         raise
     except Exception:
         if not constrained:
@@ -193,6 +399,8 @@ async def _generate_schema_task(
             db_session=db_session,
             budget=remaining_budget(budget, started),
             audit_context={**audit_context, "stage": f"{audit_context['stage']}_fallback"},
+            prepare_proposal=prepare_proposal,
+            review_proposal=review_proposal,
         )
         remaining_budget(budget, started)
         record_schema_selection(
@@ -231,6 +439,8 @@ class SchemaAlignmentService:
         capability_catalog: SystemCapabilityCatalog | None = None,
         *,
         decision_config: dict[str, Any] | None = None,
+        existing_app_manifest: dict[str, Any] | None = None,
+        require_feature_requirements: bool = False,
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
@@ -264,6 +474,8 @@ Your task is to analyze a widget request and match only its user-context facts a
 5. **New Entities**: Propose a new entity only if the concept is genuinely new. Attach it to an existing `subclass_of` parent (normally `Thing`) and provide established external `equivalent_to` IRIs when available.
 6. **Supported Data Types**: Property fields must use one of: "string", "integer", "number", "boolean".
 7. **Capability Ontology**: Propose the smallest required Widget grants from the supplied Capability Ontology and follow each category's complete `scope_contract`. Do not invent category ids, scope fields, entity types, installed catalog ids, or installed actions. For `network.request`, propose full public HTTPS source definitions rather than placeholder names. An empty capabilities array is valid.
+8. **Existing App Baseline**: A modification preserves currently approved grants and their required Graph schemas by default. List exact existing capability category IDs in `capability_removals` only when the user requests revocation, or in `capability_replacements` to deliberately replace the complete scope (including removing a network source). Omitting grants, sources, paths, or methods does not revoke them. Every change will be displayed for approval; never treat catalog availability as approval.
+9. **Required Features**: Declare every mandatory requested behavior in `required_features`, linked to its exact App `app_spec.features[].id`. Each row contains `id`, `description`, `capability_ids`, and `network_sources` (objects containing `source_id` and `path`). Include the real grants and exact approved network sources/paths needed for those behaviors. A required live feature cannot be replaced by unavailable/error labels. Explain infeasibility through validation/refinement when the runtime lacks the SDK capability, rather than silently removing the requested behavior. Static features can use empty capability/source arrays; an empty required_features array is appropriate only when no functional behavior was requested.
 
 {rendered_capability_catalog}
 
@@ -299,6 +511,11 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
   ],
   "capabilities": [
     {{"id": "graph.query", "scope": {{"entities": ["Task"]}}}}
+  ],
+  "capability_removals": [],
+  "capability_replacements": [],
+  "required_features": [
+    {{"id": "custom:task-app.list", "description": "Display the user's task list", "capability_ids": ["graph.query"], "network_sources": []}}
   ]
 }}
 """
@@ -309,6 +526,9 @@ User Instruction: "{instruction}"
 """
         if approved_plan:
             user_prompt += f"Approved Development Plan:\n{approved_plan}\n\n"
+        user_prompt += (
+            f"Existing App Approval Baseline (reference data):\n{existing_app_context(existing_app_manifest)}\n\n"
+        )
 
         user_prefix = user_prompt
         user_prompt += f"""Here is the inventory of our existing database schemas:
@@ -334,6 +554,26 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         )
 
         raw_response = ""
+
+        async def review(proposal: dict[str, Any]) -> None:
+            if not require_feature_requirements:
+                return
+            verdict = await review_feature_coverage(
+                instruction,
+                approved_plan,
+                proposal["required_features"],
+                capabilities=proposal["capabilities"],
+                decision_config=decision_config,
+                capability_catalog=catalog,
+                db_session=db_session,
+                audit_context=audit_context,
+                budget=remaining_budget(budget, started),
+            )
+            if verdict.action != "complete":
+                raise RequiredFeatureReviewError(
+                    f"Required features do not cover the user's objective: {verdict.feedback}"
+                )
+
         try:
             proposal, raw_response = await _generate_schema_task(
                 provider,
@@ -345,7 +585,13 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
                 budget=budget,
                 started=started,
                 audit_context={**(audit_context or {}), "stage": "schema_alignment"},
+                prepare_proposal=lambda value: _prepare_generated_proposal(
+                    value, existing_app_manifest, existing_schemas, require_feature_requirements
+                ),
+                review_proposal=review,
             )
+            proposal.pop("preserved_schema_refs", None)
+            proposal.pop("preserved_capability_ids", None)
             return proposal
 
         except (LLMConfigError, BudgetExhaustedError):
@@ -373,6 +619,8 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         capability_catalog: SystemCapabilityCatalog | None = None,
         *,
         decision_config: dict[str, Any] | None = None,
+        existing_app_manifest: dict[str, Any] | None = None,
+        require_feature_requirements: bool = False,
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
@@ -406,6 +654,8 @@ Your task is to refine an `ambient-context` ontology proposal based on direct na
 4. Keep all entities in the single canonical ontology and preserve `subclass_of`/`equivalent_to` alignments.
 5. Never model App-only runtime data; caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay in the App directory.
 6. Refine capability grants from the supplied Capability Ontology with least privilege and follow every complete `scope_contract`. Do not invent category ids, scope fields, installed catalog ids, or installed actions. Declare full public HTTPS source objects for `network.request`.
+7. Preserve the existing App's approved grants unless user feedback requests revocation. Use `capability_removals` for exact existing category IDs being revoked, or `capability_replacements` for complete deliberate scope replacement. Omissions are preserved before approval, and the exact resulting change summary is reviewable.
+8. Preserve mandatory requested behaviors in `required_features` rows containing `id`, `description`, `capability_ids`, and `network_sources` with `source_id`/`path`. These feature IDs link to App app_spec feature declarations. Supply their actual required grants and exact sources/paths. A missing SDK or permission must cause correction/refinement rather than substituting unavailable labels for the required behavior. Empty dependency arrays support static features; empty required_features is only appropriate if no behavior was requested.
 
 {rendered_capability_catalog}
 
@@ -441,6 +691,11 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
   ],
   "capabilities": [
     {{"id": "graph.query", "scope": {{"entities": ["Task"]}}}}
+  ],
+  "capability_removals": [],
+  "capability_replacements": [],
+  "required_features": [
+    {{"id": "custom:task-app.list", "description": "Display the user's task list", "capability_ids": ["graph.query"], "network_sources": []}}
   ]
 }}
 """
@@ -451,6 +706,9 @@ User Instruction: "{instruction}"
 """
         if approved_plan:
             user_prompt += f"Approved Development Plan:\n{approved_plan}\n\n"
+        user_prompt += (
+            f"Existing App Approval Baseline (reference data):\n{existing_app_context(existing_app_manifest)}\n\n"
+        )
 
         user_prefix = user_prompt
         refinement_suffix = f"""
@@ -482,6 +740,27 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
         )
 
         raw_response = ""
+
+        async def review(proposal: dict[str, Any]) -> None:
+            if not require_feature_requirements:
+                return
+            verdict = await review_feature_coverage(
+                instruction,
+                approved_plan,
+                proposal["required_features"],
+                capabilities=proposal["capabilities"],
+                feedback=feedback,
+                decision_config=decision_config,
+                capability_catalog=catalog,
+                db_session=db_session,
+                audit_context=audit_context,
+                budget=remaining_budget(budget, started),
+            )
+            if verdict.action != "complete":
+                raise RequiredFeatureReviewError(
+                    f"Required features do not cover the user's objective: {verdict.feedback}"
+                )
+
         try:
             proposal, raw_response = await _generate_schema_task(
                 provider,
@@ -493,7 +772,13 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
                 budget=budget,
                 started=started,
                 audit_context={**(audit_context or {}), "stage": "schema_alignment_refine"},
+                prepare_proposal=lambda value: _prepare_generated_proposal(
+                    value, existing_app_manifest, existing_schemas, require_feature_requirements
+                ),
+                review_proposal=review,
             )
+            proposal.pop("preserved_schema_refs", None)
+            proposal.pop("preserved_capability_ids", None)
             return proposal
         except (LLMConfigError, BudgetExhaustedError):
             raise

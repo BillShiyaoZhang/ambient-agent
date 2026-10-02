@@ -66,7 +66,7 @@ Prompt templates describe roles and decision rules. A Catalog renderer injects t
 
 ```text
 [SYSTEM CAPABILITY CATALOG v2]
-Capability ontology version: 1
+Capability ontology version: 2
 Durable execution: plan -> alignment approval -> staging -> verification -> promotion
 Widget grant categories:
 - graph.query: entities[]; read only
@@ -98,7 +98,7 @@ Before staging, the Workflow creates an immutable contract:
 {
   "contract_version": 1,
   "app_id": "daily-planner",
-  "catalog_version": 1,
+  "catalog_version": 2,
   "schemas": [{"id": "Task", "properties": {"title": "string"}}],
   "capabilities": [
     {"id": "graph.query", "scope": {"entities": ["Task"]}}

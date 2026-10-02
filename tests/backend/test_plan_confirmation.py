@@ -11,6 +11,20 @@ from backend.coding_agent_acp import OpenCodeStagedResult
 from backend.schema_diff import VerificationDiff
 from backend.workspace_storage import WorkspaceStorage
 
+REQUIRED_FEATURES = [
+    {
+        "id": "custom:visual.display",
+        "description": "Display the requested UI",
+        "capability_ids": [],
+        "network_sources": [],
+    }
+]
+APP_SPEC = {
+    "spec_version": 1,
+    "types": ["custom:visual"],
+    "features": [{"id": "custom:visual.display", "status": "implemented", "surfaces": ["ui"]}],
+}
+
 
 @pytest.fixture(name="test_session")
 def test_session_fixture(tmp_path):
@@ -50,7 +64,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch, client):
 
     # 2. Mock Schema alignment to return empty proposal (approved immediately in test)
     async def mock_align_schemas(*args, **kwargs):
-        return {"reused_schemas": [], "new_schemas": []}
+        return {"reused_schemas": [], "new_schemas": [], "required_features": REQUIRED_FEATURES}
 
     monkeypatch.setattr("backend.schema_alignment.SchemaAlignmentService.align_schemas", mock_align_schemas)
 
@@ -92,6 +106,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch, client):
                     "intents": [],
                     "schema_refs": [],
                     "capabilities": [],
+                    "app_spec": APP_SPEC,
                 }
             ),
             encoding="utf-8",
@@ -168,7 +183,7 @@ def test_websocket_plan_confirmation_flow(test_session, monkeypatch, client):
                 "type": "schema_approval_response",
                 "request_id": schema_request_id,
                 "approved": "approve",
-                "proposal": {"reused_schemas": [], "new_schemas": []},
+                "proposal": {"reused_schemas": [], "new_schemas": [], "required_features": REQUIRED_FEATURES},
                 "feedback": "",
             }
         )

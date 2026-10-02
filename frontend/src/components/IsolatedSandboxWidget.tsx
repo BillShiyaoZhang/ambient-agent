@@ -16,6 +16,7 @@ import {
   type WidgetStorageRequest,
 } from "../services/widgetStorage";
 import { apiUrl, webSocketUrl } from "../services/apiBase";
+import { requestDeviceLocation } from "../services/widgetLocation";
 import {
   MAX_SOCKET_RECONNECT_ATTEMPTS,
   socketReconnectDelay,
@@ -75,6 +76,8 @@ interface ClientRuntimeSession {
   suspendTimer: number | null;
   closingReason: string | null;
   bootstrap: RuntimeBootstrap | null;
+  locationRequestIds: Set<string>;
+  locationAbort: AbortController | null;
 }
 
 const runtimeWebSocketUrl = (appId: string) => {
@@ -403,6 +406,14 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
         });
         return;
       }
+      if (request.method === "location.getCurrentPosition") {
+        if (session.locationRequestIds.size > 0 || session.locationAbort) {
+          sourcePort.postMessage({ type: "rpc_response", request_id: request.request_id,
+            error: { code: "device_location_busy", message: "A location request is already pending" } });
+          return;
+        }
+        session.locationRequestIds.add(String(request.request_id));
+      }
       session.socket.send(JSON.stringify(request));
       return;
     }
@@ -438,6 +449,8 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
     if (session.framePortOffered) {
       const reason = "Widget frame navigated or reloaded unexpectedly";
       session.closingReason = reason;
+      session.locationAbort?.abort();
+      session.locationRequestIds.clear();
       setFailure({
         code: "runtime_frame_navigation_blocked",
         message: reason,
@@ -506,6 +519,8 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
       suspendTimer: null,
       closingReason: null,
       bootstrap: null,
+      locationRequestIds: new Set(),
+      locationAbort: null,
     };
     sessionRef.current = session;
     setFrameUrl(null);
@@ -530,7 +545,28 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
         initializeFrame(session);
         return;
       }
+      if (value.type === "device_request") {
+        if (!boundedString(value.request_id, 200) || !boundedString(value.rpc_request_id, 200)) return;
+        const requested = session.locationRequestIds.delete(value.rpc_request_id);
+        const validOptions = isRecord(value.options) && Object.keys(value.options).every((key) => ["timeout", "maximumAge"].includes(key));
+        if (!requested || value.method !== "location.current" || !session.bootstrap?.capability_ids.includes("device.location")
+          || !validOptions || session.locationAbort || session.socket?.readyState !== WebSocket.OPEN) {
+          session.socket?.send(JSON.stringify({ type: "device_response", request_id: value.request_id,
+            error: { code: "device_location_request_invalid", message: "Uncorrelated device request" } }));
+          return;
+        }
+        const controller = new AbortController();
+        session.locationAbort = controller;
+        void requestDeviceLocation({ timeout: (value.options as Record<string, unknown>).timeout as number, maximumAge: (value.options as Record<string, unknown>).maximumAge as number }, controller.signal)
+          .then((result) => {
+            if (isCurrentSession(session) && session.socket?.readyState === WebSocket.OPEN) session.socket.send(JSON.stringify({ type: "device_response", request_id: value.request_id, result }));
+          }, (error: unknown) => {
+            if (isCurrentSession(session) && session.socket?.readyState === WebSocket.OPEN) session.socket.send(JSON.stringify({ type: "device_response", request_id: value.request_id, error: runtimeFailure(error, "device_location_unavailable", "Device location is unavailable") }));
+          }).finally(() => { if (session.locationAbort === controller) session.locationAbort = null; });
+        return;
+      }
       if (value.type === "rpc_response" || value.type === "subscription_event") {
+        if (typeof value.request_id === "string") session.locationRequestIds.delete(value.request_id);
         session.port?.postMessage(value);
         return;
       }
@@ -548,6 +584,8 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
         return;
       }
       if (value.type === "session_invalidated") {
+        session.locationAbort?.abort();
+        session.locationRequestIds.clear();
         const reason = typeof value.reason === "string"
           ? value.reason.slice(0, 4096)
           : "Widget Runtime session was invalidated";
@@ -631,6 +669,8 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
         };
         socket.onclose = (event) => {
           if (!isCurrentSession(session)) return;
+          session.locationAbort?.abort();
+          session.locationRequestIds.clear();
           if (session.handshakeTimer !== null) {
             window.clearTimeout(session.handshakeTimer);
             session.handshakeTimer = null;
@@ -689,6 +729,8 @@ export const IsolatedSandboxWidget: React.FC<SandboxWidgetProps> = ({
 
     return () => {
       session.disposed = true;
+      session.locationAbort?.abort();
+      session.locationRequestIds.clear();
       window.clearTimeout(startTimer);
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       if (session.handshakeTimer !== null) {

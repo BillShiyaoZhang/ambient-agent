@@ -120,6 +120,12 @@ Grant operation 与 SDK action 必须分别表达。例如 `graph.mutate.operati
 
 ## 7. 验证与修复闭环
 
+修改 App 时，计划和 schema/capability 对齐必须接收现有 Manifest 基线。待审批提案默认保留现有批准能力、网络来源和 Graph 依赖；显式撤销或替换以元数据表达，审批展示新增、改变和删除差异。审批后的 payload 是唯一权限权威，不能在审批后合并旧权限。
+
+提案以 `required_features` 记录必须交付的功能、对应 `app_spec` 功能 ID、必要 capability 和网络来源/path。编码前检查依赖是否实际可用且已获批；生成后要求这些功能声明为 implemented，并检查相应 SDK 调用确实存在。只有能力缺失说明、计划中功能或未使用必要来源的产物不能被报为完成或覆盖 live App。结构验证与首帧渲染不能替代用户目标验收。
+
+审批前还对比用户原始要求、获批计划和完整功能准则，拒绝把实际功能偷换为不可用提示的提案。Jev 判断不确定或不可用时交给 LLM 审阅；缺项必须修正，不能默认通过。后端回归测试在导入应用前使用独立临时 workspace，Run、审批和聊天数据不会写入本机正在使用的工作区。
+
 验证顺序固定为：
 
 1. Artifact/Manifest shape。

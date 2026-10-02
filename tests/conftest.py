@@ -1,4 +1,11 @@
+import os
+from tempfile import TemporaryDirectory
+
 import pytest
+
+# App import initializes durable stores; isolate them before that side effect.
+_test_workspace = TemporaryDirectory(prefix="ambient-pytest-workspace-")
+os.environ["WORKSPACE_DIR"] = _test_workspace.name
 
 from backend.main import app_manager
 

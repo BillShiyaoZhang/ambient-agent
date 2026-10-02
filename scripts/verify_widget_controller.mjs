@@ -6,6 +6,10 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const Babel = require("../frontend/node_modules/@babel/standalone");
 const controllerPath = process.argv[2];
+const requiredFeatures = process.argv[3] === "--requirements-json" ? JSON.parse(process.argv[4]) : [];
+if (!Array.isArray(requiredFeatures)) throw new Error("Required features must be an array");
+const observedCapabilities = new Set();
+const observedNetworkSources = new Set();
 
 if (!controllerPath) {
   throw new Error("controller path is required");
@@ -76,9 +80,31 @@ const ambientSdkMembers = new Map([
   ["react", new Set(["useState", "useEffect", "useMemo", "useRef", "useCallback", "useContext", "useReducer"])],
   ["storage", new Set(["get", "set", "delete", "clear", "list"])],
   ["lifecycle", new Set(["onBeforeSuspend"])],
+  ["location", new Set(["getCurrentPosition"])],
 ]);
 const ambientMemberLabel = (namespace) =>
   namespace === "components" ? "primitive" : namespace === "react" ? "hook" : "method";
+
+const recordCapability = (path, capability, sourcePath) => {
+  const binding = path.scope.getBinding("ambient");
+  if (binding && (binding.kind !== "param" || !binding.scope.path.parentPath?.isExportDefaultDeclaration())) return;
+  for (let child = path, parent = path.parentPath; parent; child = parent, parent = parent.parentPath) {
+    if ((parent.isIfStatement() || parent.isConditionalExpression()) && parent.node.test.type === "BooleanLiteral") {
+      if ((child.key === "consequent" && !parent.node.test.value) || (child.key === "alternate" && parent.node.test.value)) return;
+    }
+    if (parent.isLogicalExpression() && child.key === "right" && parent.node.left.type === "BooleanLiteral") {
+      if ((parent.node.operator === "&&" && !parent.node.left.value) || (parent.node.operator === "||" && parent.node.left.value)) return;
+    }
+    if (parent.isFunctionDeclaration() && parent.node.id && !parent.parentPath.isExportDefaultDeclaration() && !parent.parentPath.isExportNamedDeclaration()) {
+      if (parent.parentPath.scope.getBinding(parent.node.id.name)?.referencePaths.length === 0) return;
+    }
+    if (parent.isFunction() && parent.parentPath.isVariableDeclarator() && parent.parentPath.node.id.type === "Identifier") {
+      if (parent.parentPath.scope.getBinding(parent.parentPath.node.id.name)?.referencePaths.length === 0) return;
+    }
+  }
+  observedCapabilities.add(capability);
+  if (sourcePath) observedNetworkSources.add(JSON.stringify(sourcePath));
+};
 
 const securityPlugin = ({ types: t }) => ({
   visitor: {
@@ -162,10 +188,29 @@ const securityPlugin = ({ types: t }) => ({
       if (namespace === "mcp" || namespace === "runs") {
         capabilityError(`ambient.${namespace} is not part of the Widget SDK`);
       }
+      if (namespace === "location") {
+        if (method !== "getCurrentPosition") capabilityError(`ambient.location.${method} is not supported`);
+        const scope = grants.get("device.location");
+        if (!scope?.operations?.includes("current")) capabilityError("ambient.location.getCurrentPosition requires device.location current");
+        const options = path.node.arguments[0];
+        if (options && !t.isObjectExpression(options)) capabilityError("location options must be an object literal");
+        if (path.node.arguments.length > 1) capabilityError("location accepts only one options object");
+        for (const property of options?.properties ?? []) {
+          if (!t.isObjectProperty(property) || property.computed) capabilityError("location option fields must be literal");
+          const name = t.isIdentifier(property.key) ? property.key.name : t.isStringLiteral(property.key) ? property.key.value : "";
+          if (!["timeout", "maximumAge"].includes(name)) capabilityError(`location option '${name}' is unsupported`);
+          const value = property.value;
+          if (!t.isNumericLiteral(value) || !Number.isInteger(value.value)) capabilityError(`location ${name} must be an integer literal`);
+          if (name === "timeout" && (value.value < 1000 || value.value > 30000)) capabilityError("location timeout must be 1000..30000 ms");
+          if (name === "maximumAge" && (value.value < 0 || value.value > 300000)) capabilityError("location maximumAge must be 0..300000 ms");
+        }
+        recordCapability(path, "device.location");
+      }
 
       if (namespace === "graph" && method === "subscribe") {
         const scope = grants.get("graph.query");
         if (!scope) capabilityError("ambient.graph.subscribe requires graph.query");
+        recordCapability(path, "graph.query");
         const query = path.node.arguments[0];
         if (!t.isObjectExpression(query)) capabilityError("graph query must be an object literal");
         const property = objectProperty(query, "type");
@@ -187,6 +232,7 @@ const securityPlugin = ({ types: t }) => ({
       if (namespace === "graph" && method === "mutate") {
         const scope = grants.get("graph.mutate");
         if (!scope) capabilityError("ambient.graph.mutate requires graph.mutate");
+        recordCapability(path, "graph.mutate");
         const actions = path.node.arguments[0];
         if (!t.isArrayExpression(actions)) capabilityError("graph mutations must be an array literal");
         const actionOperations = {
@@ -229,6 +275,7 @@ const securityPlugin = ({ types: t }) => ({
         const request = path.node.arguments[1];
         if (!t.isObjectExpression(request)) capabilityError("network request must be an object literal");
         const requestPath = stringLiteral(objectProperty(request, "path")?.value, "network path");
+        recordCapability(path, "network.request", [sourceId, requestPath]);
         const methodProperty = objectProperty(request, "method");
         const requestMethod = methodProperty ? stringLiteral(methodProperty.value, "network method").toUpperCase() : "GET";
         const source = scope.sources[sourceId];
@@ -238,6 +285,7 @@ const securityPlugin = ({ types: t }) => ({
       }
 
       if (namespace === "capabilities" && method === "invoke") {
+        recordCapability(path, "capability.invoke");
         const scope = grants.get("capability.invoke");
         if (!scope) capabilityError("ambient.capabilities.invoke requires capability.invoke");
         const catalogId = stringLiteral(path.node.arguments[0], "capability catalog id");
@@ -251,6 +299,7 @@ const securityPlugin = ({ types: t }) => ({
         const category = method === "write" ? "file.write" : method === "delete" ? "file.delete" : "file.read";
         const scope = grants.get(category);
         if (!scope) capabilityError(`ambient.files.${method} requires ${category}`);
+        recordCapability(path, category);
         const filePath = stringLiteral(path.node.arguments[0], "file path");
         if (!scope.paths?.some((pattern) => pathMatches(pattern, filePath))) {
           capabilityError(`file path '${filePath}' is not approved`);
@@ -316,6 +365,15 @@ try {
   if (typeof component !== "function") {
     throw new Error("Widget controller default export must be a component function");
   }
+  for (const feature of requiredFeatures) {
+    if (!feature || typeof feature.id !== "string" || !Array.isArray(feature.capability_ids) || !Array.isArray(feature.network_sources)) {
+      throw new Error("Required feature contract is invalid");
+    }
+    if (feature.capability_ids.some((id) => !observedCapabilities.has(id))
+      || feature.network_sources.some((source) => !observedNetworkSources.has(JSON.stringify([source.source_id, source.path])))) {
+      throw new Error(`Required feature '${feature.id}' has no implementation of its approved capability or data source`);
+    }
+  }
   process.stdout.write(JSON.stringify({ ok: true }));
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -326,6 +384,9 @@ try {
     hint = message.includes("graph mutation")
       ? "Use an array of object literals with exact actions such as create_node; grant operations like create are authorization values, not action payloads."
       : "Use only literal resources and operations covered by the approved Manifest V2 capability grants.";
+  } else if (message.includes("Required feature")) {
+    code = "required_feature_missing";
+    hint = "Implement every required feature using its approved capability and source; retain the live App when the contract cannot satisfy the request.";
   } else if (message.includes("Forbidden host or network global")) {
     code = "forbidden_runtime_api";
     hint = "Use ambient.net.request, ambient.graph, ambient.files, or an exact approved ambient.capabilities action.";

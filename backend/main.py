@@ -64,6 +64,7 @@ from backend.client_widget_runtime import (
     client_runtime_frame_url,
     client_runtime_origin,
 )
+from backend.device_location import DeviceLocationError, normalize_location_options
 from backend.models import ChatMessage, ChatSession
 from backend.remote_workspace import RemoteWorkspaceConnector, RemoteWorkspaceNodeStore
 from backend.remote_workspace_api import create_remote_workspace_router
@@ -2326,6 +2327,26 @@ async def _handle_widget_runtime_rpc(
             "actions": mutation.get("actions", []),
         }
 
+    if method == "location.getCurrentPosition":
+        capability_authorizer.authorize_location(
+            binding.app_id, "current", binding.manifest_revision, binding.grants_digest
+        )
+        if (
+            not isinstance(binding, ClientWidgetRuntimeBinding)
+            or client_widget_runtime_sessions.binding(binding.session_id) is not binding
+        ):
+            raise DeviceLocationError(
+                "device_location_unavailable", "Device location requires an active browser Runtime"
+            )
+        options = normalize_location_options(params.get("options"))
+        result = await binding.connection.request_location(str(params.get("_runtime_request_id") or ""), options)
+        if client_widget_runtime_sessions.binding(binding.session_id) is not binding:
+            raise DeviceLocationError("device_location_unavailable", "Device location session closed")
+        capability_authorizer.authorize_location(
+            binding.app_id, "current", binding.manifest_revision, binding.grants_digest
+        )
+        return result
+
     if method == "net.request":
         source_id = str(params.get("source_id") or "")
         request = params.get("request")
@@ -2459,6 +2480,14 @@ async def websocket_widget_client_runtime(
         raise
 
     closed = False
+    device_tasks: set[asyncio.Task[Any]] = set()
+
+    async def reply_to_device_rpc(message: dict[str, Any]) -> None:
+        response = await build_widget_runtime_rpc_response(
+            binding, message, _handle_widget_runtime_rpc, include_session_id=False
+        )
+        await connection.send_json(response)
+
     try:
         await connection.send_json(
             {
@@ -2484,6 +2513,41 @@ async def websocket_widget_client_runtime(
                 raise ValueError("Client Runtime message must be JSON serializable") from exc
             if encoded_size > widget_runtime_gateway.limits.max_message_bytes:
                 raise ValueError("Client Runtime message exceeds the configured byte limit")
+            if message.get("type") == "device_response":
+                # Late, duplicated or foreign device results cannot settle a
+                # current request, and do not disrupt unrelated Widget RPC.
+                connection.resolve_device_response(message)
+                continue
+            if message.get("type") == "rpc_request" and message.get("method") == "location.getCurrentPosition":
+                request_id = message.get("request_id")
+                if (
+                    not isinstance(request_id, str)
+                    or not request_id
+                    or len(request_id) > 200
+                    or not isinstance(message.get("params", {}), dict)
+                ):
+                    raise ValueError("Client Runtime location RPC is malformed")
+                if len(device_tasks) >= 1:
+                    await connection.send_json(
+                        {
+                            "type": "rpc_response",
+                            "request_id": message.get("request_id"),
+                            "error": DeviceLocationError(
+                                "device_location_busy", "A location request is already pending for this App"
+                            ).to_dict(),
+                        }
+                    )
+                    continue
+                task = asyncio.create_task(reply_to_device_rpc(message))
+                device_tasks.add(task)
+
+                def device_task_done(completed: asyncio.Task[Any]) -> None:
+                    device_tasks.discard(completed)
+                    if not completed.cancelled():
+                        completed.exception()
+
+                task.add_done_callback(device_task_done)
+                continue
             response = await build_widget_runtime_rpc_response(
                 binding,
                 message,
@@ -2510,6 +2574,11 @@ async def websocket_widget_client_runtime(
 
         subscription_manager.unregister_all(binding)
         client_widget_runtime_sessions.close(binding.session_id)
+        connection.cancel_device_requests()
+        for task in device_tasks:
+            task.cancel()
+        if device_tasks:
+            await asyncio.gather(*device_tasks, return_exceptions=True)
         if not closed:
             try:
                 await connection.close()

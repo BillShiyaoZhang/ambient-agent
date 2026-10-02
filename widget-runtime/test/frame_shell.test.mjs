@@ -77,6 +77,40 @@ function turn() {
 }
 
 
+test("location needs a recent trusted pointer or key action and consumes it once", async (context) => {
+  const target = new FakeWindow();
+  let transport;
+  const shell = installFrameShell(target, { initializeController: async (_init, next) => {
+    transport = next;
+    return { dispose() {} };
+  } });
+  const channel = new MessageChannel();
+  context.after(() => { shell.dispose(); channel.port1.close(); channel.port2.close(); });
+  const offered = nextMessage(channel.port2);
+  target.dispatch("message", portOffer(target, channel.port1));
+  await offered;
+  const ready = nextMessage(channel.port2);
+  channel.port2.postMessage(initMessage());
+  await ready;
+  await assert.rejects(transport.rpc("location.getCurrentPosition", { options: {} }), { code: "device_location_user_action_required" });
+  target.dispatch("pointerdown", { type: "pointerdown", isTrusted: false });
+  await assert.rejects(transport.rpc("location.getCurrentPosition", { options: {} }), { code: "device_location_user_action_required" });
+  const focus = nextMessage(channel.port2);
+  target.dispatch("wheel", { type: "wheel", isTrusted: true });
+  await focus;
+  await assert.rejects(transport.rpc("location.getCurrentPosition", { options: {} }), { code: "device_location_user_action_required" });
+  const activated = nextMessage(channel.port2);
+  target.dispatch("keydown", { type: "keydown", isTrusted: true });
+  await activated;
+  const request = nextMessage(channel.port2);
+  const result = transport.rpc("location.getCurrentPosition", { options: {} });
+  const message = await request;
+  channel.port2.postMessage({ type: "rpc_response", request_id: message.request_id, result: { latitude: 1 } });
+  assert.deepEqual(await result, { latitude: 1 });
+  await assert.rejects(transport.rpc("location.getCurrentPosition", { options: {} }), { code: "device_location_user_action_required" });
+});
+
+
 test("accepts one parent port, echoes the nonce, then removes global message access", async () => {
   const target = new FakeWindow();
   const initialized = [];

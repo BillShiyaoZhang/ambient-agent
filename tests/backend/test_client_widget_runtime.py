@@ -48,6 +48,92 @@ class FakeConnection:
         return None
 
 
+@pytest.mark.parametrize("browser_error", [None, "device_location_denied", "device_location_timeout"])
+def test_client_location_uses_correlated_browser_broker(browser_error, monkeypatch):
+    monkeypatch.setenv("AMBIENT_FRONTEND_ORIGINS", "http://localhost:5173")
+    main.app_manager.create_or_update_app(
+        "browser-weather",
+        "Weather",
+        js="export default function App() { return null; }",
+        capabilities=[{"id": "device.location", "scope": {"operations": ["current"]}}],
+    )
+    main.client_widget_runtime_tickets.clear()
+    main.client_widget_runtime_sessions.clear()
+    with TestClient(main.app) as client:
+        ticket = client.post(
+            "/api/apps/browser-weather/client-runtime-ticket", headers={"origin": "http://localhost:5173"}
+        ).json()
+        with client.websocket_connect(
+            "/ws/widgets/browser-weather/client-runtime",
+            subprotocols=[CLIENT_WIDGET_RUNTIME_PROTOCOL, f"ticket.{ticket['ticket']}"],
+            headers={"origin": "http://localhost:5173"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "bootstrap"
+            websocket.send_json(
+                {
+                    "type": "rpc_request",
+                    "request_id": "location-1",
+                    "method": "location.getCurrentPosition",
+                    "params": {"options": {"timeout": 1000}},
+                }
+            )
+            request = websocket.receive_json()
+            assert request["type"] == "device_request"
+            assert request["rpc_request_id"] == "location-1"
+            assert request["options"] == {"timeout": 1000, "maximumAge": 0}
+            result = {"latitude": 31, "longitude": 121, "accuracy": 20, "timestamp": 1720000000000}
+            websocket.send_json({"type": "device_response", "request_id": "foreign-request", "result": result})
+            response = {"type": "device_response", "request_id": request["request_id"]}
+            if browser_error:
+                response["error"] = {"code": browser_error, "message": "private browser details"}
+            else:
+                response["result"] = result
+            websocket.send_json(response)
+            received = websocket.receive_json()
+            assert received["type"] == "rpc_response" and received["request_id"] == "location-1"
+            if browser_error:
+                assert received["error"]["code"] == browser_error
+                assert "private" not in received["error"]["message"]
+            else:
+                assert received["result"] == result
+            websocket.send_json(response)
+            websocket.send_json(
+                {"type": "rpc_request", "request_id": "after-location", "method": "unsupported", "params": {}}
+            )
+            after = websocket.receive_json()
+            assert after["request_id"] == "after-location"
+            assert after["error"]["code"] == "runtime_rpc_failed"
+    assert main.client_widget_runtime_sessions.active_count == 0
+
+
+def test_client_location_denied_without_grant_sends_no_device_request(monkeypatch):
+    monkeypatch.setenv("AMBIENT_FRONTEND_ORIGINS", "http://localhost:5173")
+    main.app_manager.create_or_update_app(
+        "browser-static", "Static", js="export default function App() { return null; }", capabilities=[]
+    )
+    with TestClient(main.app) as client:
+        ticket = client.post(
+            "/api/apps/browser-static/client-runtime-ticket", headers={"origin": "http://localhost:5173"}
+        ).json()
+        with client.websocket_connect(
+            "/ws/widgets/browser-static/client-runtime",
+            subprotocols=[CLIENT_WIDGET_RUNTIME_PROTOCOL, f"ticket.{ticket['ticket']}"],
+            headers={"origin": "http://localhost:5173"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "bootstrap"
+            websocket.send_json(
+                {
+                    "type": "rpc_request",
+                    "request_id": "location-1",
+                    "method": "location.getCurrentPosition",
+                    "params": {},
+                }
+            )
+            response = websocket.receive_json()
+            assert response["type"] == "rpc_response"
+            assert response["error"]["code"] == "capability_not_granted"
+
+
 def test_client_runtime_origin_policy_is_explicit_and_frame_url_isolated(
     monkeypatch,
 ) -> None:

@@ -41,6 +41,19 @@ function proposal(): WidgetSchemaProposal {
 }
 
 describe("widget design dependency helpers", () => {
+  it("recomputes the visible permission diff after a schema removal", () => {
+    const original = proposal();
+    const updated = reconcileProposalGraphEntity({ ...original, baseline_capabilities: original.capabilities }, "WeatherObservation", null);
+    expect(updated.capability_changes?.removed.map((grant) => grant.id)).toEqual(["graph.mutate"]);
+    expect(updated.capability_changes?.changed[0].after.scope.entities).toEqual(["Place"]);
+    expect(updated.capability_changes?.added).toEqual([]);
+  });
+
+  it("reports required dependencies removed from an edited proposal", () => {
+    expect(schemaProposalDependencyErrors({ reused_schemas: [], new_schemas: [], capabilities: [], required_features: [{
+      id: "custom:weather.location", description: "当前位置", capability_ids: ["device.location"], network_sources: []
+    }] })).toEqual(["custom:weather.location requires the missing capability device.location"]);
+  });
   it("renames Graph grant references with an edited schema entity", () => {
     const updated = reconcileProposalGraphEntity(
       proposal(),

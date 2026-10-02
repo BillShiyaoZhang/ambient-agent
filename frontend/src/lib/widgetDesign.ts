@@ -12,6 +12,18 @@ export interface WidgetSchemaProposal {
     id: string;
     scope: Record<string, unknown>;
   }>;
+  required_features?: Array<{
+    id: string;
+    description: string;
+    capability_ids: string[];
+    network_sources: Array<{ source_id: string; path: string }>;
+  }>;
+  capability_changes?: {
+    added: Array<{ id: string; scope: Record<string, unknown> }>;
+    changed: Array<{ before: { id: string; scope: Record<string, unknown> }; after: { id: string; scope: Record<string, unknown> } }>;
+    removed: Array<{ id: string; scope: Record<string, unknown> }>;
+  };
+  baseline_capabilities?: Array<{ id: string; scope: Record<string, unknown> }>;
 }
 
 const GRAPH_CAPABILITIES = new Set(["graph.query", "graph.mutate"]);
@@ -45,6 +57,16 @@ export function reconcileProposalGraphEntity(
     if (uniqueEntities.length === 0) return [];
     return [{ ...grant, scope: { ...grant.scope, entities: uniqueEntities } }];
   });
+  if (updated.baseline_capabilities) {
+    const before = new Map(updated.baseline_capabilities.map((grant) => [grant.id, grant]));
+    const after = new Map(updated.capabilities.map((grant) => [grant.id, grant]));
+    updated.capability_changes = {
+      added: updated.capabilities.filter((grant) => !before.has(grant.id)),
+      removed: updated.baseline_capabilities.filter((grant) => !after.has(grant.id)),
+      changed: updated.capabilities.filter((grant) => before.has(grant.id) && JSON.stringify(before.get(grant.id)) !== JSON.stringify(grant))
+        .map((grant) => ({ before: before.get(grant.id)!, after: grant })),
+    };
+  }
   return updated;
 }
 
@@ -72,6 +94,12 @@ export function schemaProposalDependencyErrors(proposal: WidgetSchemaProposal): 
     )].sort();
     if (unknown.length > 0) {
       errors.push(`${grant.id} references entities not present in the schema proposal: ${unknown.join(", ")}`);
+    }
+  }
+  const grantIds = new Set(proposal.capabilities.map((grant) => grant.id));
+  for (const feature of proposal.required_features || []) {
+    for (const capabilityId of feature.capability_ids) {
+      if (!grantIds.has(capabilityId)) errors.push(`${feature.id} requires the missing capability ${capabilityId}`);
     }
   }
   return errors;

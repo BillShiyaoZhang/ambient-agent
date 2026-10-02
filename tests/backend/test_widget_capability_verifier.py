@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPO_ROOT / "scripts" / "verify_widget_controller.mjs"
 
 
-def verify(tmp_path, source, capabilities):
+def verify(tmp_path, source, capabilities, requirements=None):
     app_dir = tmp_path / "test-app"
     app_dir.mkdir()
     controller = app_dir / "controller.js"
@@ -28,12 +28,97 @@ def verify(tmp_path, source, capabilities):
         encoding="utf-8",
     )
     return subprocess.run(
-        ["node", str(VERIFIER), str(controller)],
+        [
+            "node",
+            str(VERIFIER),
+            str(controller),
+            *(["--requirements-json", json.dumps(requirements)] if requirements is not None else []),
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def test_location_requires_current_grant_and_bounded_options(tmp_path):
+    grant = [{"id": "device.location", "scope": {"operations": ["current"]}}]
+    source = "export default function App() { const locate = () => ambient.location.getCurrentPosition({timeout:1000,maximumAge:0}); return null; }"
+    assert verify(tmp_path, source, grant).returncode == 0
+    for index, (candidate, grants) in enumerate(
+        [
+            (source, []),
+            (source.replace("timeout:1000", "timeout:0"), grant),
+            (source.replace("maximumAge:0", "enableHighAccuracy:true"), grant),
+            (source.replace("getCurrentPosition", "watchPosition"), grant),
+        ]
+    ):
+        directory = tmp_path / f"invalid-{index}"
+        directory.mkdir()
+        assert verify(directory, candidate, grants).returncode != 0
+
+
+def test_required_feature_cannot_be_satisfied_by_explanatory_placeholder(tmp_path):
+    grants = [{"id": "device.location", "scope": {"operations": ["current"]}}]
+    requirements = [{"id": "current-location", "capability_ids": ["device.location"], "network_sources": []}]
+    completed = verify(
+        tmp_path,
+        "export default function App(){ return ambient.html`<div>设备定位不可用</div>`; }",
+        grants,
+        requirements,
+    )
+    assert completed.returncode != 0
+    assert json.loads(completed.stderr)["code"] == "required_feature_missing"
+
+
+def test_required_network_feature_needs_called_exact_source_and_path(tmp_path):
+    grants = [
+        {
+            "id": "network.request",
+            "scope": {
+                "sources": {
+                    "weather": {
+                        "base_url": "https://api.open-meteo.com",
+                        "paths": ["/v1/forecast", "/other"],
+                        "methods": ["GET"],
+                        "response_limit": 4096,
+                    }
+                }
+            },
+        }
+    ]
+    requirements = [
+        {
+            "id": "weather",
+            "capability_ids": ["network.request"],
+            "network_sources": [{"source_id": "weather", "path": "/v1/forecast"}],
+        }
+    ]
+    good = "ambient.net.request('weather',{path:'/v1/forecast',method:'GET'})"
+    cases = [
+        "const request = ambient.net.request;",
+        f"if(false) {good};",
+        f"const neverCalled = () => {good};",
+        f"function neverCalled() {{ return {good}; }}",
+        f"const ambient = {{net: {{request: () => null}}}}; {good};",
+        "ambient.net.request('weather',{path:'/other',method:'GET'});",
+        "const path='/v1/forecast'; ambient.net.request('weather',{path,method:'GET'});",
+        "const source='weather'; ambient.net.request(source,{path:'/v1/forecast',method:'GET'});",
+    ]
+    for index, body in enumerate(cases):
+        directory = tmp_path / f"case-{index}"
+        directory.mkdir()
+        completed = verify(directory, f"export default function App(){{ {body} return null; }}", grants, requirements)
+        assert completed.returncode != 0, body
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    completed = verify(
+        allowed,
+        f"export default function App(){{ const load = () => {good}; return ambient.html`<button onClick=${{load}}>Load</button>`; }}",
+        grants,
+        requirements,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_verifier_rejects_graph_use_without_a_grant(tmp_path):

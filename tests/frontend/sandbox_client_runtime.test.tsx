@@ -168,6 +168,7 @@ describe("SandboxWidget isolated client runtime", () => {
 
   const startReadySession = async (
     props: Omit<React.ComponentProps<typeof SandboxWidget>, "widget"> = {},
+    capabilityIds = ["graph.query"],
   ) => {
     const rendered = render(<SandboxWidget widget={widget} {...props} />);
     await act(async () => {
@@ -186,13 +187,48 @@ describe("SandboxWidget isolated client runtime", () => {
         type: "bootstrap",
         protocol_version: 1,
         controller_source: widget.js,
-        capability_ids: ["graph.query"],
+        capability_ids: capabilityIds,
       });
       channel.port1.emit({ type: "port_ready", nonce: "host-nonce" });
       channel.port1.emit({ type: "ready" });
     });
     return { ...rendered, frame, socket, channel };
   };
+
+  it("correlates authorized browser requests and returns only limited device coordinates", async () => {
+    vi.stubGlobal("isSecureContext", true);
+    const locate = vi.fn((success) => success({ coords: { latitude: 31, longitude: 121, accuracy: 10, altitude: 500 }, timestamp: 1720000000000 }));
+    vi.stubGlobal("navigator", { geolocation: { getCurrentPosition: locate } });
+    const { socket, channel } = await startReadySession({}, ["device.location"]);
+    act(() => channel.port1.emit({ type: "rpc_request", request_id: "location-1", method: "location.getCurrentPosition", params: { options: {} } }));
+    await act(async () => socket.emit({ type: "device_request", request_id: "server-request", rpc_request_id: "location-1", method: "location.current", options: { timeout: 1000, maximumAge: 0 } }));
+    expect(locate).toHaveBeenCalledTimes(1);
+    expect(socket.sent.map((value) => JSON.parse(value)).at(-1)).toEqual({ type: "device_response", request_id: "server-request", result: { latitude: 31, longitude: 121, accuracy: 10, timestamp: 1720000000000 } });
+    expect(screen.getByTitle("Notes").getAttribute("allow")).toBe("");
+  });
+
+  it("never prompts the device for an unsolicited or ungranted server request", async () => {
+    const locate = vi.fn();
+    vi.stubGlobal("isSecureContext", true);
+    vi.stubGlobal("navigator", { geolocation: { getCurrentPosition: locate } });
+    const { socket } = await startReadySession();
+    await act(async () => socket.emit({ type: "device_request", request_id: "server-request", rpc_request_id: "missing", method: "location.current", options: { timeout: 1000, maximumAge: 0 } }));
+    expect(locate).not.toHaveBeenCalled();
+    expect(socket.sent.map((value) => JSON.parse(value)).at(-1).error.code).toBe("device_location_request_invalid");
+  });
+
+  it("drops a late location result after the Widget session closes", async () => {
+    vi.stubGlobal("isSecureContext", true);
+    let success: (value: unknown) => void = () => undefined;
+    vi.stubGlobal("navigator", { geolocation: { getCurrentPosition: (callback: typeof success) => { success = callback; } } });
+    const { socket, channel, unmount } = await startReadySession({}, ["device.location"]);
+    act(() => channel.port1.emit({ type: "rpc_request", request_id: "location-1", method: "location.getCurrentPosition", params: { options: {} } }));
+    act(() => socket.emit({ type: "device_request", request_id: "server-request", rpc_request_id: "location-1", method: "location.current", options: { timeout: 1000, maximumAge: 0 } }));
+    const count = socket.sent.length;
+    unmount();
+    await act(async () => success({ coords: { latitude: 1, longitude: 2, accuracy: 3 }, timestamp: 4 }));
+    expect(socket.sent).toHaveLength(count);
+  });
 
   it("uses a one-time ticket, strict iframe attributes, and ticket WebSocket protocols", async () => {
     const { frame, socket, channel } = await startSession();

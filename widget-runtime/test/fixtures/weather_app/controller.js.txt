@@ -1,0 +1,177 @@
+const { useEffect, useRef, useState } = ambient.react;
+const { Button, Card, Column, List, Row, Text, TextField } = ambient.components;
+
+function validCoordinates(value) {
+  return value && Number.isFinite(value.latitude) && Math.abs(value.latitude) <= 90
+    && Number.isFinite(value.longitude) && Math.abs(value.longitude) <= 180;
+}
+
+function condition(code) {
+  if (code === 0) return "晴朗";
+  if (code >= 1 && code <= 3) return "多云";
+  if (code === 45 || code === 48) return "有雾";
+  if (code >= 51 && code <= 67) return "降雨";
+  if (code >= 71 && code <= 77) return "降雪";
+  if (code >= 80 && code <= 82) return "阵雨";
+  if (code === 85 || code === 86) return "阵雪";
+  if (code >= 95 && code <= 99) return "雷暴";
+  return "天气状况暂无描述";
+}
+
+export default function WeatherApp() {
+  const [query, setQuery] = useState("");
+  const [places, setPlaces] = useState([]);
+  const [searchStatus, setSearchStatus] = useState("输入城市或地名，然后搜索。");
+  const [selected, setSelected] = useState(null);
+  const [weather, setWeather] = useState(null);
+  const [weatherStatus, setWeatherStatus] = useState("选择地点或点击当前位置查看实时天气。");
+  const [locationStatus, setLocationStatus] = useState("");
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [weatherBusy, setWeatherBusy] = useState(false);
+  const [locationBusy, setLocationBusy] = useState(false);
+  const searchSequence = useRef(0);
+  const weatherSequence = useRef(0);
+  const locationSequence = useRef(0);
+  const selectedRef = useRef(null);
+
+  useEffect(() => () => {
+    searchSequence.current += 1;
+    weatherSequence.current += 1;
+    locationSequence.current += 1;
+  }, []);
+
+  function editQuery(value) {
+    searchSequence.current += 1;
+    setQuery(value);
+    setPlaces([]);
+    setSearchBusy(false);
+    setSearchStatus("输入城市或地名，然后搜索。");
+  }
+
+  async function searchPlaces(value = query) {
+    const name = String(value).trim();
+    const sequence = ++searchSequence.current;
+    setPlaces([]);
+    if (!name) {
+      setSearchBusy(false);
+      setSearchStatus("请先输入城市或地名。");
+      return;
+    }
+    setSearchBusy(true);
+    setSearchStatus("正在搜索地点…");
+    try {
+      const data = await ambient.net.request("geocoding", {
+        path: "/v1/search", method: "GET", query: { name, count: 10, language: "zh", format: "json" },
+      });
+      if (sequence !== searchSequence.current) return;
+      if (!data || typeof data !== "object" || data.error || (data.results !== undefined && !Array.isArray(data.results))) {
+        throw new Error("地点搜索返回的数据无法读取。");
+      }
+      const matches = (data.results || []).filter((place) => validCoordinates(place) && typeof place.name === "string")
+        .map((place) => ({
+          id: String(place.id ?? `${place.latitude},${place.longitude}`),
+          name: place.name,
+          label: [place.name, place.admin1, place.country].filter(Boolean).join(" · "),
+          latitude: place.latitude,
+          longitude: place.longitude,
+        }));
+      setPlaces(matches);
+      setSearchStatus(matches.length ? "请选择一个地点查看天气。" : "没有找到地点，请换一个名称再搜索。");
+    } catch (error) {
+      if (sequence !== searchSequence.current) return;
+      setSearchStatus("地点搜索失败，请检查网络后重试。");
+    } finally {
+      if (sequence === searchSequence.current) setSearchBusy(false);
+    }
+  }
+
+  async function loadWeather(place) {
+    if (!validCoordinates(place)) return;
+    const sequence = ++weatherSequence.current;
+    selectedRef.current = place;
+    setSelected(place);
+    setWeather(null);
+    setWeatherBusy(true);
+    setWeatherStatus("正在获取实时天气…");
+    try {
+      const data = await ambient.net.request("open-meteo", {
+        path: "/v1/forecast", method: "GET",
+        query: {
+          latitude: place.latitude, longitude: place.longitude, timezone: "auto",
+          current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+        },
+      });
+      if (sequence !== weatherSequence.current) return;
+      const current = data && !data.error ? data.current : null;
+      if (!current || !Number.isFinite(current.temperature_2m) || typeof current.time !== "string") {
+        throw new Error("天气服务返回的数据无法读取。");
+      }
+      const units = data.current_units || {};
+      setWeather({
+        temperature: `${current.temperature_2m} ${units.temperature_2m || "°C"}`,
+        apparent: Number.isFinite(current.apparent_temperature) ? `${current.apparent_temperature} ${units.apparent_temperature || "°C"}` : "暂无",
+        humidity: Number.isFinite(current.relative_humidity_2m) ? `${current.relative_humidity_2m}%` : "暂无",
+        wind: Number.isFinite(current.wind_speed_10m) ? `${current.wind_speed_10m} ${units.wind_speed_10m || "km/h"}` : "暂无",
+        condition: condition(current.weather_code), time: current.time,
+      });
+      setWeatherStatus("天气已更新，数据来源：Open-Meteo。");
+    } catch (error) {
+      if (sequence !== weatherSequence.current) return;
+      setWeatherStatus("获取天气失败，请点击重试天气。");
+    } finally {
+      if (sequence === weatherSequence.current) setWeatherBusy(false);
+    }
+  }
+
+  function selectPlace(place) {
+    locationSequence.current += 1;
+    setLocationBusy(false);
+    setLocationStatus("");
+    return loadWeather(place);
+  }
+
+  async function useCurrentPosition() {
+    const sequence = ++locationSequence.current;
+    setLocationBusy(true);
+    setLocationStatus("正在请求设备定位权限…");
+    try {
+      const position = await ambient.location.getCurrentPosition({ timeout: 10000, maximumAge: 120000 });
+      if (sequence !== locationSequence.current) return;
+      if (!validCoordinates(position)) throw new Error("定位结果无效。");
+      setLocationStatus("已获得当前位置。");
+      await loadWeather({ name: "当前位置", label: "当前位置", latitude: position.latitude, longitude: position.longitude });
+    } catch (error) {
+      if (sequence !== locationSequence.current) return;
+      setLocationStatus(error && error.code === "device_location_denied"
+        ? "定位权限被拒绝，您仍可搜索并选择地点。"
+        : error && error.code === "device_location_timeout"
+          ? "定位超时，您可再次尝试或搜索地点。"
+          : "无法获取当前位置，您可搜索并选择地点。");
+    } finally {
+      if (sequence === locationSequence.current) setLocationBusy(false);
+    }
+  }
+
+  return ambient.html`
+    <${Card} title="天气">
+      <${Column} gap="12px">
+        <${TextField} label="搜索地点" placeholder="例如：上海、北京" value=${query} onChange=${editQuery} onEnter=${searchPlaces} />
+        <${Row} gap="8px" wrap=${true}>
+          <${Button} label=${searchBusy ? "搜索中…" : "搜索"} disabled=${searchBusy} onClick=${() => searchPlaces()} />
+          <${Button} label=${locationBusy ? "定位中…" : "当前位置"} disabled=${locationBusy} onClick=${useCurrentPosition} />
+        <//>
+        <${Text} text=${searchStatus} role="status" />
+        <${List} items=${places} onItemClick=${selectPlace} />
+        ${locationStatus ? ambient.html`<${Text} text=${locationStatus} role="status" />` : null}
+        <${Text} text=${selected ? `所选地点：${selected.label}` : "尚未选择地点"} />
+        <${Text} text=${weatherStatus} role="status" />
+        ${weather ? ambient.html`
+          <${Text} text=${`${weather.condition} · 气温 ${weather.temperature}`} />
+          <${Text} text=${`体感 ${weather.apparent} · 湿度 ${weather.humidity} · 风速 ${weather.wind}`} />
+          <${Text} text=${`观测时间：${weather.time}（所选地点当地时间）`} />
+        ` : null}
+        <${Button} label=${weatherBusy ? "天气更新中…" : "重试天气"} disabled=${weatherBusy || !selected} onClick=${() => loadWeather(selectedRef.current)} />
+      <//>
+    <//>
+  `;
+}

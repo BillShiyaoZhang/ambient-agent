@@ -145,14 +145,14 @@ Jev 与后续生成共用本次路由的墙钟预算；生成阶段只接收扣�
 
 建议先在测试环境使用 `shadow`，以相同上下文评估中文、跨轮指代、数据操作与代码修改混淆、复合请求及只读误入副作用路径；记录 coverage、回退率、完整链路延迟和费用。真实数据验收前保持默认 `off`。实现边界和离线评分命令见仓库中的 `proposals/jev-intent-router/IMPLEMENTATION.md`；研究结论及评估用例保留在同目录。
 
-通用判断的冻结配置位于 `model_snapshot.workflow_decisions` / `RunContext.workflow_decisions`，默认 `off`，历史快照缺字段时也按 `off` 恢复。`DecisionConfig.stage_modes` 随配置保存用途模式字典，环境变量 `JEV_DECISION_STAGE_MODES` 默认 `{}`，缺项继承 `JEV_DECISION_MODE`。仅接受 `intent_parameters`、`graph_query_template`、`schema_selection`、`composite_review`、`development_plan_review` 五个用途，以及 `off`、`shadow`、`cascade` 三种模式；非法 JSON、用途或模式拒绝快照，旧配置缺字典按 `{}` 恢复。用途模式不涉及 key，也不改变已有 Run 的冻结配置。
+通用判断的冻结配置位于 `model_snapshot.workflow_decisions` / `RunContext.workflow_decisions`，默认 `off`，历史快照缺字段时也按 `off` 恢复。`DecisionConfig.stage_modes` 随配置保存用途模式字典，环境变量 `JEV_DECISION_STAGE_MODES` 默认 `{}`，缺项继承 `JEV_DECISION_MODE`。仅接受 `intent_parameters`、`graph_query_template`、`schema_selection`、`composite_review`、`development_plan_review`、`feature_coverage_review` 六个用途，以及 `off`、`shadow`、`cascade` 三种模式；非法 JSON、用途或模式拒绝快照，旧配置缺字典按 `{}` 恢复。用途模式不涉及 key，也不改变已有 Run 的冻结配置。
 
 实测合成用例中多项 Noul 判断未过门槛，可只对路由参数生成启用 `cascade`，其他阶段先旁路或关闭；这不代表语义质量已提高。下面的配置启用参数生成，保留其他用途的付费 `shadow` 证据：
 
 ```dotenv
 JEV_ROUTER_MODE=cascade
 JEV_DECISION_MODE=off
-JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow"}'
+JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow","feature_coverage_review":"shadow"}'
 ```
 
 Score 的两位小数舍入兼容校验保留严格类型、范围、概率总和、keys 和 legend，并检查 `p ± 0.005`、真实总和为 1 下的加权期望范围与 `score ± 0.005` 是否相交；只保留供应商分数，不改 Choice/Noul 门槛。该规则来自实测推断，详见[Agent Harness](/agent/harness.md)。完整接口、配置与故障轨迹设计见仓库 `proposals/decision-generation-harness/DESIGN.md`；这些判断不替代用户审批、权限或确定性校验。

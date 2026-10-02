@@ -8,7 +8,7 @@ import {
 } from "../controller_facade.mjs";
 
 
-function mountTestController() {
+function mountTestController(capabilityIds = [], rpc = async () => undefined) {
   let ambient;
   const runtime = {
     Component: class {},
@@ -49,20 +49,37 @@ function mountTestController() {
     runtime,
     root,
     controllerSource: "export default function Controller() { return null; }",
-    capabilityIds: [],
+    capabilityIds,
     presentationContext: {
       theme: { preference: "system", effective: "dark" },
       locale: "en-US",
       reduced_motion: false,
     },
     transport: {
-      rpc: async () => undefined,
+      rpc,
       storageRequest: async () => undefined,
       hostEvent: () => true,
     },
   });
   return { ambient, controller };
 }
+
+
+test("location namespace is grant-gated and calls only the one-shot broker", async () => {
+  const absent = mountTestController();
+  assert.equal(absent.ambient.location, undefined);
+  const calls = [];
+  const granted = mountTestController(["device.location"], async (...args) => {
+    calls.push(args);
+    return { latitude: 1, longitude: 2, accuracy: 3, timestamp: 4 };
+  });
+  assert.equal(Object.isFrozen(granted.ambient.location), true);
+  assert.equal(granted.ambient.location.watchPosition, undefined);
+  assert.deepEqual(await granted.ambient.location.getCurrentPosition({ timeout: 1000 }), { latitude: 1, longitude: 2, accuracy: 3, timestamp: 4 });
+  assert.deepEqual(calls, [["location.getCurrentPosition", { options: { timeout: 1000 } }]]);
+  absent.controller.dispose();
+  granted.controller.dispose();
+});
 
 
 test("ambient.storage exposes the complete local storage contract", async () => {

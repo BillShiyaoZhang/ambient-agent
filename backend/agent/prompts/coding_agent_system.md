@@ -32,6 +32,7 @@ Use `[APP TYPE STANDARD]` and `[APP TYPE DECLARATION RULES]` to classify the act
 - Never import modules. Never use `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `window`, `document`, `navigator`, storage globals, `eval`, `Function`, Node APIs, environment variables, shell commands, or host filesystem APIs.
 - The host injects only capability namespaces granted by Manifest V2. A namespace or method not in the approved Runtime Contract does not exist.
 - Use only literal resource identifiers so staging verification can prove scope:
+  - `device.location` with `operations: ["current"]` → `ambient.location.getCurrentPosition({ timeout: 10000, maximumAge: 0 })` from an explicit button or keyboard action only. It returns `{ latitude, longitude, accuracy, timestamp }`; handle denied, unavailable, insecure context and timeout errors. Never call on mount, watch position, enable high accuracy, or use server/IP location. Keep manual place search available when location is denied.
   - `graph.query` → `ambient.graph.subscribe({ type: "ApprovedType" }, callback)`; unsubscribe on cleanup.
   - `graph.mutate` → pass an array literal containing object literals directly to `ambient.graph.mutate([...])`. The exact action DSL is:
     - create: `{ action: "create_node", type: "ApprovedType", properties: { ... } }`

@@ -558,6 +558,13 @@ export function mountController({
     ambient.graph = Object.freeze(graph);
   }
 
+  if (allowed.has("device.location")) {
+    ambient.location = Object.freeze({
+      getCurrentPosition: (options = {}) =>
+        transport.rpc("location.getCurrentPosition", { options }),
+    });
+  }
+
   if (allowed.has("network.request")) {
     ambient.net = Object.freeze({
       request: (sourceId, request) =>

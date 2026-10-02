@@ -9,7 +9,7 @@ def test_catalog_is_structured_versioned_and_uses_the_capability_ontology():
     payload = catalog.project(AgentRole.SCHEMA_ALIGNMENT)
 
     assert payload["catalog_version"] == SYSTEM_CAPABILITY_CATALOG_VERSION
-    assert payload["capability_ontology_version"] == 1
+    assert payload["capability_ontology_version"] == 2
     assert tuple(item["id"] for item in payload["widget_runtime"]["capability_categories"]) == capability_category_ids()
     assert payload["context_graph"]["ontology_id"] == "ambient-context"
     assert "widget_runtime" in payload

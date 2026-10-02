@@ -192,6 +192,17 @@ class CapabilityAuthorizer:
             if entity is not None and entity not in entities:
                 raise self._scope_denied("graph.mutate", operation, {"entity": entity})
 
+    def authorize_location(
+        self,
+        app_id: str,
+        operation: str,
+        manifest_revision: str | None = None,
+        grants_digest: str | None = None,
+    ) -> None:
+        grant = self._grant(app_id, "device.location", operation, manifest_revision, grants_digest)
+        if operation != "current" or operation not in grant.scope["operations"]:
+            raise self._scope_denied("device.location", operation, {"operation": operation})
+
     def authorize_network_request(
         self,
         app_id: str,

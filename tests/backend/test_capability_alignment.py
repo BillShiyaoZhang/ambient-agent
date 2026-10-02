@@ -140,5 +140,5 @@ async def test_schema_alignment_repairs_invalid_capability_scope_with_validation
     assert len(provider.calls) == 2
     correction = provider.calls[1][-1]["content"]
     assert "network.request sources must be a non-empty object" in correction
-    assert "Do not broaden the requested capabilities" in correction
+    assert "do not add unrelated permissions" in correction
     assert proposal["capabilities"][0]["scope"]["sources"]["weather-api"]["paths"] == ["/v1/forecast"]

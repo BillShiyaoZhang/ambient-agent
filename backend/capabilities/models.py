@@ -114,6 +114,11 @@ def _normalize_scope(category_id: str, value: Any) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"Capability '{category_id}' has unknown scope fields: {', '.join(sorted(unknown))}")
 
+    if category_id == "device.location":
+        operations = _string_list(value.get("operations"), field="device.location operations")
+        if operations != ["current"]:
+            raise ValueError("device.location supports only the current operation")
+        return {"operations": operations}
     if category_id == "graph.query":
         return {"entities": _string_list(value.get("entities"), field="graph.query entities")}
     if category_id == "graph.mutate":

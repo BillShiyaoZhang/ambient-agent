@@ -200,6 +200,7 @@ def finding_from_exception(
         "widget_runtime_code_error",
         "widget_syntax_error",
         "widget_verification_failed",
+        "required_feature_missing",
     }:
         repairability = "code_only"
         contract_impact = "none"

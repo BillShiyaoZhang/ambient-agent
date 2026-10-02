@@ -32,6 +32,7 @@ Capability ontology 与 `ambient-context` 数据本体都属于系统领域模�
 | `graph.query` | `ambient.graph.subscribe` | `entities` | 只读取列出的本体实体；include 的目标实体也必须在 scope 内 |
 | `graph.mutate` | `ambient.graph.mutate` | `entities`, `operations` | 对列出的实体执行 `create`、`update`、`delete`；边操作还受 `edge_types` 约束 |
 | `network.request` | `ambient.net.request` | `sources` | 访问声明的 HTTPS JSON source；source 固定 origin、path、method 和响应上限 |
+| `device.location` | `ambient.location.getCurrentPosition` | `operations: ["current"]` | 用户操作后请求一次设备位置；还需浏览器权限，由可信 Web 宿主代理 |
 | `file.read` | `ambient.files.read/list` | `paths` | 读取 App 私有 data 目录内匹配的相对路径 |
 | `file.write` | `ambient.files.write` | `paths`, `max_bytes` | 原子写入 App 私有 data 目录；禁止路径逃逸与符号链接 |
 | `file.delete` | `ambient.files.delete` | `paths` | 删除 App 私有 data 文件，不删除目录或 App 产物 |
@@ -87,6 +88,8 @@ App manifest V2 必须包含 `capabilities`；没有任何外部访问的 App �
 - Manifest 不能在 codegen 阶段自行扩大批准结果；staging 校验比较批准 grant 与产物 manifest 的规范化值。
 
 ## 4. 从申请到执行
+
+`device.location` 只授予 `operations: ["current"]` 的一次性当前位置读取。Widget 通过 `ambient.location.getCurrentPosition` 发起请求，仍不能接触 `navigator` 或直接获得 iframe 定位权限。服务端校验 App/session/revision/grants 后，由可信 Web 宿主在用户操作和浏览器权限许可下定位；有界结果仅包含经纬度、精度和时间。请求与当前 RPC 关联，关闭 session、拒绝授权、超时及设备不可用均明确失败。headless Runtime 不得用服务器位置冒充用户位置。
 
 ```mermaid
 sequenceDiagram

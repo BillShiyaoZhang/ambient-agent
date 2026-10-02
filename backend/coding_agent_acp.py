@@ -828,7 +828,9 @@ def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]
         raise CodingAgentACPStartupError(f"Unable to prepare coding-agent staging directory: {exc!s}") from exc
 
 
-def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
+def _validate_staged_app(
+    staging_dir: Path, app_id: str, *, required_features: list[dict[str, Any]] | None = None
+) -> None:
     controller_path = _resolve_in_workspace("controller.js", staging_dir)
     if not controller_path.is_file():
         raise CodingAgentArtifactError("Coding agent did not produce the required controller.js artifact")
@@ -875,8 +877,11 @@ def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
             stage="static_verify",
         )
     try:
+        command = [node_executable, str(verifier), str(controller_path)]
+        if required_features:
+            command.extend(["--requirements-json", json.dumps(required_features, ensure_ascii=False)])
         completed = subprocess.run(
-            [node_executable, str(verifier), str(controller_path)],
+            command,
             cwd=staging_dir,
             env=_safe_terminal_environment(None),
             capture_output=True,
@@ -912,6 +917,17 @@ def _validate_staged_app(staging_dir: Path, app_id: str) -> None:
             code="widget_verification_failed",
             stage="static_verify",
         )
+
+
+def validate_coding_agent_feature_coverage(staging_dir: Path, app_id: str, requirements: list[dict[str, Any]]) -> None:
+    """Check mandatory declarations and actual authorized SDK call sites."""
+    if not requirements:
+        return
+    from backend.widget_requirements import assert_required_feature_implementation
+
+    manifest = AppManifest.read(staging_dir / "manifest.json", expected_app_id=app_id)
+    assert_required_feature_implementation(manifest, requirements)
+    _validate_staged_app(staging_dir, app_id, required_features=requirements)
 
 
 def _promote_staging_app(staging_dir: Path, live_dir: Path) -> None:

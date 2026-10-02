@@ -922,6 +922,13 @@ async function installPageRuntime(page, session, transformedController) {
         }
         ambient.graph = Object.freeze(graph);
       }
+      if (allowed.has("device.location")) {
+        ambient.location = Object.freeze({
+          getCurrentPosition: (options = {}) => window.__ambientRpc({
+            method: "location.getCurrentPosition", params: { options },
+          }),
+        });
+      }
       if (allowed.has("network.request")) {
         ambient.net = Object.freeze({
           request: (sourceId, request) =>

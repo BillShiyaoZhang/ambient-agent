@@ -1722,6 +1722,27 @@ function App() {
             </div>
 
             {/* 💬 自然语言微调反馈输入 */}
+            {editedProposal.capability_changes && (
+              <div className="rounded-xl border border-amber-500/20 p-4 text-xs text-slate-300">
+                <h4 className="font-semibold text-amber-300">{language === "zh" ? "相对当前版本的权限变更" : "Permission changes from the current version"}</h4>
+                {([
+                  [language === "zh" ? "新增" : "Added", editedProposal.capability_changes.added],
+                  [language === "zh" ? "修改" : "Changed", editedProposal.capability_changes.changed],
+                  [language === "zh" ? "撤销" : "Removed", editedProposal.capability_changes.removed],
+                ] as const).map(([label, changes]) => changes.length > 0 && (
+                  <div key={label} className="mt-2"><span>{label}</span><pre className="mt-1 whitespace-pre-wrap break-words text-[10px]">{JSON.stringify(changes, null, 2)}</pre></div>
+                ))}
+              </div>
+            )}
+            {!!editedProposal.required_features?.length && (
+              <div className="rounded-xl border border-cyan-500/20 p-4 text-xs text-slate-300">
+                <h4 className="font-semibold text-cyan-300">{language === "zh" ? "必须完成的功能" : "Required functional acceptance criteria"}</h4>
+                {editedProposal.required_features.map((feature) => (
+                  <div key={feature.id} className="mt-2"><p>{feature.description}</p><code className="text-[10px] text-slate-400">{feature.id}</code></div>
+                ))}
+              </div>
+            )}
+
             <div className="flex flex-col gap-2 border-t border-white/10 pt-4 mt-2">
               <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
                 💬 {language === "zh" ? "使用自然语言调整本体定义（可选）：" : "Adjust Ontology via Natural Language (Optional):"}

@@ -56,6 +56,14 @@ class SystemCapabilityCatalog:
                         CAPABILITY_ONTOLOGY[category_id].to_dict() for category_id in capability_category_ids()
                     ],
                     "sdk_contracts": {
+                        "location.getCurrentPosition": {
+                            "capability": "device.location",
+                            "call": "ambient.location.getCurrentPosition({ timeout: 10000, maximumAge: 0 })",
+                            "user_action_required": True,
+                            "options": {"timeout": "integer 1000..30000 ms", "maximumAge": "integer 0..300000 ms"},
+                            "result_fields": ["latitude", "longitude", "accuracy", "timestamp"],
+                            "runtime": "trusted browser device only; unavailable in headless runtime",
+                        },
                         "graph.subscribe": {
                             "capability": "graph.query",
                             "call": 'ambient.graph.subscribe({ type: "ApprovedEntity" }, callback)',

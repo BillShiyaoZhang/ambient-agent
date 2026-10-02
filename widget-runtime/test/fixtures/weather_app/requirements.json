@@ -1,0 +1,5 @@
+[
+  {"id": "custom:weather.forecast", "description": "获取并展示所选地点的真实天气", "capability_ids": ["network.request"], "network_sources": [{"source_id": "open-meteo", "path": "/v1/forecast"}]},
+  {"id": "custom:weather.search", "description": "搜索真实地点并选择结果查看天气", "capability_ids": ["network.request"], "network_sources": [{"source_id": "geocoding", "path": "/v1/search"}]},
+  {"id": "custom:weather.location", "description": "用户点击后请求一次设备定位并展示当前位置天气", "capability_ids": ["device.location", "network.request"], "network_sources": [{"source_id": "open-meteo", "path": "/v1/forecast"}]}
+]

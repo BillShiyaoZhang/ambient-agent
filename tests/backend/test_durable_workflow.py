@@ -127,6 +127,48 @@ def test_staged_runtime_contract_rejects_backend_adapter_declarations(tmp_path: 
         DurableAgentWorkflow._assert_staged_runtime_contract(tmp_path, contract)
 
 
+def test_installed_permission_baseline_is_snapshotted_once(tmp_path: Path) -> None:
+    workflow = _workflow(tmp_path, RunStore(str(tmp_path)), GraphDatabase(str(tmp_path)))
+    state = _state(
+        phase="plan",
+        workflow_type="widget_modify",
+        intent=IntentPlan(kind=IntentKind.WIDGET_MODIFY, app_id="weather-app", instruction="Add location search"),
+    )
+    directory = workflow.app_manager.apps_dir / "weather-app"
+    directory.mkdir(parents=True)
+    grant = {"id": "device.location", "scope": {"operations": ["current"]}}
+    _write_manifest(directory, "weather-app", _runtime_contract("weather-app", [grant]))
+    baseline = workflow._existing_app_manifest(state, "weather-app")
+    assert baseline["capabilities"] == [grant]
+    _write_manifest(directory, "weather-app", _runtime_contract("weather-app"))
+    assert workflow._existing_app_manifest(state, "weather-app") == baseline
+
+
+@pytest.mark.asyncio
+async def test_missing_required_dependency_stops_before_paid_coding(tmp_path: Path) -> None:
+    runner = AsyncMock()
+    workflow = _workflow(tmp_path, RunStore(str(tmp_path)), GraphDatabase(str(tmp_path)), coding_agent_runner=runner)
+    contract = _runtime_contract("weather-app")
+    contract["required_features"] = [
+        {
+            "id": "custom:weather.location",
+            "description": "当前位置",
+            "capability_ids": ["device.location"],
+            "network_sources": [],
+        }
+    ]
+    state = _state(
+        phase="stage_code",
+        workflow_type="widget_modify",
+        intent=IntentPlan(kind=IntentKind.WIDGET_MODIFY, app_id="weather-app", instruction="当前位置天气"),
+        data={"runtime_contract": contract},
+    )
+    with pytest.raises(WorkflowError) as captured:
+        await workflow._phase_stage_code({"id": "test-run"}, state)
+    assert captured.value.code == "design_change_required"
+    runner.assert_not_awaited()
+
+
 def test_verification_schema_selections_use_only_server_issued_safe_fields() -> None:
     selected = [
         {"node_type": "Document", "property_name": "temperature", "detected_type": "string"},
@@ -1865,6 +1907,7 @@ async def test_schema_verification_findings_cannot_be_bypassed_into_promotion(
     )
     run = _create_run(store, state, content="Build weather")
     monkeypatch.setattr(workflow, "_staged_widget_code", lambda _state: {"js": "export default () => null"})
+    _write_manifest(staging_dir, "weather-app", _runtime_contract("weather-app"))
 
     async def dirty_diff(**_kwargs: Any) -> VerificationDiff:
         return VerificationDiff(
@@ -1942,7 +1985,7 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
     live_dir = apps_dir / "durable-app"
     live_dir.mkdir(parents=True)
     old_controller = "// old live controller"
-    new_controller = "// verified v2 controller"
+    new_controller = "export default function App() { return null; } // verified v2 controller"
     (live_dir / "index.html").write_text("<main>old</main>", encoding="utf-8")
     (live_dir / "style.css").write_text("main { color: gray; }", encoding="utf-8")
     (live_dir / "controller.js").write_text(old_controller, encoding="utf-8")
@@ -1965,7 +2008,18 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
         generation_calls.append("align_schema")
         assert kwargs["app_id"] == "durable-app"
         assert kwargs["approved_plan"] == "Implement the v2 controller in isolated staging and verify it"
-        return {"reused_schemas": [], "new_schemas": []}
+        return {
+            "reused_schemas": [],
+            "new_schemas": [],
+            "required_features": [
+                {
+                    "id": "custom:durable.ui",
+                    "description": "Replace controller UI",
+                    "capability_ids": [],
+                    "network_sources": [],
+                }
+            ],
+        }
 
     async def staged_runner(
         app_id: str,
@@ -1987,6 +2041,13 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
         staging_dir.mkdir()
         (staging_dir / "controller.js").write_text(new_controller, encoding="utf-8")
         _write_manifest(staging_dir, app_id, _runtime_contract(app_id))
+        manifest = json.loads((staging_dir / "manifest.json").read_text())
+        manifest["app_spec"] = {
+            "spec_version": 1,
+            "types": ["custom:durable"],
+            "features": [{"id": "custom:durable.ui", "status": "implemented", "surfaces": ["ui"]}],
+        }
+        (staging_dir / "manifest.json").write_text(json.dumps(manifest))
         assert (live_dir / "controller.js").read_text(encoding="utf-8") == old_controller
         return OpenCodeStagedResult(
             output="scripted v2 staged output",

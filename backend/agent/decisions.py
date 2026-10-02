@@ -68,6 +68,7 @@ class DecisionConfig(BaseModel):
             "schema_selection",
             "composite_review",
             "development_plan_review",
+            "feature_coverage_review",
         ],
         Literal["off", "shadow", "cascade"],
     ] = Field(default_factory=dict, strict=True)

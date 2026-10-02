@@ -32,6 +32,7 @@ The Capability Ontology and the `ambient-context` data ontology are both domain 
 | `graph.query` | `ambient.graph.subscribe` | `entities` | Read only listed ontology entities; included target entities must also be in scope |
 | `graph.mutate` | `ambient.graph.mutate` | `entities`, `operations` | Perform `create`, `update`, or `delete` on listed entities; edge operations also use `edge_types` |
 | `network.request` | `ambient.net.request` | `sources` | Access declared HTTPS JSON sources with fixed origins, paths, methods, and response limits |
+| `device.location` | `ambient.location.getCurrentPosition` | `operations: ["current"]` | Request one device position after a user action and browser permission through the trusted Web host |
 | `file.read` | `ambient.files.read/list` | `paths` | Read matching relative paths under the App-private data directory |
 | `file.write` | `ambient.files.write` | `paths`, `max_bytes` | Atomically write App-private data; path escape and symlinks are forbidden |
 | `file.delete` | `ambient.files.delete` | `paths` | Delete App-private data files, never directories or App artifacts |
@@ -87,6 +88,8 @@ Normalized grants obey these rules:
 - Code generation cannot expand the approved result through the manifest; staging verification compares normalized approved grants with the artifact manifest.
 
 ## 4. From proposal to execution
+
+`device.location` grants only a one-shot current-position read through `operations: ["current"]`. Widgets request it with `ambient.location.getCurrentPosition` and cannot access `navigator` or obtain direct iframe geolocation permission. After server validation of App/session/revision/grants, the trusted Web host acquires location subject to a user action and browser permission. Bounded results contain only latitude, longitude, accuracy, and timestamp. Requests correlate with the active RPC; session closure, denial, timeout, and device unavailability fail explicitly. A headless Runtime must never substitute the server's location for the user's.
 
 ```mermaid
 sequenceDiagram

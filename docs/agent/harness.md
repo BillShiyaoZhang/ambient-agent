@@ -179,14 +179,14 @@ Schema 对齐对完整 inventory 逐候选判断复用，并独立判断 disposi
 
 通用决策使用 `JEV_DECISION_*` 环境配置，默认 `off`；非秘密快照保存于 `model_snapshot.workflow_decisions`，由 `RunContext.workflow_decisions` 传递。缺少字段的历史 Run 按 `off` 恢复。key 仅从运行时 `TYPESAFE_API_KEY` 读取。决策与生成共同计入模型、token、费用和剩余时间预算；取消与预算耗尽向上传播。
 
-`DecisionConfig.stage_modes` 随 Run 冻结为用途模式字典。`JEV_DECISION_STAGE_MODES` 默认 `{}`，未指定用途继承 `JEV_DECISION_MODE`；合法用途仅有 `intent_parameters`、`graph_query_template`、`schema_selection`、`composite_review`、`development_plan_review`，合法模式为 `off`、`shadow`、`cascade`。非法 JSON、用途或模式拒绝创建快照；历史配置缺字典按 `{}` 解释，模式与 key 无关。
+`DecisionConfig.stage_modes` 随 Run 冻结为用途模式字典。`JEV_DECISION_STAGE_MODES` 默认 `{}`，未指定用途继承 `JEV_DECISION_MODE`；合法用途仅有 `intent_parameters`、`graph_query_template`、`schema_selection`、`composite_review`、`development_plan_review`、`feature_coverage_review`，合法模式为 `off`、`shadow`、`cascade`。非法 JSON、用途或模式拒绝创建快照；历史配置缺字典按 `{}` 解释，模式与 key 无关。
 
 `shadow` 只记录证据，`cascade` 仅在门控及编译通过后采用。新路由生成分离要求 `jev_router.mode=cascade` 与 `intent_parameters` 的有效用途模式为 `cascade`；其他用途各自决定是否调用或采用。仅开启旧 `jev_router=cascade` 时仍只允许高置信 `converse` 直达。实测合成用例的多项 Noul 触发回退，可先只启用路由参数生成、其他用途设为 `shadow` 或 `off`，不因此宣称语义质量提升。例如：
 
 ```dotenv
 JEV_ROUTER_MODE=cascade
 JEV_DECISION_MODE=off
-JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow"}'
+JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow","feature_coverage_review":"shadow"}'
 ```
 
 `shadow` 仍消耗 API 调用和延迟。详见[意图路由](/agent/intent-router.md)；完整设计与配置表位于仓库 `proposals/decision-generation-harness/DESIGN.md`。

@@ -187,14 +187,14 @@ Schema alignment evaluates every candidate in the complete inventory for reuse, 
 
 Generic decisions use `JEV_DECISION_*` environment settings and default to `off`. Non-secret snapshots live in `model_snapshot.workflow_decisions` and propagate through `RunContext.workflow_decisions`; historical Runs missing that field resume with `off`. The key is read only from runtime `TYPESAFE_API_KEY`. Decisions and generation both consume model, token, cost, and remaining-time budgets; cancellation and budget exhaustion propagate upward.
 
-`DecisionConfig.stage_modes` freezes a dictionary of purpose modes with the Run. `JEV_DECISION_STAGE_MODES` defaults to `{}`; omitted purposes inherit `JEV_DECISION_MODE`. Only `intent_parameters`, `graph_query_template`, `schema_selection`, `composite_review`, and `development_plan_review` are allowed, with values `off`, `shadow`, or `cascade`. Invalid JSON, purposes, or modes reject snapshot creation. Historical configurations missing the dictionary use `{}`. Mode settings are independent of the key.
+`DecisionConfig.stage_modes` freezes a dictionary of purpose modes with the Run. `JEV_DECISION_STAGE_MODES` defaults to `{}`; omitted purposes inherit `JEV_DECISION_MODE`. Only `intent_parameters`, `graph_query_template`, `schema_selection`, `composite_review`, `development_plan_review`, and `feature_coverage_review` are allowed, with values `off`, `shadow`, or `cascade`. Invalid JSON, purposes, or modes reject snapshot creation. Historical configurations missing the dictionary use `{}`. Mode settings are independent of the key.
 
 `shadow` records evidence only, while `cascade` adopts decisions after gates and compilation pass. The new routing generation path requires `jev_router.mode=cascade` and an effective `intent_parameters` mode of `cascade`; other purposes independently control calls and adoption. Enabling only the legacy `jev_router=cascade` retains its high-confidence `converse` shortcut. Several Noul judgments in synthetic live cases triggered fallback, so routing parameter generation can be enabled while other purposes remain `shadow` or `off`, without claiming improved semantic quality. For example:
 
 ```dotenv
 JEV_ROUTER_MODE=cascade
 JEV_DECISION_MODE=off
-JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow"}'
+JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow","feature_coverage_review":"shadow"}'
 ```
 
 `shadow` still consumes API calls and adds latency. See [Intent Router](/en/agent/intent-router.md). Repository file `proposals/decision-generation-harness/DESIGN.md` contains the complete design and configuration table.

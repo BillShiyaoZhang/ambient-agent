@@ -43,6 +43,7 @@ from backend.coding_agent_acp import (
     promote_coding_agent_staging,
     validate_coding_agent_promotion,
     validate_coding_agent_staging,
+    validate_coding_agent_feature_coverage,
 )
 from backend.plan_generation import PlanGenerationService
 from backend.run_service import (
@@ -56,7 +57,12 @@ from backend.run_service import (
     Succeeded,
     Wait,
 )
-from backend.schema_alignment import SchemaAlignmentService, validate_schema_capability_proposal
+from backend.schema_alignment import (
+    SchemaAlignmentService,
+    capability_change_summary,
+    validate_schema_capability_proposal,
+)
+from backend.widget_requirements import validate_feature_requirements
 from backend.schema_verification import SchemaVerificationService
 from backend.skill_manager import (
     SkillContextBudgetError,
@@ -125,6 +131,8 @@ class DurableAgentWorkflow:
         "verification_passed",
         "verification_override",
         "schema_snapshot",
+        "existing_app_manifest",
+        "requires_feature_criteria",
     }
 
     def __init__(
@@ -1574,6 +1582,15 @@ class DurableAgentWorkflow:
             state.data["plan_review"] = review.model_dump(mode="json")
             state.data["plan_review_input_hash"] = input_hash
 
+    def _existing_app_manifest(self, state: AgentRunState, app_id: str) -> dict[str, Any] | None:
+        """Snapshot the installed approval baseline once per App update."""
+        if "existing_app_manifest" not in state.data:
+            validate_app_id(app_id)
+            manifest_path = Path(self.app_manager.apps_dir) / app_id / "manifest.json"
+            manifest = AppManifest.read(manifest_path, expected_app_id=app_id) if manifest_path.is_file() else None
+            state.data["existing_app_manifest"] = manifest.to_dict() if manifest else None
+        return state.data["existing_app_manifest"]
+
     async def _phase_plan(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         phase_started = time.monotonic()
         intent = self._current_intent(state)
@@ -1593,6 +1610,8 @@ class DurableAgentWorkflow:
                 language=str(state.data.get("language") or "zh"),
                 audit_context=self._run_context(run, state).audit_context(),
                 budget=self._model_budget(state),
+                existing_app_manifest=self._existing_app_manifest(state, intent.app_id),
+                capability_catalog=self.capability_catalog_factory(),
             )
             state.data["plan_candidate"] = candidate
             state.data["plan_review_instruction"] = plan_instruction
@@ -1642,6 +1661,8 @@ class DurableAgentWorkflow:
                 language=str(state.data.get("language") or "zh"),
                 audit_context=self._run_context(run, state).audit_context(),
                 budget=self._model_budget(state),
+                existing_app_manifest=self._existing_app_manifest(state, intent.app_id or ""),
+                capability_catalog=self.capability_catalog_factory(),
             )
             state.data["plan_candidate"] = refined
             feedback = str(response.get("feedback") or "").strip()
@@ -1681,7 +1702,10 @@ class DurableAgentWorkflow:
                 budget=self._model_budget(state),
                 capability_catalog=self.capability_catalog_factory(),
                 decision_config=dict(state.model_snapshot.get("workflow_decisions") or {"mode": "off"}),
+                existing_app_manifest=self._existing_app_manifest(state, intent.app_id or ""),
+                require_feature_requirements=True,
             )
+            state.data["requires_feature_criteria"] = True
             proposal = self._merge_preapproved_schema_props(
                 proposal,
                 state.data.get("pre_extend_schema_props") or {},
@@ -1689,6 +1713,11 @@ class DurableAgentWorkflow:
             state.data.pop("pre_extend_schema_props", None)
             self.graph_db.effective_schemas(proposal)
             state.data["schema_candidate"] = proposal
+        baseline = self._existing_app_manifest(state, intent.app_id or "") or {}
+        proposal["baseline_capabilities"] = baseline.get("capabilities", [])
+        proposal["capability_changes"] = capability_change_summary(
+            proposal["baseline_capabilities"], proposal.get("capabilities", [])
+        )
         await self._emit_activity(
             run,
             activity_id="schema:proposal",
@@ -1730,6 +1759,18 @@ class DurableAgentWorkflow:
                     edited_proposal,
                     self.capability_catalog_factory(),
                 )
+                if state.data.get("requires_feature_criteria") and not approved.get("required_features"):
+                    raise ValueError("Required functional acceptance criteria cannot be omitted from a new proposal")
+                if state.data.get("requires_feature_criteria") and approved.get("required_features") != proposal.get(
+                    "required_features"
+                ):
+                    raise ValueError(
+                        "Changes to functional acceptance criteria require Refine and a new objective coverage review"
+                    )
+                baseline = self._existing_app_manifest(state, intent.app_id or "")
+                approved["capability_changes"] = capability_change_summary(
+                    (baseline or {}).get("capabilities", []), approved["capabilities"]
+                )
                 effective_schemas = self.graph_db.effective_schemas(approved)
             except ValueError as exc:
                 # Approval payloads are editable in the UI.  A dependency
@@ -1768,6 +1809,10 @@ class DurableAgentWorkflow:
                 schemas=schemas,
                 capabilities=approved["capabilities"],
             ).to_dict()
+            if approved.get("required_features"):
+                state.data["runtime_contract"]["required_features"] = approved["required_features"]
+            if state.data.get("requires_feature_criteria"):
+                state.data["runtime_contract"]["requires_feature_criteria"] = True
             state.data.pop("plan_schema_context", None)
             state.data.pop("plan_rework_feedback", None)
             return Continue(next_phase="stage_code", summary="Schema proposal approved")
@@ -1803,8 +1848,16 @@ class DurableAgentWorkflow:
                 budget=self._model_budget(state),
                 capability_catalog=self.capability_catalog_factory(),
                 decision_config=dict(state.model_snapshot.get("workflow_decisions") or {"mode": "off"}),
+                existing_app_manifest=self._existing_app_manifest(state, intent.app_id or ""),
+                require_feature_requirements=True,
             )
+            state.data["requires_feature_criteria"] = True
             self.graph_db.effective_schemas(refined)
+            baseline = self._existing_app_manifest(state, intent.app_id or "") or {}
+            refined["baseline_capabilities"] = baseline.get("capabilities", [])
+            refined["capability_changes"] = capability_change_summary(
+                refined["baseline_capabilities"], refined.get("capabilities", [])
+            )
             state.data["schema_candidate"] = refined
             state.phase = "wait_schema"
             return await self._wait(
@@ -1884,10 +1937,22 @@ class DurableAgentWorkflow:
         previous = state.data.get("staged_app")
         retained_draft = self._staged_result(previous) if previous else None
 
-        self._consume_model_turn(state, 1)
         contract = state.data.get("runtime_contract")
         if not isinstance(contract, dict):
             raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
+        try:
+            required_features = validate_feature_requirements(
+                contract.get("required_features"), self.capability_catalog_factory(), contract.get("capabilities", [])
+            )
+            if (
+                state.data.get("requires_feature_criteria") or contract.get("requires_feature_criteria")
+            ) and not required_features:
+                raise ValueError("Required functional acceptance criteria are missing")
+        except ValueError as exc:
+            raise WorkflowError(
+                f"Required features need a corrected approval: {exc}", code="design_change_required"
+            ) from exc
+        self._consume_model_turn(state, 1)
         schemas = list(contract.get("schemas") or [])
         schema_text = "\n".join(f"- Type '{item['id']}': {json.dumps(item.get('properties', {}))}" for item in schemas)
         manifest_template = self._manifest_v2_template(contract)
@@ -1897,6 +1962,12 @@ class DurableAgentWorkflow:
             f"{state.data.get('approved_plan', '')}\n\n[GRAPH DATABASE SCHEMAS]\n{schema_text}"
             "\n\n[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]\n"
             f"{json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)}"
+            "\n\n[REQUIRED FEATURES — ACCEPTANCE CRITERIA]\n"
+            f"{json.dumps(required_features, ensure_ascii=False, sort_keys=True)}\n"
+            "Implement every required feature and declare its exact ID as implemented in app_spec. "
+            "Use the authorized SDK methods and exact sources/paths in these criteria. "
+            "Unavailable notices, planned declarations, unused permissions, and a rendered loading page do not "
+            "complete the requested feature. If a required dependency is unavailable, request design correction."
             "\n\n[REQUIRED MANIFEST V2 TEMPLATE]\n"
             f"{json.dumps(manifest_template, ensure_ascii=False, sort_keys=True, indent=2)}"
             "\n\n[MANIFEST V2 FIELD RULES]\n"
@@ -2092,6 +2163,8 @@ class DurableAgentWorkflow:
     @staticmethod
     def _assert_staged_runtime_contract(staging_dir: Path, contract: dict[str, Any]) -> AppManifest:
         app_id = str(contract.get("app_id") or "")
+        if contract.get("requires_feature_criteria") and not contract.get("required_features"):
+            raise WorkflowError("Required functional acceptance criteria are missing", code="design_change_required")
         try:
             manifest = AppManifest.read(staging_dir / "manifest.json", expected_app_id=app_id)
         except (OSError, ManifestValidationError) as exc:
@@ -2123,6 +2196,7 @@ class DurableAgentWorkflow:
                 f"Staged App contains files outside the Runtime Contract: {', '.join(unexpected)}",
                 code="runtime_contract_mismatch",
             )
+        validate_coding_agent_feature_coverage(staging_dir, app_id, list(contract.get("required_features") or []))
         return manifest
 
     async def _phase_verify(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
@@ -2142,6 +2216,8 @@ class DurableAgentWorkflow:
         if not isinstance(contract, dict):
             raise WorkflowError("Approved Runtime Contract is missing", code="runtime_contract_missing")
         schemas = list(contract.get("schemas") or [])
+        staged_result = self._staged_result(staged)
+        self._assert_staged_runtime_contract(staged_result.staging_dir, contract)
         diff = await SchemaVerificationService.diff(
             app_id=intent.app_id or "",
             widget_code=self._staged_widget_code(state),

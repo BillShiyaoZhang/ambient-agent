@@ -66,7 +66,7 @@ Prompt 模板只描述角色与决策规则，动态能力块由 Catalog rendere
 
 ```text
 [SYSTEM CAPABILITY CATALOG v2]
-Capability ontology version: 1
+Capability ontology version: 2
 Durable execution: plan -> alignment approval -> staging -> verification -> promotion
 Widget grant categories:
 - graph.query: entities[]; read only
@@ -98,7 +98,7 @@ Schema 对齐返回的 JSON 若第一次违反该 contract，服务会把有界�
 {
   "contract_version": 1,
   "app_id": "daily-planner",
-  "catalog_version": 1,
+  "catalog_version": 2,
   "schemas": [{"id": "Task", "properties": {"title": "string"}}],
   "capabilities": [
     {"id": "graph.query", "scope": {"entities": ["Task"]}}

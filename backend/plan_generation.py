@@ -5,6 +5,8 @@ from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
 from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
+from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
+from backend.schema_alignment import existing_app_context
 
 logger = logging.getLogger("plan_generation")
 
@@ -19,6 +21,9 @@ class PlanGenerationService:
         language: str = "zh",
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        *,
+        existing_app_manifest: dict[str, Any] | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> str:
         """
         Generates a high-level summary implementation plan describing the widget and its UI elements.
@@ -31,6 +36,8 @@ The plan must only cover:
 2. The key user interface elements/features that will be added or modified.
 
 Keep the plan extremely short, clear, and direct. Do NOT include code, files, or technical configuration steps.
+Preserve the existing App's working features and approved capability baseline unless the user asks to remove them.
+Use the supplied actual runtime catalog to assess feasibility. Catalog support is not approval; available capabilities can be proposed for approval. Missing installed providers must not hide available public HTTPS networking or device SDK capabilities. If a mandatory behavior cannot be supported, explain the specific blocker and a meaningful alternative for the user to review; do not call an unavailable/error label an implementation of the requested feature.
 IMPORTANT: You MUST write the plan in {"Chinese (中文)" if is_zh else "English"}."""
 
         user_prompt = f"""We are designing/modifying a widget app:
@@ -38,6 +45,10 @@ App ID: "{app_id}"
 User Instruction: "{instruction}"
 Database Schema Context:
 {schemas_context if schemas_context else "(No custom database schemas required)"}
+Existing App Approval Baseline (reference data):
+{existing_app_context(existing_app_manifest)}
+
+{(capability_catalog or SystemCapabilityCatalog.build()).render(AgentRole.SCHEMA_ALIGNMENT)}
 
 Please write a brief implementation plan for this widget."""
 
@@ -75,6 +86,9 @@ Please write a brief implementation plan for this widget."""
         language: str = "zh",
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
+        *,
+        existing_app_manifest: dict[str, Any] | None = None,
+        capability_catalog: SystemCapabilityCatalog | None = None,
     ) -> str:
         """
         Refines the current plan using direct natural language feedback from the user.
@@ -83,6 +97,7 @@ Please write a brief implementation plan for this widget."""
         system_prompt = f"""You are an Ambient Agent Development Architect.
 Your task is to refine the implementation plan based on direct feedback from the user.
 Keep it a concise, high-level plan covering the widget's purpose and UI elements. Do NOT write source code.
+Preserve existing working behavior and approved capabilities unless feedback explicitly removes them. Assess mandatory requested behavior against the actual runtime catalog: available capabilities can be proposed for approval, while a genuinely missing capability requires a specific blocker and meaningful alternative for review. Do not silently substitute unavailable/error labels for mandatory live features.
 IMPORTANT: You MUST write the refined plan in {"Chinese (中文)" if is_zh else "English"}."""
 
         user_prompt = f"""We are building/modifying a widget app:
@@ -90,6 +105,10 @@ App ID: "{app_id}"
 Original Instruction: "{instruction}"
 Database Schema Context:
 {schemas_context if schemas_context else "(No custom database schemas required)"}
+Existing App Approval Baseline (reference data):
+{existing_app_context(existing_app_manifest)}
+
+{(capability_catalog or SystemCapabilityCatalog.build()).render(AgentRole.SCHEMA_ALIGNMENT)}
 
 Current Implementation Plan:
 {current_plan}
