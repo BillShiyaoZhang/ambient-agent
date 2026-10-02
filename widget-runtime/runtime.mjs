@@ -499,7 +499,7 @@ async function installPageRuntime(page, session, transformedController) {
   });
 
   await page.evaluate(
-    ({ code, capabilityIds, presentationContext }) => {
+    ({ code, capabilityIds, presentationContext, ephemeralStorage }) => {
       const runtime = window.htmPreact;
       if (!runtime) throw new Error("The Widget renderer failed to initialize");
       const {
@@ -887,6 +887,32 @@ async function installPageRuntime(page, session, transformedController) {
         minimize: () => window.__ambientHostEvent({ event: "minimize" }),
       };
 
+      if (ephemeralStorage) {
+        let beforeSuspendRegistration;
+        ambient.storage = Object.freeze({
+          get: (key) => window.__ambientRpc({ method: "smoke.storage.get", params: { key } }),
+          set: (key, value) => window.__ambientRpc({ method: "smoke.storage.set", params: { key, value } }),
+          delete: (key) => window.__ambientRpc({ method: "smoke.storage.delete", params: { key } }),
+          clear: () => window.__ambientRpc({ method: "smoke.storage.clear", params: {} }),
+          list: () => window.__ambientRpc({ method: "smoke.storage.list", params: {} }),
+        });
+        ambient.lifecycle = Object.freeze({
+          onBeforeSuspend(handler) {
+            if (typeof handler !== "function") {
+              throw new TypeError("ambient.lifecycle.onBeforeSuspend requires a handler");
+            }
+            const registration = { handler };
+            beforeSuspendRegistration = registration;
+            let subscribed = true;
+            return () => {
+              if (!subscribed) return;
+              subscribed = false;
+              if (beforeSuspendRegistration === registration) beforeSuspendRegistration = undefined;
+            };
+          },
+        });
+      }
+
       if (allowed.has("graph.query") || allowed.has("graph.mutate")) {
         const graph = {};
         if (allowed.has("graph.query")) {
@@ -1020,6 +1046,7 @@ async function installPageRuntime(page, session, transformedController) {
       code: transformedController,
       capabilityIds: session.capabilityIds,
       presentationContext: session.presentationContext,
+      ephemeralStorage: session.ephemeralStorage,
     },
   );
 }
@@ -1162,6 +1189,7 @@ async function openSession(socket, message) {
       capabilityIds: Array.isArray(message.capability_ids)
         ? message.capability_ids.filter((item) => typeof item === "string")
         : [],
+      ephemeralStorage: message.ephemeral_storage === true,
       presentationContext,
       socket,
       context,

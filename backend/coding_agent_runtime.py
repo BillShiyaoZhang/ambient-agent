@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -554,9 +555,9 @@ class CodingAgentRuntime:
                 f"{spec.timeout_env} must be a number",
                 code="coding_agent_configuration_error",
             ) from exc
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise CodingAgentRuntimeError(
-                f"{spec.timeout_env} must be positive",
+                f"{spec.timeout_env} must be finite and positive",
                 code="coding_agent_configuration_error",
             )
         return ACPLaunchDescriptor(

@@ -9,8 +9,14 @@ from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 
 import backend.coding_agent as coding_agent_module
 import backend.main as main_module
-from backend.coding_agent_runtime import CodingAgentRuntime
-from backend.coding_agent_acp import CodingAgentArtifactError, CodingAgentStagedResult
+from backend.coding_agent_runtime import CodingAgentRuntime, CodingAgentRuntimeError
+from backend.coding_agent_acp import (
+    CodingAgentACPInputError,
+    CodingAgentArtifactError,
+    CodingAgentStagedResult,
+    _structured_verifier_error,
+    run_coding_agent_acp,
+)
 
 
 def _executable(path: Path) -> str:
@@ -43,6 +49,40 @@ def test_runtime_builds_native_and_bridged_acp_launch_descriptors(tmp_path, monk
     assert bridged.environment["INITIAL_AGENT_MODE"] == "agent"
     assert bridged.environment["NO_BROWSER"] == "1"
     assert "OPENAI_API_KEY" not in bridged.environment
+
+
+@pytest.mark.parametrize("timeout", ["nan", "inf", "-inf"])
+def test_runtime_rejects_non_finite_acp_timeout(tmp_path, monkeypatch, timeout):
+    codex = _executable(tmp_path / "codex")
+    bridge = _executable(tmp_path / "codex-acp")
+    monkeypatch.setenv("CODEX_COMMAND", codex)
+    monkeypatch.setenv("CODEX_ACP_COMMAND", bridge)
+    monkeypatch.setenv("CODEX_TIMEOUT", timeout)
+    runtime = CodingAgentRuntime(tmp_path / "workspace")
+
+    with pytest.raises(CodingAgentRuntimeError, match="finite and positive"):
+        runtime.acp_launch("codex")
+
+
+@pytest.mark.asyncio
+async def test_acp_runner_rejects_non_finite_timeout_before_staging(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPS_DIR", str(tmp_path / "apps"))
+    launch = SimpleNamespace(
+        agent_id="codex", agent_name="Codex", argv=("/unused",), environment={}, timeout_seconds=float("nan")
+    )
+
+    with pytest.raises(CodingAgentACPInputError, match="timeout must be finite and positive"):
+        await run_coding_agent_acp("finite-timeout", "build", launch=launch)
+
+    assert not (tmp_path / "apps" / "finite-timeout").exists()
+
+
+def test_verifier_report_parser_handles_brace_heavy_diagnostics():
+    report = '{"ok":false,"code":"required_feature_missing","message":"missing","hint":"repair"}'
+
+    parsed = _structured_verifier_error(["{" * 100_000 + report + "}" * 100_000])
+
+    assert parsed == {"ok": False, "code": "required_feature_missing", "message": "missing", "hint": "repair"}
 
 
 @pytest.mark.asyncio

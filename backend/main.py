@@ -1921,8 +1921,8 @@ class AppFileWriteRequest(AppFilePathRequest):
 
 def _app_file_error(exc: AppFileError) -> HTTPException:
     return HTTPException(
-        status_code=403,
-        detail={"code": "file_capability_denied", "message": str(exc)},
+        status_code=exc.status_code,
+        detail=exc.to_dict(),
     )
 
 

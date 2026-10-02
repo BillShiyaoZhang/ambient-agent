@@ -19,6 +19,8 @@
 
 `TextField` 的 `onChange(value)` 与 `onEnter(value)` 接收当前字符串值；`Checkbox` 的 `onChange(checked)` 接收布尔值。组件回调不会暴露 DOM 事件对象。
 
+`List` 通过 `items` 属性渲染文本行；每项可以是字符串或包含 `label`/`name` 的对象，并支持 `onItemClick` 和 `itemStyle`。它不会渲染子元素。`Table` 用 `columns` 与 `rows` 渲染文本单元格，只支持行点击。需要在记录行中放置按钮、复选框或输入框时，应将记录映射为 `<${Row}>`，并放在 `<${Column}>` 中。
+
 这些接口不授予外部数据访问。Controller 不使用 `window`、DOM 查询、Cookie、浏览器 storage globals、import、`fetch`、原始 WebSocket、`eval` 或 `Function`。
 
 展示上下文会在不重启 Widget 的情况下更新。需要响应主题、语言或减少动画偏好的 Controller 应订阅它，而不是只在模块加载时读取一次：
@@ -50,7 +52,7 @@ await ambient.storage.clear();
 
 key 为 1–256 个字符，value 必须是无循环 JSON 且单值不超过 64 KiB；每个 App 最多 128 个 key、合计 1 MiB。缺失 key 返回 `null`。数据仅存在当前浏览器 profile，可能被用户清理或被浏览器回收；不得保存凭据、token、跨设备状态或用户数据的唯一副本。`VITE_WIDGET_UI_TRANSPORT=pixels` 旧回滚模式不提供此 API。
 
-用户输入应在有意义的修改后写穿。若为减少写入而使用 debounce，请把最新值保存在 ref，并注册有界刷盘：
+用户输入应在有意义的修改后写穿。必须等 `storage.get` 完成 hydration 后再允许写入，否则初始空值或默认值可能在已保存数据加载前覆盖它。若为减少写入而使用 debounce，请把最新值保存在 ref，并注册有界刷盘：
 
 ```javascript
 useEffect(
@@ -116,11 +118,16 @@ Controller 不能传完整 URL、覆盖 host、跟随 redirect 或附带 secret�
 | `file.delete` | `ambient.files.delete(path)` |
 
 ```javascript
-const draft = await ambient.files.read("drafts/today.md");
+const draft = await ambient.files.read("drafts/today.md").catch((error) => {
+  if (error?.code === "file_not_found" || error?.message === "App data file not found") return "";
+  throw error; // The caller displays a retryable load error.
+});
 await ambient.files.write("drafts/today.md", `${draft}\nDone`);
 ```
 
 每次操作都检查 path glob、大小、路径逃逸和符号链接。文件 SDK 不访问 Manifest、Controller、README 或其他工作区目录。
+
+`files.read(path)` 读取一个尚未创建的文件时会以 `file_not_found` 拒绝（旧版 Runtime 可能只返回准确消息 `App data file not found`）。首次加载时，只把这个明确的缺失文件错误当作空初始数据，并允许用户创建文件；其他读取错误必须显示可重试的错误状态，不能静默显示为空列表。
 
 ## 6. Installed Capability Grant
 

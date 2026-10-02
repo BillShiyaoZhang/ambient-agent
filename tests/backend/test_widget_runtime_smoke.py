@@ -110,6 +110,45 @@ async def test_smoke_tester_requires_a_real_first_frame(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_smoke_exposes_bounded_ephemeral_storage_for_native_sdk_parity(tmp_path: Path) -> None:
+    connection = FakeRuntimeConnection(
+        [
+            {
+                "type": "rpc_request",
+                "request_id": "storage-get-missing",
+                "method": "smoke.storage.get",
+                "params": {"key": "task-board.drafts.v1"},
+            },
+            {
+                "type": "rpc_request",
+                "request_id": "storage-set",
+                "method": "smoke.storage.set",
+                "params": {"key": "task-board.drafts.v1", "value": {"newTitle": "Task"}},
+            },
+            {
+                "type": "rpc_request",
+                "request_id": "storage-get-saved",
+                "method": "smoke.storage.get",
+                "params": {"key": "task-board.drafts.v1"},
+            },
+            {"type": "frame", "format": "jpeg", "data": "ZmFrZQ==", "width": 640, "height": 480},
+        ]
+    )
+    tester = WidgetRuntimeSmokeTester(
+        graph_db=GraphDatabase(str(tmp_path / "graph.db")),
+        connector=lambda: connection,
+        timeout_seconds=1,
+    )
+
+    result = await tester.verify(staged_result(tmp_path))
+
+    assert result["status"] == "rendered"
+    assert connection.sent[0]["ephemeral_storage"] is True
+    storage_responses = [message for message in connection.sent if message.get("type") == "rpc_response"]
+    assert [message["result"] for message in storage_responses] == [None, {"status": "ok"}, {"newTitle": "Task"}]
+
+
+@pytest.mark.asyncio
 async def test_smoke_graph_rpc_uses_non_sqlite_adapter_contract(tmp_path: Path) -> None:
     class NonSqliteGraph:
         def list_nodes(self, node_type=None):

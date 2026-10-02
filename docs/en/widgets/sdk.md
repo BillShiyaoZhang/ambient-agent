@@ -19,6 +19,8 @@
 
 `TextField` delivers the current string value to `onChange(value)` and `onEnter(value)`; `Checkbox` delivers a boolean to `onChange(checked)`. Component callbacks do not expose DOM event objects.
 
+`List` renders text rows from its `items` prop. Each item can be a string or an object with `label` or `name`; it also accepts `onItemClick` and `itemStyle`. It does not render child elements. `Table` renders text cells from `columns` and `rows` and supports row clicks only. For editable records or rows with buttons, checkboxes, or fields, map records to `<${Row}>` children inside `<${Column}>`.
+
 These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, Cookies, browser storage globals, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
 
 Presentation context updates without restarting the Widget. A Controller that reacts to theme, language, or reduced-motion changes subscribes instead of reading only once during module load:
@@ -50,7 +52,7 @@ await ambient.storage.clear();
 
 Keys contain 1–256 characters. Values must be acyclic JSON and no larger than 64 KiB each; each App is limited to 128 keys and 1 MiB total. A missing key returns `null`. Data exists only in the current browser profile and may be cleared by the user or reclaimed by the browser. Never store credentials, tokens, cross-device state, or the sole copy of user data. The legacy `VITE_WIDGET_UI_TRANSPORT=pixels` rollback does not provide this API.
 
-Write user input through after meaningful changes. If writes use a debounce, keep the latest value in a ref and register a bounded flush:
+Write user input through after meaningful changes. Gate writes until `storage.get` hydration finishes; otherwise an initial empty/default value can overwrite saved data before it loads. If writes use a debounce, keep the latest value in a ref and register a bounded flush:
 
 ```javascript
 useEffect(
@@ -116,11 +118,16 @@ File paths are POSIX paths relative to `app://data/`:
 | `file.delete` | `ambient.files.delete(path)` |
 
 ```javascript
-const draft = await ambient.files.read("drafts/today.md");
+const draft = await ambient.files.read("drafts/today.md").catch((error) => {
+  if (error?.code === "file_not_found" || error?.message === "App data file not found") return "";
+  throw error; // The caller displays a retryable load error.
+});
 await ambient.files.write("drafts/today.md", `${draft}\nDone`);
 ```
 
 Every operation checks path globs, size, escape, and symlinks. The file SDK never accesses the Manifest, Controller, README, or another workspace directory.
+
+`files.read(path)` rejects with code `file_not_found` when a file has not been created yet (older Runtimes may expose only the exact message `App data file not found`). On first load, treat only this missing-file condition as an empty initial value and let the user create the file. Show a visible retryable error for other read failures; do not silently present them as an empty list.
 
 ## 6. Installed Capability Grant
 

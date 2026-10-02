@@ -8,7 +8,13 @@ from backend.capabilities.policy import CapabilityAuthorizer, CapabilityDenied
 
 
 class AppFileError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "file_capability_denied", status_code: int = 403) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+    def to_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": str(self)}
 
 
 class AppFileGateway:
@@ -126,7 +132,7 @@ class AppFileGateway:
         self._authorize(app_id, "read", path, revision=manifest_revision, grants_digest=grants_digest)
         target = self._reject_links(self._data_root(app_id), relative)
         if not target.is_file():
-            raise AppFileError("App data file not found")
+            raise AppFileError("App data file not found", code="file_not_found", status_code=404)
         try:
             return target.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
@@ -183,5 +189,5 @@ class AppFileGateway:
         self._authorize(app_id, "delete", path, revision=manifest_revision, grants_digest=grants_digest)
         target = self._reject_links(self._data_root(app_id), relative)
         if not target.is_file():
-            raise AppFileError("App data file not found")
+            raise AppFileError("App data file not found", code="file_not_found", status_code=404)
         target.unlink()

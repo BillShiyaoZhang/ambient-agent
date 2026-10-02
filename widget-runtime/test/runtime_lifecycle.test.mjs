@@ -196,7 +196,7 @@ function waitForFirstFrame(socket, sessionId, timeoutMs = 30_000) {
 }
 
 
-function runtimeStartMessage(sessionId) {
+function runtimeStartMessage(sessionId, { controllerSource, ephemeralStorage = false } = {}) {
   return {
     type: "start",
     protocol_version: 1,
@@ -206,16 +206,102 @@ function runtimeStartMessage(sessionId) {
     grants_digest: `grants-${sessionId}`,
     artifact_digest: `artifact-${sessionId}`,
     capability_ids: [],
-    controller_source:
-      `export default function Controller() {`
-      + ` return <div>Runtime smoke ${sessionId}</div>;`
-      + " }",
+    controller_source: controllerSource
+      ?? `export default function Controller() { return <div>Runtime smoke ${sessionId}</div>; }`,
     viewport: {
       width: 320,
       height: 240,
       device_scale_factor: 1,
     },
+    ...(ephemeralStorage ? { ephemeral_storage: true } : {}),
   };
+}
+
+
+function waitForHostEvent(socket, sessionId, expectedText, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timed out waiting for host event for ${sessionId}`));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("data", onData);
+      socket.off("error", onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      let newline;
+      while ((newline = buffer.indexOf(0x0a)) >= 0) {
+        const line = buffer.subarray(0, newline);
+        buffer = buffer.subarray(newline + 1);
+        if (!line.byteLength) continue;
+        const message = JSON.parse(line.toString("utf8"));
+        if (message.type === "runtime_error") {
+          cleanup();
+          reject(new Error(JSON.stringify(message.error)));
+          return;
+        }
+        if (
+          message.type === "host_event"
+          && message.session_id === sessionId
+          && message.event === "send_message"
+        ) {
+          cleanup();
+          if (message.text === expectedText) resolve(message.text);
+          else reject(new Error(`unexpected smoke event: ${message.text}`));
+          return;
+        }
+      }
+    };
+    socket.on("data", onData);
+    socket.once("error", onError);
+  });
+}
+
+
+function respondToEphemeralStorage(socket, sessionId) {
+  const values = new Map();
+  let buffer = Buffer.alloc(0);
+  const onData = (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    let newline;
+    while ((newline = buffer.indexOf(0x0a)) >= 0) {
+      const line = buffer.subarray(0, newline);
+      buffer = buffer.subarray(newline + 1);
+      if (!line.byteLength) continue;
+      const message = JSON.parse(line.toString("utf8"));
+      if (message.type !== "rpc_request") continue;
+      const method = message.method.replace("smoke.storage.", "");
+      const { key, value } = message.params;
+      let result;
+      if (method === "get") result = values.has(key) ? values.get(key) : null;
+      else if (method === "set") {
+        values.set(key, value);
+        result = { status: "ok" };
+      } else if (method === "delete") {
+        values.delete(key);
+        result = { status: "ok" };
+      } else if (method === "clear") {
+        values.clear();
+        result = { status: "ok" };
+      } else if (method === "list") result = [...values.keys()];
+      else throw new Error(`unexpected smoke storage RPC: ${message.method}`);
+      socket.write(`${JSON.stringify({
+        type: "rpc_response",
+        session_id: sessionId,
+        request_id: message.request_id,
+        result,
+      })}\n`);
+    }
+  };
+  socket.on("data", onData);
+  return () => socket.off("data", onData);
 }
 
 
@@ -629,6 +715,77 @@ test("listens on the socket without launching Chromium", async (context) => {
 
 
 test(
+  "provides isolated ephemeral storage only to smoke-mode Controllers",
+  {
+    skip: CHROMIUM_PATH ? false : "Chromium is not installed",
+    timeout: 90_000,
+  },
+  async (context) => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "ambient-widget-runtime-storage-smoke-"),
+    );
+    const socketPath = path.join(directory, "runtime.sock");
+    const child = spawn(process.execPath, [RUNTIME_PATH], {
+      env: {
+        ...process.env,
+        CHROMIUM_EXECUTABLE_PATH: CHROMIUM_PATH,
+        WIDGET_RUNTIME_SOCKET_PATH: socketPath,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    context.after(async () => {
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        await waitForChildExit(child);
+      }
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    await waitForSocket(socketPath, child);
+    const sessionId = "ephemeral-storage";
+    const socket = await connectUnix(socketPath);
+    const stopStorageResponder = respondToEphemeralStorage(socket, sessionId);
+    const framePromise = waitForFirstFrame(socket, sessionId);
+    const storagePromise = waitForHostEvent(socket, sessionId, "smoke-storage-passed");
+    const controllerSource = `
+      const unsubscribeSuspend = ambient.lifecycle.onBeforeSuspend(async () => {});
+      unsubscribeSuspend();
+      const verifyStorage = ambient.storage.get("draft").then(async (missing) => {
+        if (missing !== null) throw new Error("missing value must be null");
+        await ambient.storage.set("draft", { title: "Task" });
+        const saved = await ambient.storage.get("draft");
+        if (saved.title !== "Task") throw new Error("stored value did not round-trip");
+        const keys = await ambient.storage.list();
+        if (keys.length !== 1 || keys[0] !== "draft") throw new Error("list did not return keys");
+        await ambient.storage.delete("draft");
+        if (await ambient.storage.get("draft") !== null) throw new Error("delete failed");
+        await ambient.storage.set("draft", { title: "Again" });
+        await ambient.storage.clear();
+        if ((await ambient.storage.list()).length !== 0) throw new Error("clear failed");
+      }).then(() => ambient.sendMessage("smoke-storage-passed"));
+      export default function Controller() { return <div>Smoke storage</div>; }
+    `;
+    socket.write(`${JSON.stringify(runtimeStartMessage(sessionId, {
+      controllerSource,
+      ephemeralStorage: true,
+    }))}\n`);
+    try {
+      const [{ frame, ready }, storageResult] = await Promise.all([framePromise, storagePromise]);
+      assert.equal(ready, true);
+      assert.equal(frame.format, "jpeg");
+      assert.equal(storageResult, "smoke-storage-passed");
+    } finally {
+      stopStorageResponder();
+      await closeRuntimeSession(socket, sessionId);
+    }
+  },
+);
+
+
+test(
   "renders again after the last session passes the browser idle timeout",
   {
     skip: CHROMIUM_PATH ? false : "Chromium is not installed",
@@ -687,7 +844,9 @@ test(
         sessionId,
         ...await openRuntimeSession(socketPath, sessionId),
       })),
-    );
+    ).catch((error) => {
+      throw new Error(`${error.message}\nruntime output:\n${output}`);
+    });
     assert.ok(active.every(({ result }) => result.ready));
 
     const fifthSocket = await connectUnix(socketPath);

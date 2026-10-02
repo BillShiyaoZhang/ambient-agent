@@ -78,6 +78,44 @@ def test_app_file_gateway_round_trips_only_inside_private_data_root(file_app):
         gateway.read_text("notes-app", "drafts/today.md")
 
 
+@pytest.mark.parametrize("operation", ["read_text", "delete"])
+def test_missing_private_file_has_distinct_code_only_after_authorization(file_app, operation):
+    from backend.main import _app_file_error
+
+    _manager, gateway, _app_dir = file_app
+    with pytest.raises(AppFileError) as missing:
+        getattr(gateway, operation)("notes-app", "drafts/missing.md")
+    assert missing.value.to_dict() == {"code": "file_not_found", "message": "App data file not found"}
+    response = _app_file_error(missing.value)
+    assert response.status_code == 404
+    assert response.detail == missing.value.to_dict()
+
+    with pytest.raises(AppFileError) as denied:
+        getattr(gateway, operation)("notes-app", "private/missing.md")
+    assert denied.value.code == "file_capability_denied"
+    assert _app_file_error(denied.value).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_native_file_rpc_preserves_missing_file_code(file_app):
+    from backend.widget_runtime import build_widget_runtime_rpc_response
+
+    _manager, gateway, _app_dir = file_app
+    binding = SimpleNamespace(app_id="notes-app")
+    response = await build_widget_runtime_rpc_response(
+        binding,
+        {
+            "type": "rpc_request",
+            "request_id": "read-first-use",
+            "method": "files.read",
+            "params": {"path": "drafts/missing.md"},
+        },
+        lambda bound, _method, params: gateway.read_text(bound.app_id, params["path"]),
+        include_session_id=False,
+    )
+    assert response["error"] == {"code": "file_not_found", "message": "App data file not found"}
+
+
 @pytest.mark.parametrize("path", ["../manifest.json", "/etc/passwd", "drafts/../../controller.js", ""])
 def test_app_file_gateway_rejects_path_escape(file_app, path):
     _manager, gateway, _app_dir = file_app

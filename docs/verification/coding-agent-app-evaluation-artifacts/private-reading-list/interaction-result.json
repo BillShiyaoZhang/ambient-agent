@@ -1,0 +1,31 @@
+{
+  "case_id": "private-reading-list",
+  "artifact_dir": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/private-reading-list",
+  "checks": [
+    {
+      "id": "render-empty-state",
+      "passed": true,
+      "detail": "empty|no books|no titles|no entries|nothing here|nothing yet"
+    }
+  ],
+  "rpc": [
+    {
+      "method": "files.read",
+      "params": {
+        "path": "books.json"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[{\"id\":\"17909717774469zf8ll695s\",\"title\":\"The Left Hand of Darkness\",\"author\":\"Ursula K. Le Guin\",\"read\":false}]"
+      }
+    }
+  ],
+  "page_errors": [],
+  "screenshot": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/private-reading-list/private-reading-list-failed.png",
+  "page_text": "Private Reading List\nKeep track of the books you want to read.\nBook title\nAuthor\nAdd book\nSaved privately",
+  "passed": false,
+  "error": "Error: Timed out waiting for create-book /The Left Hand of Darkness/; body was: Private Reading List\nKeep track of the books you want to read.\nBook title\nAuthor\nAdd book\nSaved privately\n    at expectBody (file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_apps.mjs:94:9)\n    at async runReadingList (file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_apps.mjs:260:3)\n    at async file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_apps.mjs:383:47"
+}

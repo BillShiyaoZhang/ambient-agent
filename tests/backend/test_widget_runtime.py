@@ -87,6 +87,16 @@ async def test_open_session_transfers_source_by_value_and_binds_artifact_identit
 
 
 @pytest.mark.asyncio
+async def test_ephemeral_storage_is_opt_in_for_smoke_sessions_only() -> None:
+    connection = FakeRuntimeConnection()
+    gateway = WidgetRuntimeGateway(app_manager=FakeAppManager(), connector=lambda: connection)
+
+    await gateway.open_session("notes-app", {"width": 320, "height": 240}, ephemeral_storage=True)
+
+    assert connection.sent[0]["ephemeral_storage"] is True
+
+
+@pytest.mark.asyncio
 async def test_runtime_rpc_uses_server_binding_and_ignores_forged_identity() -> None:
     connection = FakeRuntimeConnection()
     calls: list[tuple[Any, str, dict[str, Any]]] = []

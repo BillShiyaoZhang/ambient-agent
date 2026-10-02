@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,9 @@ from backend.widget_runtime import (
     WidgetRuntimeBinding,
     WidgetRuntimeGateway,
 )
+
+_SMOKE_STORAGE_MAX_KEYS = 256
+_SMOKE_STORAGE_MAX_BYTES = 1024 * 1024
 
 
 class WidgetRuntimeSmokeError(RuntimeError):
@@ -86,12 +90,44 @@ class WidgetRuntimeSmokeTester:
                 else None
             ),
         )
+        # This storage exists only for a single staged smoke session. It tests
+        # the native SDK surface without claiming or exercising persistence.
+        smoke_storage: dict[str, tuple[Any, int]] = {}
 
         async def handle(
             binding: WidgetRuntimeBinding,
             method: str,
             params: dict[str, Any],
         ) -> Any:
+            if method.startswith("smoke.storage."):
+                operation = method.removeprefix("smoke.storage.")
+                if operation == "list":
+                    return list(smoke_storage)
+                if operation == "clear":
+                    smoke_storage.clear()
+                    return {"status": "ok"}
+                key = params.get("key")
+                if not isinstance(key, str) or not key or len(key) > 256:
+                    raise ValueError("Smoke storage key must be a non-empty string of at most 256 characters")
+                if operation == "get":
+                    return smoke_storage.get(key, (None, 0))[0]
+                if operation == "delete":
+                    smoke_storage.pop(key, None)
+                    return {"status": "ok"}
+                if operation == "set":
+                    try:
+                        serialized = json.dumps(params.get("value"), ensure_ascii=False, allow_nan=False)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("Smoke storage values must be JSON serializable") from exc
+                    encoded_size = len(serialized.encode("utf-8"))
+                    total_size = sum(size for _, size in smoke_storage.values())
+                    if key not in smoke_storage and len(smoke_storage) >= _SMOKE_STORAGE_MAX_KEYS:
+                        raise ValueError("Smoke storage key limit reached")
+                    if total_size - smoke_storage.get(key, (None, 0))[1] + encoded_size > _SMOKE_STORAGE_MAX_BYTES:
+                        raise ValueError("Smoke storage byte limit reached")
+                    smoke_storage[key] = (json.loads(serialized), encoded_size)
+                    return {"status": "ok"}
+                raise ValueError("Unsupported smoke storage operation")
             if method == "graph.subscribe":
                 query = params.get("query")
                 if not isinstance(query, dict):
@@ -218,6 +254,7 @@ class WidgetRuntimeSmokeTester:
             binding = await gateway.open_session(
                 result.app_id,
                 {"width": 640, "height": 480, "device_scale_factor": 1},
+                ephemeral_storage=True,
             )
             async with asyncio.timeout(self.timeout_seconds):
                 while True:

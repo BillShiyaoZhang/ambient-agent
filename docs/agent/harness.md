@@ -109,7 +109,9 @@ stateDiagram-v2
     promote --> done: atomic live-App swap
 ```
 
-Schema interaction 原子批准数据 schema 与 capability grants。Workflow 随后生成带 grants digest 的不可变 Runtime Contract。OpenCode 使用 `promote=False` 生成 staging；`verify` 要求 Manifest grants 等于 contract、代码使用为其子集，再检查 Graph schema。`promote` 持久化 marker、提交 schema 并原子替换 live App。recovery 不重复发布；失败、返工和取消保留旧 live App。
+Schema interaction 原子批准数据 schema 与 capability grants。Workflow 随后生成带 grants digest 的不可变 Runtime Contract。Coding Agent 使用 `promote=False` 生成 staging；`verify` 要求 Manifest grants 等于 contract、代码使用为其子集，再检查 Graph schema。`promote` 持久化 marker、提交 schema 并原子替换 live App。recovery 不重复发布；失败、返工和取消保留旧 live App。
+
+首帧验收使用隔离 Chromium Runtime，并由宿主显式启用 `ephemeral_storage`，提供原生 Widget SDK 的 `ambient.storage` 与生命周期注册接口。存储仅在本次验收的内存中存在，最多 256 个键、1 MiB JSON 值；能力 RPC 仍经过原有授权器。首帧结果证明代码可以加载和渲染，持久化、暂停前刷盘与实际交互需要分别验证。文件首次读取的 `file_not_found` 在授权后返回；其他读取故障需要保留可见错误状态。
 
 Schema verification 的生成 fallback 必须返回完整有效的 `unknown_props`、`type_mismatches`、`unknown_types` 三组列表，并在列表填充完成后构造 `VerificationDiff`。任一 finding 都使 `is_clean=false` 并进入 `wait_override`；缺列表或非法结果是验证失败，不能当作 clean。用户批准不能绕过 mandatory findings，必须返工代码、Schema 或计划后再次验证。
 
@@ -144,9 +146,11 @@ Capability/MCP/ACP/HTTP adapter 由同一个 `RunCoordinator` effect boundary �
 
 入口路由与普通 Converse 默认限制为 8 次模型调用。确认 `widget_create` 或 `widget_modify` 后，默认的总轮次限制改为 `max_model_turns=null`；实际 Harness 模型调用仍累计计数，每次生成的局部尝试上限、active wall clock、token 和费用预算继续生效。`model_turn_limit_explicit` 记录调用方是否明确设置轮次限制，显式的有限值（包括 8）保持有效。历史 checkpoint 没有这个标记时，原默认 8 次按开发默认策略迁移；非默认有限限制继续保留。
 
-启动 Coding Agent 不算一次 Harness 模型调用。ACP session 内部的编码、工具调用与不同错误的自动修复没有固定轮次上限，但仍受超时、取消、允许文件与权限、重复 finding 和文件无变化的停止条件约束。当前 Run 的 token/cost 只覆盖回传 usage 的 Harness 模型调用，不表示 ACP 内部的完整费用。
+启动 Coding Agent 不算一次 Harness 模型调用。ACP session 内部的编码、工具调用与不同错误的自动修复没有固定轮次上限，但仍受有限且为正的单次请求超时、取消、允许文件与权限、重复 finding 和文件无变化的停止条件约束。当前 Run 的 token/cost 只覆盖回传 usage 的 Harness 模型调用，不表示 ACP 内部的完整费用。
 
 Manifest、权限、功能依赖、AST 与 Schema 的确定性校验不消耗模型轮次。Schema 解析确实需要模型 fallback 时才惰性申请模型预算；缺少预算不能阻止纯代码校验，fallback 又不能绕过有限预算或失败关闭规则。已批准 contract 和有效草稿都保留的验证预算失败，retry 从 `verify` 继续并重做校验，不为单纯继续验证重新生成代码；明确修改代码的 feedback 仍进入编码阶段。
+
+单应用的计划、Schema 对齐和编码同时保留原始用户请求与 Router 摘要；复合与 slash 命令步骤使用各自的范围内指令。计划覆盖适用的交互、持久化、数据来源和失败恢复，并给出可观察的验收条件。修复提示保留逐项功能条件；超长段落指向完整的原始 ACP 指令。Schema 模型回退读取完整 Controller，遵守 staging 的 2 MiB 上限；超限则拒绝，不能只验证前缀。
 
 Jev 可仅用于入口路由；`workflow_decisions=off` 时开发设计复核走 LLM。最终 Runtime Contract 批准后，正常执行路径由 Coding Agent 和确定性验证推进，不再重新路由或用 Jev 决定是否允许发布。最终审批前的目标覆盖复核仍保留，避免将占位提示误报为功能完成。
 

@@ -1,0 +1,179 @@
+{
+  "case_id": "project-task-board",
+  "artifact_dir": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/project-task-board",
+  "artifact_hash": "4f5807539fd13f487181a6f71a4c7d30b8ea4666762deca898e9280a18a31954",
+  "checks": [
+    {
+      "id": "render-empty-state",
+      "passed": true,
+      "detail": "empty|no tasks|no items|nothing here|nothing yet"
+    },
+    {
+      "id": "subscribe-task",
+      "passed": true,
+      "detail": "graph.subscribe RPC observed"
+    },
+    {
+      "id": "create-task",
+      "passed": true,
+      "detail": "visible textbox value: Write acceptance tests"
+    },
+    {
+      "id": "rename-task",
+      "passed": true,
+      "detail": "visible textbox value: Write browser acceptance tests"
+    },
+    {
+      "id": "persist-task-draft",
+      "passed": true,
+      "detail": "unsent task draft written to host storage"
+    },
+    {
+      "id": "toggle-done",
+      "passed": true,
+      "detail": "done=true Graph mutation observed"
+    },
+    {
+      "id": "open-filter-excludes-completed-task",
+      "passed": true,
+      "detail": "textbox value disappeared: Write browser acceptance tests"
+    },
+    {
+      "id": "completed-filter-includes-task",
+      "passed": true,
+      "detail": "visible textbox value: Write browser acceptance tests"
+    },
+    {
+      "id": "query-open-completed",
+      "passed": true,
+      "detail": "open filter excludes completed Task; completed filter includes it"
+    },
+    {
+      "id": "reload-recreated-production-frame",
+      "passed": true,
+      "detail": "frame shell reinitialized with retained fixture data"
+    },
+    {
+      "id": "reload-retains-graph-state",
+      "passed": true,
+      "detail": "visible textbox value: Write browser acceptance tests"
+    },
+    {
+      "id": "reload-restores-task-draft",
+      "passed": true,
+      "detail": "visible textbox value: Keep this draft across reload"
+    },
+    {
+      "id": "delete-task",
+      "passed": true,
+      "detail": "textbox value disappeared: Write browser acceptance tests"
+    },
+    {
+      "id": "graph-error-is-visible",
+      "passed": true,
+      "detail": "error|failed|unavailable|problem"
+    }
+  ],
+  "rpc": [
+    {
+      "method": "graph.subscribe",
+      "params": {
+        "subscription_id": "sub-1",
+        "query": {
+          "type": "Task"
+        }
+      }
+    },
+    {
+      "method": "graph.mutate",
+      "params": {
+        "actions": [
+          {
+            "action": "create_node",
+            "type": "Task",
+            "properties": {
+              "title": "Write acceptance tests",
+              "done": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "graph.mutate",
+      "params": {
+        "actions": [
+          {
+            "action": "update_node_property",
+            "id": "node-1",
+            "properties": {
+              "title": "Write browser acceptance tests"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "graph.mutate",
+      "params": {
+        "actions": [
+          {
+            "action": "update_node_property",
+            "id": "node-1",
+            "properties": {
+              "done": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "graph.subscribe",
+      "params": {
+        "subscription_id": "sub-1",
+        "query": {
+          "type": "Task"
+        }
+      }
+    },
+    {
+      "method": "graph.mutate",
+      "params": {
+        "actions": [
+          {
+            "action": "delete_node",
+            "id": "node-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "graph.mutate",
+      "params": {
+        "actions": [
+          {
+            "action": "create_node",
+            "type": "Task",
+            "properties": {
+              "title": "Failure probe",
+              "done": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "page_errors": [],
+  "screenshot": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/project-task-board.png",
+  "runtime_events": [
+    {
+      "type": "host_event",
+      "event": "focus"
+    },
+    {
+      "type": "host_event",
+      "event": "focus"
+    }
+  ],
+  "passed": true
+}

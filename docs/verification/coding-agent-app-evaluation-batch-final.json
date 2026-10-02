@@ -1,0 +1,75 @@
+{
+  "format": 1,
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "evidence_scope": "composed observed runs; initial three-case batch plus two focused private-reading-list repair turns; final artifact from attempt 2",
+  "cases": [
+    {
+      "id": "private-reading-list",
+      "status": "incomplete",
+      "model": "gpt-6-luna",
+      "artifact_hash": "e9122cd50fe9ce527ec3539f39cdc52ce8f94eca61def8b36b037916c0880c0a",
+      "artifact_dir": "docs/verification/coding-agent-app-evaluation-final-artifacts/private-reading-list",
+      "repair_attempts": 0,
+      "production_staging_validated": true,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed",
+        "render-empty-state": "not_run",
+        "create-book": "not_run",
+        "read-book": "not_run",
+        "edit-book": "not_run",
+        "toggle-read": "not_run",
+        "delete-book": "not_run",
+        "reload-retains-books": "not_run",
+        "file-error-is-visible": "not_run"
+      },
+      "source_run": "focused repair attempt 2"
+    },
+    {
+      "id": "project-task-board",
+      "status": "incomplete",
+      "model": "gpt-6-luna",
+      "artifact_hash": "4f5807539fd13f487181a6f71a4c7d30b8ea4666762deca898e9280a18a31954",
+      "artifact_dir": "docs/verification/coding-agent-app-evaluation-final-artifacts/project-task-board",
+      "repair_attempts": 0,
+      "production_staging_validated": true,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "render-empty-state": "not_run",
+        "subscribe-task": "not_run",
+        "query-open-completed": "not_run",
+        "create-task": "not_run",
+        "rename-task": "not_run",
+        "toggle-done": "not_run",
+        "delete-task": "not_run",
+        "graph-error-is-visible": "not_run"
+      },
+      "source_run": "initial three-case batch"
+    },
+    {
+      "id": "service-status",
+      "status": "incomplete",
+      "model": "gpt-6-luna",
+      "artifact_hash": "cfc9a3bef2433aded64d903d105f8d71244c6e49abab214c2bece124ebc3cbed",
+      "artifact_dir": "docs/verification/coding-agent-app-evaluation-final-artifacts/service-status",
+      "repair_attempts": 0,
+      "production_staging_validated": true,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "render-loading-state": "not_run",
+        "request-approved-source": "not_run",
+        "render-success-response": "not_run",
+        "render-empty-response": "not_run",
+        "render-request-error": "not_run",
+        "retry-after-error": "not_run",
+        "reject-malformed-response": "not_run"
+      },
+      "source_run": "initial three-case batch"
+    }
+  ],
+  "complete_passes": 0
+}

@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "id": "project-task-board",
+  "title": "Project Task Board",
+  "description": "Create, rename, complete, filter, and delete tasks stored in the Graph.",
+  "app_version": "1.0.0",
+  "intents": ["manage project tasks"],
+  "schema_refs": ["Task"],
+  "capabilities": [
+    {
+      "id": "graph.mutate",
+      "scope": {
+        "entities": ["Task"],
+        "operations": ["create", "delete", "update"]
+      }
+    },
+    {
+      "id": "graph.query",
+      "scope": {
+        "entities": ["Task"]
+      }
+    }
+  ],
+  "app_spec": {
+    "spec_version": 1,
+    "types": ["custom:task-board"],
+    "features": [
+      {
+        "id": "custom:task-board.crud",
+        "status": "implemented",
+        "surfaces": ["data", "ui"]
+      }
+    ]
+  }
+}

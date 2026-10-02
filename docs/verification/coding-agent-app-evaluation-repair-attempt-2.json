@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "repair_run": true,
+  "case_set_sha256": "a5ba1e26fd6cbcc44bd7714df135a0c1ee750a1cfa55ff2f9a6f0e86f7c7ded4",
+  "repair_feedback_sha256": "5ffa510e088056a7b5a14d7af72b2af8b0e643f603f9349e3388c39b9aa3e4ed",
+  "cases": [
+    {
+      "id": "private-reading-list",
+      "status": "incomplete",
+      "model": "gpt-6-luna",
+      "artifact_hash": "e9122cd50fe9ce527ec3539f39cdc52ce8f94eca61def8b36b037916c0880c0a",
+      "artifact_dir": "/tmp/coding-agent-app-eval-repair2-artifacts/private-reading-list",
+      "repair_attempts": 0,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed",
+        "render-empty-state": "not_run",
+        "create-book": "not_run",
+        "read-book": "not_run",
+        "edit-book": "not_run",
+        "toggle-read": "not_run",
+        "delete-book": "not_run",
+        "reload-retains-books": "not_run",
+        "file-error-is-visible": "not_run"
+      },
+      "elapsed_ms": 56416
+    }
+  ],
+  "complete_passes": 0,
+  "elapsed_ms": 56435
+}

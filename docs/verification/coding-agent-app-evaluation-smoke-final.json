@@ -1,0 +1,26 @@
+{
+  "executor": "WidgetRuntimeSmokeTester",
+  "results": [
+    {
+      "id": "private-reading-list",
+      "status": "passed",
+      "artifact_hash": "e9122cd50fe9ce527ec3539f39cdc52ce8f94eca61def8b36b037916c0880c0a",
+      "width": 640,
+      "height": 480
+    },
+    {
+      "id": "project-task-board",
+      "status": "passed",
+      "artifact_hash": "4f5807539fd13f487181a6f71a4c7d30b8ea4666762deca898e9280a18a31954",
+      "width": 640,
+      "height": 480
+    },
+    {
+      "id": "service-status",
+      "status": "passed",
+      "artifact_hash": "cfc9a3bef2433aded64d903d105f8d71244c6e49abab214c2bece124ebc3cbed",
+      "width": 640,
+      "height": 480
+    }
+  ]
+}

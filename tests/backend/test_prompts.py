@@ -54,6 +54,12 @@ def test_opencode_system_prompt_inclusion():
     assert "Never keep user-authored drafts only in React hook state" in prompt
     assert "ambient.lifecycle.onBeforeSuspend(handler)" in prompt
     assert "awaits its `ambient.storage.set(...)`" in prompt
+    assert "Gate write-through until `storage.get` hydration finishes" in prompt
+    assert "List` renders its `items` prop as text rows" in prompt
+    assert "ignores child elements" in prompt
+    assert "map the records to `<${Row}>` children inside `<${Column}>`" in prompt
+    assert "code `file_not_found`" in prompt
+    assert "never turn every read error into empty data" in prompt
     assert app_spec_declaration_rules() in prompt
 
 

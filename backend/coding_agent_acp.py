@@ -62,6 +62,8 @@ _MAX_ACP_PATH_LENGTH = 4096
 _ACP_STDERR_RETAIN_BYTES = 16 * 1024
 _ACP_STDERR_DIAGNOSTIC_CHARS = 4096
 _ACP_ARTIFACT_CONTEXT_BYTES = 64 * 1024
+_MAX_VERIFIER_DIAGNOSTIC_CHARS = 256 * 1024
+_MAX_VERIFIER_REPORT_CANDIDATES = 128
 _CODEX_ACP_PATCH_BYTES = 1024 * 1024
 _CODEX_ACP_PATCH_CAPABILITY = {"jetbrains": {"air": {"version": 1, "capabilities": ["diffPatch"]}}}
 _SECRET_KEY_PATTERN = re.compile(
@@ -642,6 +644,31 @@ def _acp_artifact_context(staging_dir: Path) -> str:
     )
 
 
+def _structured_verifier_error(diagnostics: list[str]) -> dict[str, Any] | None:
+    """Find one bounded structured verifier report without copying every JSON suffix."""
+    decoder = json.JSONDecoder()
+    candidates_seen = 0
+    for stream in diagnostics:
+        bounded = stream[:_MAX_VERIFIER_DIAGNOSTIC_CHARS]
+        for match in re.finditer(r'\{\s*"ok"\s*:\s*false\s*,\s*"code"\s*:\s*"', bounded):
+            candidates_seen += 1
+            if candidates_seen > _MAX_VERIFIER_REPORT_CANDIDATES:
+                return None
+            try:
+                report, _ = decoder.raw_decode(bounded, match.start())
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(report, dict)
+                and report.get("ok") is False
+                and isinstance(report.get("code"), str)
+                and isinstance(report.get("message"), str)
+                and isinstance(report.get("hint"), str)
+            ):
+                return report
+    return None
+
+
 def _sanitized_acp_stderr(raw: bytes, environment: Mapping[str, str]) -> str:
     """Return a bounded diagnostic without credential values or terminal controls."""
     secrets: set[str] = set()
@@ -898,11 +925,8 @@ def _validate_staged_app(
             stage="static_verify",
         ) from exc
     if completed.returncode != 0:
-        diagnostic = (completed.stderr or completed.stdout or "unknown verifier error").strip()
-        try:
-            structured = json.loads(diagnostic)
-        except json.JSONDecodeError:
-            structured = None
+        diagnostics = [stream.strip() for stream in (completed.stderr, completed.stdout) if stream.strip()]
+        structured = _structured_verifier_error(diagnostics)
         if isinstance(structured, dict):
             code = str(structured.get("code") or "widget_verification_failed")
             message = str(structured.get("message") or "Widget verification failed")
@@ -912,6 +936,7 @@ def _validate_staged_app(
                 code=code,
                 stage="static_verify",
             )
+        diagnostic = "\n".join(diagnostics) or "unknown verifier error"
         raise CodingAgentArtifactError(
             f"Widget syntax/runtime/security verification failed: {diagnostic[:_DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT]}",
             code="widget_verification_failed",
@@ -1910,8 +1935,8 @@ async def run_coding_agent_acp(
         raise CodingAgentACPInputError("Coding Agent ACP launch command is invalid")
     if not isinstance(launch_environment, Mapping):
         raise CodingAgentACPInputError("Coding Agent ACP launch environment is invalid")
-    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
-        raise CodingAgentACPInputError("Coding Agent ACP timeout must be positive")
+    if not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise CodingAgentACPInputError("Coding Agent ACP timeout must be finite and positive")
 
     seed_manifest = _validated_manifest_template(manifest_template, app_id)
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
@@ -2151,8 +2176,8 @@ async def run_opencode_agent_acp(
         timeout_seconds = float(os.getenv("OPENCODE_TIMEOUT", "600.0"))
     except ValueError as exc:
         raise CodingAgentACPInputError(f"Invalid OpenCode ACP configuration: {exc!s}") from exc
-    if timeout_seconds <= 0:
-        raise CodingAgentACPInputError("OPENCODE_TIMEOUT must be positive")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise CodingAgentACPInputError("OPENCODE_TIMEOUT must be finite and positive")
     environment = dict(default_environment())
     environment.update(_opencode_runtime_env())
     return await run_coding_agent_acp(

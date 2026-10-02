@@ -118,6 +118,28 @@ async def test_explicit_empty_finding_lists_are_clean(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+async def test_fallback_reviews_findings_after_the_old_source_cutoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = (
+        CONTROLLER_REQUIRING_FALLBACK
+        + "\n// padding\n" * 1000
+        + ("\nconst tail = {action: 'create_node', type: 'UnregisteredTask', properties: {title: 'tail'}};")
+    )
+    calls = _scripted_provider(monkeypatch, json.dumps(_payload(types=True)))
+    diff = await SchemaVerificationService.diff("fallback-app", {"js": source}, SCHEMAS)
+    assert source in calls[0]["messages"][1]["content"]
+    assert not diff.is_clean and diff.unknown_types[0].type_name == "UnregisteredTask"
+
+
+@pytest.mark.asyncio
+async def test_oversized_fallback_fails_without_reviewing_partial_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _scripted_provider(monkeypatch, json.dumps(_payload()))
+    source = CONTROLLER_REQUIRING_FALLBACK + "//界\n" * (512 * 1024)
+    with pytest.raises(VerificationError, match="complete-source"):
+        await SchemaVerificationService.diff("fallback-app", {"js": source}, SCHEMAS)
+    assert calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "response",
     [

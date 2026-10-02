@@ -1,0 +1,162 @@
+{
+  "case_id": "private-reading-list",
+  "artifact_dir": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/private-reading-list-repair-attempt-2",
+  "artifact_hash": "e9122cd50fe9ce527ec3539f39cdc52ce8f94eca61def8b36b037916c0880c0a",
+  "checks": [
+    {
+      "id": "render-empty-state",
+      "passed": true,
+      "detail": "empty|no books|no titles|no entries|nothing here|nothing yet"
+    },
+    {
+      "id": "create-book",
+      "passed": true,
+      "detail": "The Left Hand of Darkness"
+    },
+    {
+      "id": "read-book",
+      "passed": true,
+      "detail": "Ursula K\\.? Le Guin"
+    },
+    {
+      "id": "write-books-json",
+      "passed": true,
+      "detail": "private file read/write RPCs observed"
+    },
+    {
+      "id": "reload-recreated-production-frame",
+      "passed": true,
+      "detail": "frame shell reinitialized with retained fixture data"
+    },
+    {
+      "id": "reload-retains-books",
+      "passed": true,
+      "detail": "The Left Hand of Darkness"
+    },
+    {
+      "id": "edit-book",
+      "passed": true,
+      "detail": "The Dispossessed"
+    },
+    {
+      "id": "toggle-read",
+      "passed": true,
+      "detail": "read checkbox changed to checked"
+    },
+    {
+      "id": "toggle-unread",
+      "passed": true,
+      "detail": "read checkbox changed back to unchecked"
+    },
+    {
+      "id": "delete-book",
+      "passed": true,
+      "detail": "The Dispossessed"
+    },
+    {
+      "id": "reload-recreated-production-frame",
+      "passed": true,
+      "detail": "frame shell reinitialized with retained fixture data"
+    },
+    {
+      "id": "file-error-is-visible",
+      "passed": true,
+      "detail": "error|failed|unavailable|problem|could.{0,4}load|unable to load"
+    },
+    {
+      "id": "file-read-retry",
+      "passed": true,
+      "detail": "empty|no books|no titles|no entries|nothing here|nothing yet"
+    },
+    {
+      "id": "file-write-error-is-visible",
+      "passed": true,
+      "detail": "error|failed|unable|problem|could.?n.?t save|save your changes"
+    }
+  ],
+  "rpc": [
+    {
+      "method": "files.read",
+      "params": {
+        "path": "books.json"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[{\"id\":\"1790972765856joljcn1i86h\",\"title\":\"The Left Hand of Darkness\",\"author\":\"Ursula K. Le Guin\",\"read\":false}]"
+      }
+    },
+    {
+      "method": "files.read",
+      "params": {
+        "path": "books.json"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[{\"id\":\"1790972765856joljcn1i86h\",\"title\":\"The Dispossessed\",\"author\":\"Ursula K. Le Guin\",\"read\":false}]"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[{\"id\":\"1790972765856joljcn1i86h\",\"title\":\"The Dispossessed\",\"author\":\"Ursula K. Le Guin\",\"read\":true}]"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[{\"id\":\"1790972765856joljcn1i86h\",\"title\":\"The Dispossessed\",\"author\":\"Ursula K. Le Guin\",\"read\":false}]"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[]"
+      }
+    },
+    {
+      "method": "files.read",
+      "params": {
+        "path": "books.json"
+      }
+    },
+    {
+      "method": "files.read",
+      "params": {
+        "path": "books.json"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "books.json",
+        "text": "[{\"id\":\"1790972766603ekgqdzdaf9\",\"title\":\"Write failure probe\",\"author\":\"A. Reader\",\"read\":false}]"
+      }
+    }
+  ],
+  "page_errors": [],
+  "screenshot": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/private-reading-list-repair-attempt-2/private-reading-list.png",
+  "runtime_events": [
+    {
+      "type": "host_event",
+      "event": "focus"
+    },
+    {
+      "type": "host_event",
+      "event": "focus"
+    },
+    {
+      "type": "host_event",
+      "event": "focus"
+    }
+  ],
+  "passed": true
+}

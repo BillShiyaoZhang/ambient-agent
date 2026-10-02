@@ -1,0 +1,74 @@
+{
+  "format": 1,
+  "cases": [
+    {
+      "id": "private-reading-list",
+      "title": "Private persistent CRUD",
+      "instruction": "Build a compact reading-list Widget. Users must add a book with title and author, see saved books, edit a book, mark it read/unread, and delete it. Persist records privately across reloads with ambient.files under books.json; never use Graph for this private list. Show empty and load/write error states. Keep the UI keyboard accessible. Declare and implement the required feature custom:reading-list.crud.",
+      "repair_feedback": "The first real Runtime interaction clicked Add book and observed a successful files.write with the new title and author, but the book did not appear in the rendered list. The SDK List component only renders its items prop as text and ignores children; do not put interactive Row components inside List. Render interactive book rows with Row children inside Column. Preserve the existing Manifest, grants, and all requested behavior; do not treat a successful write as proof the UI updated.",
+      "manifest": {
+        "manifest_version": 2,
+        "id": "private-reading-list",
+        "title": "Private Reading List",
+        "description": "A private persistent book list",
+        "app_version": "1.0.0",
+        "intents": ["manage my reading list"],
+        "schema_refs": [],
+        "capabilities": [
+          {"id": "file.read", "scope": {"paths": ["books.json"]}},
+          {"id": "file.write", "scope": {"paths": ["books.json"], "max_bytes": 65536}}
+        ]
+      },
+      "requirements": [
+        {"id": "custom:reading-list.crud", "description": "Create, read, update and delete private reading-list entries; persist them in books.json and report storage errors.", "capability_ids": ["file.read", "file.write"], "network_sources": []}
+      ],
+      "acceptance": ["manifest-controller-contract", "feature-coverage", "runtime-first-frame", "render-empty-state", "create-book", "read-book", "edit-book", "toggle-read", "delete-book", "reload-retains-books", "file-error-is-visible"],
+      "fixture": {"kind": "private-files", "initial": {}, "reload_between": ["create-book", "read-book"]}
+    },
+    {
+      "id": "project-task-board",
+      "title": "Graph-backed CRUD and query",
+      "instruction": "Build a project task board backed only by canonical Task nodes in the Graph. The approved Task schema has title (string) and done (boolean). Subscribe to Task nodes and display title and done state. Users must create a task, rename a task, toggle done, and delete a task. Include a filter that queries or derives open versus completed tasks from the subscribed data, show an empty state, and surface Graph failures. Never invent entities or properties. Declare and implement custom:task-board.crud.",
+      "manifest": {
+        "manifest_version": 2,
+        "id": "project-task-board",
+        "title": "Project Task Board",
+        "description": "A Graph-backed task board",
+        "app_version": "1.0.0",
+        "intents": ["manage project tasks"],
+        "schema_refs": ["Task"],
+        "capabilities": [
+          {"id": "graph.query", "scope": {"entities": ["Task"]}},
+          {"id": "graph.mutate", "scope": {"entities": ["Task"], "operations": ["create", "update", "delete"]}}
+        ]
+      },
+      "requirements": [
+        {"id": "custom:task-board.crud", "description": "Query canonical Task nodes and create, rename, toggle and delete tasks with visible Graph error handling.", "capability_ids": ["graph.query", "graph.mutate"], "network_sources": []}
+      ],
+      "acceptance": ["manifest-controller-contract", "feature-coverage", "runtime-first-frame", "render-empty-state", "subscribe-task", "query-open-completed", "create-task", "rename-task", "toggle-done", "delete-task", "graph-error-is-visible"],
+      "fixture": {"kind": "graph", "initial": [], "reload_between": ["create-task", "subscribe-task"]}
+    },
+    {
+      "id": "service-status",
+      "title": "External data, loading and failure recovery",
+      "instruction": "Build a service-status Widget that requests JSON from the approved test fixture source status-api at GET /v1/status using ambient.net.request. The fixture base URL ends in .invalid and is never contacted; the deterministic runtime test supplies responses. The decoded success shape is {services:[{name:string,status:string}]}; an empty services array means no services. Display each service name and status. Include explicit loading, success, empty, and error states, and a retry action that makes a fresh request after failure. A rejected request must show an error and allow retry. Malformed response data must show an error and must never be presented as successful status data. Do not use fetch, direct URLs, credentials, or fabricated success data. Declare and implement custom:service-status.retry.",
+      "manifest": {
+        "manifest_version": 2,
+        "id": "service-status",
+        "title": "Service Status",
+        "description": "Status from an approved external JSON source",
+        "app_version": "1.0.0",
+        "intents": ["check service status"],
+        "schema_refs": [],
+        "capabilities": [
+          {"id": "network.request", "scope": {"sources": {"status-api": {"base_url": "https://status.example.invalid", "paths": ["/v1/status"], "methods": ["GET"], "response_limit": 65536}}}}
+        ]
+      },
+      "requirements": [
+        {"id": "custom:service-status.retry", "description": "Read approved service status data, show loading, empty, malformed-data and request-failure states, and retry after failure.", "capability_ids": ["network.request"], "network_sources": [{"source_id": "status-api", "path": "/v1/status"}]}
+      ],
+      "acceptance": ["manifest-controller-contract", "feature-coverage", "runtime-first-frame", "render-loading-state", "request-approved-source", "render-success-response", "render-empty-response", "render-request-error", "retry-after-error", "reject-malformed-response"],
+      "fixture": {"kind": "http", "source_id": "status-api", "path": "/v1/status", "responses": [{"status": 503, "body": {"error": "temporarily unavailable"}}, {"status": 200, "body": {"services": [{"name": "Search", "status": "operational"}]}}]}
+    }
+  ]
+}

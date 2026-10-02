@@ -278,7 +278,10 @@ class WidgetRuntimeGateway:
         viewport: dict[str, Any],
         *,
         presentation_context: dict[str, Any] | None = None,
+        ephemeral_storage: bool = False,
     ) -> WidgetRuntimeBinding:
+        if not isinstance(ephemeral_storage, bool):
+            raise ValueError("Widget Runtime ephemeral_storage must be a boolean")
         normalized_viewport = self._normalize_viewport(viewport)
         app = self.app_manager.get_app_files(app_id)
         if not isinstance(app, dict):
@@ -313,21 +316,22 @@ class WidgetRuntimeGateway:
             self._sessions[session_id] = binding
 
         try:
-            await connection.send_json(
-                {
-                    "type": "start",
-                    "protocol_version": WIDGET_RUNTIME_PROTOCOL_VERSION,
-                    "session_id": session_id,
-                    "app_id": app_id,
-                    "manifest_revision": revision,
-                    "grants_digest": grants_digest,
-                    "artifact_digest": artifact_digest,
-                    "capability_ids": capability_ids,
-                    "controller_source": source,
-                    "viewport": normalized_viewport,
-                    "presentation_context": self._normalize_presentation_context(presentation_context),
-                }
-            )
+            start_message = {
+                "type": "start",
+                "protocol_version": WIDGET_RUNTIME_PROTOCOL_VERSION,
+                "session_id": session_id,
+                "app_id": app_id,
+                "manifest_revision": revision,
+                "grants_digest": grants_digest,
+                "artifact_digest": artifact_digest,
+                "capability_ids": capability_ids,
+                "controller_source": source,
+                "viewport": normalized_viewport,
+                "presentation_context": self._normalize_presentation_context(presentation_context),
+            }
+            if ephemeral_storage:
+                start_message["ephemeral_storage"] = True
+            await connection.send_json(start_message)
         except Exception:
             async with self._session_lock:
                 self._sessions.pop(session_id, None)

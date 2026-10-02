@@ -31,11 +31,11 @@ class PlanGenerationService:
         is_zh = language == "zh"
         system_prompt = f"""You are an Ambient Agent Development Architect.
 Your task is to generate a concise, high-level implementation plan for a new or modified widget.
-The plan must only cover:
-1. The main purpose of the widget.
-2. The key user interface elements/features that will be added or modified.
-
-Keep the plan extremely short, clear, and direct. Do NOT include code, files, or technical configuration steps.
+Cover every requested user-visible behavior: the main purpose, interactions and UI, data sources and persistence,
+and relevant loading, empty, validation and failure/retry states. Include observable acceptance criteria for each
+distinct objective so implementation can be checked. Only include concerns that apply to this request.
+Keep the plan concise, clear, and direct without compressing away requirements. Do NOT include source code,
+file listings, or technical configuration steps.
 Preserve the existing App's working features and approved capability baseline unless the user asks to remove them.
 Use the supplied actual runtime catalog to assess feasibility. Catalog support is not approval; available capabilities can be proposed for approval. Missing installed providers must not hide available public HTTPS networking or device SDK capabilities. If a mandatory behavior cannot be supported, explain the specific blocker and a meaningful alternative for the user to review; do not call an unavailable/error label an implementation of the requested feature.
 IMPORTANT: You MUST write the plan in {"Chinese (中文)" if is_zh else "English"}."""
@@ -96,7 +96,9 @@ Please write a brief implementation plan for this widget."""
         is_zh = language == "zh"
         system_prompt = f"""You are an Ambient Agent Development Architect.
 Your task is to refine the implementation plan based on direct feedback from the user.
-Keep it a concise, high-level plan covering the widget's purpose and UI elements. Do NOT write source code.
+Keep it a concise, high-level plan covering every requested behavior, interactions, data sources and persistence,
+and relevant loading, empty, validation and failure/retry states, with observable acceptance criteria.
+Carry forward unchanged requirements and apply the user's feedback explicitly. Do NOT write source code.
 Preserve existing working behavior and approved capabilities unless feedback explicitly removes them. Assess mandatory requested behavior against the actual runtime catalog: available capabilities can be proposed for approval, while a genuinely missing capability requires a specific blocker and meaningful alternative for review. Do not silently substitute unavailable/error labels for mandatory live features.
 IMPORTANT: You MUST write the refined plan in {"Chinese (中文)" if is_zh else "English"}."""
 

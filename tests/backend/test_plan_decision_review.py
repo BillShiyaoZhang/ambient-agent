@@ -140,6 +140,29 @@ def install_plan_generation(monkeypatch, candidate="Add a task editor with Graph
 
 
 @pytest.mark.asyncio
+async def test_plan_receives_original_constraints_omitted_by_routing(workflow_tape, monkeypatch):
+    original = "Create a task editor. Persist tasks after reload, reject blank titles and keep existing tasks."
+    run, state, _intent = create_run(workflow_tape, mode="off")
+    run["input"]["content"] = original
+    generation = install_plan_generation(monkeypatch)
+    outcome = await workflow_tape.workflow(run, state)
+    assert isinstance(outcome, Wait)
+    assert original in generation.call_args.kwargs["instruction"]
+    assert original in state.data["plan_review_instruction"]
+
+
+@pytest.mark.parametrize("scoped", ["multi", "slash"])
+def test_original_context_cannot_broaden_a_scoped_app_step(workflow_tape, scoped):
+    run, state, intent = create_run(workflow_tape, mode="off")
+    run["input"]["content"] = "Create a task editor and delete all notes in a separate App."
+    if scoped == "multi":
+        state.data["return_to_multi"] = True
+    else:
+        intent.rationale = "explicit slash command"
+    assert workflow_tape.workflow._widget_instruction(run, state, intent) == "Create a task editor"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changed_field", ["candidate", "instruction", "app_id", "feedback"])
 async def test_review_checkpoint_reuses_same_inputs_and_invalidates_changed_inputs(
     workflow_tape, monkeypatch, changed_field

@@ -7,6 +7,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPO_ROOT / "scripts" / "verify_widget_controller.mjs"
 
 
+def verifier_error_report(completed):
+    decoder = json.JSONDecoder()
+    for output in (completed.stderr, completed.stdout):
+        try:
+            report, _ = decoder.raw_decode(output.lstrip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(report, dict):
+            return report
+    raise AssertionError(f"Verifier did not emit a JSON error report: {completed.stderr or completed.stdout}")
+
+
 def verify(tmp_path, source, capabilities, requirements=None):
     app_dir = tmp_path / "test-app"
     app_dir.mkdir()
@@ -68,7 +80,7 @@ def test_required_feature_cannot_be_satisfied_by_explanatory_placeholder(tmp_pat
         requirements,
     )
     assert completed.returncode != 0
-    assert json.loads(completed.stderr)["code"] == "required_feature_missing"
+    assert verifier_error_report(completed)["code"] == "required_feature_missing"
 
 
 def test_required_network_feature_needs_called_exact_source_and_path(tmp_path):
@@ -128,7 +140,7 @@ def test_verifier_rejects_graph_use_without_a_grant(tmp_path):
         [],
     )
     assert completed.returncode != 0
-    assert json.loads(completed.stderr)["code"] == "capability_contract_error"
+    assert verifier_error_report(completed)["code"] == "capability_contract_error"
 
 
 def test_verifier_accepts_scoped_graph_use_and_rejects_another_entity(tmp_path):
@@ -148,7 +160,7 @@ def test_verifier_accepts_scoped_graph_use_and_rejects_another_entity(tmp_path):
         grant,
     )
     assert denied.returncode != 0
-    assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+    assert verifier_error_report(denied)["code"] == "capability_contract_error"
 
 
 def test_verifier_requires_literal_approved_capability_action(tmp_path):
@@ -173,7 +185,7 @@ def test_verifier_requires_literal_approved_capability_action(tmp_path):
         grant,
     )
     assert denied.returncode != 0
-    assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+    assert verifier_error_report(denied)["code"] == "capability_contract_error"
 
 
 def test_verifier_checks_graph_network_and_file_scope_literals(tmp_path):
@@ -224,7 +236,7 @@ def test_verifier_checks_graph_network_and_file_scope_literals(tmp_path):
         capabilities,
     )
     assert denied.returncode != 0
-    assert json.loads(denied.stderr)["code"] == "capability_contract_error"
+    assert verifier_error_report(denied)["code"] == "capability_contract_error"
 
 
 def test_verifier_explains_graph_action_dsl_instead_of_misreporting_grant_scope(tmp_path):
@@ -240,7 +252,7 @@ def test_verifier_explains_graph_action_dsl_instead_of_misreporting_grant_scope(
     )
 
     assert completed.returncode != 0
-    diagnostic = json.loads(completed.stderr)
+    diagnostic = verifier_error_report(completed)
     assert diagnostic["code"] == "capability_contract_error"
     assert "action 'create' is invalid" in diagnostic["message"]
     assert "create_node" in diagnostic["message"]
@@ -327,4 +339,4 @@ def test_verifier_rejects_navigation_and_peer_network_globals(tmp_path):
         case_path.mkdir()
         completed = verify(case_path, source, [])
         assert completed.returncode != 0
-        assert "Forbidden" in json.loads(completed.stderr)["message"]
+        assert "Forbidden" in verifier_error_report(completed)["message"]

@@ -328,9 +328,19 @@ def _repair_instruction_context(instruction: str) -> str:
     sections = (
         _bounded_context("[ORIGINAL APPROVED REQUEST]", request, max_chars=4_000),
         _bounded_context(
+            "[ORIGINAL USER REQUEST]",
+            _instruction_section(instruction, "[ORIGINAL USER REQUEST]"),
+            max_chars=4_000,
+        ),
+        _bounded_context(
             "[APPROVED DEVELOPMENT PLAN]",
             _instruction_section(instruction, "[APPROVED DEVELOPMENT PLAN]"),
             max_chars=4_000,
+        ),
+        _bounded_context(
+            "[REQUIRED FEATURES — ACCEPTANCE CRITERIA]",
+            _instruction_section(instruction, "[REQUIRED FEATURES — ACCEPTANCE CRITERIA]"),
+            max_chars=8_000,
         ),
         approved_runtime_contract_excerpt(instruction),
         _manifest_template_context(instruction),
@@ -346,7 +356,8 @@ def build_repair_prompt(finding: RepairFinding, *, instruction: str) -> str:
     return (
         "The staged Widget failed mandatory independent validation. Repair controller.js and/or manifest.json "
         "in place, then inspect the whole files for the same class of mistake. Do not create unsupported files. "
-        "Preserve the approved behavior, but never add or broaden capabilities, schemas, entities, operations, "
+        "Preserve approved behavior and implement every required feature acceptance criterion; never add or broaden "
+        "capabilities, schemas, entities, operations, "
         "sources, paths, actions, or host APIs. The Runtime Contract is an approval envelope rather than the "
         "Manifest schema; map only its approved Manifest fields. If the requested behavior cannot be implemented "
         "within the approved contract, leave the contract unchanged and explain the blocker. Do not claim success "

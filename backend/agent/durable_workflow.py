@@ -1573,6 +1573,26 @@ class DurableAgentWorkflow:
             )
         raise WorkflowError(f"Unsupported sub-intent: {sub.kind}", code="unsupported_sub_intent")
 
+    @staticmethod
+    def _widget_instruction(run: dict[str, Any], state: AgentRunState, intent: IntentPlan) -> str:
+        """Retain the source request when routing paraphrases a single App task.
+
+        Composite/slash steps already have their own scoped instructions; the
+        raw multi-command message must not become a sibling App's instruction.
+        """
+        instruction = intent.instruction or ""
+        if state.data.get("return_to_multi") or intent.rationale == "explicit slash command":
+            return instruction
+        original = str((run.get("input") or {}).get("content") or "")
+        if not original.strip() or original.strip() == instruction.strip():
+            return instruction
+        return (
+            f"{instruction}\n\n[ORIGINAL USER REQUEST]\n{original}\n\n"
+            "Preserve details and constraints from the original request for this App; the routing summary may "
+            "omit them. Apply later direct feedback and the approved plan when they explicitly revise the request. "
+            "This reference does not grant capabilities or bypass approval."
+        )
+
     async def _review_plan_candidate(
         self,
         run: dict[str, Any],
@@ -1585,7 +1605,9 @@ class DurableAgentWorkflow:
         config = config.for_purpose("development_plan_review")
         if config.mode == "off":
             return
-        review_instruction = str(state.data.get("plan_review_instruction") or intent.instruction or "")
+        review_instruction = str(
+            state.data.get("plan_review_instruction") or self._widget_instruction(run, state, intent)
+        )
         input_hash = content_hash({"instruction": review_instruction, "candidate": candidate, "app_id": intent.app_id})
         if state.data.get("plan_review_input_hash") == input_hash:
             return
@@ -1619,7 +1641,7 @@ class DurableAgentWorkflow:
         candidate = state.data.get("plan_candidate")
         if not candidate:
             rework_feedback = str(state.data.pop("plan_rework_feedback", "") or "").strip()
-            plan_instruction = intent.instruction or ""
+            plan_instruction = self._widget_instruction(run, state, intent)
             if rework_feedback:
                 plan_instruction = f"{plan_instruction}\n\n[PLAN REWORK FEEDBACK]\n{rework_feedback[:12_000]}"
             candidate = await PlanGenerationService.generate_plan(
@@ -1672,7 +1694,7 @@ class DurableAgentWorkflow:
         if action == "refine":
             phase_started = time.monotonic()
             refined = await PlanGenerationService.refine_plan(
-                instruction=intent.instruction or "",
+                instruction=self._widget_instruction(run, state, intent),
                 app_id=intent.app_id or "",
                 schemas_context=str(state.data.get("plan_schema_context") or "")[:16_000],
                 current_plan=str(response.get("plan") or candidate),
@@ -1688,7 +1710,7 @@ class DurableAgentWorkflow:
             feedback = str(response.get("feedback") or "").strip()
             if feedback:
                 state.data["plan_review_instruction"] = (
-                    str(state.data.get("plan_review_instruction") or intent.instruction or "")
+                    str(state.data.get("plan_review_instruction") or self._widget_instruction(run, state, intent))
                     + "\n\n[PLAN REFINEMENT FEEDBACK]\n"
                     + feedback
                 )
@@ -1712,7 +1734,7 @@ class DurableAgentWorkflow:
         proposal = state.data.get("schema_candidate")
         if not proposal:
             proposal = await SchemaAlignmentService.align_schemas(
-                instruction=intent.instruction or "",
+                instruction=self._widget_instruction(run, state, intent),
                 app_id=intent.app_id or "",
                 db=self.graph_db,
                 db_session=self._run_storage(state),
@@ -1856,7 +1878,7 @@ class DurableAgentWorkflow:
             return Continue(next_phase="plan", summary="Returning to development plan")
         if action == "refine":
             refined = await SchemaAlignmentService.refine_proposal(
-                instruction=intent.instruction or "",
+                instruction=self._widget_instruction(run, state, intent),
                 app_id=intent.app_id or "",
                 current_proposal=response.get("proposal") or proposal,
                 feedback=str(response.get("feedback") or ""),
@@ -1977,7 +1999,7 @@ class DurableAgentWorkflow:
         manifest_template = self._manifest_v2_template(contract)
         language = str(state.data.get("language") or "zh")
         instruction = (
-            f"{intent.instruction or ''}\n\n[APPROVED DEVELOPMENT PLAN]\n"
+            f"{self._widget_instruction(run, state, intent)}\n\n[APPROVED DEVELOPMENT PLAN]\n"
             f"{state.data.get('approved_plan', '')}\n\n[GRAPH DATABASE SCHEMAS]\n{schema_text}"
             "\n\n[APPROVED RUNTIME CONTRACT — REFERENCE ONLY]\n"
             f"{json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)}"

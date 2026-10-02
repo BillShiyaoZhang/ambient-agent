@@ -1,0 +1,43 @@
+{
+  "manifest_version": 2,
+  "id": "service-status",
+  "title": "Service Status",
+  "description": "View current service names and statuses from the approved status source.",
+  "app_version": "1.0.0",
+  "intents": [
+    "check service status",
+    "retry service status request"
+  ],
+  "schema_refs": [],
+  "capabilities": [
+    {
+      "id": "network.request",
+      "scope": {
+        "sources": {
+          "status-api": {
+            "base_url": "https://status.example.invalid",
+            "methods": ["GET"],
+            "paths": ["/v1/status"],
+            "response_limit": 65536
+          }
+        }
+      }
+    }
+  ],
+  "app_spec": {
+    "spec_version": 1,
+    "types": ["custom:service-status"],
+    "features": [
+      {
+        "id": "custom:service-status.status-display",
+        "status": "implemented",
+        "surfaces": ["ui"]
+      },
+      {
+        "id": "custom:service-status.retry",
+        "status": "implemented",
+        "surfaces": ["ui"]
+      }
+    ]
+  }
+}

@@ -226,6 +226,45 @@ def test_repair_context_keeps_request_template_and_complete_ids_without_catalog_
     assert len(prompt) < 8_000
 
 
+def test_repair_prompt_carries_functional_acceptance_criteria_forward() -> None:
+    instruction = _instruction() + (
+        "\n\n[REQUIRED FEATURES — ACCEPTANCE CRITERIA]\n"
+        '[{"id":"custom:weather.forecast","description":"Show live forecast","capability_ids":'
+        '["network.request"],"network_sources":[{"source_id":"weather","path":"/v1/forecast"}]}]'
+        "\nImplement every required feature and declare its exact ID as implemented in app_spec."
+    )
+
+    prompt = build_repair_prompt(finding("Missing closing tag", attempt=1, artifact="one"), instruction=instruction)
+
+    criteria = prompt.split("[REQUIRED FEATURES — ACCEPTANCE CRITERIA]\n", 1)[1].split("\n\n[", 1)[0]
+    assert '"custom:weather.forecast"' in criteria
+    assert '"/v1/forecast"' in criteria
+    assert "implement every required feature acceptance criterion" in prompt
+
+
+def test_repair_prompt_retains_original_user_request_when_router_summary_differs() -> None:
+    instruction = _instruction() + (
+        "\n\n[ORIGINAL USER REQUEST]\n"
+        "Also support importing a saved list from JSON and preserve the existing keyboard shortcuts."
+    )
+
+    prompt = build_repair_prompt(finding("Missing button handler", attempt=1, artifact="one"), instruction=instruction)
+
+    assert "[ORIGINAL USER REQUEST]" in prompt
+    assert "importing a saved list from JSON" in prompt
+    assert "preserve the existing keyboard shortcuts" in prompt
+
+
+def test_oversized_acceptance_criteria_are_referenced_without_partial_payload() -> None:
+    instruction = _instruction() + "\n\n[REQUIRED FEATURES — ACCEPTANCE CRITERIA]\n" + ("criterion-marker " * 700)
+
+    prompt = build_repair_prompt(finding("Missing closing tag", attempt=1, artifact="one"), instruction=instruction)
+
+    criteria = prompt.split("[REQUIRED FEATURES — ACCEPTANCE CRITERIA]\n", 1)[1].split("\n\n[", 1)[0]
+    assert criteria == "Consult the complete original section in this ACP session; all of its constraints still apply."
+    assert "criterion-marker" not in prompt
+
+
 @pytest.mark.parametrize("context", ["malformed-json", {"type_ids": ["calendar"], "feature_ids_by_type": {}}])
 def test_malformed_retained_reference_uses_original_session_without_partial_mapping(context) -> None:
     instruction = _instruction(catalog=context) if isinstance(context, dict) else "[APP TYPE STANDARD]\n" + context

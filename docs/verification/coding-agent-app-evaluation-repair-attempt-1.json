@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "case_set_sha256": "92e5cf1e7fb39b60c70141e0f0abb26de7e94e7245d534c95fd9431279e0fc4e",
+  "cases": [
+    {
+      "id": "private-reading-list",
+      "status": "failed",
+      "model": "gpt-6-luna",
+      "error_code": "widget_verifier_unavailable",
+      "repair_action": "operator",
+      "artifact_hash": "4620262086fd6a198f88ac5e0e376f3da95dda14695692cdb7ac614c7afa51e5",
+      "artifact_dir": "/tmp/coding-agent-app-eval-repair-artifacts/private-reading-list",
+      "assertions": {
+        "manifest-controller-contract": "not_run",
+        "runtime-first-frame": "not_run",
+        "render-empty-state": "not_run",
+        "create-book": "not_run",
+        "read-book": "not_run",
+        "edit-book": "not_run",
+        "toggle-read": "not_run",
+        "delete-book": "not_run",
+        "reload-retains-books": "not_run",
+        "file-error-is-visible": "not_run"
+      },
+      "elapsed_ms": 51720
+    }
+  ],
+  "complete_passes": 0,
+  "elapsed_ms": 51737
+}

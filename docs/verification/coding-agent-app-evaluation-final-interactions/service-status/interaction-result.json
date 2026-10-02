@@ -1,0 +1,103 @@
+{
+  "case_id": "service-status",
+  "artifact_dir": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/service-status",
+  "artifact_hash": "cfc9a3bef2433aded64d903d105f8d71244c6e49abab214c2bece124ebc3cbed",
+  "checks": [
+    {
+      "id": "render-loading-state",
+      "passed": true,
+      "detail": "loading|checking|fetching|載入"
+    },
+    {
+      "id": "request-approved-source",
+      "passed": true,
+      "detail": "literal source, path, and GET observed in host RPC"
+    },
+    {
+      "id": "render-request-error",
+      "passed": true,
+      "detail": "error|failed|unavailable|temporarily"
+    },
+    {
+      "id": "render-success-response",
+      "passed": true,
+      "detail": "Search"
+    },
+    {
+      "id": "render-success-status",
+      "passed": true,
+      "detail": "operational"
+    },
+    {
+      "id": "retry-after-error",
+      "passed": true,
+      "detail": "a second network request succeeded"
+    },
+    {
+      "id": "reload-recreated-production-frame",
+      "passed": true,
+      "detail": "frame shell reinitialized with retained fixture data"
+    },
+    {
+      "id": "reject-malformed-response",
+      "passed": true,
+      "detail": "error|invalid|malformed|unexpected|unable|missing"
+    },
+    {
+      "id": "reload-recreated-production-frame",
+      "passed": true,
+      "detail": "frame shell reinitialized with retained fixture data"
+    },
+    {
+      "id": "render-empty-response",
+      "passed": true,
+      "detail": "no services|no status|no data|empty|no monitored services"
+    }
+  ],
+  "rpc": [
+    {
+      "method": "net.request",
+      "params": {
+        "source_id": "status-api",
+        "request": {
+          "path": "/v1/status",
+          "method": "GET"
+        }
+      }
+    },
+    {
+      "method": "net.request",
+      "params": {
+        "source_id": "status-api",
+        "request": {
+          "path": "/v1/status",
+          "method": "GET"
+        }
+      }
+    },
+    {
+      "method": "net.request",
+      "params": {
+        "source_id": "status-api",
+        "request": {
+          "path": "/v1/status",
+          "method": "GET"
+        }
+      }
+    },
+    {
+      "method": "net.request",
+      "params": {
+        "source_id": "status-api",
+        "request": {
+          "path": "/v1/status",
+          "method": "GET"
+        }
+      }
+    }
+  ],
+  "page_errors": [],
+  "screenshot": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-app-evaluation-artifacts/service-status.png",
+  "runtime_events": [],
+  "passed": true
+}

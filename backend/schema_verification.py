@@ -19,6 +19,10 @@ from backend.schema_diff import (
 
 logger = logging.getLogger("schema_verification")
 
+# Match the staged controller bound. A partial controller cannot justify a
+# clean schema report; reject oversized direct inputs instead of slicing them.
+_MAX_FALLBACK_CONTROLLER_BYTES = 2 * 1024 * 1024
+
 
 def _model_diff(data: Any) -> VerificationDiff:
     """Validate the fallback's complete findings before deriving ``is_clean``."""
@@ -98,6 +102,9 @@ class SchemaVerificationService:
         # LLM fallback: ask the model to enumerate the unknown props by reading
         # the source. Bounded to a single call.
 
+        if len(js_source.encode("utf-8")) > _MAX_FALLBACK_CONTROLLER_BYTES:
+            raise VerificationError("Controller exceeds the complete-source schema review limit")
+
         schemas_info = ""
         for s in registered_schemas:
             schemas_info += f"- Schema ID: '{s['id']}'\n"
@@ -114,7 +121,7 @@ class SchemaVerificationService:
             "No other text. No markdown fences."
             "\n\n" + (capability_catalog or SystemCapabilityCatalog.build()).render(AgentRole.VERIFICATION)
         )
-        user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source[:8000]}\n```"
+        user_prompt = f"Schemas:\n{schemas_info}\n\nJavaScript:\n```js\n{js_source}\n```"
 
         try:
             fallback_budget = budget_factory() if budget_factory is not None else budget

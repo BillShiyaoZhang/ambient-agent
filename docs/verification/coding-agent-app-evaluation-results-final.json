@@ -1,0 +1,93 @@
+{
+  "format": 1,
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "evidence_scope": "composed observed runs; initial three-case batch plus two focused private-reading-list repair turns; final artifact from attempt 2",
+  "cases": [
+    {
+      "id": "private-reading-list",
+      "status": "passed",
+      "model": "gpt-6-luna",
+      "artifact_hash": "e9122cd50fe9ce527ec3539f39cdc52ce8f94eca61def8b36b037916c0880c0a",
+      "artifact_dir": "docs/verification/coding-agent-app-evaluation-final-artifacts/private-reading-list",
+      "repair_attempts": 0,
+      "production_staging_validated": true,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed",
+        "render-empty-state": "passed",
+        "create-book": "passed",
+        "read-book": "passed",
+        "edit-book": "passed",
+        "toggle-read": "passed",
+        "delete-book": "passed",
+        "reload-retains-books": "passed",
+        "file-error-is-visible": "passed"
+      },
+      "source_run": "focused repair attempt 2",
+      "artifact_integrity": "passed",
+      "runtime_smoke_integrity": "passed",
+      "interaction_integrity": "passed",
+      "interaction_passed": true
+    },
+    {
+      "id": "project-task-board",
+      "status": "passed",
+      "model": "gpt-6-luna",
+      "artifact_hash": "4f5807539fd13f487181a6f71a4c7d30b8ea4666762deca898e9280a18a31954",
+      "artifact_dir": "docs/verification/coding-agent-app-evaluation-final-artifacts/project-task-board",
+      "repair_attempts": 0,
+      "production_staging_validated": true,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed",
+        "render-empty-state": "passed",
+        "subscribe-task": "passed",
+        "query-open-completed": "passed",
+        "create-task": "passed",
+        "rename-task": "passed",
+        "toggle-done": "passed",
+        "delete-task": "passed",
+        "graph-error-is-visible": "passed"
+      },
+      "source_run": "initial three-case batch",
+      "artifact_integrity": "passed",
+      "runtime_smoke_integrity": "passed",
+      "interaction_integrity": "passed",
+      "interaction_passed": true
+    },
+    {
+      "id": "service-status",
+      "status": "passed",
+      "model": "gpt-6-luna",
+      "artifact_hash": "cfc9a3bef2433aded64d903d105f8d71244c6e49abab214c2bece124ebc3cbed",
+      "artifact_dir": "docs/verification/coding-agent-app-evaluation-final-artifacts/service-status",
+      "repair_attempts": 0,
+      "production_staging_validated": true,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed",
+        "render-loading-state": "passed",
+        "request-approved-source": "passed",
+        "render-success-response": "passed",
+        "render-empty-response": "passed",
+        "render-request-error": "passed",
+        "retry-after-error": "passed",
+        "reject-malformed-response": "passed"
+      },
+      "source_run": "initial three-case batch",
+      "artifact_integrity": "passed",
+      "runtime_smoke_integrity": "passed",
+      "interaction_integrity": "passed",
+      "interaction_passed": true
+    }
+  ],
+  "complete_passes": 3
+}

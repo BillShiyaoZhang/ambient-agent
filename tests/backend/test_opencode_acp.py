@@ -1430,6 +1430,15 @@ async def test_run_opencode_agent_acp_timeout(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", ["nan", "inf", "-inf"])
+async def test_run_opencode_agent_acp_rejects_non_finite_timeout(monkeypatch, timeout):
+    monkeypatch.setenv("OPENCODE_TIMEOUT", timeout)
+
+    with pytest.raises(OpenCodeACPInputError, match="finite and positive"):
+        await run_opencode_agent_acp(app_id="weather-card", instruction="build")
+
+
+@pytest.mark.asyncio
 async def test_client_directory_traversal(tmp_path):
     # Setup target workspace dir
     workspace_root = tmp_path / "app_workspace"
