@@ -98,7 +98,7 @@ API_PATH = re.compile(
     r"^/api/(?:sessions(?:/[^/]+(?:/(?:messages|language|model))?)?|canvas|"
     r"runs(?:/[^/]+(?:/(?:cancel|retry|reconcile))?)?|run-interactions/[^/]+/resolve|"
     r"runtimes(?:/[^/]+/stop)?|app-store(?:/layout)?|app-types|chat/commands|"
-    r"llm/(?:catalog|providers(?:/[^/]+(?:/(?:discover-models|test))?)?|settings)|"
+    r"llm/(?:catalog|providers(?:/[^/]+(?:/(?:discover-models|test))?)?|settings|connections/codex/sync)|"
     r"coding-agents(?:/settings|/[^/]+(?:/(?:model|install|auth|models|operations/[^/]+))?)?|"
     r"skill-market(?:/sources/[^/]+)?|skills(?:/install|/[^/]+(?:/authorization)?)?|"
     r"capabilities/[^/]+(?:/ui)?|apps(?:/[^/]+(?:/(?:client-runtime-ticket|diagnostics|"

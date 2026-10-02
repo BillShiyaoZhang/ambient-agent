@@ -357,19 +357,25 @@ flowchart LR
     Provider[中心 Provider Registry] --> Ambient[primary / fast]
     Provider -->|per-agent shared binding| OpenCode
     Native[Codex 原生登录与订阅] --> AppServer
+    Native --> Sync[llm_discovery.py: sync_codex_connection]
+    Runtime -->|统一编码展示目录| Sync
+    Sync -->|模型目录与用途兼容性| Provider
 ```
 
 ACP 是唯一的代码生成 orchestration 边界。内置 Adapter 只声明受信任的 launch descriptor：ACP server 命令、底层 CLI、环境、模型配置与版本来源；不能另写一套 prompt loop、权限或 repair 行为。OpenCode 启动原生 `opencode acp`。Codex 使用镜像中固定版本的 `@agentclientprotocol/codex-acp`，通过 `CODEX_PATH` 连接 Ambient 管理的 Codex CLI，再由后者启动官方 app-server。若新增 Agent 不原生支持 ACP，必须优先选择 ACP Registry 中可审计、版本固定、维护活跃的 bridge；bridge 只做协议映射，权限与生命周期仍由 Ambient ACP client 所有。
 
-OpenCode CLI 由系统镜像提供；Codex 只有在用户选择安装时才下载到独立持久卷。Codex 的安装、认证、动态模型发现与执行使用同一 Agent 专用状态目录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
+OpenCode CLI 由系统镜像提供；Codex 只有在用户选择安装时才下载到独立持久卷。Codex 原托管目录管理登录，编码和新版原生推理各有独立版本状态目录并共享该登录；Ambient Provider 凭据不会进入 native 模式的 Codex 进程。Codex 模型列表仍来自 app-server `model/list`，不在 Ambient 中硬编码。Provider 连接集中管理，模型消费角色分开绑定：Ambient 使用 `primary/fast`，OpenCode 使用可继承或专用的 `shared_binding`，Codex 使用 `native` 绑定。Run 提交时同时冻结 Agent、Agent 模型配置与解析后的 shared model，恢复执行不会受设置页后续变化影响。
 
 Docker 默认 seccomp 会阻止 Codex bubblewrap 创建非特权 user namespace。Compose 仅放开该 syscall 过滤层，让 Codex 自己的 `workspace-write` 沙箱在外层容器边界内工作；不使用 `SYS_ADMIN` 或 `danger-full-access`。
 
-### 8.1 原生 Codex 主模型传输（待实现）
+### 8.1 原生 Codex 主模型传输
 
-`CodingAgentRuntime.command("codex")` 保留固定主模型 CLI；`coding_command("codex")` 为编码目录、状态版本与 ACP descriptor 选择独立新版 CLI，缺新版时兼容既有 CLI。托管安装/更新分别校验两个版本，不覆盖旧 `bin/codex`；认证仍由相同 Ambient 托管登录管理。状态包含可更新标记与目标版本，网页更新不改变原生主模型支持的 profile。
+`CodingAgentRuntime.command("codex")` 保留旧版兼容与登录 CLI；`coding_command("codex")` 为编码目录、状态版本与 ACP descriptor 选择固定新版 CLI。`inference_command/inference_state_dir/inference_environment` 优先复用新版二进制与独立推理 home；缺新版或显式命令时保留原受信启动边界，传输再核对确切版本。托管安装/更新分别校验两个版本，不覆盖旧 `bin/codex`；认证仍由相同 Ambient 托管登录管理。状态包含可更新标记与目标版本，网页更新后原生主/快速推理按确切版本选择已适配 profile，未知版本拒绝。
 
-此图先定义待实现公共子集；当前API-only的`LLMService`须按`ResolvedModel.api_mode`选择原生transport，契约见[Provider规范](/integrations/llm-providers.md)。图不表示功能已上线。实现后`verify_uml.py`须映射并核对`NativeCodexTransport`，不得省略该类放宽校验。
+`LLMService`按`ResolvedModel.api_mode`选择原生transport，契约见[Provider规范](/integrations/llm-providers.md)。`verify_uml.py`映射并核对`NativeCodexTransport`。`sync_codex_connection`将共享登录投影为主/快速模型连接，统一编码展示目录，分别预检用途兼容性；CLI版本和用途绑定仍独立，不更改认证或执行器配置。
+`ModelRef.availability` 可为空以兼容旧配置；`ModelAvailability.native_inference/coding` 是用途兼容性布尔值，`reason` 是固定原因枚举，不代表 entitlement 或工具验证。已知主推理不兼容的原生模型在 `LLMConfigStore.resolve` 拒绝，历史引用保留。
+`LLMConfigStore.provider_generation(provider_id=None)`在内存中记录连接生命周期代次，同步捕捉删除/重建与禁用/启用，不使纯名称/模型编辑失效；不传ID时返回原生连接总体代次。`CodingAgentRuntime.authentication_generation(agent_id)`在开始登录、取消活动登录或退出时使待完成消费者失效，与登录操作ID一起保护目录同步。两者仅协调单进程请求，不修改持久配置格式。
+`CodingAgentRuntime.status()`在退出操作进行中报告未认证，直到本次操作清理；同步不能在异步CLI退出期间新建连接。
 
 ```mermaid
 classDiagram
@@ -381,11 +387,17 @@ classDiagram
         +runtime: CodingAgentRuntime
         +generate(selection, messages, tools) LLMResult
         +discover_models() list
+        +model_availability() list
     }
     LLMService --> NativeCodexTransport : native model selection only
+    class ModelRef {
+        +id: str
+        +availability: ModelAvailability
+    }
+    ModelRef --> ModelAvailability : optional compatibility
 ```
 
-`runtime`复用受信命令与托管原生登录；`generate`接收`ResolvedModel`快照、完整历史和工具声明，返回`LLMResult`而不执行工具。`discover_models`读取实际app-server目录，不证明entitlement。原生ephemeral inference仅允许内存Plan及Plan-only CodeMode，副作用仍经Ambient工具、Capability和Run。取消/超时等待关闭本次进程组与回收临时目录，无隐式repair、fallback或重放。
+`runtime`复用受信命令与托管原生登录；`generate`接收`ResolvedModel`快照、完整历史和工具声明，返回`LLMResult`而不执行工具。`discover_models`读取主推理实际app-server目录，`model_availability` 在同一受限连接中结合公开元数据预检各模型，不创建thread/turn、不证明entitlement。原生ephemeral inference允许内存Plan及CodeMode；新版模型元数据驱动的clock仅读时间、异步消息仅进入有界缓冲并从最终输出排除，副作用仍经Ambient工具、Capability和Run。取消/超时等待关闭本次进程组与回收临时目录，无隐式repair、fallback或重放。
 
 ## 本地工作区远程入口
 云入口只管理账户、节点和授权。Connector 主动连接 Gateway，逐次验证本机批准的账户、grant、范围与期限，再将有界 HTTP / WebSocket 流量发送到固定 loopback 服务。撤销先在本机关闭转发和连接。Run、App、Graph 与 Widget 的执行和数据仍由本地工作区管理。

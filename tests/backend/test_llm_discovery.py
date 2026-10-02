@@ -1,10 +1,30 @@
 import pytest
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from backend.llm_config import LLMConfigStore
+from backend.coding_agent_runtime import CodingAgentRuntime, CodingAgentRuntimeError
+from backend.llm_config import LLMConfigError, LLMConfigStore
 from backend.llm_discovery import discover_models, test_provider as check_provider
 from backend.llm_service import LLMResult
+
+
+@pytest.fixture
+def managed_codex(tmp_path, monkeypatch):
+    runtime = CodingAgentRuntime(tmp_path)
+    monkeypatch.setattr("backend.llm_discovery.CodingAgentRuntime", lambda _workspace: runtime)
+    monkeypatch.setattr(runtime, "command", lambda _agent_id: ["managed-codex"])
+    monkeypatch.setattr(
+        runtime,
+        "status",
+        AsyncMock(return_value={"installed": True, "authenticated": True, "auth_state": "signed_in"}),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "models",
+        AsyncMock(return_value={"models": [{"id": "gpt-5.6-luna", "display_name": "GPT 5.6 Luna"}]}),
+    )
+    return runtime
 
 
 class _Response:
@@ -178,7 +198,7 @@ async def test_discovery_discards_stale_provider_response(tmp_path, monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_codex_native_discovery_uses_managed_cli_catalog_without_http(tmp_path, monkeypatch):
+async def test_codex_native_discovery_uses_managed_cli_catalog_without_http(tmp_path, monkeypatch, managed_codex):
     store = LLMConfigStore(str(tmp_path))
     store.create_provider({"id": "native", "name": "Native", "preset": "codex_native"}, {})
     seen = []
@@ -187,10 +207,10 @@ async def test_codex_native_discovery_uses_managed_cli_catalog_without_http(tmp_
         def __init__(self, runtime):
             seen.append(runtime.state_dir("codex"))
 
-        async def discover_models(self):
+        async def model_availability(self):
             return [
-                {"id": "gpt-5.6-luna", "name": "GPT 5.6 Luna", "capabilities": {"tool_calling": True}},
-                {"id": "gpt-5.6-luna", "name": "duplicate"},
+                {"id": "gpt-5.6-luna", "name": "GPT 5.6 Luna", "native_inference": True},
+                {"id": "gpt-5.6-luna", "name": "duplicate", "native_inference": True},
             ]
 
     def no_http(**_kwargs):
@@ -207,11 +227,12 @@ async def test_codex_native_discovery_uses_managed_cli_catalog_without_http(tmp_
     assert models[0]["source"] == "discovered"
     assert models[0]["capabilities"]["verification"] == "unknown"
     assert models[0]["capabilities"]["tool_calling"] is None
+    assert models[0]["availability"] == {"native_inference": True, "coding": True, "reason": None}
     assert store.get_provider("native").models[0].api_mode == "codex_native"
 
 
 @pytest.mark.asyncio
-async def test_codex_native_discovery_failure_has_no_api_catalog_fallback(tmp_path, monkeypatch):
+async def test_codex_native_discovery_failure_has_no_api_catalog_fallback(tmp_path, monkeypatch, managed_codex):
     from backend.llm_service import LLMTransportError
 
     store = LLMConfigStore(str(tmp_path))
@@ -224,7 +245,7 @@ async def test_codex_native_discovery_failure_has_no_api_catalog_fallback(tmp_pa
         def __init__(self, _runtime):
             pass
 
-        async def discover_models(self):
+        async def model_availability(self):
             raise LLMTransportError("Native Codex is unavailable", code="llm_auth_failed")
 
     monkeypatch.setitem(sys.modules, "backend.codex_llm", SimpleNamespace(NativeCodexTransport=NativeTransport))
@@ -235,7 +256,7 @@ async def test_codex_native_discovery_failure_has_no_api_catalog_fallback(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_codex_native_discovery_discards_disabled_provider_response(tmp_path, monkeypatch):
+async def test_codex_native_discovery_discards_disabled_provider_response(tmp_path, monkeypatch, managed_codex):
     store = LLMConfigStore(str(tmp_path))
     store.create_provider({"id": "native", "name": "Native", "preset": "codex_native"}, {})
 
@@ -243,10 +264,109 @@ async def test_codex_native_discovery_discards_disabled_provider_response(tmp_pa
         def __init__(self, _runtime):
             pass
 
-        async def discover_models(self):
+        async def model_availability(self):
             store.update_provider("native", {"enabled": False}, None)
-            return [{"id": "gpt-5.6-luna"}]
+            return [{"id": "gpt-5.6-luna", "native_inference": True}]
 
     monkeypatch.setitem(sys.modules, "backend.codex_llm", SimpleNamespace(NativeCodexTransport=NativeTransport))
     assert await discover_models(store, "native") == []
     assert store.get_provider("native").models == []
+
+
+@pytest.mark.asyncio
+async def test_native_discovery_rejects_login_changed_during_compatibility_precheck(
+    tmp_path, monkeypatch, managed_codex
+):
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native"}, {})
+    before = store.config_path.read_bytes()
+
+    class NativeTransport:
+        def __init__(self, _runtime):
+            pass
+
+        async def model_availability(self):
+            managed_codex._auth_generations["codex"] = managed_codex.authentication_generation("codex") + 1
+            return [{"id": "gpt-5.6-luna", "native_inference": True}]
+
+    monkeypatch.setitem(sys.modules, "backend.codex_llm", SimpleNamespace(NativeCodexTransport=NativeTransport))
+    with pytest.raises(LLMConfigError) as failure:
+        await discover_models(store, "native")
+    assert failure.value.code == "llm_auth_failed"
+    assert store.config_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_native_discovery_coding_failure_is_structured_and_keeps_saved_models(
+    tmp_path, monkeypatch, managed_codex
+):
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native", "models": [{"id": "saved"}]}, {})
+    before = store.config_path.read_bytes()
+    managed_codex.models.side_effect = CodingAgentRuntimeError("private-marker", code="model_catalog_failed")
+    with pytest.raises(LLMConfigError) as failure:
+        await discover_models(store, "native")
+    assert failure.value.code == "llm_provider_error"
+    assert "private-marker" not in str(failure.value)
+    assert store.config_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_native_connection_test_chooses_compatible_model_in_current_catalog_order(tmp_path, monkeypatch):
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider(
+        {
+            "id": "native",
+            "name": "Native",
+            "preset": "codex_native",
+            "models": [
+                {
+                    "id": "coding-only",
+                    "availability": {"native_inference": False, "coding": True, "reason": "native_catalog_missing"},
+                },
+                {"id": "shared", "availability": {"native_inference": True, "coding": True}},
+            ],
+        },
+        {},
+    )
+    seen = []
+
+    async def generate(_service, selection, _messages, _tools):
+        seen.append(store.resolve(selection).model_id)
+        return LLMResult(text="OK")
+
+    monkeypatch.setattr("backend.llm_discovery.LLMService.generate", generate)
+    assert (await check_provider(store, "native"))["ok"] is True
+    assert seen == ["shared"]
+
+
+@pytest.mark.asyncio
+async def test_native_connection_test_explains_an_all_coding_only_catalog(tmp_path, monkeypatch):
+    store = LLMConfigStore(str(tmp_path))
+    profile = store.create_provider(
+        {
+            "id": "native",
+            "name": "Native",
+            "preset": "codex_native",
+            "models": [
+                {
+                    "id": "coding-only",
+                    "availability": {"native_inference": False, "coding": True, "reason": "native_catalog_missing"},
+                }
+            ],
+        },
+        {},
+    )
+    discovery = AsyncMock(return_value=profile["models"])
+    generate = AsyncMock(side_effect=AssertionError("Incompatible models must not reach inference"))
+    monkeypatch.setattr("backend.llm_discovery.discover_models", discovery)
+    monkeypatch.setattr("backend.llm_discovery.LLMService.generate", generate)
+
+    result = await check_provider(store, "native")
+
+    assert result == {
+        "ok": False,
+        "code": "llm_capability_unsupported",
+        "message": "No Codex model compatible with primary/fast inference is available",
+    }
+    generate.assert_not_awaited()

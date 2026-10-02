@@ -16,6 +16,11 @@ export interface LLMModel {
   display_name?: string | null;
   api_mode?: "chat_completions" | "responses" | "codex_native" | null;
   capabilities?: ModelCapabilities;
+  availability?: {
+    native_inference: boolean;
+    coding: boolean;
+    reason?: "native_catalog_missing" | "native_profile_unsupported" | "coding_catalog_missing" | null;
+  } | null;
   source?: "manual" | "discovered" | "catalog";
 }
 
@@ -106,6 +111,10 @@ export function deleteProvider(apiBase: string, providerId: string) {
 
 export function discoverProviderModels(apiBase: string, providerId: string) {
   return jsonRequest<{ models: LLMModel[] }>(`${apiBase}/api/llm/providers/${providerId}/discover-models`, { method: "POST" });
+}
+
+export function syncCodexConnection(apiBase: string) {
+  return jsonRequest<LLMProvider>(`${apiBase}/api/llm/connections/codex/sync`, { method: "POST" });
 }
 
 export async function testProviderConnection(apiBase: string, providerId: string, modelId?: string, mode: "connection" | "tools" = "connection") {

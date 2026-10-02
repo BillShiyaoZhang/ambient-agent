@@ -19,7 +19,7 @@ and models. A model is identified by `provider_id/model_id` and records API mode
 reasoning, context window, and verification state. Discovery prefers the live provider API and then
 LiteLLM metadata; manual model ids are always supported.
 
-Rediscovery merges by model ID without replacing existing API modes, manual display names,
+API-provider rediscovery merges by model ID without replacing existing API modes, manual display names,
 sources, or verified capabilities. Duplicate IDs yield one entry; existing models absent from
 discovery remain available to default and session references. The merge uses the latest saved
 configuration after the network request, preserving edits made while discovery was pending.
@@ -42,6 +42,61 @@ and video models from the chat model picker.
 
 ## Model selection
 
+### Shared connections and independent roles
+
+Configuration has four layers: connections/accounts (API credentials or the managed Codex login),
+model catalogs/transports, primary/fast/coding model bindings, and the ACP coding executor. Consumers
+share the login while each adapter verifies its own catalog and capabilities. This borrows centralized
+connection management from CC Switch without copying OAuth tokens or rewriting desktop CLI files.
+
+`POST /api/llm/connections/codex/sync` projects an installed, authenticated managed Codex connection
+into the Provider Registry. It reuses the first enabled `codex_native` profile, or creates
+`ambient-codex` with a numeric suffix on ID collision. Disabled-only native profiles return
+`llm_provider_unavailable` and require explicit enabling. The response is a sanitized profile.
+Sync and native-provider discovery use the coding CLI's visible catalog for current model IDs, names,
+and ordering, so primary/fast and coding selectors show the same current entries. Optional model
+`availability` contains `native_inference` and `coding` compatibility flags and a bounded `reason`:
+`native_catalog_missing`, `native_profile_unsupported`, `coding_catalog_missing`, or null.
+Primary/fast compatibility still requires the pinned primary CLI's catalog and public model metadata;
+new coding entries do not broaden native inference support. These flags establish neither entitlement
+nor tool verification. API providers and legacy models without the field retain existing behavior.
+Known incompatible native entries remain visible but disabled with a reason in primary/fast selectors;
+backend resolution also rejects them. Existing bindings remain displayed without automatic replacement.
+
+Merging follows current coding order, refreshes discovered names, and preserves manual names and
+verified capabilities. Previously saved models absent from the coding catalog remain at the end for
+reference preservation, with both roles unavailable and `coding_catalog_missing`. Each discovery
+refreshes availability rather than retaining old compatibility. Missing installation/login,
+unsupported profiles/platforms, empty or malformed catalogs, and logout/disable/delete during discovery
+fail or discard stale results without creating an empty profile or changing role bindings. Concurrent
+and repeated syncs reuse one profile. This mutation requires `workspace.manage`, performs no inference,
+and does not establish entitlement or tool compatibility; use the existing model test for that.
+An in-memory connection lifecycle generation detects delete/recreate and disable/reenable while
+preserving concurrent name/model edits. Authentication operation IDs separately detect logout/relogin.
+Generations coordinate requests within the same Store/service process, without a disk-schema change
+or a claim of cross-process write coordination.
+API sync, native discovery, and connection-test discovery share the managed Runtime used for actual
+login/logout; a newly constructed instance with empty generations cannot provide this protection.
+Connection tests with no explicit model or saved binding prefer models compatible with primary/fast
+inference. A catalog containing only coding-only entries returns `ok=false` and
+`llm_capability_unsupported`, explaining that no compatible primary/fast model is available rather
+than asking users to add an already listed model. Explicit selections and saved bindings do not fall back.
+Logout immediately suspends new syncs: runtime status reports unauthenticated while logout is pending,
+and the UI disables sync. Completion, failure, and cancellation clear the pending marker, after which
+actual CLI authentication probes determine the state; a still-active old login cannot register a connection.
+
+Settings exposes “Sync primary/fast models” and invokes it once after a successful login. Existing
+logins can use the same action without manually adding a provider. Opening settings alone never
+recreates a deleted connection. Successful sync also refreshes the coding catalog; manual coding
+refresh discovers existing enabled native providers and reloads primary/fast choices. Closed dialogs and
+logout/relogin invalidate old UI responses; failures preserve selections and offer retry without a
+request loop. Sync never selects primary, fast, or coding models automatically.
+
+Acceptance covers login-to-model availability, idempotency/concurrency, preservation of disabled
+profiles/API connections/role and session bindings, and failure/staleness without credential copying.
+Common models are selectable, coding-only models are visible with an explicit disabled reason, missing
+historical selections remain referenced, API behavior remains compatible, and refresh updates both catalogs.
+
 - Global settings contain a default model and an optional fast model.
 - A session may override the default. Changes affect the next request; an in-flight request retains
   the selection snapshot captured at its start.
@@ -62,6 +117,7 @@ and video models from the chat model picker.
 | PATCH/DELETE | `/api/llm/providers/{id}` | Update or delete a profile |
 | POST | `/api/llm/providers/{id}/discover-models` | Refresh and persist models |
 | POST | `/api/llm/providers/{id}/test` | Test the connection or a model |
+| POST | `/api/llm/connections/codex/sync` | Sync the managed Codex login into primary/fast model connections without changing bindings |
 | GET/PATCH | `/api/llm/settings` | Read or update global default/fast models |
 | PUT | `/api/sessions/{session_id}/model` | Change the session model and broadcast it |
 
@@ -88,15 +144,66 @@ The coding CLI target is official `0.159.3`, with `@agentclientprotocol/codex-ac
 
 The coding CLI uses a separate versioned `CODEX_HOME` for its model cache, sessions, and configuration. Only `auth.json` is a trusted symbolic link to the original Ambient managed login file; no credential contents are read or copied. Login and logout remain owned by the CLI in the original managed directory, so removing that source login also invalidates coding authentication. An existing wrong link or regular authentication file is rejected instead of silently using a second account. The CLI's in-place login-file save behavior must be reverified when upgrading.
 
-Coding and Ambient native primary inference use separate trusted CLIs: primary inference retains the verified `0.145.0` profile below, while coding catalog discovery and ACP execution use a separately pinned newer CLI. Server catalogs depend on client version, so refreshing an older CLI does not guarantee models shown by a newer desktop client. Settings show the actual coding CLI version and offer Update for an existing older installation; completion automatically rediscovers models. Names continue to come from the execution CLI's `model/list`, without copying the desktop catalog or adding names not returned by that CLI.
+Coding catalog discovery and ACP execution use a separately pinned newer CLI. Native primary/fast inference reuses the adapted `0.159.3` binary once installed, while installations without the upgrade retain the `0.145.0` profile. Their state directories remain separate. Server catalogs depend on client version, so refreshing an older CLI does not guarantee models shown by a newer desktop client. The display catalog therefore uses the coding CLI, with separate primary/fast compatibility checks. Settings show the actual coding CLI version and offer Update for an existing older installation; completion automatically rediscovers models. Names continue to come from the execution CLI's `model/list`, without copying the desktop catalog or adding names not returned by that CLI.
 
-The newer coding CLI installs into its own version directory, retaining the original `bin/codex`, managed login, primary settings, and model bindings. First installation provides the pinned primary CLI then the coding CLI; an existing installation only adds the coding CLI. Both purposes share the CLI-owned Ambient login, without reading or copying desktop authentication. The CLI may refresh its public model cache; primary inference retains its version, configuration, and model-metadata checks, without broadening support after a coding upgrade. Explicit `CODEX_COMMAND` remains operator-managed and cannot be replaced by the UI. Download, archive member, exact size, or version failures retain the existing CLI and report a retryable failed operation; concurrent updates reuse one operation.
+The newer coding CLI installs into its own version directory, retaining the original `bin/codex`, managed login, primary settings, and model bindings. First installation provides the pinned login CLI then the coding CLI; an existing installation only adds the coding CLI. Both purposes share the CLI-owned Ambient login, without reading or copying desktop authentication. The CLI may refresh its public model cache; primary inference checks exact adapted versions, configuration, and model metadata without automatically accepting future coding CLI versions. Explicit `CODEX_COMMAND` remains operator-managed and cannot be replaced by the UI. Download, archive member, exact size, or version failures retain the existing CLI and report a retryable failed operation; concurrent updates reuse one operation.
 
 Web installation pins the official `0.145.0` CLI, verifies the platform-specific archive SHA-256, and copies only its exact named regular-file member. Compressed downloads retain the 160MiB bound and streamed byte accounting; the expanded file must match an independently recorded exact size for each pinned release artifact. The compressed bound must not be reused for the expanded CLI. The verified Linux x86_64 artifact is 113,724,150 compressed bytes and 310,730,800 CLI bytes, so legitimate installation must not be rejected by a 160MiB expanded-size threshold.
 
 Size mismatches, including one byte, incorrect paths, symbolic or hard links, excessive downloads, checksum mismatches, and incorrect probed versions fail and clean this operation's staging directory. Validated installation retains `0700` permissions, the managed destination, and pinned version probing, without extracting other members, changing versions/models, or reading/writing native authentication. Acceptance first uses isolated synthetic archives for the valid expanded size and negative cases, followed by normal web installation into the real Docker persistent volume.
 
 ## Native Codex primary-model integration contract
+
+### Native inference adaptation for 0.159.3
+
+Modern primary/fast inference reuses the pinned `0.159.3` coding binary with a separate
+`agents/codex/inference/0.159.3/state` home for model caches, configuration, and sessions.
+`CodingAgentRuntime.inference_command`, `inference_state_dir`, and `inference_environment` provide
+the trusted launch boundary. Only a trusted `auth.json` symlink shares the original managed login;
+credential contents are never read or copied. Managed modern commands and homes use absolute paths even with relative
+workspace/runtime roots, so inference can start outside the project. Directory guards reject
+symlinks/non-directories, independent auth files, and wrong links. Login/logout remain in the original
+managed home. Without the newer managed binary, retain the legacy `0.145.0` profile. Explicit
+`CODEX_COMMAND` retains operator commands/state, with exact supported-version checks in transport.
+Failure after selecting a modern profile does not fall back to another CLI, model, or API.
+
+Exact CLI and initialize versions choose separate safety profiles. Both retain Linux-only execution,
+temporary cwd outside projects, ephemeral threads, read-only/no-network sandboxing, empty environments,
+dynamic tools/capability roots/MCP, owned process groups, deadline/message/byte budgets, effective config
+checks, and strict final JSON. The modern profile disables cloud skills, sleep, background/UI and new
+external capabilities, explicitly uses file auth storage, and checks typed config plus raw sessionFlags.
+Legacy configuration and assertions remain separate.
+
+Modern `code_mode_host=false` keeps the host disabled, without starting an external computation
+process or claiming the legacy embedded V8 still executes. Models can return strict text/JSON directly;
+CodeMode attempts fail safely. Accept only two fixed official `warning` messages for the owned thread:
+the exact `skip_host_skill_discovery` notice using this operation's captured home/config.toml, and
+the host-disabled notice that states CodeMode will fail closed. Require exactly message/threadId fields
+without displaying their contents; reject other warnings, direct-tool fallback, and unknown paths.
+
+Modern public metadata permits `code_mode_only` and `multi_agent_version=v1|v2` while agents remain
+disabled. Experimental tools are limited to audited `clock`, `request_user_input_async`, and the catalog's
+legacy alias `send_user_message_async`; reject other tools or metadata shapes. Clock only reads time. Model-driven
+async user messages remain in this ephemeral thread's bounded buffer, without forwarding them to users,
+interrupting Runs, or creating Ambient tool calls. Validate the public fields of modern
+`agentMessage.delivery=async`, retain the same type and delivery for each item ID, and exclude these messages from final output; the legacy profile rejects
+this extension. Accept exactly one ordinary final message and validate its complete JSON and all
+registered Ambient tool arguments before returning. Unknown delivery, native effect items, notifications,
+callbacks, identities, or policies still fail closed; compatibility never ignores unknown messages.
+
+Modern `model/list` can emit the public `account/updated` status notification. Accept exactly the
+`authMode` and `planType` fields: auth is `chatgpt` or null, and plan is a pinned public protocol enum or
+null. Do not persist account data, substitute this notification for `account/read` login validation,
+or initiate login/retry. Reject other auth modes, unknown fields/enums, and this notification in the
+legacy profile.
+
+Acceptance uses official pinned source/protocol fixtures for Red→Green GPT-6 text, Ambient JSON tool
+selection, async filtering, configuration/metadata/identity/native-effect rejection, preserving legacy
+regression. An isolated unauthenticated Linux probe checks the actual CLI/effective config. Then bounded
+exact-model GPT-6 text and tool-selection probes use the existing managed login with no workspace data,
+recording version/model/results and leaving role bindings unchanged. This scope establishes transport
+compatibility rather than full App, public-access, or recovery acceptance.
+See the [0.159.3 acceptance record](../verification/native-codex-0-159-3-2026-10-02.md) for actual results.
 
 This integration and acceptance contract addresses the capability gap found during 2026-10-01 public acceptance and precedes product code. Each capability is supported only after implementation, Red/Green, and its corresponding real acceptance; see staged results in [public acceptance](../verification/remote-workspace-production-2026-10-01.md). Short Chat success does not replace full App or recovery acceptance. The local web UI creates a `codex_native` Provider, selects an exact model ID such as `gpt-5.6-luna`, and configures existing default/fast models and session overrides. It uses official Codex independent login/subscription; Coding Agent native-model settings and Ambient primary selection do not overwrite one another.
 
@@ -105,16 +212,16 @@ This integration and acceptance contract addresses the capability gap found duri
 | Preset and model mode | Preset `codex_native` and model `api_mode="codex_native"`; API Providers retain `chat_completions`/`responses`, without mixing modes |
 | Declarative fields | `fields=[]`, `advanced_fields=[]`, Profile `connection={}`, `credential_refs={}`, and empty submitted credentials. No API key is required or accepted; endpoint, headers, profile, command, launch arguments, auth paths, and environment variables are rejected |
 | Creation, update, and resolution | Existing `/api/llm/providers` and configuration loading validate native constraints before saving unknown connection/credential input. `ResolvedModel.credentials={}` and exact native IDs have no LiteLLM prefix or cross-provider fallback |
-| Discovery | Existing `discover-models` reads actual app-server `model/list`; catalog discovery can be independent of login, without LiteLLM metadata substitution. Cache/catalog entries do not prove entitlement or verification. Missing login remains explicit; only a real exact-model test marks verification passed |
+| Discovery | Existing `discover-models` requires stable managed login and uses the coding app-server catalog for unified display, with separate primary catalog/metadata compatibility checks and no LiteLLM substitution. Low-level `NativeCodexTransport.discover_models` still discovers the primary catalog independently of login. Cache/catalog entries do not prove entitlement or verification. Missing login remains explicit; only a real exact-model test marks verification passed |
 | Tests and management | Existing `/api/llm/providers/{id}/test` makes a bounded call through the same native transport. Existing Coding Agent login operations retain auth outside Provider secrets. Remote `workspace.manage` gates apply; control-only cannot change Providers, default/fast models, or native login configuration |
 
 Native Provider creation/editing displays only name and ID, without endpoint, credentials, or advanced connection fields, explaining: “Uses Ambient-managed Codex login; sign in under Coding Agent, no API key required.” OpenCode shared-binding choices exclude native Codex Providers. When Ambient primary is native, “inherit Ambient primary” is disabled with a clear hint to choose a separate API Provider; explicit API model bindings remain available. Codex's native model dropdown stays independent, supporting exact Luna without silently changing Ambient primary/fast selections.
 
-`NativeCodexTransport` reuses `CodingAgentRuntime` trusted commands and managed state directories. Its public field is `runtime`, with methods `generate(selection: ResolvedModel, messages, tools) -> LLMResult` and `discover_models() -> list[dict]`. Web UI, Profiles, remote messages, and model output cannot specify executables, shells, auth locations, environments, or CLI flags. API Provider credentials do not enter native processes. Pin the verified Linux execution profile and official 0.145.0 app-server protocol. Windows and other execution platforms fail safely before spawning native transport processes. The independent Windows Host 0.159.2 CLI capability probe and Coding Agent model save do not establish Ambient native primary-model support or expand version/platform coverage. Missing installation/login, unavailable models, and unsupported version/config/model fail safely, without CLI exec, API proxy, or model fallback.
+`NativeCodexTransport` reuses `CodingAgentRuntime` trusted commands and managed state directories. Its public field is `runtime`, with methods `generate(selection: ResolvedModel, messages, tools) -> LLMResult` , `discover_models() -> list[dict]`, and `model_availability() -> list[dict]`. Web UI, Profiles, remote messages, and model output cannot specify executables, shells, auth locations, environments, or CLI flags. API Provider credentials do not enter native processes. Pin verified Linux execution profiles with separate adapters for the official `0.145.0` and `0.159.3` app-server protocols. Windows and other execution platforms fail safely before spawning native transport processes. The independent Windows Host 0.159.2 CLI capability probe and Coding Agent model save do not establish Ambient native primary-model support or expand version/platform coverage. Missing installation/login, unavailable models, and unsupported version/config/model fail safely, without CLI exec, API proxy, or model fallback.
 
 The pinned 0.145.0 CLI does not support `--ignore-user-config`; native transport must neither pass that flag nor ignore CLI argument errors. Equivalent isolation requires managed Codex state `config.toml` to be absent. Any file, directory, or symlink is rejected before reading or overwriting it. Native auth remains owned by existing CLI login operations without reading, copying, or rewriting its contents. Each generation creates an ephemeral thread/turn in a fresh temporary inference cwd outside project ancestry, using read-only policy, `project_doc_max_bytes=0`, all mandatory trusted config overrides, and explicit `environments=[]`, `dynamicTools=[]`, and `selectedCapabilityRoots=[]`. Before threads or model inference, `config/read` validates actual effective configuration and empty MCP. Unsupported restrictions, mismatched configuration, or launch argument errors fail closed without falling back to user configuration or ignoring unknown flags.
 
-Before `turn/start`, validate the actual `thread/start` response's required safety fields: model is the exact selection, modelProvider is `openai`, resolved cwd equals this operation's owned temporary directory, approvalPolicy is `never`, and sandbox is a read-only policy. Missing required fields or mismatching policies prevent inference; nonempty returned `runtimeWorkspaceRoots` or `instructionSources` also fail. Handle omitted optional fields according to the pinned 0.145 protocol rather than inventing mandatory unknown/optional properties. Successful fake-process replies must include actual required fields; a thread/model-only fixture cannot establish effective safety settings.
+Before `turn/start`, validate the actual `thread/start` response's required safety fields: model is the exact selection, modelProvider is `openai`, resolved cwd equals this operation's owned temporary directory, approvalPolicy is `never`, and sandbox is a read-only policy. Missing required fields or mismatching policies prevent inference; nonempty returned `runtimeWorkspaceRoots` or `instructionSources` also fail. Handle omitted optional fields according to the corresponding pinned protocol rather than inventing mandatory unknown/optional properties. Successful fake-process replies must include actual required fields; a thread/model-only fixture cannot establish effective safety settings.
 
 The Provider name alone does not prove the official inference endpoint. Pinned 0.145 [config validation](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/config/src/config_toml.rs) rejects a reserved `model_providers.openai` definition, and [Provider merging](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/model-provider-info/src/lib.rs) preserves built-ins. However, top-level `openai_base_url` overrides the built-in endpoint even with ChatGPT login. Before any account/thread/turn request, native mode inspects every raw `config/read` layer, requiring each layer and config to be objects. Any explicit non-null `openai_base_url` or `chatgpt_base_url` value is rejected, including an official address, an empty string, an incorrect type, or a lower-precedence or disabled layer; only omission or null preserves builtin defaults. Typed config, Provider name, and login type cannot substitute for routing validation; no UI/API override, silent ignoring, or fallback is offered. Process environments retain the Runtime safety whitelist without describing environment variables as official endpoint overrides unless pinned-version source proves support. Native login remains CLI-owned without credential copying. Synthetic-layer regression tests reject these routes before any account/thread/turn request.
 
@@ -124,7 +231,7 @@ Include complete history envelopes: system/user/assistant/tool messages, previou
 
 This native contract currently transports text-only JSON history. It does not convert images or other multimodal content into native input or claim vision support. Unknown catalog vision capabilities remain unknown; a model name, catalog entry, or independent CLI probe does not establish support.
 
-Before launch, disable Web/search, apps, skills, MCP, hooks, notify, memory, goals, multi-agent, user input, and filesystem/terminal workspace side effects, verifying that the pinned profile supports the restrictions. Exact Luna metadata may require `code_mode_only`. Allow internal in-memory Plan and verified CodeMode exec/wait exposing only the Plan facade; it uses bare V8, not Node/Deno, without imports, IO, or file/network/process capabilities. This computation neither executes Ambient tools nor produces workspace side effects or user-visible tool calls. Acceptance requires zero workspace side effects, not zero native tool items. Unknown native tool requests, side-effect approvals, disallowed execution items, and versions/config/models whose restrictions cannot be confirmed terminate and clean up without approval or speculative continuation.
+Before launch, disable Web/search, apps, skills, MCP, hooks, notify, memory, goals, multi-agent, interactive user input, and filesystem/terminal workspace side effects, verifying that the pinned profile supports the restrictions. Legacy exact Luna metadata may require `code_mode_only`. The legacy profile allows internal in-memory Plan and verified CodeMode exec/wait exposing only the Plan facade; it uses bare V8, not Node/Deno, without imports, IO, or file/network/process capabilities. This computation neither executes Ambient tools nor produces workspace side effects or user-visible tool calls. Acceptance requires zero workspace side effects, not zero native tool items. The modern profile keeps its external CodeMode host disabled as specified above. Unknown native tool requests, side-effect approvals, disallowed execution items, and versions/config/models whose restrictions cannot be confirmed terminate and clean up without approval or speculative continuation.
 
 Only native turn outputSchema uses the JSON `{text, tool_calls:[{name, arguments}]}` envelope. Text is a string, arguments is a JSON-containing string, and both the outer and per-call strict schemas use `additionalProperties=false`. Names belong to registered tools supplied for this request. The adapter parses each arguments string exactly once into an object, then validates all calls against the complete matching `tool.function.parameters` JSON Schema before returning any call; required, type, enum, and other constraints cannot be skipped. Never resolve external/network `$ref` or access the network for validation; internal defs are allowed only after local validation. This unpublished native preset retains no object-arguments wire compatibility.
 

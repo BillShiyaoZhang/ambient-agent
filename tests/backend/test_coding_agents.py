@@ -124,6 +124,129 @@ def test_coding_cli_upgrade_preserves_primary_command_and_managed_login(tmp_path
     assert runtime.coding_command("codex") == runtime.command("codex") == [sys.executable]
 
 
+def _installed_codex_runtime(tmp_path, monkeypatch, *, upgraded=True):
+    monkeypatch.delenv("CODEX_COMMAND", raising=False)
+    runtime = CodingAgentRuntime(tmp_path)
+    primary = runtime.managed_command("codex")
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"pinned-primary")
+    if upgraded:
+        coding = runtime._managed_coding_command()
+        coding.parent.mkdir(parents=True)
+        coding.write_bytes(b"pinned-coding")
+    return runtime
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Managed Codex installations require Linux or macOS")
+def test_native_inference_uses_upgraded_cli_in_an_independent_home_with_shared_login(tmp_path, monkeypatch):
+    runtime = _installed_codex_runtime(tmp_path, monkeypatch)
+    login_home = runtime.state_dir("codex")
+    login_home.mkdir()
+    auth = login_home / "auth.json"
+    auth.write_bytes(b"opaque-test-login")
+    login_cache = login_home / "models_cache.json"
+    login_cache.write_bytes(b"old-public-catalog")
+    coding_home = Path(runtime.coding_environment("codex")["CODEX_HOME"])
+    (coding_home / "config.toml").write_text("coding-only = true")
+    coding_cache = coding_home / "models_cache.json"
+    coding_cache.write_bytes(b"coding-public-catalog")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-inherit")
+
+    environment = runtime.inference_environment("codex")
+    inference_home = runtime.inference_state_dir("codex")
+
+    assert runtime.inference_command("codex") == [str(runtime._managed_coding_command())]
+    assert runtime.command("codex") == [str(runtime.managed_command("codex"))]
+    assert inference_home == runtime.agent_root("codex") / "inference" / "0.159.3" / "state"
+    assert environment["CODEX_HOME"] == environment["HOME"] == str(inference_home)
+    assert "OPENAI_API_KEY" not in environment
+    assert inference_home.stat().st_mode & 0o777 == 0o700
+    assert (inference_home / "auth.json").is_symlink()
+    assert (inference_home / "auth.json").readlink() == auth.absolute()
+    assert not (inference_home / "config.toml").exists()
+    assert not (inference_home / "models_cache.json").exists()
+    (inference_home / "models_cache.json").write_bytes(b"inference-public-catalog")
+    assert login_cache.read_bytes() == b"old-public-catalog"
+    assert coding_cache.read_bytes() == b"coding-public-catalog"
+    assert auth.read_bytes() == b"opaque-test-login"
+
+    auth.unlink()
+    assert not (inference_home / "auth.json").exists()
+    assert runtime.inference_environment("codex")["CODEX_HOME"] == str(inference_home)
+    assert not auth.exists()
+
+
+def test_native_inference_preserves_legacy_runtime_until_managed_upgrade(tmp_path, monkeypatch):
+    runtime = _installed_codex_runtime(tmp_path, monkeypatch, upgraded=False)
+    assert runtime.inference_command("codex") == runtime.command("codex")
+    assert runtime.inference_state_dir("codex") == runtime.state_dir("codex")
+    assert runtime.inference_environment("codex") == runtime.process_environment("codex")
+    assert not (runtime.agent_root("codex") / "inference").exists()
+
+
+def test_native_inference_resolves_managed_launch_paths_before_changing_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODING_AGENT_RUNTIME_DIR", "relative-runtime")
+    runtime = _installed_codex_runtime(tmp_path, monkeypatch)
+
+    assert runtime.inference_command("codex") == [str(runtime._managed_coding_command().absolute())]
+    home = runtime.inference_state_dir("codex")
+    assert home == (runtime.agent_root("codex") / "inference" / "0.159.3" / "state").absolute()
+    environment = runtime.inference_environment("codex")
+    assert environment["CODEX_HOME"] == environment["HOME"] == str(home)
+    assert (home / "auth.json").readlink() == (runtime.state_dir("codex") / "auth.json").absolute()
+
+
+def test_native_inference_respects_explicit_command_and_login_home(tmp_path, monkeypatch):
+    runtime = _installed_codex_runtime(tmp_path, monkeypatch)
+    monkeypatch.setenv("CODEX_COMMAND", sys.executable)
+    assert runtime.inference_command("codex") == [sys.executable]
+    assert runtime.inference_state_dir("codex") == runtime.state_dir("codex")
+    assert runtime.inference_environment("codex") == runtime.process_environment("codex")
+    assert not (runtime.agent_root("codex") / "inference").exists()
+
+
+@pytest.mark.parametrize("invalid_auth", ["file", "wrong_link"])
+def test_native_inference_rejects_independent_or_untrusted_login(tmp_path, monkeypatch, invalid_auth):
+    runtime = _installed_codex_runtime(tmp_path, monkeypatch)
+    inference_home = runtime.agent_root("codex") / "inference" / "0.159.3" / "state"
+    inference_home.mkdir(parents=True)
+    alias = inference_home / "auth.json"
+    if invalid_auth == "file":
+        alias.write_bytes(b"untrusted-other-account")
+    else:
+        alias.symlink_to(tmp_path / "untrusted-login")
+    with pytest.raises(CodingAgentRuntimeError) as error:
+        runtime.inference_environment("codex")
+    assert error.value.code == "coding_agent_auth_invalid"
+
+
+@pytest.mark.parametrize("directory", ["inference", "version", "state"])
+@pytest.mark.parametrize("invalid_path", ["symlink", "file"])
+def test_native_inference_rejects_untrusted_home_ancestry(tmp_path, monkeypatch, directory, invalid_path):
+    runtime = _installed_codex_runtime(tmp_path, monkeypatch)
+    inference_root = runtime.agent_root("codex") / "inference"
+    path = {
+        "inference": inference_root,
+        "version": inference_root / "0.159.3",
+        "state": inference_root / "0.159.3" / "state",
+    }[directory]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    external_home = tmp_path / "external-home"
+    external_home.mkdir()
+    if invalid_path == "symlink":
+        path.symlink_to(external_home, target_is_directory=True)
+    else:
+        path.write_bytes(b"must-not-replace")
+
+    with pytest.raises(CodingAgentRuntimeError) as error:
+        runtime.inference_environment("codex")
+    assert error.value.code == "coding_agent_auth_invalid"
+    assert list(external_home.iterdir()) == []
+    if invalid_path == "file":
+        assert path.read_bytes() == b"must-not-replace"
+
+
 def test_upgraded_coding_home_rejects_an_independent_authentication_file(tmp_path, monkeypatch):
     monkeypatch.delenv("CODEX_COMMAND", raising=False)
     runtime = CodingAgentRuntime(tmp_path)

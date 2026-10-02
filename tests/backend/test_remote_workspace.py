@@ -968,6 +968,10 @@ def test_scope_and_route_policy_rejects_remote_management_and_traversal():
     assert allowed_route("backend", "GET", "/api/sessions", ["workspace.control"])
     assert not allowed_route("backend", "PATCH", "/api/llm/settings", ["workspace.control"])
     assert allowed_route("backend", "PATCH", "/api/llm/settings", ["workspace.control", "workspace.manage"])
+    assert not allowed_route("backend", "POST", "/api/llm/connections/codex/sync", ["workspace.control"])
+    assert allowed_route(
+        "backend", "POST", "/api/llm/connections/codex/sync", ["workspace.control", "workspace.manage"]
+    )
     for path in (
         "/api/remote-workspace/pair",
         "/api/apps/%2e%2e/remote-workspace",

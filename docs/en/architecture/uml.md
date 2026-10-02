@@ -367,19 +367,25 @@ flowchart LR
     Provider[Central Provider Registry] --> Ambient[primary / fast]
     Provider -->|per-agent shared binding| OpenCode
     Native[Codex-native login and subscription] --> AppServer
+    Native --> Sync[llm_discovery.py: sync_codex_connection]
+    Runtime -->|unified coding display catalog| Sync
+    Sync -->|catalog and role compatibility| Provider
 ```
 
 ACP is the only code-generation orchestration boundary. A built-in adapter declares only a trusted launch descriptor: ACP server command, underlying CLI, environment, model configuration, and version source. It cannot implement another prompt loop, permission model, or repair behavior. OpenCode starts native `opencode acp`. Codex uses the image-pinned `@agentclientprotocol/codex-acp`, points it at the Ambient-managed Codex CLI through `CODEX_PATH`, and that CLI starts the official app-server. A future non-native Agent must prefer an auditable, pinned, actively maintained bridge from the ACP Registry; the bridge only maps protocols while Ambient's ACP client owns permission and lifecycle behavior.
 
-The system image supplies the OpenCode CLI. Codex is downloaded to a dedicated persistent volume only after the user requests installation. Codex installation, authentication, dynamic model discovery, and execution share an agent-specific state directory; Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
+The system image supplies the OpenCode CLI. Codex is downloaded to a dedicated persistent volume only after the user requests installation. The original managed directory owns login; coding and modern native inference use separate versioned state directories sharing that login. Ambient Provider credentials never enter a native-mode Codex process. The Codex model catalog still comes from app-server `model/list` rather than an Ambient-maintained hard-coded list. Provider connections remain centralized, but consumer model roles are bound independently: Ambient uses `primary/fast`, OpenCode uses an inherited or dedicated `shared_binding`, and Codex uses a `native` binding. Submission snapshots the agent, its model configuration, and any resolved shared model so recovery cannot drift after later settings changes.
 
 Docker's default seccomp profile blocks the unprivileged user namespace required by Codex bubblewrap. Compose relaxes that syscall layer so Codex can keep its `workspace-write` sandbox inside the outer container boundary; it does not use `SYS_ADMIN` or `danger-full-access`.
 
-### 8.1 Native Codex primary-model transport (pending implementation)
+### 8.1 Native Codex primary-model transport
 
-`CodingAgentRuntime.command("codex")` retains the pinned primary CLI. `coding_command("codex")` selects a separate newer CLI for coding catalogs, reported versions, and ACP descriptors, falling back to the existing CLI before upgrade. Managed installation/update verifies both versions without overwriting the original `bin/codex`; authentication stays CLI-owned in the same Ambient managed login. Status includes update availability and target version; UI updates do not broaden the native primary profile.
+`CodingAgentRuntime.command("codex")` retains the legacy/login CLI. `coding_command("codex")` selects the pinned modern CLI for coding catalogs, reported versions, and ACP descriptors. `inference_command/inference_state_dir/inference_environment` prefer the modern binary with a separate inference home; missing modern binaries or explicit commands retain the trusted legacy launch boundary, with exact-version transport checks. Managed installation/update verifies both versions without overwriting the original `bin/codex`; authentication stays CLI-owned in the same Ambient managed login. Status includes update availability and target version; After update, native primary/fast inference selects its adapted profile by exact version and rejects unknown versions.
 
-This diagram defines a public subset before implementation. The currently API-only `LLMService` must select native transport by `ResolvedModel.api_mode`; see the [Provider contract](/en/integrations/llm-providers.md). The diagram does not claim deployment. Implementation must map and verify `NativeCodexTransport` in `verify_uml.py`, without weakening verification by omitting the class.
+`LLMService` selects native transport by `ResolvedModel.api_mode`; see the [Provider contract](/en/integrations/llm-providers.md). `verify_uml.py` maps and verifies `NativeCodexTransport`. `sync_codex_connection` projects the shared login into a primary/fast connection using the unified coding display catalog and separate role compatibility checks. CLI versions and role bindings remain independent; authentication and executor configuration stay unchanged.
+`ModelRef.availability` is optional for legacy compatibility. `ModelAvailability.native_inference/coding` are role compatibility flags with a bounded `reason`, establishing neither entitlement nor tool verification. `LLMConfigStore.resolve` rejects known incompatible native models while preserving historical references.
+`LLMConfigStore.provider_generation(provider_id=None)` records in-memory connection lifecycle generations for delete/recreate and disable/reenable, preserving name/model-only edits; omitting the ID returns the overall native-connection generation. `CodingAgentRuntime.authentication_generation(agent_id)` invalidates pending consumers on login start, active-login cancellation, and logout, together with the authentication operation ID. Both coordinate one service process without changing the persistent config format.
+`CodingAgentRuntime.status()` reports unauthenticated during a pending logout until operation cleanup, preventing new connections during the asynchronous CLI logout.
 
 ```mermaid
 classDiagram
@@ -391,11 +397,17 @@ classDiagram
         +runtime: CodingAgentRuntime
         +generate(selection, messages, tools) LLMResult
         +discover_models() list
+        +model_availability() list
     }
     LLMService --> NativeCodexTransport : native model selection only
+    class ModelRef {
+        +id: str
+        +availability: ModelAvailability
+    }
+    ModelRef --> ModelAvailability : optional compatibility
 ```
 
-`runtime` reuses trusted commands and managed native login. `generate` accepts a `ResolvedModel` snapshot, complete history, and tool declarations, returning `LLMResult` without executing tools. `discover_models` reads actual app-server catalogs without proving entitlement. Ephemeral native inference permits only in-memory Plan and Plan-only CodeMode; effects still pass through Ambient tools, Capabilities, and Runs. Cancellation/timeouts await owned process-group closure and temporary-directory removal without implicit repair, fallback, or replay.
+`runtime` reuses trusted commands and managed native login. `generate` accepts a `ResolvedModel` snapshot, complete history, and tool declarations, returning `LLMResult` without executing tools. `discover_models` reads the primary app-server catalog; `model_availability` combines it with public metadata in the same restricted connection without creating a thread/turn or proving entitlement. Ephemeral native inference permits in-memory Plan/CodeMode; modern metadata-driven clock only reads time and async messages stay buffered and excluded from final output; effects still pass through Ambient tools, Capabilities, and Runs. Cancellation/timeouts await owned process-group closure and temporary-directory removal without implicit repair, fallback, or replay.
 
 ## Remote entry to the local workspace
 The cloud entry manages accounts, nodes, and grants. The Connector connects outbound to the Gateway and checks the locally approved account, grant, scopes, and expiry for each request before forwarding bounded HTTP / WebSocket traffic to fixed loopback services. Revocation closes local forwarding and connections first. Runs, Apps, Graph, and Widgets still execute and store data in the local workspace.

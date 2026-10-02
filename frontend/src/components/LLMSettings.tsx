@@ -21,6 +21,14 @@ function modelLabel(providers: LLMProvider[], value: ModelSelection | null, lang
   return model?.display_name || model?.id || value.model_id;
 }
 
+function nativeUnavailableReason(model: LLMModel, isZh: boolean) {
+  switch (model.availability?.reason) {
+    case "coding_catalog_missing": return isZh ? "已不在当前 Codex 目录中" : "No longer in the current Codex catalog";
+    case "native_catalog_missing": return isZh ? "仅编码可用；主/快速暂不支持" : "Coding only; primary/fast not supported yet";
+    default: return isZh ? "主/快速暂不支持此模型" : "Primary/fast do not support this model yet";
+  }
+}
+
 export function ModelPicker({ providers, value, onChange, language, onManage, label, disabled }: ModelPickerProps) {
   const isZh = language === "zh";
   const [open, setOpen] = useState(false);
@@ -42,10 +50,11 @@ export function ModelPicker({ providers, value, onChange, language, onManage, la
           <h4>{provider.name}</h4>
           {provider.models.map((model) => {
             const selected = value?.provider_id === provider.id && value.model_id === model.id;
+            const unavailable = provider.preset === "codex_native" && model.availability?.native_inference === false;
             const toolUnknown = model.capabilities?.tool_calling !== true;
-            return <button type="button" className={selected ? "is-selected" : ""} key={model.id} onClick={() => { onChange({ provider_id: provider.id, model_id: model.id }); setOpen(false); }}>
+            return <button type="button" disabled={unavailable} className={selected ? "is-selected" : ""} key={model.id} onClick={() => { onChange({ provider_id: provider.id, model_id: model.id }); setOpen(false); }}>
               <span><strong>{model.display_name || model.id}</strong><small>{model.id}</small></span>
-              {toolUnknown ? <em><AlertTriangle size={12} />{isZh ? "工具调用未验证" : "Tool use not verified"}</em> : <CheckCircle2 size={14} />}
+              {unavailable ? <em><AlertTriangle size={12} />{nativeUnavailableReason(model, isZh)}</em> : toolUnknown ? <em><AlertTriangle size={12} />{isZh ? "工具调用未验证" : "Tool use not verified"}</em> : <CheckCircle2 size={14} />}
             </button>;
           })}
         </section>)}
@@ -65,11 +74,12 @@ interface LLMSettingsDialogProps {
   codingAgents?: CodingAgentDefinition[];
   codingAgentSettings?: CodingAgentSettings;
   onClose: () => void;
-  onRefresh: () => void | Promise<void>;
+  onRefresh: (isCurrent?: () => boolean) => void | Promise<void>;
   onCreateProvider?: (profile: Record<string, unknown>, credentials: Record<string, unknown>) => Promise<unknown>;
   onUpdateProvider?: (providerId: string, profile: Record<string, unknown>, credentials?: Record<string, unknown>) => Promise<unknown>;
   onDeleteProvider?: (providerId: string) => Promise<unknown>;
   onDiscoverModels?: (providerId: string) => Promise<unknown>;
+  onSyncCodexConnection?: () => Promise<LLMProvider>;
   onTestProvider?: (providerId: string, modelId?: string, mode?: "connection" | "tools") => Promise<unknown>;
   onUpdateSettings?: (patch: Partial<LLMSettings>) => Promise<unknown>;
   onUpdateCodingAgent?: (patch: Partial<CodingAgentSettings>) => Promise<unknown>;
@@ -83,6 +93,7 @@ interface LLMSettingsDialogProps {
 
 type Notice = { tone: "success" | "error"; text: string } | null;
 type ModelRefreshScope = { signature: string; request: number };
+type CodexSyncOperation = { epoch: number; authRequest: number; signature: string };
 
 export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
   const {
@@ -120,6 +131,12 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
   const [agentModelSaving, setAgentModelSaving] = useState<Record<string, boolean>>({});
   const agentModelSaves = useRef(new Set<CodingAgentId>());
   const [providerModelLoading, setProviderModelLoading] = useState<Record<string, boolean>>({});
+  const [codexSyncing, setCodexSyncing] = useState(false);
+  const [codexSigningOut, setCodexSigningOut] = useState(false);
+  const codexSigningOutRef = useRef(false);
+  const codexSyncOperation = useRef<CodexSyncOperation | null>(null);
+  const pendingCodexSync = useRef<number | null>(null);
+  const freshCodexLogin = useRef<number | null>(null);
   const refreshState = useRef({ open: false, epoch: 0, agents: new Map<CodingAgentId, ModelRefreshScope>(), providers: new Map<string, ModelRefreshScope>() });
   const authVersions = useRef(new Map<CodingAgentId, { signature: string; version: number; installed: boolean; authenticated: boolean | null }>());
   const authSessionVersions = useRef(new Map<CodingAgentId, number>());
@@ -161,23 +178,46 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
   const canDiscoverModels = Boolean(props.onDiscoverModels);
 
   const saveAgentAuth = useCallback((session: CodingAgentAuthSession) => {
+    if (session.agent_id === "codex" && session.status === "signed_in" && currentAuth.current.codex?.status !== "signed_in") {
+      pendingCodexSync.current = authRequests.current.get("codex") ?? 0;
+      freshCodexLogin.current = null;
+    } else if (session.agent_id === "codex" && ["signed_out", "failed", "cancelled", "expired"].includes(session.status)) {
+      freshCodexLogin.current = null;
+      pendingCodexSync.current = null;
+    }
     authSessionVersions.current.set(session.agent_id, authVersions.current.get(session.agent_id)?.version ?? 0);
     currentAuth.current = { ...currentAuth.current, [session.agent_id]: session };
     setAgentAuth(currentAuth.current);
   }, []);
 
   const clearAgentAuth = async (agentId: CodingAgentId) => {
+    if (agentId === "codex" && codexSigningOutRef.current) return;
     authRequests.current.set(agentId, (authRequests.current.get(agentId) ?? 0) + 1);
-    await props.onClearCodingAgentAuth?.(agentId);
-    // Invalidate immediately, even if the parent's configuration refresh is slow.
-    refreshState.current.agents.delete(agentId);
     if (agentId === "codex") {
-      refreshState.current.providers.clear();
-      setProviderModelLoading({});
+      codexSigningOutRef.current = true;
+      setCodexSigningOut(true);
+      freshCodexLogin.current = null;
+      pendingCodexSync.current = null;
+      codexSyncOperation.current = null;
+      setCodexSyncing(false);
     }
-    setAgentModelCatalogs((current) => { const next = { ...current }; delete next[agentId]; return next; });
-    setAgentModelLoading((current) => ({ ...current, [agentId]: false }));
-    saveAgentAuth({ id: "", agent_id: agentId, status: "signed_out", method: "", verification_uri: "", user_code: "", expires_at: null, error: "" });
+    try {
+      await props.onClearCodingAgentAuth?.(agentId);
+      // Invalidate immediately, even if the parent's configuration refresh is slow.
+      refreshState.current.agents.delete(agentId);
+      if (agentId === "codex") {
+        refreshState.current.providers.clear();
+        setProviderModelLoading({});
+      }
+      setAgentModelCatalogs((current) => { const next = { ...current }; delete next[agentId]; return next; });
+      setAgentModelLoading((current) => ({ ...current, [agentId]: false }));
+      saveAgentAuth({ id: "", agent_id: agentId, status: "signed_out", method: "", verification_uri: "", user_code: "", expires_at: null, error: "" });
+    } finally {
+      if (agentId === "codex") {
+        codexSigningOutRef.current = false;
+        setCodexSigningOut(false);
+      }
+    }
   };
 
   const run = async (key: string, action: () => Promise<unknown>, success: string) => {
@@ -243,40 +283,100 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
     return () => window.clearInterval(timer);
   }, [agentAuth, authRefreshKey, onGetCodingAgentAuth, open, saveAgentAuth]);
 
-  const refreshAgentModels = useCallback(async (agentId: CodingAgentId) => {
-    const scope = refreshState.current.agents.get(agentId);
-    const listModels = latest.current.props.onListCodingAgentModels;
-    if (!scope || !listModels || !latest.current.agentScopes.get(agentId)?.canList || !latest.current.props.open) return;
-    const epoch = refreshState.current.epoch;
-    const request = ++scope.request;
-    const isCurrent = () => latest.current.props.open && refreshState.current.epoch === epoch && refreshState.current.agents.get(agentId) === scope && scope.request === request && latest.current.agentScopes.get(agentId)?.signature === scope.signature;
-    setAgentModelLoading((current) => ({ ...current, [agentId]: true }));
-    try {
-      const catalog = await listModels(agentId);
-      if (isCurrent()) setAgentModelCatalogs((current) => ({ ...current, [agentId]: catalog }));
-    } catch (error) {
-      if (isCurrent()) setNotice({ tone: "error", text: `${error instanceof Error ? error.message : String(error)}. ${isZh ? "请刷新模型或重新打开设置重试。" : "Use Refresh or reopen settings to retry."}` });
-    } finally {
-      if (isCurrent()) setAgentModelLoading((current) => ({ ...current, [agentId]: false }));
-    }
-  }, [isZh]);
-
-  const discoverNativeModels = useCallback(async (providerId: string, scope: ModelRefreshScope) => {
+  const discoverNativeModels = useCallback(async (providerId: string, scope: ModelRefreshScope, parentIsCurrent?: () => boolean) => {
     const discover = latest.current.props.onDiscoverModels;
     if (!discover) return;
     const epoch = refreshState.current.epoch;
+    const authRequest = authRequests.current.get("codex") ?? 0;
     const request = ++scope.request;
-    const isCurrent = () => latest.current.props.open && refreshState.current.epoch === epoch && refreshState.current.providers.get(providerId) === scope && scope.request === request && latest.current.codexScope?.signature === scope.signature && latest.current.nativeProviderIds.includes(providerId);
+    const isCurrent = () => !codexSigningOutRef.current && (authRequests.current.get("codex") ?? 0) === authRequest && (!parentIsCurrent || parentIsCurrent()) && latest.current.props.open && refreshState.current.epoch === epoch && refreshState.current.providers.get(providerId) === scope && scope.request === request && latest.current.codexScope?.signature === scope.signature && latest.current.nativeProviderIds.includes(providerId);
     setProviderModelLoading((current) => ({ ...current, [providerId]: true }));
     try {
       await discover(providerId);
-      if (isCurrent()) await latest.current.props.onRefresh();
+      if (isCurrent()) await latest.current.props.onRefresh(isCurrent);
     } catch (error) {
       if (isCurrent()) setNotice({ tone: "error", text: `${error instanceof Error ? error.message : String(error)}. ${isZh ? "请点击发现模型或重新打开设置重试。" : "Use Discover or reopen settings to retry."}` });
     } finally {
       if (isCurrent()) setProviderModelLoading((current) => ({ ...current, [providerId]: false }));
     }
   }, [isZh]);
+
+  const refreshAgentModels = useCallback(async (agentId: CodingAgentId, refreshProviders = false) => {
+    const scope = refreshState.current.agents.get(agentId);
+    const listModels = latest.current.props.onListCodingAgentModels;
+    if (!scope || !listModels || !latest.current.agentScopes.get(agentId)?.canList || !latest.current.props.open || (agentId === "codex" && codexSigningOutRef.current)) return false;
+    const epoch = refreshState.current.epoch;
+    const authRequest = authRequests.current.get(agentId) ?? 0;
+    const request = ++scope.request;
+    const isCurrent = () => (agentId !== "codex" || !codexSigningOutRef.current) && (authRequests.current.get(agentId) ?? 0) === authRequest && latest.current.props.open && refreshState.current.epoch === epoch && refreshState.current.agents.get(agentId) === scope && scope.request === request && latest.current.agentScopes.get(agentId)?.signature === scope.signature;
+    setAgentModelLoading((current) => ({ ...current, [agentId]: true }));
+    try {
+      const catalog = await listModels(agentId);
+      if (!isCurrent()) return false;
+      setAgentModelCatalogs((current) => ({ ...current, [agentId]: catalog }));
+      if (agentId === "codex" && refreshProviders) {
+        await Promise.all(latest.current.nativeProviderIds.map((providerId) => {
+          const providerScope = refreshState.current.providers.get(providerId) ?? { signature: scope.signature, request: 0 };
+          refreshState.current.providers.set(providerId, providerScope);
+          return discoverNativeModels(providerId, providerScope, isCurrent);
+        }));
+      }
+      return isCurrent();
+    } catch (error) {
+      if (isCurrent()) setNotice({ tone: "error", text: `${error instanceof Error ? error.message : String(error)}. ${isZh ? "请刷新模型或重新打开设置重试。" : "Use Refresh or reopen settings to retry."}` });
+      return false;
+    } finally {
+      if (isCurrent()) setAgentModelLoading((current) => ({ ...current, [agentId]: false }));
+    }
+  }, [discoverNativeModels, isZh]);
+
+  const syncCodexModels = useCallback(async () => {
+    const sync = latest.current.props.onSyncCodexConnection;
+    const scope = latest.current.codexScope;
+    if (!sync || !latest.current.props.open || !scope?.canList || codexSyncOperation.current || codexSigningOutRef.current) return;
+    const operation = { epoch: refreshState.current.epoch, authRequest: authRequests.current.get("codex") ?? 0, signature: scope.signature };
+    codexSyncOperation.current = operation;
+    const isCurrent = () => codexSyncOperation.current === operation && latest.current.props.open && refreshState.current.epoch === operation.epoch && (authRequests.current.get("codex") ?? 0) === operation.authRequest && latest.current.codexScope?.signature === operation.signature;
+    setCodexSyncing(true);
+    setNotice(null);
+    try {
+      const provider = await sync();
+      if (!isCurrent()) return;
+      // Sync already discovered the unified catalog. Mark its opening/auth
+      // scope before refreshing props so a new Provider does not rediscover it.
+      refreshState.current.providers.set(provider.id, { signature: operation.signature, request: 0 });
+      await latest.current.props.onRefresh(isCurrent);
+      if (!isCurrent()) return;
+      if (latest.current.props.onListCodingAgentModels && !await refreshAgentModels("codex")) return;
+      if (isCurrent()) setNotice({ tone: "success", text: isZh ? "Codex 模型目录已同步。灰色模型暂不支持主/快速用途。" : "Codex model catalog synced. Disabled models do not support primary/fast use yet." });
+    } catch (error) {
+      if (isCurrent()) setNotice({ tone: "error", text: `${error instanceof Error ? error.message : String(error)}. ${isZh ? "请确认主/快速模型支持条件后点击“同步主/快速模型”重试。编码登录和现有选择已保留。" : "Check primary/fast model support, then use Sync primary/fast models to retry. Coding sign-in and existing selections are retained."}` });
+    } finally {
+      if (codexSyncOperation.current === operation) {
+        codexSyncOperation.current = null;
+        setCodexSyncing(false);
+      }
+    }
+  }, [isZh, refreshAgentModels]);
+
+  useEffect(() => {
+    const request = freshCodexLogin.current;
+    const codex = codingAgents.find((agent) => agent.id === "codex");
+    // A configuration refresh can observe a completed fresh login before its
+    // device-session poll. Consume the same login once in either path.
+    if (request !== null && request === (authRequests.current.get("codex") ?? 0) && codex?.authenticated === true && codex.auth_state === "signed_in") {
+      freshCodexLogin.current = null;
+      pendingCodexSync.current = request;
+    }
+  }, [codingAgents, authRefreshKey]);
+
+  useEffect(() => {
+    const operation = codexSyncOperation.current;
+    if (operation && (!open || operation.epoch !== refreshState.current.epoch || operation.signature !== codexScope?.signature || operation.authRequest !== (authRequests.current.get("codex") ?? 0))) {
+      codexSyncOperation.current = null;
+      setCodexSyncing(false);
+    }
+  }, [open, agentRefreshKey, authRefreshKey, codexScope?.signature]);
 
   useEffect(() => {
     const state = refreshState.current;
@@ -304,7 +404,8 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
         setProviderModelLoading((current) => current[providerId] ? { ...current, [providerId]: false } : current);
       }
     }
-    if (open && nativeReady && canDiscoverModels) {
+    const syncingLogin = Boolean(latest.current.props.onSyncCodexConnection && pendingCodexSync.current !== null);
+    if (open && nativeReady && canDiscoverModels && !syncingLogin && !codexSyncOperation.current) {
       for (const providerId of latest.current.nativeProviderIds) {
         if (state.providers.has(providerId)) continue;
         const scope = { signature: latest.current.codexScope!.signature, request: 0 };
@@ -314,11 +415,22 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
     }
   }, [open, agentRefreshKey, nativeProviderKey, canListModels, canDiscoverModels, refreshAgentModels, discoverNativeModels]);
 
+  useEffect(() => {
+    const request = pendingCodexSync.current;
+    if (!open || !codexScope?.canList || !props.onSyncCodexConnection || request === null) return;
+    pendingCodexSync.current = null;
+    if (request === (authRequests.current.get("codex") ?? 0)) void syncCodexModels();
+  }, [open, agentRefreshKey, authRefreshKey, props.onSyncCodexConnection, codexScope?.canList, syncCodexModels]);
+
   const beginAgentAuth = async (agentId: CodingAgentId) => {
-    if (!props.onStartCodingAgentAuth) return;
+    if (!props.onStartCodingAgentAuth || (agentId === "codex" && codexSigningOutRef.current)) return;
     const request = (authRequests.current.get(agentId) ?? 0) + 1;
     const authVersion = authVersions.current.get(agentId)?.version;
     authRequests.current.set(agentId, request);
+    if (agentId === "codex") {
+      freshCodexLogin.current = request;
+      pendingCodexSync.current = null;
+    }
     // Starting login is an explicit operation that survives closing settings.
     // Cancellation, sign-out, and a different auth generation still replace it.
     const isCurrent = () => authRequests.current.get(agentId) === request && authVersions.current.get(agentId)?.version === authVersion;
@@ -432,7 +544,7 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
     setEditingProvider(null);
   };
 
-  return <SystemDialog open={open} size="large" title={isZh ? "模型与 Provider" : "Models & Providers"} description={isZh ? "配置服务端连接，并选择默认与快速模型。" : "Configure server-side connections and choose default and fast models."} onClose={onClose} className="llm-settings-dialog">
+  return <SystemDialog open={open} size="large" title={isZh ? "模型与 Provider" : "Models & Providers"} description={isZh ? "统一管理连接与登录，再分别选择主模型、快速模型和编码执行模型。" : "Manage connections and sign-in, then choose primary, fast, and coding models independently."} onClose={onClose} className="llm-settings-dialog">
     <div className="llm-settings-toolbar">
       <button type="button" className="system-button is-primary" aria-label={isZh ? "添加 Provider" : "Add provider"} onClick={() => setAdding((value) => !value)}><Plus size={15} />{isZh ? "添加 Provider" : "Add provider"}</button>
       <SystemIconButton label={isZh ? "刷新配置" : "Refresh configuration"} onClick={() => void onRefresh()}><RefreshCw size={16} /></SystemIconButton>
@@ -503,10 +615,15 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
                     ? (isZh ? `${agent.name} 更新已开始` : `${agent.name} update started`)
                     : (isZh ? `${agent.name} 安装已开始` : `${agent.name} installation started`))}
                 >{agent.install_state === "installing" ? <LoaderCircle className="is-spinning" size={12} /> : null}{agent.installed ? (isZh ? "更新" : "Update") : (isZh ? "安装" : "Install")}</button> : null}
-                {agent.installed && agent.auth_methods.length > 0 && !ready && authState !== "starting" && authState !== "waiting" ? <button type="button" disabled={busy === `auth-${agent.id}` || !props.onStartCodingAgentAuth} onClick={() => void beginAgentAuth(agent.id)}><LogIn size={12} />{isZh ? "使用 ChatGPT 登录" : "Sign in with ChatGPT"}</button> : null}
-                {agent.installed && ready && agent.auth_methods.length > 0 ? <button type="button" disabled={!props.onClearCodingAgentAuth} onClick={() => void run(`logout-${agent.id}`, () => clearAgentAuth(agent.id), isZh ? "已退出登录" : "Signed out")}><LogOut size={12} />{isZh ? "退出登录" : "Sign out"}</button> : null}
+                {agent.installed && agent.auth_methods.length > 0 && !ready && authState !== "starting" && authState !== "waiting" ? <button type="button" disabled={busy === `auth-${agent.id}` || !props.onStartCodingAgentAuth || (agent.id === "codex" && codexSigningOut)} onClick={() => void beginAgentAuth(agent.id)}><LogIn size={12} />{isZh ? "使用 ChatGPT 登录" : "Sign in with ChatGPT"}</button> : null}
+                {agent.installed && ready && agent.auth_methods.length > 0 ? <button type="button" disabled={!props.onClearCodingAgentAuth || (agent.id === "codex" && codexSigningOut)} onClick={() => void run(`logout-${agent.id}`, () => clearAgentAuth(agent.id), isZh ? "已退出登录" : "Signed out")}><LogOut size={12} />{isZh ? "退出登录" : "Sign out"}</button> : null}
                 {versionLabel ? <span>{versionLabel}</span> : null}
               </div>
+
+              {agent.id === "codex" && props.onSyncCodexConnection ? <div className="coding-agent-connection">
+                <p className="coding-agent-auth-hint">{isZh ? "主模型、快速模型与编码代理共享托管 Codex 登录和模型目录，各用途独立选模。灰色条目会标明主/快速用途不可用的原因。" : "Primary, fast, and coding models share the managed Codex sign-in and catalog, and choose models independently. Disabled entries explain why primary/fast use is unavailable."}</p>
+                <div className="coding-agent-actions"><button type="button" disabled={!ready || codexSyncing || codexSigningOut} onClick={() => void syncCodexModels()}>{codexSyncing ? <LoaderCircle className="is-spinning" size={12} /> : <RefreshCw size={12} />}{isZh ? "同步主/快速模型" : "Sync primary/fast models"}</button></div>
+              </div> : null}
 
               {(authState === "starting" || authState === "waiting") && authSession ? <div className="coding-agent-device-auth" role="status">
                 <span>{authSession.status === "starting" ? (isZh ? "正在获取设备码…" : "Requesting a device code…") : (isZh ? "在浏览器中打开链接并输入一次性设备码" : "Open the link and enter the one-time device code")}</span>
@@ -529,7 +646,7 @@ export function LLMSettingsDialog(props: LLMSettingsDialogProps) {
                 <option value="">{nativeDefault ? `${isZh ? "Agent 默认" : "Agent default"} · ${nativeDefault.display_name}` : (isZh ? "使用 Agent 默认模型" : "Use agent default")}</option>
                 {selectedNativeModel && !nativeCatalog?.models.some((model) => model.id === selectedNativeModel) ? <option value={selectedNativeModel}>{selectedNativeModel}</option> : null}
                 {nativeCatalog?.models.map((model) => <option key={model.id} value={model.id}>{model.display_name}{model.is_default ? (isZh ? "（当前默认）" : " (current default)") : ""}{model.description ? ` · ${model.description}` : ""}</option>)}
-              </select></label><button type="button" aria-label={isZh ? `刷新 ${agent.name} 模型` : `Refresh ${agent.name} models`} disabled={!ready || agentModelLoading[agent.id] || !onListCodingAgentModels} onClick={() => { setNotice(null); void refreshAgentModels(agent.id); }}>{agentModelLoading[agent.id] ? <LoaderCircle className="is-spinning" size={12} /> : <RefreshCw size={12} />}{isZh ? "刷新" : "Refresh"}</button></div> : null}
+              </select></label><button type="button" aria-label={isZh ? `刷新 ${agent.name} 模型` : `Refresh ${agent.name} models`} disabled={!ready || agentModelLoading[agent.id] || !onListCodingAgentModels || (agent.id === "codex" && (codexSyncing || codexSigningOut))} onClick={() => { setNotice(null); void refreshAgentModels(agent.id, true); }}>{agentModelLoading[agent.id] ? <LoaderCircle className="is-spinning" size={12} /> : <RefreshCw size={12} />}{isZh ? "刷新" : "Refresh"}</button></div> : null}
 
               {agent.install_operation?.status === "failed" && agent.install_operation.error ? <p className="coding-agent-error">{agent.install_operation.error}</p> : null}
               {authSession?.status === "failed" && authSession.error ? <p className="coding-agent-error">{authSession.error}</p> : null}

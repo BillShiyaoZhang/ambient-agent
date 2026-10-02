@@ -1,7 +1,7 @@
 """Bounded, isolated official Codex app-server transport for Ambient inference.
 
 Ambient tools are JSON choices in the final answer, never native dynamic tools.
-The pinned native profile exposes only internal Plan/CodeMode computation.
+Pinned profiles isolate internal computation, read-only clock and bounded async messages.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,32 @@ from backend.llm_config import ResolvedModel
 from backend.llm_service import LLMResult, LLMTransportError
 
 _VERSION = "0.145.0"
+_MODERN_VERSION = "0.159.3"
+_MODERN_PLAN_TYPES = (
+    None,
+    "free",
+    "go",
+    "plus",
+    "pro",
+    "prolite",
+    "promax",
+    "team",
+    "self_serve_business_prolite",
+    "self_serve_business_usage_based",
+    "business",
+    "ent26",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_usage_based",
+    "enterprise",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "unknown",
+)
+_HOST_DISABLED_WARNING = (
+    "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; "
+    "enable `features.code_mode_host` and install `codex-code-mode-host`."
+)
 _BYTE_LIMIT = 2 * 1024 * 1024
 _INPUT_LIMIT = 512 * 1024
 _MESSAGE_LIMIT = 1024
@@ -104,6 +131,31 @@ _SAFE_CONFIG: dict[str, Any] = {
     "orchestrator": {"skills": {"enabled": False}, "mcp": {"enabled": False}},
     "tools": {"experimental_request_user_input": {"enabled": False}},
     "features": dict.fromkeys(_DISABLED_FEATURES, False),
+}
+_MODERN_SAFE_CONFIG: dict[str, Any] = {
+    **_SAFE_CONFIG,
+    "cloud": {"skills": {"enabled": False}},
+    "cli_auth_credentials_store": "file",
+    "features": {
+        **_SAFE_CONFIG["features"],
+        **dict.fromkeys(
+            (
+                "sleep_tool",
+                "view_image",
+                "worktrees",
+                "in_app_chat",
+                "in_app_dictation",
+                "in_app_local_automation",
+                "in_app_updates",
+                "daemon_auto_start",
+                "system_proxy_fallback",
+                "unbounded_connection_retries",
+                "send_message_to_user_async",
+            ),
+            False,
+        ),
+        "skip_host_skill_discovery": True,
+    },
 }
 _INSTRUCTIONS = (
     "You are the Ambient inference transport. The next JSON envelope contains the complete Ambient conversation "
@@ -216,10 +268,10 @@ def _closed_schema(schema: dict[str, Any]) -> Any:
     return validator(schema, registry=Registry(retrieve=_deny_resource), format_checker=validator.FORMAT_CHECKER)
 
 
-def _safe_effective_config(response: dict[str, Any]) -> bool:
-    # .145's typed ToolsV2 omits this legacy knob. Its effective sessionFlags
+def _safe_effective_config(response: dict[str, Any], expected: dict[str, Any] = _SAFE_CONFIG) -> bool:
+    # Both pinned typed ToolsV2 schemas omit this legacy knob. Effective sessionFlags
     # layer is returned first and must explicitly disable the actual core knob.
-    projected = {key: value for key, value in _SAFE_CONFIG.items() if key != "tools"}
+    projected = {key: value for key, value in expected.items() if key != "tools"}
     if not _config_matches(response.get("config"), projected):
         return False
     layers = response.get("layers")
@@ -237,7 +289,7 @@ def _safe_effective_config(response: dict[str, Any]) -> bool:
         isinstance(layer, dict)
         and (layer.get("name") or {}).get("type") == "sessionFlags"
         and layer.get("disabledReason") is None
-        and _config_matches((layer.get("config") or {}).get("tools"), _SAFE_CONFIG["tools"])
+        and _config_matches((layer.get("config") or {}).get("tools"), expected["tools"])
     )
 
 
@@ -270,7 +322,7 @@ def _json_object(raw: str) -> dict[str, Any]:
     return value
 
 
-def _upstream_error_code(info: Any) -> str:
+def _upstream_error_code(info: Any, version: str = _VERSION) -> str:
     """Validate only the pinned public enum; never inspect error text."""
     if info is None:
         return "llm_provider_error"
@@ -288,9 +340,11 @@ def _upstream_error_code(info: Any) -> str:
             "sandboxError",
             "other",
         }
+        if version == _MODERN_VERSION:
+            known |= {"rateLimitExceeded", "flexUnavailable", "misalignmentPolicyViolation", "tooManyDenials"}
         if info not in known:
             raise _error("llm_capability_unsupported", reason="known_upstream_error")
-        if info in {"sessionBudgetExceeded", "usageLimitExceeded"}:
+        if info in {"sessionBudgetExceeded", "usageLimitExceeded", "rateLimitExceeded"}:
             return "llm_rate_limited"
         return "llm_auth_failed" if info == "unauthorized" else "llm_provider_error"
     if not isinstance(info, dict) or len(info) != 1:
@@ -373,8 +427,10 @@ async def _stop_process(proc: asyncio.subprocess.Process) -> None:
 
 
 class _Connection:
-    def __init__(self, process: asyncio.subprocess.Process):
+    def __init__(self, process: asyncio.subprocess.Process, version: str = _VERSION, home: Path | None = None):
         self.process = process
+        self.version = version
+        self.home = home
         self.sequence = 0
         self.bytes = 0
         self.messages = 0
@@ -422,6 +478,48 @@ class _Connection:
         identifier = item.get("id")
         if not isinstance(identifier, str) or not identifier or len(identifier) > 256:
             raise _error()
+        previous = self.items.get(identifier)
+        if self.version == _MODERN_VERSION and previous and previous["type"] != item["type"]:
+            raise _error("llm_capability_unsupported", reason="native_item")
+        if item["type"] == "agentMessage":
+            delivery = item.get("delivery")
+            if delivery is not None and (self.version != _MODERN_VERSION or delivery != "async"):
+                raise _error("llm_capability_unsupported", reason="native_item")
+            if self.version == _MODERN_VERSION:
+                if (
+                    set(item) - {"type", "id", "text", "phase", "memoryCitation", "delivery", "questions"}
+                    or not isinstance(item.get("text"), str)
+                    or item.get("phase") not in (None, "commentary", "final_answer")
+                    or item.get("memoryCitation") is not None
+                ):
+                    raise _error("llm_capability_unsupported", reason="native_item")
+                questions = item.get("questions")
+                if delivery == "async":
+                    if not isinstance(questions, list) or not 1 <= len(questions) <= _ITEM_LIMIT:
+                        raise _error("llm_capability_unsupported", reason="native_item")
+                    for question in questions:
+                        if (
+                            not isinstance(question, dict)
+                            or set(question) - {"title", "options"}
+                            or not isinstance(question.get("title"), str)
+                            or not question["title"].strip()
+                            or (
+                                question.get("options") is not None
+                                and (
+                                    not isinstance(question["options"], list)
+                                    or not 1 <= len(question["options"]) <= _ITEM_LIMIT
+                                    or any(
+                                        not isinstance(option, str) or not option.strip()
+                                        for option in question["options"]
+                                    )
+                                )
+                            )
+                        ):
+                            raise _error("llm_capability_unsupported", reason="native_item")
+                elif questions is not None:
+                    raise _error("llm_capability_unsupported", reason="native_item")
+                if previous and previous.get("delivery") != delivery:
+                    raise _error("llm_capability_unsupported", reason="native_item")
         self.items[identifier] = item
         if len(self.items) > _ITEM_LIMIT:
             raise _error(reason="output_limit")
@@ -493,7 +591,7 @@ class _Connection:
                 or (error.get("additionalDetails") is not None and not isinstance(error["additionalDetails"], str))
             ):
                 raise _error("llm_capability_unsupported", reason="known_upstream_error")
-            code = _upstream_error_code(error.get("codexErrorInfo"))
+            code = _upstream_error_code(error.get("codexErrorInfo"), self.version)
             if not params["willRetry"]:
                 raise _error(code, reason="known_upstream_error")
             # The official server is retrying the existing turn. No new request
@@ -505,6 +603,30 @@ class _Connection:
                 raise _error("llm_capability_unsupported", reason="native_notification")
         elif method == "remoteControl/status/changed":
             if params.get("status") != "disabled" or params.get("environmentId") is not None:
+                raise _error("llm_capability_unsupported", reason="native_notification")
+        elif method == "account/updated":
+            if (
+                self.version != _MODERN_VERSION
+                or set(params) != {"authMode", "planType"}
+                or params["authMode"] not in (None, "chatgpt")
+                or params["planType"] not in _MODERN_PLAN_TYPES
+            ):
+                raise _error("llm_capability_unsupported", reason="native_notification")
+        elif method == "warning":
+            startup_warning = (
+                "Under-development features enabled: skip_host_skill_discovery. "
+                "Under-development features are incomplete and may behave unpredictably. "
+                "To suppress this warning, set `suppress_unstable_features_warning = true` in "
+                f"{self.home}/config.toml."
+            )
+            if (
+                self.version != _MODERN_VERSION
+                or self.home is None
+                or self.thread_id is None
+                or set(params) != {"threadId", "message"}
+                or params["threadId"] != self.thread_id
+                or params["message"] not in (startup_warning, _HOST_DISABLED_WARNING)
+            ):
                 raise _error("llm_capability_unsupported", reason="native_notification")
         elif method in {
             "item/agentMessage/delta",
@@ -553,21 +675,27 @@ class NativeCodexTransport:
         self._stop = stop_process or _stop_process
         self._injected_process = process_factory is not None
 
-    def _guard_home(self) -> Path:
-        home = self.runtime.state_dir("codex")
+    def _guard_home(self, home: Path | None = None) -> Path:
+        home = home or getattr(self.runtime, "inference_state_dir", self.runtime.state_dir)("codex")
         try:
             (home / "config.toml").lstat()
         except FileNotFoundError:
             return home
         raise _error("llm_capability_unsupported")
 
-    def _model_metadata(self, home: Path, model: str) -> None:
+    def _model_metadata(self, home: Path, model: str, version: str = _VERSION) -> None:
         # Only public catalog metadata is read; authentication remains CLI-owned.
-        with (home / "models_cache.json").open("rb") as source:
-            raw = source.read(_BYTE_LIMIT + 1)
-        if len(raw) > _BYTE_LIMIT:
-            raise _error("llm_capability_unsupported", reason="model_metadata")
-        catalog = json.loads(raw)
+        try:
+            descriptor = os.open(home / "models_cache.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise _error("llm_capability_unsupported", reason="model_metadata")
+                raw = source.read(_BYTE_LIMIT + 1)
+            if len(raw) > _BYTE_LIMIT:
+                raise _error("llm_capability_unsupported", reason="model_metadata")
+            catalog = json.loads(raw)
+        except (OSError, ValueError, TypeError):
+            raise _error("llm_capability_unsupported", reason="model_metadata") from None
         models = catalog.get("models") if isinstance(catalog, dict) else None
         if not isinstance(models, list) or len(models) > 1000:
             raise _error("llm_capability_unsupported", reason="model_metadata")
@@ -575,10 +703,19 @@ class NativeCodexTransport:
         if len(matches) != 1:
             raise _error("llm_capability_unsupported", reason="model_metadata")
         item = matches[0]
+        supported_tools = item.get("experimental_supported_tools")
+        allowed_tools = (
+            {"clock", "send_user_message_async", "request_user_input_async"} if version == _MODERN_VERSION else set()
+        )
+        versions = {"v1", "v2"} if version == _MODERN_VERSION else {"v1"}
         if (
             item.get("tool_mode") != "code_mode_only"
-            or item.get("experimental_supported_tools") != []
-            or item.get("multi_agent_version") != "v1"
+            or not isinstance(item.get("multi_agent_version"), str)
+            or item["multi_agent_version"] not in versions
+            or not isinstance(supported_tools, list)
+            or len(supported_tools) > len(allowed_tools)
+            or any(not isinstance(tool, str) or tool not in allowed_tools for tool in supported_tools)
+            or len(set(supported_tools)) != len(supported_tools)
         ):
             raise _error("llm_capability_unsupported", reason="model_metadata")
 
@@ -611,10 +748,10 @@ class NativeCodexTransport:
                 if sys.platform != "linux" and not self._injected_process:
                     raise _error("llm_capability_unsupported")
                 home = self._guard_home()
-                command = self.runtime.command("codex")
+                command = getattr(self.runtime, "inference_command", self.runtime.command)("codex")
                 if not command:
                     raise _error("llm_capability_unsupported")
-                environment = self.runtime.process_environment("codex")
+                environment = getattr(self.runtime, "inference_environment", self.runtime.process_environment)("codex")
                 if Path(environment.get("CODEX_HOME", "")).resolve() != home.resolve():
                     raise _error("llm_invalid_configuration")
                 with tempfile.TemporaryDirectory(prefix="ambient-native-inference-") as cwd:
@@ -626,17 +763,20 @@ class NativeCodexTransport:
                         if proc.stdout is None:
                             raise _error()
                         version = await proc.stdout.read(256)
-                        if await proc.wait() != 0 or not re.fullmatch(rb"codex-cli 0\.145\.0\s*", version):
+                        match = re.fullmatch(rb"codex-cli (0\.145\.0|0\.159\.3)\s*", version)
+                        if await proc.wait() != 0 or match is None:
                             raise _error("llm_capability_unsupported")
+                        profile_version = match[1].decode("ascii")
+                        safe_config = _MODERN_SAFE_CONFIG if profile_version == _MODERN_VERSION else _SAFE_CONFIG
                         await self._stop(proc)
                         proc = None
-                        self._guard_home()
+                        self._guard_home(home)
                         proc = await self._owned_process(
-                            [*command, "app-server", "--stdio", "--strict-config", *_overrides(_SAFE_CONFIG)],
+                            [*command, "app-server", "--stdio", "--strict-config", *_overrides(safe_config)],
                             cwd,
                             environment,
                         )
-                        connection = _Connection(proc)
+                        connection = _Connection(proc, profile_version, home)
                         initialized = await connection.request(
                             "initialize",
                             {
@@ -644,11 +784,13 @@ class NativeCodexTransport:
                                 "capabilities": {"experimentalApi": True},
                             },
                         )
-                        if not re.search(r"\b0\.145\.0\b", str(initialized.get("userAgent", ""))):
+                        if not re.search(
+                            rf"\b{re.escape(profile_version)}(?=$|[\s;)])", str(initialized.get("userAgent", ""))
+                        ):
                             raise _error("llm_capability_unsupported")
                         await connection.send("initialized", {})
                         configured = await connection.request("config/read", {"cwd": cwd, "includeLayers": True})
-                        if not _safe_effective_config(configured):
+                        if not _safe_effective_config(configured, safe_config):
                             raise _error("llm_capability_unsupported")
                         cursor = None
                         seen: set[str] = set()
@@ -664,7 +806,7 @@ class NativeCodexTransport:
                             seen.add(cursor)
                         else:
                             raise _error()
-                        self._guard_home()
+                        self._guard_home(home)
                         return await operation(connection, home, cwd)
                     finally:
                         if proc is not None:
@@ -714,6 +856,22 @@ class NativeCodexTransport:
     async def discover_models(self) -> list[dict[str, Any]]:
         async def discover(connection: _Connection, _home: Path, _cwd: str):
             return await self._catalog(connection)
+
+        return await self._with_connection(discover)
+
+    async def model_availability(self) -> list[dict[str, Any]]:
+        """Precheck the pinned inference catalog; this does not verify account access."""
+
+        async def discover(connection: _Connection, home: Path, _cwd: str):
+            models = await self._catalog(connection)
+            for model in models:
+                try:
+                    self._model_metadata(home, model["id"], connection.version)
+                except (LLMTransportError, OSError, ValueError, TypeError):
+                    model["native_inference"] = False
+                else:
+                    model["native_inference"] = True
+            return models
 
         return await self._with_connection(discover)
 
@@ -773,7 +931,8 @@ class NativeCodexTransport:
             catalog = await self._catalog(connection)
             if selection.model_id not in {item["id"] for item in catalog}:
                 raise _error("llm_model_not_found")
-            self._model_metadata(home, selection.model_id)
+            self._model_metadata(home, selection.model_id, connection.version)
+            safe_config = _MODERN_SAFE_CONFIG if connection.version == _MODERN_VERSION else _SAFE_CONFIG
             response = await connection.request(
                 "thread/start",
                 {
@@ -790,13 +949,14 @@ class NativeCodexTransport:
                     "approvalsReviewer": "user",
                     "baseInstructions": _INSTRUCTIONS,
                     "developerInstructions": "",
-                    "config": _SAFE_CONFIG,
+                    "config": safe_config,
                     "allowProviderModelFallback": False,
                     "experimentalRawEvents": False,
                 },
             )
             connection.thread_id = (response.get("thread") or {}).get("id")
             sandbox = response.get("sandbox")
+            permission_profile = response.get("activePermissionProfile")
             if (
                 not isinstance(connection.thread_id, str)
                 or not connection.thread_id
@@ -811,6 +971,16 @@ class NativeCodexTransport:
                 or sandbox.get("networkAccess", False) is not False
                 or response.get("runtimeWorkspaceRoots")
                 or response.get("instructionSources")
+                or (
+                    permission_profile is not None
+                    and (
+                        connection.version != _MODERN_VERSION
+                        or not isinstance(permission_profile, dict)
+                        or set(permission_profile) - {"id", "extends"}
+                        or permission_profile.get("id") != ":read-only"
+                        or permission_profile.get("extends") is not None
+                    )
+                )
             ):
                 raise _error("llm_capability_unsupported", reason="thread_policy")
             connection.pending_turn = True
@@ -840,7 +1010,9 @@ class NativeCodexTransport:
             finals = [
                 item
                 for item in connection.items.values()
-                if item.get("type") == "agentMessage" and item.get("phase") != "commentary"
+                if item.get("type") == "agentMessage"
+                and item.get("phase") != "commentary"
+                and item.get("delivery") != "async"
             ]
             if len(finals) != 1 or not isinstance(finals[0].get("text"), str):
                 raise _error(reason="final_output")

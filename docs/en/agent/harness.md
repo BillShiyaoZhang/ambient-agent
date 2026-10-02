@@ -160,4 +160,13 @@ Plan, schema, verification, and MCP/Agent permission all use Run interactions ra
 
 ## 7. Remote workspace entry
 
+Model connections and coding executors are managed separately. `llm_discovery.sync_codex_connection`
+projects the managed Codex login into the Provider Registry. Primary/fast snapshots use native inference,
+while ACP owns coding execution. Sync uses the coding catalog for unified display and records role
+compatibility separately. Known incompatible primary models are disabled and rejected during resolution.
+Role bindings, Run snapshots, tool permissions, and recovery semantics remain unchanged. Modern native
+inference reuses the pinned `0.159.3` binary with a separate inference home, retaining the legacy profile
+for installations without the upgrade. See the [Provider contract](../integrations/llm-providers.md) for
+version and Linux restrictions. Ambient's tool loop always owns execution.
+
 `RemoteWorkspaceConnector` provides bounded transport into the local frontend and API and uses `RemoteWorkspaceNodeStore` to persist and verify local grants. It preserves `RunCoordinator`, tool effects, approvals, and recovery semantics. The cloud platform claims nodes, issues single-use entry links, and relays traffic. Remote requests enter the existing local API and Run paths and remain subject to the same application, capability, and durable execution boundaries. See the [remote workspace design](../architecture/remote-workspace.md) for scopes and protocol.

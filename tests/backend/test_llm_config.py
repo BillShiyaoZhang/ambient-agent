@@ -65,6 +65,94 @@ def test_codex_native_catalog_and_defaults_need_no_api_configuration(tmp_path, m
     assert json.loads(store.secrets_path.read_text()) == {}
 
 
+@pytest.mark.parametrize("setting", ["default_model", "fast_model"])
+def test_native_models_with_known_incompatible_profile_cannot_be_bound_or_resolved(tmp_path, setting):
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider(
+        {
+            "id": "native",
+            "name": "Native",
+            "preset": "codex_native",
+            "models": [
+                {
+                    "id": "coding-only",
+                    "availability": {
+                        "native_inference": False,
+                        "coding": True,
+                        "reason": "native_catalog_missing",
+                    },
+                }
+            ],
+        },
+        {},
+    )
+    selection = {"provider_id": "native", "model_id": "coding-only"}
+    before = store.config_path.read_bytes()
+    with pytest.raises(LLMConfigError) as failure:
+        store.update_settings({setting: selection})
+    assert failure.value.code == "llm_capability_unsupported"
+    assert store.config_path.read_bytes() == before
+    with pytest.raises(LLMConfigError) as failure:
+        store.resolve(selection)
+    assert failure.value.code == "llm_capability_unsupported"
+
+
+def test_native_compatibility_survives_save_reload_without_claiming_verified_tools(tmp_path):
+    store = LLMConfigStore(str(tmp_path))
+    profile = store.create_provider(
+        {
+            "id": "native",
+            "name": "Native",
+            "preset": "codex_native",
+            "models": [{"id": "shared", "availability": {"native_inference": True, "coding": True}}],
+        },
+        {},
+    )
+    selection = {"provider_id": "native", "model_id": "shared"}
+    store.update_settings({"default_model": selection, "fast_model": selection})
+    reloaded = LLMConfigStore(str(tmp_path))
+    assert reloaded.get_provider("native").models[0].availability.native_inference is True
+    assert reloaded.resolve_default().model_id == reloaded.resolve_fast().model_id == "shared"
+    assert profile["models"][0]["capabilities"]["verification"] == "unknown"
+
+
+def test_api_provider_resolution_does_not_apply_native_compatibility_flags(tmp_path):
+    store = LLMConfigStore(str(tmp_path))
+    store.create_provider(
+        {
+            "id": "api",
+            "name": "API",
+            "preset": "ollama",
+            "models": [{"id": "api-model", "availability": {"native_inference": False, "coding": False}}],
+        },
+        {},
+    )
+    selection = {"provider_id": "api", "model_id": "api-model"}
+    store.update_settings({"default_model": selection})
+    assert store.resolve_default().model_id == "api-model"
+
+
+@pytest.mark.parametrize(
+    "availability",
+    [{"native_inference": True}, {"coding": True}, {"native_inference": True, "coding": True, "reason": "untrusted"}],
+)
+def test_invalid_model_availability_fails_before_profile_write(tmp_path, availability):
+    store = LLMConfigStore(str(tmp_path))
+    before = store.config_path.read_bytes()
+    with pytest.raises(LLMConfigError) as failure:
+        store.create_provider(
+            {
+                "id": "native",
+                "name": "Native",
+                "preset": "codex_native",
+                "models": [{"id": "shared", "availability": availability}],
+            },
+            {},
+        )
+    assert failure.value.code == "llm_invalid_configuration"
+    assert store.config_path.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "changes",
     [

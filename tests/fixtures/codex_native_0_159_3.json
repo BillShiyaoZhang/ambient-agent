@@ -1,0 +1,327 @@
+{
+  "provenance": "Official rust-v0.159.3 public metadata and Linux aarch64 CLI config/read in empty unauthenticated home, 2026-10-02; unrelated config omitted.",
+  "safe_config": {
+    "approval_policy": "never",
+    "sandbox_mode": "read-only",
+    "model_provider": "openai",
+    "web_search": "disabled",
+    "notify": [],
+    "project_doc_max_bytes": 0,
+    "mcp_servers": {},
+    "agents": {
+      "enabled": false
+    },
+    "skills": {
+      "include_instructions": false
+    },
+    "orchestrator": {
+      "skills": {
+        "enabled": false
+      },
+      "mcp": {
+        "enabled": false
+      }
+    },
+    "tools": {
+      "experimental_request_user_input": {
+        "enabled": false
+      }
+    },
+    "features": {
+      "shell_tool": false,
+      "multi_agent": false,
+      "multi_agent_v2": false,
+      "apps": false,
+      "enable_mcp_apps": false,
+      "plugins": false,
+      "remote_plugin": false,
+      "tool_suggest": false,
+      "hooks": false,
+      "memories": false,
+      "goals": false,
+      "image_generation": false,
+      "standalone_web_search": false,
+      "skill_mcp_dependency_install": false,
+      "skill_search": false,
+      "deferred_executor": false,
+      "request_permissions_tool": false,
+      "token_budget": false,
+      "current_time_reminder": false,
+      "executor_capability_discovery": false,
+      "code_mode_host": false,
+      "in_app_browser": false,
+      "browser_use": false,
+      "browser_use_full_cdp_access": false,
+      "browser_use_external": false,
+      "computer_use": false,
+      "artifact": false,
+      "workspace_dependencies": false,
+      "chronicle": false,
+      "external_agent_memory_import": false,
+      "network_proxy": false,
+      "default_mode_request_user_input": false,
+      "guardian_approval": false,
+      "realtime_conversation": false,
+      "sleep_tool": false,
+      "view_image": false,
+      "worktrees": false,
+      "in_app_chat": false,
+      "daemon_auto_start": false,
+      "system_proxy_fallback": false,
+      "unbounded_connection_retries": false,
+      "send_message_to_user_async": false,
+      "in_app_dictation": false,
+      "in_app_local_automation": false,
+      "in_app_updates": false,
+      "skip_host_skill_discovery": true
+    },
+    "cloud": {
+      "skills": {
+        "enabled": false
+      }
+    },
+    "cli_auth_credentials_store": "file"
+  },
+  "config_read": {
+    "config": {
+      "approval_policy": "never",
+      "sandbox_mode": "read-only",
+      "model_provider": "openai",
+      "web_search": "disabled",
+      "notify": [],
+      "project_doc_max_bytes": 0,
+      "mcp_servers": {},
+      "agents": {
+        "enabled": false,
+        "max_concurrent_threads_per_session": null,
+        "max_depth": null,
+        "default_subagent_model": null,
+        "default_subagent_reasoning_effort": null,
+        "job_max_runtime_seconds": null,
+        "interrupt_message": null
+      },
+      "skills": {
+        "include_instructions": false
+      },
+      "orchestrator": {
+        "skills": {
+          "enabled": false
+        },
+        "mcp": {
+          "enabled": false
+        }
+      },
+      "tools": {
+        "web_search": null
+      },
+      "features": {
+        "code_mode_host": false,
+        "multi_agent_v2": false,
+        "token_budget": false,
+        "current_time_reminder": false,
+        "sleep_tool": false,
+        "network_proxy": false,
+        "apps": false,
+        "artifact": false,
+        "browser_use": false,
+        "browser_use_external": false,
+        "browser_use_full_cdp_access": false,
+        "chronicle": false,
+        "computer_use": false,
+        "daemon_auto_start": false,
+        "default_mode_request_user_input": false,
+        "deferred_executor": false,
+        "enable_mcp_apps": false,
+        "executor_capability_discovery": false,
+        "external_agent_memory_import": false,
+        "goals": false,
+        "guardian_approval": false,
+        "hooks": false,
+        "image_generation": false,
+        "in_app_browser": false,
+        "in_app_chat": false,
+        "in_app_dictation": false,
+        "in_app_local_automation": false,
+        "in_app_updates": false,
+        "memories": false,
+        "multi_agent": false,
+        "plugins": false,
+        "realtime_conversation": false,
+        "remote_plugin": false,
+        "request_permissions_tool": false,
+        "send_message_to_user_async": false,
+        "shell_tool": false,
+        "skill_mcp_dependency_install": false,
+        "skill_search": false,
+        "skip_host_skill_discovery": true,
+        "standalone_web_search": false,
+        "system_proxy_fallback": false,
+        "tool_suggest": false,
+        "unbounded_connection_retries": false,
+        "view_image": false,
+        "workspace_dependencies": false,
+        "worktrees": false,
+        "api_key_model_discovery": false,
+        "auth_elicitation": true,
+        "background_paginated_rollout_migration": false,
+        "codex_apps_mcp_2026_07_28": false,
+        "mcp_2026_07_28": false,
+        "mentions_v2": true,
+        "remote_control": false,
+        "windows_sandbox_service": false
+      },
+      "cloud": {
+        "skills": {
+          "enabled": false
+        }
+      },
+      "cli_auth_credentials_store": "file"
+    },
+    "layers": [
+      {
+        "name": {
+          "type": "sessionFlags"
+        },
+        "config": {
+          "approval_policy": "never",
+          "sandbox_mode": "read-only",
+          "model_provider": "openai",
+          "web_search": "disabled",
+          "notify": [],
+          "project_doc_max_bytes": 0,
+          "mcp_servers": {},
+          "agents": {
+            "enabled": false
+          },
+          "skills": {
+            "include_instructions": false
+          },
+          "orchestrator": {
+            "skills": {
+              "enabled": false
+            },
+            "mcp": {
+              "enabled": false
+            }
+          },
+          "tools": {
+            "experimental_request_user_input": {
+              "enabled": false
+            }
+          },
+          "features": {
+            "shell_tool": false,
+            "multi_agent": false,
+            "multi_agent_v2": false,
+            "apps": false,
+            "enable_mcp_apps": false,
+            "plugins": false,
+            "remote_plugin": false,
+            "tool_suggest": false,
+            "hooks": false,
+            "memories": false,
+            "goals": false,
+            "image_generation": false,
+            "standalone_web_search": false,
+            "skill_mcp_dependency_install": false,
+            "skill_search": false,
+            "deferred_executor": false,
+            "request_permissions_tool": false,
+            "token_budget": false,
+            "current_time_reminder": false,
+            "executor_capability_discovery": false,
+            "code_mode_host": false,
+            "in_app_browser": false,
+            "browser_use": false,
+            "browser_use_full_cdp_access": false,
+            "browser_use_external": false,
+            "computer_use": false,
+            "artifact": false,
+            "workspace_dependencies": false,
+            "chronicle": false,
+            "external_agent_memory_import": false,
+            "network_proxy": false,
+            "default_mode_request_user_input": false,
+            "guardian_approval": false,
+            "realtime_conversation": false,
+            "sleep_tool": false,
+            "view_image": false,
+            "worktrees": false,
+            "in_app_chat": false,
+            "daemon_auto_start": false,
+            "system_proxy_fallback": false,
+            "unbounded_connection_retries": false,
+            "send_message_to_user_async": false,
+            "in_app_dictation": false,
+            "in_app_local_automation": false,
+            "in_app_updates": false,
+            "skip_host_skill_discovery": true
+          },
+          "cloud": {
+            "skills": {
+              "enabled": false
+            }
+          },
+          "cli_auth_credentials_store": "file"
+        },
+        "disabledReason": null
+      },
+      {
+        "name": {
+          "type": "user"
+        },
+        "config": {},
+        "disabledReason": null
+      },
+      {
+        "name": {
+          "type": "system"
+        },
+        "config": {},
+        "disabledReason": null
+      }
+    ]
+  },
+  "models": [
+    {
+      "slug": "gpt-6-astra",
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ],
+      "use_responses_lite": true
+    },
+    {
+      "slug": "gpt-6.1-sol",
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ],
+      "use_responses_lite": true
+    },
+    {
+      "slug": "gpt-6-sol",
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ],
+      "use_responses_lite": true
+    },
+    {
+      "slug": "gpt-6-luna",
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ],
+      "use_responses_lite": true
+    }
+  ]
+}

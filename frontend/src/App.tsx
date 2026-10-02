@@ -65,6 +65,7 @@ import {
   deleteProvider,
   discoverProviderModels,
   loadLLMConfiguration,
+  syncCodexConnection,
   testProviderConnection,
   updateLLMSettings,
   updateProvider,
@@ -262,14 +263,15 @@ function App() {
     }
   }, []);
 
-  const refreshLLMConfiguration = useCallback(async () => {
+  const refreshLLMConfiguration = useCallback(async (isCurrent?: () => boolean) => {
+    if (isCurrent && !isCurrent()) return;
     const request = ++llmConfigurationRequest.current;
     try {
       const [llmConfiguration, codingAgentConfiguration] = await Promise.all([
         loadLLMConfiguration(API_BASE),
         loadCodingAgentConfiguration(API_BASE),
       ]);
-      if (request !== llmConfigurationRequest.current) return;
+      if (request !== llmConfigurationRequest.current || (isCurrent && !isCurrent())) return;
       setLLMCatalog(llmConfiguration.catalog);
       setLLMProviders(llmConfiguration.providers);
       setLLMSettings(llmConfiguration.settings);
@@ -277,6 +279,7 @@ function App() {
       setCodingAgentSettings(codingAgentConfiguration.settings);
     } catch (error) {
       console.error("Error loading LLM configuration:", error);
+      if (isCurrent && isCurrent()) throw error;
     }
   }, []);
   const saveCodingAgentModel = useCallback(async (agentId: CodingAgentId, config: AgentModelConfig) => {
@@ -1323,6 +1326,7 @@ function App() {
         onUpdateProvider={(providerId, profile, credentials) => updateProvider(API_BASE, providerId, profile, credentials)}
         onDeleteProvider={(providerId) => deleteProvider(API_BASE, providerId)}
         onDiscoverModels={(providerId) => discoverProviderModels(API_BASE, providerId)}
+        onSyncCodexConnection={() => syncCodexConnection(API_BASE)}
         onTestProvider={(providerId, modelId, mode) => testProviderConnection(API_BASE, providerId, modelId, mode)}
         onUpdateSettings={(patch) => updateLLMSettings(API_BASE, patch)}
         onUpdateCodingAgent={(patch) => updateCodingAgentSettings(API_BASE, patch)}

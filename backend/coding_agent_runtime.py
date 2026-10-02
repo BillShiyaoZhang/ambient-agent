@@ -227,6 +227,8 @@ class CodingAgentRuntime:
         self._auth_sessions: dict[str, dict[str, Any]] = {}
         self._auth_tasks: dict[str, asyncio.Task[None]] = {}
         self._auth_processes: dict[str, asyncio.subprocess.Process] = {}
+        self._auth_generations: dict[str, int] = {}
+        self._logout_counts: dict[str, int] = {}
         self._locks = {spec.id: asyncio.Lock() for spec in SPECS}
 
     def agent_root(self, agent_id: str) -> Path:
@@ -288,6 +290,62 @@ class CodingAgentRuntime:
             if upgraded.is_file():
                 return [str(upgraded)]
         return self.command(agent_id)
+
+    def inference_command(self, agent_id: str) -> list[str] | None:
+        """Reuse the pinned upgraded CLI while retaining legacy/explicit commands."""
+        if agent_id == "codex" and not os.getenv("CODEX_COMMAND", "").strip():
+            upgraded = self._managed_coding_command()
+            if upgraded.is_file():
+                return [str(upgraded.absolute())]
+        return self.command(agent_id)
+
+    def inference_state_dir(self, agent_id: str) -> Path:
+        """Keep upgraded inference caches and configuration apart from coding."""
+        if (
+            agent_id == "codex"
+            and not os.getenv("CODEX_COMMAND", "").strip()
+            and self._managed_coding_command().is_file()
+        ):
+            return (self.agent_root(agent_id) / "inference" / _CODEX_CODING_VERSION / "state").absolute()
+        return self.state_dir(agent_id)
+
+    def inference_environment(self, agent_id: str) -> dict[str, str]:
+        """Share only the CLI-owned login with the managed inference profile."""
+        environment = self.process_environment(agent_id)
+        home = self.inference_state_dir(agent_id)
+        if home == self.state_dir(agent_id):
+            return environment
+        self._prepare_inference_home(home)
+        environment.update({"CODEX_HOME": str(home), "HOME": str(home)})
+        return environment
+
+    def _prepare_inference_home(self, home: Path) -> None:
+        for directory in (home.parent.parent, home.parent, home):
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                raise CodingAgentRuntimeError(
+                    "Invalid managed Codex inference directory", code="coding_agent_auth_invalid"
+                )
+            directory.mkdir(exist_ok=True, mode=0o700)
+            if directory.is_symlink() or not directory.is_dir():
+                raise CodingAgentRuntimeError(
+                    "Invalid managed Codex inference directory", code="coding_agent_auth_invalid"
+                )
+            with contextlib.suppress(OSError):
+                directory.chmod(0o700)
+
+        source_auth = (self.state_dir("codex") / "auth.json").absolute()
+        alias = home / "auth.json"
+        if alias.is_symlink():
+            if alias.readlink() != source_auth:
+                raise CodingAgentRuntimeError("Invalid managed Codex login link", code="coding_agent_auth_invalid")
+        elif alias.exists():
+            raise CodingAgentRuntimeError("Unexpected independent Codex login", code="coding_agent_auth_invalid")
+        else:
+            try:
+                alias.symlink_to(source_auth)
+            except FileExistsError:
+                if not alias.is_symlink() or alias.readlink() != source_auth:
+                    raise CodingAgentRuntimeError("Invalid managed Codex login link", code="coding_agent_auth_invalid")
 
     def coding_environment(self, agent_id: str) -> dict[str, str]:
         """Isolate coding caches while leaving authentication CLI-owned."""
@@ -494,6 +552,9 @@ class CodingAgentRuntime:
             active_auth = self._auth_sessions.get(agent_id)
             if active_auth and active_auth["status"] in {"starting", "waiting"}:
                 auth_state = active_auth["status"]
+            if self._logout_counts.get(agent_id, 0):
+                authenticated = False
+                auth_state = "signed_out"
         available = installed
         if installed and spec.acp_transport == "bridge":
             try:
@@ -886,6 +947,11 @@ class CodingAgentRuntime:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
 
+    def authentication_generation(self, agent_id: str) -> int:
+        """Invalidate pending consumers when native authentication changes."""
+        spec_for(agent_id)
+        return self._auth_generations.get(agent_id, 0)
+
     def auth_session(self, agent_id: str) -> dict[str, Any]:
         spec_for(agent_id)
         session = self._auth_sessions.get(agent_id)
@@ -940,6 +1006,7 @@ class CodingAgentRuntime:
                 "error": "",
             }
             self._auth_sessions[agent_id] = session
+            self._auth_generations[agent_id] = self.authentication_generation(agent_id) + 1
             task = asyncio.create_task(self._run_device_auth(agent_id, command))
             self._auth_tasks[agent_id] = task
             return dict(session)
@@ -1018,6 +1085,7 @@ class CodingAgentRuntime:
             session.update(status="cancelled", verification_uri="", user_code="")
         task = self._auth_tasks.get(agent_id)
         if task and not task.done():
+            self._auth_generations[agent_id] = self.authentication_generation(agent_id) + 1
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -1027,15 +1095,23 @@ class CodingAgentRuntime:
         spec = spec_for(agent_id)
         if not spec.auth_methods:
             raise CodingAgentRuntimeError("This coding agent has no native login", code="auth_not_required")
-        await self.cancel_auth(agent_id)
-        command = self.command(agent_id)
-        if command is None:
-            raise CodingAgentRuntimeError("Coding agent is not installed", code="coding_agent_not_installed")
-        code, output = await self._run_probe([*command, "logout"], agent_id=agent_id)
-        if code != 0:
-            raise CodingAgentRuntimeError(f"Unable to sign out: {output}", code="auth_logout_failed")
-        self._auth_sessions.pop(agent_id, None)
-        return self.auth_session(agent_id)
+        # Invalidate before the asynchronous CLI logout, including after restart
+        # when there is no in-memory auth session to mark as cancelled.
+        self._auth_generations[agent_id] = self.authentication_generation(agent_id) + 1
+        self._logout_counts[agent_id] = self._logout_counts.get(agent_id, 0) + 1
+        try:
+            await self.cancel_auth(agent_id)
+            command = self.command(agent_id)
+            if command is None:
+                raise CodingAgentRuntimeError("Coding agent is not installed", code="coding_agent_not_installed")
+            code, output = await self._run_probe([*command, "logout"], agent_id=agent_id)
+            if code != 0:
+                raise CodingAgentRuntimeError(f"Unable to sign out: {output}", code="auth_logout_failed")
+            self._auth_sessions.pop(agent_id, None)
+            return self.auth_session(agent_id)
+        finally:
+            self._logout_counts[agent_id] -= 1
+            self._auth_generations[agent_id] = self.authentication_generation(agent_id) + 1
 
     async def shutdown(self) -> None:
         for agent_id in list(self._auth_tasks):

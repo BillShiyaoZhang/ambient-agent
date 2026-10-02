@@ -519,6 +519,36 @@ async def test_native_auth_required_and_discovery_does_not_require_auth(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "metadata,supported",
+    [
+        ({}, True),
+        ({"multi_agent_version": "v2"}, False),
+        ({"tool_mode": "direct"}, False),
+        ({"experimental_supported_tools": ["send_user_message_async", "clock"]}, False),
+    ],
+)
+async def test_native_model_availability_prechecks_metadata_without_account_or_inference(tmp_path, metadata, supported):
+    transport, runtime, processes, _ = adapter(tmp_path, "no_auth")
+    runtime.metadata(**metadata)
+
+    models = await transport.model_availability()
+
+    assert models[0]["id"] == "gpt-5.6-luna"
+    assert models[0]["native_inference"] is supported
+    assert not any(x["method"] in {"account/read", "thread/start", "turn/start"} for x in processes[-1].requests)
+
+
+@pytest.mark.asyncio
+async def test_native_model_availability_marks_missing_public_metadata_incompatible(tmp_path):
+    transport, runtime, processes, _ = adapter(tmp_path)
+    (runtime.root / "models_cache.json").unlink()
+    models = await transport.model_availability()
+    assert models[0]["native_inference"] is False
+    assert not any(x["method"] in {"account/read", "thread/start", "turn/start"} for x in processes[-1].requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "metadata",
     [{"experimental_supported_tools": ["test_sync_tool"]}, {"multi_agent_version": "v2"}, {"tool_mode": "unknown"}],
 )
@@ -543,10 +573,14 @@ async def test_existing_managed_user_config_is_not_read_or_overwritten(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_unsupported_cli_version_fails_before_app_server(tmp_path):
+@pytest.mark.parametrize("operation", ["generate", "discover_models", "model_availability"])
+async def test_unsupported_cli_version_fails_before_app_server(tmp_path, operation):
     transport, _, processes, _ = adapter(tmp_path, version="0.159.2")
     with pytest.raises(LLMTransportError) as caught:
-        await transport.generate(selection(), HISTORY, TOOLS)
+        if operation == "generate":
+            await transport.generate(selection(), HISTORY, TOOLS)
+        else:
+            await getattr(transport, operation)()
     assert caught.value.code == "llm_capability_unsupported"
     assert len(processes) == 1
 

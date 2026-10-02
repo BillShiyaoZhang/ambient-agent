@@ -154,4 +154,11 @@ Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction�
 
 ## 7. 远程工作区入口
 
+模型连接与编码执行器分别管理：`llm_discovery.sync_codex_connection` 将托管 Codex 登录
+投影到 Provider Registry，主/快速模型经各自快照使用原生推理，编码执行仍由 ACP 所有。
+同步以编码目录统一模型展示，并独立记录用途兼容性；明确不支持主推理的条目禁选并在
+解析时拒绝。同步不改变模型绑定、Run 快照、工具权限或恢复语义。新版原生推理复用
+固定 `0.159.3` 二进制和独立推理 home，保留未升级安装的旧 profile；版本与 Linux 限制
+见 [Provider 契约](../integrations/llm-providers.md)。工具执行始终由 Ambient 工具循环所有。
+
 `RemoteWorkspaceConnector` 是本地前台与 API 的受限传输入口，使用 `RemoteWorkspaceNodeStore` 保存并验证本机授权。它不改变 `RunCoordinator`、tool effect、审批或恢复语义。云平台只领取节点、签发一次性入口并中转；远程请求进入原有本地 API 和 Run 路径，仍受相同应用、能力和持久执行边界约束。完整范围和协议见 [远程工作区设计](../architecture/remote-workspace.md)。

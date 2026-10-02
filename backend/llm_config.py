@@ -39,6 +39,12 @@ class ModelCapabilities(BaseModel):
     verification: Literal["unknown", "verified", "unsupported"] = "unknown"
 
 
+class ModelAvailability(BaseModel):
+    native_inference: bool
+    coding: bool
+    reason: Literal["native_catalog_missing", "native_profile_unsupported", "coding_catalog_missing"] | None = None
+
+
 class ModelRef(BaseModel):
     id: str
     provider_id: str | None = None
@@ -47,6 +53,7 @@ class ModelRef(BaseModel):
     api_mode: Literal["chat_completions", "responses", "codex_native"] | None = None
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     source: Literal["manual", "discovered", "catalog"] = "manual"
+    availability: ModelAvailability | None = None
 
     @field_validator("id")
     @classmethod
@@ -388,6 +395,10 @@ class LLMConfigStore:
         self.llm_dir = self.workspace_dir / "llm"
         self.config_path = self.llm_dir / "config.json"
         self.secrets_path = self.llm_dir / "secrets.json"
+        # Single-worker lifecycle tokens reject stale async discovery even when
+        # a profile is deleted/recreated or disabled/enabled with identical data.
+        self._provider_generations: dict[str, int] = {}
+        self._native_generation = 0
         self.llm_dir.mkdir(parents=True, exist_ok=True)
         if not self.config_path.exists():
             self._write_json(self.config_path, self._empty_config(), secret=False)
@@ -579,6 +590,15 @@ class LLMConfigStore:
     def list_providers(self) -> list[dict[str, Any]]:
         return [self._public_profile(profile) for profile in self._profiles()]
 
+    def provider_generation(self, provider_id: str | None = None) -> int:
+        """Return an in-process lifecycle token, excluding name/model edits."""
+        return self._native_generation if provider_id is None else self._provider_generations.get(provider_id, 0)
+
+    def _record_provider_lifecycle(self, profile: ProviderProfile, previous: ProviderProfile | None = None) -> None:
+        self._provider_generations[profile.id] = self.provider_generation(profile.id) + 1
+        if profile.preset == "codex_native" or (previous and previous.preset == "codex_native"):
+            self._native_generation += 1
+
     def create_provider(self, profile_data: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
         try:
             profile = ProviderProfile.model_validate(profile_data)
@@ -593,6 +613,7 @@ class LLMConfigStore:
         config = self._load_config()
         config.setdefault("providers", []).append(profile.model_dump(mode="json"))
         self._write_json(self.config_path, config, secret=False)
+        self._record_provider_lifecycle(profile)
         return self._public_profile(profile)
 
     def update_provider(
@@ -603,6 +624,7 @@ class LLMConfigStore:
         index = next((i for i, item in enumerate(raw_profiles) if item.get("id") == provider_id), None)
         if index is None:
             raise LLMConfigError("Provider not found", code="llm_provider_not_found")
+        previous = ProviderProfile.model_validate(raw_profiles[index])
         if "models" in (changes or {}):
             previous_ids = {str(item.get("id")) for item in raw_profiles[index].get("models", [])}
             next_ids = {str(item.get("id")) for item in (changes.get("models") or [])}
@@ -625,6 +647,11 @@ class LLMConfigStore:
             self._apply_credentials(profile, credentials)
         raw_profiles[index] = profile.model_dump(mode="json")
         self._write_json(self.config_path, config, secret=False)
+        if credentials or any(
+            getattr(previous, field) != getattr(profile, field)
+            for field in ("preset", "enabled", "connection", "credential_refs")
+        ):
+            self._record_provider_lifecycle(profile, previous)
         return self._public_profile(profile)
 
     def delete_provider(self, provider_id: str) -> None:
@@ -637,8 +664,10 @@ class LLMConfigStore:
         remaining = [item for item in profiles if item.get("id") != provider_id]
         if len(remaining) == len(profiles):
             raise LLMConfigError("Provider not found", code="llm_provider_not_found")
+        removed = ProviderProfile.model_validate(next(item for item in profiles if item.get("id") == provider_id))
         config["providers"] = remaining
         self._write_json(self.config_path, config, secret=False)
+        self._record_provider_lifecycle(removed)
         secrets = self._load_secrets()
         secrets = {key: value for key, value in secrets.items() if not key.startswith(f"{provider_id}:")}
         self._write_json(self.secrets_path, secrets, secret=True)
@@ -681,6 +710,15 @@ class LLMConfigStore:
         model = next((item for item in profile.models if item.id == selection.model_id), None)
         if not model:
             raise LLMConfigError("Model is not configured for this provider", code="llm_model_not_found")
+        if (
+            profile.preset == "codex_native"
+            and model.availability is not None
+            and not model.availability.native_inference
+        ):
+            raise LLMConfigError(
+                "The selected Codex model is incompatible with primary/fast inference",
+                code="llm_capability_unsupported",
+            )
         prefix = preset["litellm_prefix"]
         litellm_model = model.id if not prefix or model.id.startswith(f"{prefix}/") else f"{prefix}/{model.id}"
         connection = dict(profile.connection)

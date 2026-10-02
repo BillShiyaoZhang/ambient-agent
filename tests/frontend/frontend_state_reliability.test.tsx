@@ -151,6 +151,50 @@ describe("frontend async state regression contracts", () => {
   });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+  describe("shared Codex connection refresh", () => {
+    const provider = { id: "ambient-codex", name: "Managed Codex", preset: "codex_native", enabled: true, connection: {}, models: [{ id: "gpt-inference", display_name: "GPT Inference" }] };
+
+    it("shows a retry error when sync succeeds but its configuration refresh fails", async () => {
+      const api = mockCodingModelApi();
+      await openCodingModels();
+      const defaultFetch = vi.mocked(fetch).getMockImplementation()!;
+      vi.mocked(fetch).mockImplementation((input, init) => String(input).endsWith("/api/llm/connections/codex/sync") ? Promise.resolve(response(provider)) : defaultFetch(input, init));
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        api.read.mockRejectedValueOnce(new Error("Configuration unavailable"));
+        fireEvent.click(screen.getByRole("button", { name: "同步主/快速模型" }));
+        await screen.findByText(/Configuration unavailable.*同步主\/快速模型.*重试/);
+        expect(screen.queryByText("Codex 模型已同步，可分别选择主模型和快速模型。")).toBeNull();
+        expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-fast|gpt-fast");
+        expect(screen.getByRole("button", { name: "同步主/快速模型" }).hasAttribute("disabled")).toBe(false);
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it("does not apply a sync refresh after sign-out begins while the configuration request is pending", async () => {
+      const api = mockCodingModelApi();
+      await openCodingModels();
+      const pendingConfiguration = deferred<Response>();
+      const logout = deferred<Response>();
+      api.read.mockReturnValueOnce(pendingConfiguration.promise);
+      const defaultFetch = vi.mocked(fetch).getMockImplementation()!;
+      vi.mocked(fetch).mockImplementation((input, init) => {
+        const url = String(input);
+        if (url.endsWith("/api/llm/connections/codex/sync")) return Promise.resolve(response(provider));
+        if (url.endsWith("/api/coding-agents/codex/auth") && init?.method === "DELETE") return logout.promise;
+        return defaultFetch(input, init);
+      });
+      fireEvent.click(screen.getByRole("button", { name: "同步主/快速模型" }));
+      await waitFor(() => expect(api.read).toHaveBeenCalledTimes(3));
+      fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+      await act(async () => pendingConfiguration.resolve(response(codingConfiguration({ mode: "native", native_model: "gpt-default" }))));
+      expect(screen.getByTestId("coding-agent-bindings").textContent).toBe("gpt-fast|gpt-fast");
+      expect(screen.queryByText("Codex 模型已同步，可分别选择主模型和快速模型。")).toBeNull();
+      await act(async () => logout.resolve(response({})));
+    });
+  });
+
   describe("coding model persistence", () => {
     it("applies a saved native model before a slow refresh and keeps it when settings reopen", async () => {
       const api = mockCodingModelApi();

@@ -1,4 +1,5 @@
 from uuid import uuid4
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 from backend.llm_config import LLMConfigStore
 from backend.llm_service import LLMTransportError
+from backend.coding_agent_runtime import CodingAgentRuntime
 from backend.models import ChatSession
 from backend.workspace_storage import WorkspaceStorage
 from backend.coding_agent import CodingAgentConfigStore, CodingAgentConfigError
@@ -165,6 +167,133 @@ def test_codex_native_provider_api_and_primary_selection(tmp_path, monkeypatch):
         )
         assert selected.status_code == 200
     assert store.resolve_default().api_mode == "codex_native"
+
+
+def test_codex_connection_sync_api_uses_trusted_workspace_state_and_retains_session_binding(tmp_path, monkeypatch):
+    storage, store = _isolate_llm(tmp_path, monkeypatch)
+    store.create_provider({"id": "api", "name": "API", "preset": "ollama", "models": [{"id": "api-model"}]}, {})
+    storage.add(
+        ChatSession(id="bound-chat", title="Bound", model_selection={"provider_id": "api", "model_id": "api-model"})
+    )
+    storage.commit()
+    coding = CodingAgentConfigStore(store.workspace_dir)
+    monkeypatch.setattr(main_module, "coding_agent_config_store", coding)
+    calls = []
+
+    async def sync(selected_store, runtime):
+        calls.append((selected_store, runtime))
+        return selected_store.create_provider(
+            {"id": "ambient-codex", "name": "Codex", "preset": "codex_native", "models": [{"id": "primary-model"}]}, {}
+        )
+
+    monkeypatch.setattr(main_module, "sync_codex_connection", sync, raising=False)
+    before_binding = storage.get(ChatSession, "bound-chat").model_selection
+    with TestClient(main_module.app) as client:
+        response = client.post(
+            "/api/llm/connections/codex/sync", json={"command": "private-marker", "auth_path": "private-marker"}
+        )
+    assert response.status_code == 200
+    assert calls == [(store, coding.runtime)]
+    assert response.json()["credentials"] == response.json()["connection"] == {}
+    assert "private-marker" not in response.text
+    assert storage.get(ChatSession, "bound-chat").model_selection == before_binding
+    assert store.get_settings() == {"default_model": None, "fast_model": None}
+
+
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("llm_auth_failed", 401),
+        ("llm_provider_unavailable", 422),
+        ("llm_capability_unsupported", 422),
+        ("llm_provider_error", 502),
+    ],
+)
+def test_codex_connection_sync_api_reports_structured_failure(monkeypatch, code, status):
+    async def fail_sync(*_args):
+        raise LLMTransportError("Unable to sync managed Codex models", code=code)
+
+    monkeypatch.setattr(main_module, "sync_codex_connection", fail_sync, raising=False)
+    with TestClient(main_module.app) as client:
+        response = client.post("/api/llm/connections/codex/sync")
+    assert response.status_code == status
+    assert response.json()["detail"]["code"] == code
+
+
+@pytest.mark.parametrize("action", ["discover-models", "test"])
+def test_native_discovery_api_uses_managed_runtime_login_generation(tmp_path, monkeypatch, action):
+    _, store = _isolate_llm(tmp_path, monkeypatch)
+    store.create_provider({"id": "native", "name": "Native", "preset": "codex_native"}, {})
+    coding = CodingAgentConfigStore(store.workspace_dir)
+    monkeypatch.setattr(main_module, "coding_agent_config_store", coding)
+    monkeypatch.setattr(CodingAgentRuntime, "command", lambda _runtime, _agent_id: ["managed-codex"])
+    monkeypatch.setattr(
+        CodingAgentRuntime,
+        "status",
+        AsyncMock(return_value={"installed": True, "authenticated": True, "auth_state": "signed_in"}),
+    )
+    monkeypatch.setattr(CodingAgentRuntime, "_run_probe", AsyncMock(return_value=(0, "signed out")))
+    monkeypatch.setattr(
+        CodingAgentRuntime,
+        "models",
+        AsyncMock(return_value={"models": [{"id": "shared", "display_name": "Shared"}]}),
+    )
+    login = {"id": "same-account", "status": "signed_in"}
+    coding.runtime._auth_sessions["codex"] = login.copy()
+    selected_runtimes = []
+
+    class NativeTransport:
+        def __init__(self, runtime):
+            selected_runtimes.append(runtime)
+
+        async def model_availability(self):
+            # Actual managed logout increments generation, even if a subsequent
+            # login presents the same account/status by the next status probe.
+            await coding.runtime.logout("codex")
+            coding.runtime._auth_sessions["codex"] = login.copy()
+            return [{"id": "shared", "native_inference": True}]
+
+    async def generate(*_args, **_kwargs):
+        from backend.llm_service import LLMResult
+
+        return LLMResult(text="OK")
+
+    monkeypatch.setattr("backend.codex_llm.NativeCodexTransport", NativeTransport)
+    monkeypatch.setattr("backend.llm_discovery.LLMService.generate", generate)
+    before = store.config_path.read_bytes()
+    with TestClient(main_module.app) as client:
+        response = client.post(f"/api/llm/providers/native/{action}", json={})
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "llm_auth_failed"
+    assert selected_runtimes == [coding.runtime]
+    assert store.config_path.read_bytes() == before
+
+
+def test_native_connection_test_api_reports_a_catalog_without_compatible_inference_models(tmp_path, monkeypatch):
+    _, store = _isolate_llm(tmp_path, monkeypatch)
+    profile = store.create_provider(
+        {
+            "id": "native",
+            "name": "Native",
+            "preset": "codex_native",
+            "models": [
+                {
+                    "id": "coding-only",
+                    "availability": {"native_inference": False, "coding": True, "reason": "native_catalog_missing"},
+                }
+            ],
+        },
+        {},
+    )
+    monkeypatch.setattr("backend.llm_discovery.discover_models", AsyncMock(return_value=profile["models"]))
+    with TestClient(main_module.app) as client:
+        response = client.post("/api/llm/providers/native/test", json={})
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "code": "llm_capability_unsupported",
+        "message": "No Codex model compatible with primary/fast inference is available",
+    }
 
 
 @pytest.mark.parametrize(

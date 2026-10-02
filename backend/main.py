@@ -66,7 +66,7 @@ from backend.models import ChatMessage, ChatSession
 from backend.remote_workspace import RemoteWorkspaceConnector, RemoteWorkspaceNodeStore
 from backend.remote_workspace_api import create_remote_workspace_router
 from backend.llm_config import LLMConfigError, LLMConfigStore, ModelSelection
-from backend.llm_discovery import discover_models, test_provider
+from backend.llm_discovery import discover_models, sync_codex_connection, test_provider
 from backend.llm_service import set_default_llm_store
 from backend.graph_visualization import build_graph_explorer_snapshot, project_data_map
 from backend.coding_agent_acp import (
@@ -989,6 +989,16 @@ async def get_llm_providers():
     return llm_config_store.list_providers()
 
 
+@app.post("/api/llm/connections/codex/sync")
+async def sync_codex_model_connection():
+    try:
+        return await sync_codex_connection(llm_config_store, coding_agent_config_store.runtime)
+    except LLMConfigError as exc:
+        raise HTTPException(
+            status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}
+        ) from exc
+
+
 @app.post("/api/llm/providers", status_code=201)
 async def create_llm_provider(data: ProviderCreateRequest):
     try:
@@ -1039,7 +1049,9 @@ async def delete_llm_provider(provider_id: str, session: WorkspaceStorage = Depe
 @app.post("/api/llm/providers/{provider_id}/discover-models")
 async def discover_llm_provider_models(provider_id: str):
     try:
-        return {"models": await discover_models(llm_config_store, provider_id)}
+        return {
+            "models": await discover_models(llm_config_store, provider_id, runtime=coding_agent_config_store.runtime)
+        }
     except LLMConfigError as exc:
         raise HTTPException(
             status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}
@@ -1049,7 +1061,13 @@ async def discover_llm_provider_models(provider_id: str):
 @app.post("/api/llm/providers/{provider_id}/test")
 async def test_llm_provider(provider_id: str, data: ProviderTestRequest):
     try:
-        return await test_provider(llm_config_store, provider_id, data.model_id, test_tools=data.mode == "tools")
+        return await test_provider(
+            llm_config_store,
+            provider_id,
+            data.model_id,
+            test_tools=data.mode == "tools",
+            runtime=coding_agent_config_store.runtime,
+        )
     except LLMConfigError as exc:
         raise HTTPException(
             status_code=_llm_error_status(exc.code), detail={"code": exc.code, "message": str(exc)}
