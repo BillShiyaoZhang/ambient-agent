@@ -180,6 +180,18 @@ jobs:
         run: npm ci --ignore-scripts
         working-directory: widget-runtime
 
+      - name: Install Playwright Chromium and dependencies
+        run: npx --no-install playwright-core install --with-deps chromium
+        working-directory: widget-runtime
+
+      - name: Select and verify Playwright Chromium
+        run: |
+          CHROMIUM_EXECUTABLE_PATH="$(node --input-type=module -e 'import { chromium } from "playwright-core"; process.stdout.write(chromium.executablePath());')"
+          test -x "$CHROMIUM_EXECUTABLE_PATH"
+          "$CHROMIUM_EXECUTABLE_PATH" --version
+          echo "CHROMIUM_EXECUTABLE_PATH=$CHROMIUM_EXECUTABLE_PATH" >> "$GITHUB_ENV"
+        working-directory: widget-runtime
+
       - name: Enable Chromium user namespace sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 

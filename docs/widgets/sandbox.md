@@ -4,6 +4,19 @@ Widget 默认作为微前端在用户浏览器中的隔离 iframe 内渲染，�
 
 旧的服务端 Chromium 像素流保留一个发布周期作为显式回滚路径，见第 7 节。
 
+CI 的真实浏览器测试使用 `widget-runtime/package-lock.json` 锁定的 Playwright 配套
+Chromium：`npm ci --ignore-scripts` 后通过本地 `playwright-core` CLI 安装浏览器和 Linux
+依赖，再由同一模块的 `chromium.executablePath()` 设置 `CHROMIUM_EXECUTABLE_PATH`。
+测试前验证文件可执行并输出版本；安装或路径失败必须使 job 失败，不能静默跳过浏览器测试。
+不依赖 runner 的系统 Chromium 或 Snap 包装器。原有 Chromium namespace sandbox、CSP、
+网络拒绝断言、并发限制和测试超时保持不变；以 Linux 下两个真实浏览器用例实际通过且
+无 skip 作为验收。本机结果不等同于远端 CI 已通过。
+
+2026-10-02 隔离 Linux Debian 12 aarch64、Node 22.23.3 的验收使用 Playwright 1.62.0
+配套 Chrome 151.0.7922.34，在 2 CPU/2 GiB、非 root 且保留 namespace sandbox 下，
+原并行套件 36/36 通过、零 skip，耗时 3.62 秒。原 runner 系统浏览器的超时原因尚未
+复现；此改动固定浏览器来源，远端 Ubuntu/Node 22.18.0 的结果仍需对应新提交验证。
+
 ## 1. 部署与信任边界
 
 ```mermaid

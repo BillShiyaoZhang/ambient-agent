@@ -4,6 +4,21 @@ By default, a Widget renders as a microfrontend inside an isolated iframe in the
 
 The previous server-side Chromium pixel stream remains available for one release as an explicit rollback path; see section 7.
 
+CI browser tests use Chromium paired with the Playwright version in
+`widget-runtime/package-lock.json`. After `npm ci --ignore-scripts`, the local `playwright-core` CLI
+installs the browser and Linux dependencies; the same module's `chromium.executablePath()` supplies
+`CHROMIUM_EXECUTABLE_PATH`. Verify executability and report the version before testing. Installation
+or path failure must fail the job rather than silently skip browser coverage. Do not depend on the
+runner's system Chromium or Snap wrapper. Retain the Chromium namespace sandbox, CSP/network rejection
+assertions, concurrency limits, and test timeouts. Acceptance requires both actual browser tests to
+pass on Linux without skips; local results do not establish remote CI success.
+
+On 2026-10-02, isolated Linux Debian 12 aarch64 with Node 22.23.3 used Chrome 151.0.7922.34
+paired with Playwright 1.62.0. With two CPUs, 2 GiB, a non-root user, and the namespace sandbox retained,
+the original parallel suite passed 36/36 without skips in 3.62 seconds. The original runner browser's
+timeout cause has not been reproduced; this change fixes the browser source. Remote Ubuntu/Node 22.18.0
+results still require verification against the new commit.
+
 ## 1. Deployment and trust boundary
 
 ```mermaid
