@@ -18,6 +18,7 @@ class RunContext(BaseModel):
     primary_model: dict[str, Any] = Field(default_factory=dict)
     fast_model: dict[str, Any] = Field(default_factory=dict)
     jev_router: dict[str, Any] = Field(default_factory=lambda: {"mode": "off"})
+    workflow_decisions: dict[str, Any] = Field(default_factory=lambda: {"mode": "off"})
     artifact_hashes: dict[str, str] = Field(default_factory=dict)
 
     def audit_context(self, *, stage: str | None = None) -> dict[str, Any]:

@@ -31,7 +31,7 @@ Responsibilities:
 - `RunStore`: source of truth for Run state, step attempts, checkpoints, interactions, and versioned events.
 - `RunCoordinator`: queueing, session FIFO lanes, leases/heartbeats, orphan recovery, cancellation, and adapter dispatch.
 - `DurableAgentWorkflow`: version 2 chat reducer; each invocation advances exactly one phase and returns a typed `StepOutcome`.
-- `RunContext`: explicitly carries run/session/step/attempt/trace and frozen model IDs into every LLM and tool audit call.
+- `RunContext`: explicitly carries run/session/step/attempt/trace, frozen model IDs, and non-secret `jev_router` / `workflow_decisions` configuration into every LLM and tool audit call.
 - `AgentOrchestrator`: retained routing, Converse, and formatting domain helpers; it no longer owns `/ws/chat` execution lifecycle.
 - `ToolGateway`, the MCP client, and Coding Agent ACP: enforcement boundaries for local model tools, external JSON-RPC, and code generation respectively. OpenCode's native ACP server and the Codex ACP bridge use exactly the same Ambient session, permission, staging, verification, and repair state machine.
 
@@ -117,6 +117,8 @@ stateDiagram-v2
 
 The schema interaction atomically approves data schemas and capability grants. The Workflow then creates an immutable Runtime Contract with a grants digest. OpenCode generates staging with `promote=False`; verification requires Manifest grants to equal the contract and code use to be a subset before checking Graph schemas. Promotion persists a marker, commits schemas, and atomically replaces the live App. Recovery does not publish twice, and failure, rework, or cancellation preserves the old live App.
 
+The generative schema-verification fallback must return complete, valid `unknown_props`, `type_mismatches`, and `unknown_types` lists before constructing `VerificationDiff`. Any finding makes `is_clean=false` and enters `wait_override`; missing lists or malformed output fail verification instead of being treated as clean. User approval cannot bypass mandatory findings: code, Schema, or plan rework must pass verification again.
+
 ### Graph mutation
 
 ```mermaid
@@ -158,6 +160,8 @@ Plan, schema, verification, and MCP/Agent permission all use Run interactions ra
 
 `RunStoreTraceAdapter` derives `EvaluationTrace` from real Runs, step attempts, canonical events, and LLM audit records, including unsafe trajectory signals from unknown effects, policy violations, and unapproved effectful tools. Scripted CI scenarios execute through production `RunCoordinator + DurableAgentWorkflow`; reported metrics cover outcome/trajectory, success rate, unsafe action rate, tool calls, tokens, cost, latency, and recovery rate. Real-model scenarios remain separate and require at least three repetitions.
 
+Decision/generation tests cover failure trajectories such as missing candidates, low confidence, timeouts, invalid answers, generation drift, incomplete parameters, approval bypass, exhausted budgets, and recovery. Passing those tests establishes the covered control boundaries, rather than a high QoS guarantee for arbitrary real semantic tasks. Real accuracy, coverage, complete-path cost, and p50/p95 require separate evaluation.
+
 ## 7. Remote workspace entry
 
 Model connections and coding executors are managed separately. `llm_discovery.sync_codex_connection`
@@ -170,3 +174,27 @@ for installations without the upgrade. See the [Provider contract](../integratio
 version and Linux restrictions. Ambient's tool loop always owns execution.
 
 `RemoteWorkspaceConnector` provides bounded transport into the local frontend and API and uses `RemoteWorkspaceNodeStore` to persist and verify local grants. It preserves `RunCoordinator`, tool effects, approvals, and recovery semantics. The cloud platform claims nodes, issues single-use entry links, and relays traffic. Remote requests enter the existing local API and Run paths and remain subject to the same application, capability, and durable execution boundaries. See the [remote workspace design](../architecture/remote-workspace.md) for scopes and protocol.
+
+## 8. Separating decisions from generation
+
+`DecisionService.evaluate` in `backend/agent/decisions.py` provides `Choice`, `Noul`, and `Score` evidence for a declared purpose, state, and questions. Questions are evaluated independently and do not read other answers from the same call. Candidates use opaque keys that code maps to exact business IDs. Results retain full distributions, the actual model, state/request hashes, sanitized usage, elapsed time, and fixed error codes. Score remains evidence rather than replacing approval or hard validation.
+
+Score validation strictly checks numeric types, finite values, ranges, the probability sum, level keys, and legend. When observed scores and probabilities lie on a two-decimal grid, a bounded rounding check allows only compatible differences: compute the feasible weighted-mean range with each probability within `p ± 0.005` and the true sum equal to 1; accept only when that range intersects `score ± 0.005`, retaining the provider's score. This rule is inferred from observed responses, rather than a provider precision guarantee. Choice/Noul thresholds stay unchanged.
+
+An accepted decision binds `IntentGenerationTask` to a fixed kind, target App, and `decision_hash`; the generative model fills only free parameters. Compilation rejects reselected fixed fields, stale hashes, and incomplete plans before passing a complete `IntentPlan` to the existing durable workflow. Code can compile bounded read-only list templates over known Schemas; complex queries and free-text mutations still use generation. Composite plans may skip the refiner only when parameters are complete and semantic review accepts the entire plan. Order and targets stay fixed, and all steps still undergo preflight before the first effect.
+
+Schema alignment evaluates every candidate in the complete inventory for reuse, plus independent disposition and Graph-context questions. Generated proposals are constrained to the selected set; ambiguity or set drift falls back to full generation, while a source hash traces the frozen input for that evaluation. Optional plan semantic review cannot approve plans, expand grants, or bypass Manifest/Schema verification.
+
+Generic decisions use `JEV_DECISION_*` environment settings and default to `off`. Non-secret snapshots live in `model_snapshot.workflow_decisions` and propagate through `RunContext.workflow_decisions`; historical Runs missing that field resume with `off`. The key is read only from runtime `TYPESAFE_API_KEY`. Decisions and generation both consume model, token, cost, and remaining-time budgets; cancellation and budget exhaustion propagate upward.
+
+`DecisionConfig.stage_modes` freezes a dictionary of purpose modes with the Run. `JEV_DECISION_STAGE_MODES` defaults to `{}`; omitted purposes inherit `JEV_DECISION_MODE`. Only `intent_parameters`, `graph_query_template`, `schema_selection`, `composite_review`, and `development_plan_review` are allowed, with values `off`, `shadow`, or `cascade`. Invalid JSON, purposes, or modes reject snapshot creation. Historical configurations missing the dictionary use `{}`. Mode settings are independent of the key.
+
+`shadow` records evidence only, while `cascade` adopts decisions after gates and compilation pass. The new routing generation path requires `jev_router.mode=cascade` and an effective `intent_parameters` mode of `cascade`; other purposes independently control calls and adoption. Enabling only the legacy `jev_router=cascade` retains its high-confidence `converse` shortcut. Several Noul judgments in synthetic live cases triggered fallback, so routing parameter generation can be enabled while other purposes remain `shadow` or `off`, without claiming improved semantic quality. For example:
+
+```dotenv
+JEV_ROUTER_MODE=cascade
+JEV_DECISION_MODE=off
+JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow"}'
+```
+
+`shadow` still consumes API calls and adds latency. See [Intent Router](/en/agent/intent-router.md). Repository file `proposals/decision-generation-harness/DESIGN.md` contains the complete design and configuration table.

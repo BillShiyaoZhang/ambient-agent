@@ -31,7 +31,7 @@ flowchart TB
 - `RunStore`：Run state、step attempt、checkpoint、interaction 和 versioned event 的事实源。
 - `RunCoordinator`：排队、session FIFO lane、lease/heartbeat、orphan recovery、取消和 adapter 分派。
 - `DurableAgentWorkflow`：版本 2 的 chat reducer；每次调用只推进一个 phase，并返回 typed `StepOutcome`。
-- `RunContext`：每一步显式传递 run/session/step/attempt/trace 与冻结模型标识；LLM 和 Tool audit 不从占位 helper 猜测这些值。
+- `RunContext`：每一步显式传递 run/session/step/attempt/trace、冻结模型标识及非秘密 `jev_router` / `workflow_decisions` 配置；LLM 和 Tool audit 不从占位 helper 猜测这些值。
 - `AgentOrchestrator`：保留部分路由、Converse 和格式化 domain helper；不再拥有 `/ws/chat` 的运行生命周期。
 - `ToolGateway`、MCP client 和 Coding Agent ACP：分别强制本地模型工具、外部 JSON-RPC 和代码生成边界。OpenCode 的原生 ACP server 与 Codex ACP bridge 使用完全相同的 Ambient session、权限、staging、验证和 repair 状态机。
 
@@ -111,6 +111,8 @@ stateDiagram-v2
 
 Schema interaction 原子批准数据 schema 与 capability grants。Workflow 随后生成带 grants digest 的不可变 Runtime Contract。OpenCode 使用 `promote=False` 生成 staging；`verify` 要求 Manifest grants 等于 contract、代码使用为其子集，再检查 Graph schema。`promote` 持久化 marker、提交 schema 并原子替换 live App。recovery 不重复发布；失败、返工和取消保留旧 live App。
 
+Schema verification 的生成 fallback 必须返回完整有效的 `unknown_props`、`type_mismatches`、`unknown_types` 三组列表，并在列表填充完成后构造 `VerificationDiff`。任一 finding 都使 `is_clean=false` 并进入 `wait_override`；缺列表或非法结果是验证失败，不能当作 clean。用户批准不能绕过 mandatory findings，必须返工代码、Schema 或计划后再次验证。
+
 ### Graph mutation
 
 ```mermaid
@@ -152,6 +154,8 @@ Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction�
 
 `RunStoreTraceAdapter` 从真实 Run、step attempt、canonical event 和 LLM audit 生成 `EvaluationTrace`，并从未知 effect、policy violation 和未批准 effectful tool 等持久信号推导 unsafe trajectory。CI 的 scripted fake 场景走生产 `RunCoordinator + DurableAgentWorkflow`；指标同时包含 outcome/trajectory、成功率、unsafe action rate、tool calls、tokens、cost、latency 与恢复率。真实模型场景仍要求至少三次重复，且与确定性门禁分开运行。
 
+决策/生成分离的测试重点包括候选缺失、低置信、超时、无效答案、生成漂移、缺参数、审批绕过、预算耗尽和恢复后的失败轨迹。通过这些测试表明已覆盖的控制边界有效，不代表任意真实语义任务有高 QoS 保证；真实准确率、coverage、完整链路费用与 p50/p95 必须另行评估。
+
 ## 7. 远程工作区入口
 
 模型连接与编码执行器分别管理：`llm_discovery.sync_codex_connection` 将托管 Codex 登录
@@ -162,3 +166,27 @@ Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction�
 见 [Provider 契约](../integrations/llm-providers.md)。工具执行始终由 Ambient 工具循环所有。
 
 `RemoteWorkspaceConnector` 是本地前台与 API 的受限传输入口，使用 `RemoteWorkspaceNodeStore` 保存并验证本机授权。它不改变 `RunCoordinator`、tool effect、审批或恢复语义。云平台只领取节点、签发一次性入口并中转；远程请求进入原有本地 API 和 Run 路径，仍受相同应用、能力和持久执行边界约束。完整范围和协议见 [远程工作区设计](../architecture/remote-workspace.md)。
+
+## 8. 决策与生成分离
+
+`backend/agent/decisions.py` 的 `DecisionService.evaluate` 为声明的 purpose、state 和 questions 提供 `Choice`、`Noul`、`Score` 证据。问题独立求值，不会读取同次调用中其他问题的答案。候选使用 opaque key，随后映射为精确业务 ID；输出保留完整分布、实际模型、输入/请求 hash、安全 usage、耗时与固定错误码。Score 只作为证据，不替代审批或硬校验。
+
+Score 严格检查类型、有限值、范围、概率总和、等级 keys 和 legend。实测响应出现两位小数网格时，允许有限的舍入一致性校验：在各概率 `p ± 0.005`、真实总和为 1 的约束下求加权期望的可行范围，只有它与 `score ± 0.005` 相交才接受，且保留供应商 score。该规则根据实测推断，不代表供应商承诺精度；Choice/Noul 门槛不变。
+
+采用决策后，`IntentGenerationTask` 固定 kind、目标 App 和 `decision_hash`，生成模型只补自由参数。编译拒绝改选固定字段、旧 hash 与不完整计划；完整 `IntentPlan` 再进入原 durable workflow。已知 Schema 的有限只读列表模板可以由代码编译，复杂查询与自由文本 mutation 继续生成。复合计划只有在参数完整且全计划语义复核接受时才可省 refiner；顺序和目标固定，仍在首个 effect 前整体 preflight。
+
+Schema 对齐对完整 inventory 逐候选判断复用，并独立判断 disposition 与 Graph context；生成提案受选择集合约束，歧义或集合漂移回退完整生成，source hash 追溯该次冻结输入。计划语义复核也是可选证据，不自动批准计划、增加 grants 或绕过 Manifest/Schema 验证。
+
+通用决策使用 `JEV_DECISION_*` 环境配置，默认 `off`；非秘密快照保存于 `model_snapshot.workflow_decisions`，由 `RunContext.workflow_decisions` 传递。缺少字段的历史 Run 按 `off` 恢复。key 仅从运行时 `TYPESAFE_API_KEY` 读取。决策与生成共同计入模型、token、费用和剩余时间预算；取消与预算耗尽向上传播。
+
+`DecisionConfig.stage_modes` 随 Run 冻结为用途模式字典。`JEV_DECISION_STAGE_MODES` 默认 `{}`，未指定用途继承 `JEV_DECISION_MODE`；合法用途仅有 `intent_parameters`、`graph_query_template`、`schema_selection`、`composite_review`、`development_plan_review`，合法模式为 `off`、`shadow`、`cascade`。非法 JSON、用途或模式拒绝创建快照；历史配置缺字典按 `{}` 解释，模式与 key 无关。
+
+`shadow` 只记录证据，`cascade` 仅在门控及编译通过后采用。新路由生成分离要求 `jev_router.mode=cascade` 与 `intent_parameters` 的有效用途模式为 `cascade`；其他用途各自决定是否调用或采用。仅开启旧 `jev_router=cascade` 时仍只允许高置信 `converse` 直达。实测合成用例的多项 Noul 触发回退，可先只启用路由参数生成、其他用途设为 `shadow` 或 `off`，不因此宣称语义质量提升。例如：
+
+```dotenv
+JEV_ROUTER_MODE=cascade
+JEV_DECISION_MODE=off
+JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow"}'
+```
+
+`shadow` 仍消耗 API 调用和延迟。详见[意图路由](/agent/intent-router.md)；完整设计与配置表位于仓库 `proposals/decision-generation-harness/DESIGN.md`。

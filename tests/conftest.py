@@ -13,9 +13,19 @@ def isolate_jev_router_configuration(monkeypatch):
         "JEV_ROUTER_MIN_PROBABILITY",
         "JEV_ROUTER_MIN_MARGIN",
         "JEV_ROUTER_MAX_STATE_CHARS",
+        "JEV_ROUTER_CONTEXT_VERSION",
+        "JEV_DECISION_MODEL",
+        "JEV_DECISION_STAGE_MODES",
+        "JEV_DECISION_TIMEOUT_SECONDS",
+        "JEV_DECISION_MIN_PROBABILITY",
+        "JEV_DECISION_MIN_MARGIN",
+        "JEV_DECISION_MAX_STATE_CHARS",
+        "JEV_DECISION_MAX_CANDIDATES",
+        "JEV_DECISION_MAX_QUESTIONS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("JEV_ROUTER_MODE", "off")
+    monkeypatch.setenv("JEV_DECISION_MODE", "off")
 
 
 @pytest.fixture(autouse=True)

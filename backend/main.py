@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.agent.jev_router import JevRouterConfig, JevRouterError
+from backend.agent.decisions import DecisionConfig
 from backend.agent.slash_commands import build_slash_command_catalog
 from backend.app_data_sources import AppDataSourceError, AppDataSourceGateway
 from backend.app_manager import AppManager
@@ -327,12 +328,13 @@ def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
 
     try:
         jev_router = JevRouterConfig.from_env().snapshot()
+        workflow_decisions = DecisionConfig.from_env().snapshot()
     except JevRouterError as exc:
         raise LLMConfigError("Invalid Jev router configuration", code="jev_configuration_invalid") from exc
     settings = llm_config_store.get_settings()
     primary_data = chat_session.model_selection or settings.get("default_model")
     if not primary_data:
-        return {"jev_router": jev_router}
+        return {"jev_router": jev_router, "workflow_decisions": workflow_decisions}
     primary = ModelSelection.model_validate(primary_data)
     fast = ModelSelection.model_validate(settings.get("fast_model") or primary)
     llm_config_store.resolve(primary)
@@ -363,6 +365,7 @@ def _snapshot_model_config(chat_session: ChatSession) -> dict[str, Any]:
         "coding_agent_config": coding_config,
         "coding_model": coding_model.model_dump(mode="json") if coding_model else None,
         "jev_router": jev_router,
+        "workflow_decisions": workflow_decisions,
     }
 
 

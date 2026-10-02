@@ -2,6 +2,8 @@
 
 本文记录研究之后的接入边界。原 [README.md](README.md) 保留 2026 年 10 月 2 日研究时的代码依据与结论；其中的未实现问题属于当时基线，不代表当前实现状态。接入默认关闭，尚不能据实现或 mock 测试宣称项目中文准确率、真实费用或延迟改善。
 
+以下模式说明保留首轮兼容路径；同时启用通用决策级联后的参数生成、Schema 选择与复核架构见[决策与生成分离设计](../decision-generation-harness/DESIGN.md)。
+
 ## 分类对象与执行对象
 
 Jev 使用 TypeSafe 的独立 `systemone` API，不加入 chat-completions 模型列表。一次请求对同一 state 询问八类顶层 kind 和已有 App 候选；App 选择还包含 `none` 和 `multiple`。问题独立求值，代码负责解释它们的一致性。

@@ -31,6 +31,7 @@ def isolated_jev_environment(monkeypatch):
         "JEV_ROUTER_MIN_PROBABILITY",
         "JEV_ROUTER_MIN_MARGIN",
         "JEV_ROUTER_MAX_STATE_CHARS",
+        "JEV_ROUTER_CONTEXT_VERSION",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -71,6 +72,7 @@ def test_config_defaults_snapshot_frozen_and_secret_free():
         "min_margin": 0.15,
         "max_state_chars": 48_000,
         "criteria_version": CRITERIA_VERSION,
+        "context_version": "routing-context-v2",
     }
     assert "test-key-only" not in json.dumps(config.snapshot())
     assert JevRouterConfig.model_validate(config.snapshot()) == config
@@ -97,6 +99,13 @@ def test_config_from_env(monkeypatch):
     assert config.min_probability == 0.99
     assert config.min_margin == 0.4
     assert config.max_state_chars == 1234
+
+
+def test_legacy_snapshot_and_new_environment_pin_context_versions(monkeypatch):
+    assert JevRouterConfig.model_validate({"mode": "shadow"}).context_version == "routing-context-v1"
+    assert JevRouterConfig.from_env().context_version == "routing-context-v2"
+    monkeypatch.setenv("JEV_ROUTER_CONTEXT_VERSION", "routing-context-v1")
+    assert JevRouterConfig.from_env().context_version == "routing-context-v1"
 
 
 @pytest.mark.parametrize(

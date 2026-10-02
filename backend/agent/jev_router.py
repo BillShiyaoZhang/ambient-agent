@@ -12,11 +12,13 @@ import json
 import math
 import os
 import re
+import time
 from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from backend.agent.errors import BudgetExhaustedError
 from backend.agent.intent_plan import IntentKind
 from backend.agent.providers import ToolLoopBudget
 from backend.app_manifest import ManifestValidationError, validate_app_id
@@ -24,6 +26,7 @@ from backend.app_manifest import ManifestValidationError, validate_app_id
 JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 CRITERIA_VERSION = "ambient-intent-v1"
 MAX_APP_CANDIDATES = 253
+MAX_JEV_RESPONSE_BYTES = 1024 * 1024
 _PINNED_MODEL_PATTERN = re.compile(r"^jev-\d+\.\d+\.\d+$")
 _INTENT_KEYS = frozenset(kind.value for kind in IntentKind)
 _MANIFEST_ROUTING_FIELDS = ("id", "title", "description", "intents", "schema_refs", "app_spec")
@@ -49,6 +52,7 @@ class JevRouterConfig(BaseModel):
     min_margin: float = Field(default=0.15, ge=0, le=1, allow_inf_nan=False)
     max_state_chars: int = Field(default=48_000, gt=0, le=1_000_000, strict=True)
     criteria_version: Literal["ambient-intent-v1"] = CRITERIA_VERSION
+    context_version: Literal["routing-context-v1", "routing-context-v2"] = "routing-context-v1"
 
     @field_validator("model")
     @classmethod
@@ -73,6 +77,7 @@ class JevRouterConfig(BaseModel):
             "JEV_ROUTER_MIN_PROBABILITY": "min_probability",
             "JEV_ROUTER_MIN_MARGIN": "min_margin",
             "JEV_ROUTER_MAX_STATE_CHARS": "max_state_chars",
+            "JEV_ROUTER_CONTEXT_VERSION": "context_version",
         }
         values: dict[str, Any] = {}
         try:
@@ -80,6 +85,7 @@ class JevRouterConfig(BaseModel):
                 value = os.getenv(name)
                 if value is not None:
                     values[field] = int(value) if field == "max_state_chars" else value
+            values.setdefault("context_version", "routing-context-v2")
             return cls.model_validate(values)
         except (ValidationError, ValueError, TypeError):
             raise JevRouterError("jev_config_invalid") from None
@@ -336,8 +342,109 @@ def _usage(raw: Any, actual_model: Any) -> dict[str, Any]:
     return result
 
 
+class JevJSONClient:
+    """Shared single-attempt HTTP transport for typed Jev decisions."""
+
+    def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._transport = transport
+
+    async def post(
+        self,
+        request: dict[str, Any],
+        *,
+        timeout_s: float,
+        budget: ToolLoopBudget | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if (
+            not isinstance(request, dict)
+            or set(request) != {"model", "state", "questions"}
+            or not isinstance(request.get("model"), str)
+            or not _PINNED_MODEL_PATTERN.fullmatch(request["model"])
+            or not isinstance(timeout_s, (int, float))
+            or isinstance(timeout_s, bool)
+            or not 0 < timeout_s <= 60
+            or not math.isfinite(timeout_s)
+        ):
+            raise JevRouterError("jev_input_invalid")
+        key = os.getenv("TYPESAFE_API_KEY", "").strip()
+        if not key:
+            raise JevRouterError("jev_key_missing")
+        if "\n" in key or "\r" in key or len(key) > 1024:
+            raise JevRouterError("jev_key_invalid")
+        timeout = timeout_s
+        if budget is not None:
+            timeout = min(timeout, budget.llm_call_timeout_s, budget.wall_clock_s)
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise JevRouterError("jev_timeout")
+            if budget.on_model_call is not None:
+                budget.on_model_call()
+
+        started = time.monotonic()
+
+        async def invoke() -> Any:
+            async with httpx.AsyncClient(
+                transport=self._transport, timeout=timeout, follow_redirects=False, trust_env=False
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    JEV_ENDPOINT,
+                    headers={"Authorization": f"Bearer {key}", "Accept-Encoding": "identity"},
+                    json=request,
+                ) as response:
+                    if response.status_code != 200:
+                        # Error bodies are untrusted and may reflect headers.
+                        raise JevRouterError(f"jev_http_{response.status_code}")
+                    chunks = []
+                    size = 0
+                    async for chunk in response.aiter_bytes(chunk_size=16 * 1024):
+                        size += len(chunk)
+                        if size > MAX_JEV_RESPONSE_BYTES:
+                            raise JevRouterError("jev_response_too_large")
+                        chunks.append(chunk)
+            # Decoding remains cancellable and inside the overall timeout. The
+            # bounded payload prevents an abandoned decoder from using unbounded
+            # memory or CPU after timeout/cancellation.
+            return await asyncio.to_thread(json.loads, b"".join(chunks))
+
+        try:
+            raw = await asyncio.wait_for(invoke(), timeout=timeout)
+        except (TimeoutError, httpx.TimeoutException):
+            raise JevRouterError("jev_timeout") from None
+        except httpx.HTTPError:
+            raise JevRouterError("jev_network_error") from None
+        except (ValueError, TypeError, UnicodeError):
+            raise JevRouterError("jev_response_invalid") from None
+        usage = _usage(raw.get("usage"), raw.get("model")) if isinstance(raw, dict) else {}
+        if budget is not None and budget.on_usage is not None:
+            try:
+                budget.on_usage(usage)
+            except BudgetExhaustedError as exc:
+                # The response has already been billed. Carry only validated
+                # numeric evidence to the caller before propagating the budget
+                # failure; the callback's accounting remains authoritative.
+                evidence = JevRouterError(
+                    "jev_budget_exhausted", model=raw.get("model") if isinstance(raw, dict) else None, usage=usage
+                )
+                exc.decision_model = evidence.model
+                exc.decision_usage = evidence.usage
+                raise
+        if time.monotonic() - started >= timeout:
+            raise JevRouterError("jev_timeout", model=raw.get("model") if isinstance(raw, dict) else None, usage=usage)
+        if (
+            not isinstance(raw, dict)
+            or not usage
+            or raw.get("model") != request.get("model")
+            or not isinstance(raw.get("model"), str)
+            or not _PINNED_MODEL_PATTERN.fullmatch(raw["model"])
+        ):
+            raise JevRouterError(
+                "jev_response_invalid", model=raw.get("model") if isinstance(raw, dict) else None, usage=usage
+            ) from None
+        return {"model": raw["model"], "answers": raw.get("answers"), "usage": usage}, usage
+
+
 class JevDecisionClient:
-    """Single-attempt HTTP transport with no LLMService protocol adaptation."""
+    """Intent-specific compatibility client over the shared JSON transport."""
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._transport = transport
@@ -350,42 +457,9 @@ class JevDecisionClient:
         budget: ToolLoopBudget | None = None,
     ) -> tuple[RouteDecision, dict[str, Any]]:
         targets = _request_targets(request, config)
-        key = os.getenv("TYPESAFE_API_KEY", "").strip()
-        if not key:
-            raise JevRouterError("jev_key_missing")
-        if "\n" in key or "\r" in key or len(key) > 1024:
-            raise JevRouterError("jev_key_invalid")
-        timeout = config.timeout_s
-        if budget is not None:
-            timeout = min(timeout, budget.llm_call_timeout_s, budget.wall_clock_s)
-            if not math.isfinite(timeout) or timeout <= 0:
-                raise JevRouterError("jev_timeout")
-            if budget.on_model_call is not None:
-                budget.on_model_call()
-
-        async def invoke() -> httpx.Response:
-            async with httpx.AsyncClient(
-                transport=self._transport, timeout=timeout, follow_redirects=False, trust_env=False
-            ) as client:
-                return await client.post(JEV_ENDPOINT, headers={"Authorization": f"Bearer {key}"}, json=request)
-
-        try:
-            response = await asyncio.wait_for(invoke(), timeout=timeout)
-        except (TimeoutError, httpx.TimeoutException):
-            raise JevRouterError("jev_timeout") from None
-        except httpx.HTTPError:
-            raise JevRouterError("jev_network_error") from None
-        except (ValueError, TypeError, UnicodeError):
-            raise JevRouterError("jev_input_invalid") from None
-        if response.status_code != 200:
-            raise JevRouterError(f"jev_http_{response.status_code}")
-        try:
-            raw = response.json()
-        except (ValueError, UnicodeError):
-            raise JevRouterError("jev_response_invalid") from None
-        usage = _usage(raw.get("usage"), raw.get("model")) if isinstance(raw, dict) else {}
-        if budget is not None and budget.on_usage is not None:
-            budget.on_usage(usage)
+        raw, usage = await JevJSONClient(transport=self._transport).post(
+            request, timeout_s=config.timeout_s, budget=budget
+        )
         try:
             if not isinstance(raw, dict) or not usage:
                 raise ValueError("invalid_response")

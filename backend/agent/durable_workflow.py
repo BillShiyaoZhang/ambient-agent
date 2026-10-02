@@ -17,6 +17,9 @@ from typing import Any
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
 from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubIntentKind
+from backend.agent.decision_context import content_hash
+from backend.agent.decisions import remaining_budget
+from backend.agent.workflow_decisions import resolve_decision_config, review_development_plan
 from backend.agent.providers import ToolLoopBudget
 from backend.agent.run_context import RunContext
 from backend.agent.slash_commands import SlashCommandParseError, explicit_skill_ids
@@ -91,6 +94,9 @@ class DurableAgentWorkflow:
     }
     _WIDGET_KEYS = {
         "plan_candidate",
+        "plan_review",
+        "plan_review_input_hash",
+        "plan_review_instruction",
         "plan_rework_feedback",
         "plan_schema_context",
         "approved_plan",
@@ -322,6 +328,7 @@ class DurableAgentWorkflow:
             # Runs created before Jev support retain their original routing
             # behavior even if the deployment enables Jev after a restart.
             jev_router=dict(state.model_snapshot.get("jev_router") or {"mode": "off"}),
+            workflow_decisions=dict(state.model_snapshot.get("workflow_decisions") or {"mode": "off"}),
             artifact_hashes=artifact_hashes,
         )
 
@@ -1455,7 +1462,37 @@ class DurableAgentWorkflow:
             )
         raise WorkflowError(f"Unsupported sub-intent: {sub.kind}", code="unsupported_sub_intent")
 
+    async def _review_plan_candidate(
+        self,
+        run: dict[str, Any],
+        state: AgentRunState,
+        intent: IntentPlan,
+        candidate: str,
+        started: float,
+    ) -> None:
+        config = resolve_decision_config(dict(state.model_snapshot.get("workflow_decisions") or {"mode": "off"}))
+        config = config.for_purpose("development_plan_review")
+        if config.mode == "off":
+            return
+        review_instruction = str(state.data.get("plan_review_instruction") or intent.instruction or "")
+        input_hash = content_hash({"instruction": review_instruction, "candidate": candidate, "app_id": intent.app_id})
+        if state.data.get("plan_review_input_hash") == input_hash:
+            return
+        review = await review_development_plan(
+            review_instruction,
+            candidate,
+            intent.app_id or "",
+            config,
+            db_session=self._run_storage(state),
+            audit_context=self._run_context(run, state).audit_context(),
+            budget=remaining_budget(self._model_budget(state), started),
+        )
+        if review is not None:
+            state.data["plan_review"] = review.model_dump(mode="json")
+            state.data["plan_review_input_hash"] = input_hash
+
     async def _phase_plan(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
+        phase_started = time.monotonic()
         intent = self._current_intent(state)
         if not intent.app_id:
             return Failed(summary="Missing App ID", error_code="app_id_missing", message="Widget intent has no app_id")
@@ -1475,6 +1512,8 @@ class DurableAgentWorkflow:
                 budget=self._model_budget(state),
             )
             state.data["plan_candidate"] = candidate
+            state.data["plan_review_instruction"] = plan_instruction
+        await self._review_plan_candidate(run, state, intent, str(candidate), phase_started)
         await self._emit_activity(
             run,
             activity_id="plan:proposal",
@@ -1504,8 +1543,12 @@ class DurableAgentWorkflow:
             if not approved_plan.strip():
                 raise WorkflowError("Approved development plan is empty", code="approved_plan_empty")
             state.data["approved_plan"] = approved_plan
+            if approved_plan != candidate:
+                state.data.pop("plan_review", None)
+                state.data.pop("plan_review_input_hash", None)
             return Continue(next_phase="align_schema", summary="Development plan approved")
         if action == "refine":
+            phase_started = time.monotonic()
             refined = await PlanGenerationService.refine_plan(
                 instruction=intent.instruction or "",
                 app_id=intent.app_id or "",
@@ -1518,6 +1561,14 @@ class DurableAgentWorkflow:
                 budget=self._model_budget(state),
             )
             state.data["plan_candidate"] = refined
+            feedback = str(response.get("feedback") or "").strip()
+            if feedback:
+                state.data["plan_review_instruction"] = (
+                    str(state.data.get("plan_review_instruction") or intent.instruction or "")
+                    + "\n\n[PLAN REFINEMENT FEEDBACK]\n"
+                    + feedback
+                )
+            await self._review_plan_candidate(run, state, intent, refined, phase_started)
             state.phase = "wait_plan"
             return await self._wait(
                 run,
@@ -1546,6 +1597,7 @@ class DurableAgentWorkflow:
                 audit_context=self._run_context(run, state).audit_context(),
                 budget=self._model_budget(state),
                 capability_catalog=self.capability_catalog_factory(),
+                decision_config=dict(state.model_snapshot.get("workflow_decisions") or {"mode": "off"}),
             )
             proposal = self._merge_preapproved_schema_props(
                 proposal,
@@ -1642,6 +1694,8 @@ class DurableAgentWorkflow:
                 "Revise the plan so every feature is feasible with the user-edited schema and capability proposal."
             )
             state.data.pop("plan_candidate", None)
+            state.data.pop("plan_review", None)
+            state.data.pop("plan_review_input_hash", None)
             state.data.pop("approved_plan", None)
             state.data.pop("schema_candidate", None)
             state.data.pop("runtime_contract", None)
@@ -1665,6 +1719,7 @@ class DurableAgentWorkflow:
                 audit_context=self._run_context(run, state).audit_context(),
                 budget=self._model_budget(state),
                 capability_catalog=self.capability_catalog_factory(),
+                decision_config=dict(state.model_snapshot.get("workflow_decisions") or {"mode": "off"}),
             )
             self.graph_db.effective_schemas(refined)
             state.data["schema_candidate"] = refined

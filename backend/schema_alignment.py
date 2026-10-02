@@ -1,8 +1,18 @@
+import asyncio
+import copy
 import json
 import logging
 import re
+import time
 from typing import Any
 
+from backend.agent.decisions import remaining_budget
+from backend.agent.schema_decisions import (
+    SchemaGenerationTask,
+    SchemaSelection,
+    record_schema_selection,
+    select_schema_candidates,
+)
 from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
@@ -79,12 +89,19 @@ async def _generate_validated_proposal(
     budget: ToolLoopBudget | None,
     audit_context: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    raw_response = await provider.generate(
-        messages,
-        db_session=db_session,
-        budget=budget,
-        audit_context=audit_context,
-    )
+    started = time.monotonic()
+
+    async def generate(call_messages: list[dict[str, str]], call_context: dict[str, Any]) -> str:
+        limits = remaining_budget(budget, started)
+        invocation = provider.generate(call_messages, db_session=db_session, budget=limits, audit_context=call_context)
+        if limits is None:
+            return await invocation
+        try:
+            return await asyncio.wait_for(invocation, timeout=limits.wall_clock_s)
+        except TimeoutError:
+            raise BudgetExhaustedError("Schema generation exceeded its wall-clock budget") from None
+
+    raw_response = await generate(messages, audit_context)
     try:
         return _parse_and_validate_proposal(raw_response, catalog), raw_response
     except Exception as validation_error:
@@ -99,13 +116,105 @@ async def _generate_validated_proposal(
             {"role": "assistant", "content": raw_response[-12_000:]},
             {"role": "user", "content": repair_prompt},
         ]
-        repaired_response = await provider.generate(
+        repaired_response = await generate(
             repair_messages,
-            db_session=db_session,
-            budget=budget,
-            audit_context={**audit_context, "stage": f"{audit_context.get('stage', 'schema_alignment')}_repair"},
+            {**audit_context, "stage": f"{audit_context.get('stage', 'schema_alignment')}_repair"},
         )
         return _parse_and_validate_proposal(repaired_response, catalog), repaired_response
+
+
+def _schema_inventory(schemas: list[dict[str, Any]], *, include_description: bool) -> str:
+    lines: list[str] = []
+    for schema in schemas:
+        lines.append(f"- Schema ID: '{schema['id']}'")
+        if include_description:
+            lines.append(f"  Name: {schema['name']}")
+            lines.append(f"  Description: {schema['description']}")
+        lines.append(f"  Properties: {json.dumps(schema['properties'])}\n")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+async def _generate_schema_task(
+    provider: Any,
+    full_messages: list[dict[str, str]],
+    constrained_user_prompt: str,
+    selection: SchemaSelection,
+    *,
+    catalog: SystemCapabilityCatalog,
+    db_session: Any,
+    budget: ToolLoopBudget | None,
+    started: float,
+    audit_context: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    task = SchemaGenerationTask(selection)
+    constrained = selection.constrained
+    messages = (
+        [full_messages[0], {"role": "user", "content": constrained_user_prompt + task.constraint_prompt()}]
+        if constrained
+        else full_messages
+    )
+    record_schema_selection(
+        selection,
+        db_session,
+        audit_context,
+        generation_status="constrained" if constrained else "shadow" if selection.mode == "shadow" else "unconstrained",
+    )
+    proposal: dict[str, Any] | None = None
+    try:
+        proposal, raw = await _generate_validated_proposal(
+            provider,
+            messages,
+            catalog=catalog,
+            db_session=db_session,
+            budget=remaining_budget(budget, started),
+            audit_context=audit_context,
+        )
+        remaining_budget(budget, started)
+        task.validate(proposal)
+    except (LLMConfigError, BudgetExhaustedError):
+        raise
+    except Exception:
+        if not constrained:
+            raise
+        record_schema_selection(
+            selection,
+            db_session,
+            audit_context,
+            generation_status="constraint_conflict",
+            generated_ids=[item["id"] for item in proposal.get("reused_schemas", [])] if proposal else None,
+        )
+        # Never discard the user's objective because a candidate decision or
+        # generated payload disagreed. The complete original inventory and
+        # request remain the fallback authority, with normal validation.
+        proposal, raw = await _generate_validated_proposal(
+            provider,
+            full_messages,
+            catalog=catalog,
+            db_session=db_session,
+            budget=remaining_budget(budget, started),
+            audit_context={**audit_context, "stage": f"{audit_context['stage']}_fallback"},
+        )
+        remaining_budget(budget, started)
+        record_schema_selection(
+            selection,
+            db_session,
+            audit_context,
+            generation_status="fallback_complete",
+            generated_ids=[item["id"] for item in proposal.get("reused_schemas", [])],
+        )
+        return proposal, raw
+    record_schema_selection(
+        selection,
+        db_session,
+        audit_context,
+        generation_status="compiled"
+        if constrained
+        else "shadow_complete"
+        if selection.mode == "shadow"
+        else "complete",
+        generated_ids=[item["id"] for item in proposal.get("reused_schemas", [])],
+    )
+    return proposal, raw
 
 
 class SchemaAlignmentService:
@@ -120,21 +229,26 @@ class SchemaAlignmentService:
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
         capability_catalog: SystemCapabilityCatalog | None = None,
+        *,
+        decision_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Interacts with the LLM to perform semantic schema alignment.
         Analyzes the app instruction against existing database schemas and returns a proposal dict.
         """
+        started = time.monotonic()
         # 1. Retrieve current schema inventory
-        existing_schemas = db.list_schemas()
-
-        # Format inventory as string for prompt
-        schemas_info = ""
-        for schema in existing_schemas:
-            schemas_info += f"- Schema ID: '{schema['id']}'\n"
-            schemas_info += f"  Name: {schema['name']}\n"
-            schemas_info += f"  Description: {schema['description']}\n"
-            schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
+        existing_schemas = copy.deepcopy(db.list_schemas())
+        selection = await select_schema_candidates(
+            instruction,
+            approved_plan,
+            existing_schemas,
+            decision_config,
+            db_session=db_session,
+            audit_context=audit_context,
+            budget=remaining_budget(budget, started),
+        )
+        schemas_info = _schema_inventory(existing_schemas, include_description=True)
 
         is_zh = language == "zh"
         catalog = capability_catalog or SystemCapabilityCatalog.build()
@@ -196,6 +310,7 @@ User Instruction: "{instruction}"
         if approved_plan:
             user_prompt += f"Approved Development Plan:\n{approved_plan}\n\n"
 
+        user_prefix = user_prompt
         user_prompt += f"""Here is the inventory of our existing database schemas:
 {schemas_info if schemas_info else "(No existing schemas)"}
 
@@ -207,15 +322,28 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         provider = get_llm_provider(provider_name, model_name)
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        selected_info = _schema_inventory(
+            [schema for schema in existing_schemas if schema["id"] in selection.selected_ids],
+            include_description=True,
+        )
+        constrained_user_prompt = (
+            user_prefix
+            + "Here is the selected existing Schema inventory:\n"
+            + (selected_info or "(No existing entity selected)\n")
+            + "\nGenerate the remaining Schema and capability proposal fields as a JSON block.\n"
+        )
 
         raw_response = ""
         try:
-            proposal, raw_response = await _generate_validated_proposal(
+            proposal, raw_response = await _generate_schema_task(
                 provider,
                 messages,
+                constrained_user_prompt,
+                selection,
                 catalog=catalog,
                 db_session=db_session,
                 budget=budget,
+                started=started,
                 audit_context={**(audit_context or {}), "stage": "schema_alignment"},
             )
             return proposal
@@ -243,15 +371,27 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         audit_context: dict[str, Any] | None = None,
         budget: ToolLoopBudget | None = None,
         capability_catalog: SystemCapabilityCatalog | None = None,
+        *,
+        decision_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Refines the current schema proposal using natural language feedback from the user.
         """
-        existing_schemas = db.list_schemas()
-        schemas_info = ""
-        for schema in existing_schemas:
-            schemas_info += f"- Schema ID: '{schema['id']}'\n"
-            schemas_info += f"  Properties: {json.dumps(schema['properties'])}\n\n"
+        started = time.monotonic()
+        existing_schemas = copy.deepcopy(db.list_schemas())
+        current_proposal = copy.deepcopy(current_proposal)
+        selection = await select_schema_candidates(
+            instruction,
+            approved_plan,
+            existing_schemas,
+            decision_config,
+            feedback=feedback,
+            current_proposal=current_proposal,
+            db_session=db_session,
+            audit_context=audit_context,
+            budget=remaining_budget(budget, started),
+        )
+        schemas_info = _schema_inventory(existing_schemas, include_description=False)
 
         is_zh = language == "zh"
         catalog = capability_catalog or SystemCapabilityCatalog.build()
@@ -312,9 +452,8 @@ User Instruction: "{instruction}"
         if approved_plan:
             user_prompt += f"Approved Development Plan:\n{approved_plan}\n\n"
 
-        user_prompt += f"""Here is the database schema inventory:
-{schemas_info}
-
+        user_prefix = user_prompt
+        refinement_suffix = f"""
 Here is the CURRENT schema proposal we drafted:
 {json.dumps(current_proposal, indent=2, ensure_ascii=False)}
 
@@ -323,20 +462,36 @@ The user provided the following natural language FEEDBACK for modifications:
 
 Apply the adjustments requested in the feedback and output the updated JSON schema proposal.
 """
+        user_prompt += f"""Here is the database schema inventory:
+{schemas_info}
+{refinement_suffix}"""
 
         provider_name, model_name = selection_ids(primary_selection())
         provider = get_llm_provider(provider_name, model_name)
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        selected_info = _schema_inventory(
+            [schema for schema in existing_schemas if schema["id"] in selection.selected_ids],
+            include_description=False,
+        )
+        constrained_user_prompt = (
+            user_prefix
+            + "Here is the selected existing Schema inventory:\n"
+            + (selected_info or "(No existing entity selected)\n")
+            + refinement_suffix
+        )
 
         raw_response = ""
         try:
-            proposal, raw_response = await _generate_validated_proposal(
+            proposal, raw_response = await _generate_schema_task(
                 provider,
                 messages,
+                constrained_user_prompt,
+                selection,
                 catalog=catalog,
                 db_session=db_session,
                 budget=budget,
+                started=started,
                 audit_context={**(audit_context or {}), "stage": "schema_alignment_refine"},
             )
             return proposal

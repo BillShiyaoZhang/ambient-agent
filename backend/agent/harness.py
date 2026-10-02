@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
+from backend.agent.decisions import remaining_budget
 from backend.agent.intent_plan import IntentKind, IntentPlan
 from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.router import IntentRouter
@@ -100,6 +102,7 @@ class AgentOrchestrator:
         )
 
     async def _classify_intent(self, content: str, session_id: str, language: str = "zh") -> IntentPlan:
+        started = time.monotonic()
         router_context = None
         try:
             from backend.router_context import RouterContext
@@ -130,6 +133,7 @@ class AgentOrchestrator:
                 budget=self.tool_loop_budget,
                 capability_catalog=self.capability_catalog,
                 jev_config=self.run_context.jev_router if self.run_context else None,
+                decision_config=self.run_context.workflow_decisions if self.run_context else None,
             )
             if (
                 plan.kind in {IntentKind.MULTI_INTENT, IntentKind.PLAN_AND_ACT}
@@ -141,8 +145,10 @@ class AgentOrchestrator:
                     db_session=self.db,
                     language=language,
                     audit_context=audit_context,
-                    budget=self.tool_loop_budget,
+                    budget=remaining_budget(self.tool_loop_budget, started),
                     capability_catalog=self.capability_catalog,
+                    decision_config=self.run_context.workflow_decisions if self.run_context else None,
+                    content=content,
                 )
             return plan
         except (LLMConfigError, BudgetExhaustedError):

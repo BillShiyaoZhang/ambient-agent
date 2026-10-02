@@ -117,11 +117,16 @@ Jev uses the separate TypeSafe API to classify the eight top-level kinds and cho
 | --- | --- |
 | `off` (default) | Use the existing Router without calling Jev |
 | `shadow` | Call Jev and record evidence, then use the existing Router for the complete `IntentPlan`; adds one timeout-bounded round trip |
-| `cascade` | Only a high-confidence `converse` that passes the gate may skip the generative Router; all other requests use the existing Router |
+| `cascade`, without effective `intent_parameters` cascade | Preserve the compatibility path: only a high-confidence `converse` that passes the gate may skip the generative Router |
+| `cascade`, with effective `intent_parameters=cascade` | Adopt valid kind/target decisions and generate only free parameters; Graph templates require their own purpose cascade, and compilation failures fall back to the full Router |
 
 The cascade gate checks the highest kind probability and its margin over the runner-up, then validates the response, context limit, and App selection consistency. A direct `converse` cannot target a specific App or `multiple`; when an App probability distribution is present, `none` must also pass the same probability and margin thresholds. A rejected decision falls back to the generative Router instead of asking the user to clarify. The complete generated plan determines whether `clarify` is appropriate.
 
-`graph_query`, `graph_mutation`, `widget_create`, `widget_modify`, `multi_intent`, `plan_and_act`, and `clarify` all retain the complete generative path. A Jev `graph_query` label is never packaged into an executable plan with `query={}`. An accepted `converse` passes through the original user instruction and uses the existing bounded read-only conversation flow. Explicit `/` commands compile before Jev; `/query` and `/mutate` still call the generative Router to fill parameters for their already explicit kind. External Skills still enter the read-only semantic sandbox first and bypass Jev.
+With only the legacy routing cascade enabled, Graph/App/composite/clarification intents retain the complete generative path. When both cascades are enabled, `IntentGenerationTask` fixes kind, target App, and `decision_hash`; the model uses `generate_intent_parameters` to fill free parameters. Compilation rejects reselected fixed fields, stale hashes, and incomplete plans. A `graph_query` label is never packaged into a plan with `query={}`. Code may compile an unfiltered list template for one known Schema into a read-only query with type/limit; complex filters, ordering, counts, date conditions, and free-text mutations still use generation.
+
+Composite candidates skip the second-layer refiner only when all parameters are complete and semantic review accepts the entire plan. Order and targets stay fixed, and the complete request still undergoes preflight before the first effect. An accepted `converse` preserves the original instruction and uses the existing bounded read-only conversation flow. Explicit `/` commands compile before Jev; `/query` and `/mutate` fill parameters for their already explicit kind. External Skills still enter the read-only semantic sandbox first and bypass Jev.
+
+New environment configuration defaults to `routing-context-v2`: a routing-specific projection sends the complete request, App candidates, selected history/summary, and Graph type counts once, without repeating full App manifests or the entire capability catalog. It does not truncate an existing request or candidate set to obtain an executable classification; oversized inputs fall back. Historical snapshots missing the version use `routing-context-v1`, so recovery does not switch context semantics because the default changed.
 
 Configure the backend with these environment variables. Inject the key into its runtime environment; do not store it in the repository, Run snapshots, or logs:
 
@@ -134,6 +139,7 @@ Configure the backend with these environment variables. Inject the key into its 
 | `JEV_ROUTER_MIN_PROBABILITY` | `0.95` | Minimum highest kind probability for direct routing |
 | `JEV_ROUTER_MIN_MARGIN` | `0.15` | Minimum gap between the top two kind probabilities |
 | `JEV_ROUTER_MAX_STATE_CHARS` | `48000` | Jev state character limit; overflow skips Jev and uses the existing Router without truncating the state |
+| `JEV_ROUTER_CONTEXT_VERSION` | `routing-context-v2` | Dedicated projection for new Runs; supports compatibility with `routing-context-v1` |
 
 Non-secret configuration and the classification rules version are frozen in `model_snapshot.jev_router` when a Run starts and propagated through `RunContext.jev_router`. Configuration accepts only fixed `jev-x.y.z` versions and rejects `jev-latest` and `jev-preview`; the actual response version must exactly match the Run configuration. Invalid environment configuration rejects creation of a new Run. Historical Runs without a Jev configuration snapshot resume with `off`. A missing key, timeout, HTTP error, invalid response, oversized context, or low confidence preserves the existing Router path. Failures do not fabricate valid probabilities or a complete plan.
 
@@ -141,4 +147,18 @@ The `route_decision` stage in `LLMAuditLog` records Jev classification evidence,
 
 Jev and subsequent generation share the routing wall-clock budget; generation receives only the time remaining after Jev. Both model calls count toward existing call and usage limits. Exhausted budgets and cancellation propagate to the caller rather than triggering service-failure fallback.
 
+Parameter generation uses the `intent_generate` audit stage; `response.routing` also retains projection metadata, the `generation_task` binding, and the generation fallback reason. Graph templates and composite review use `decision:graph_query_template` and `decision:composite_review`, allowing decisions, generation, and complete-path costs to be measured separately.
+
 Start with `shadow` in a test environment and use identical context to evaluate Chinese, cross-turn references, data changes versus code changes, composite requests, and read-only requests misclassified as effects. Measure coverage, fallback rate, complete-path latency, and cost. Keep the default `off` until real-data acceptance. Repository file `proposals/jev-intent-router/IMPLEMENTATION.md` describes the implementation boundaries and offline scoring commands; the research and evaluation cases remain in the same directory.
+
+Generic judgment settings are frozen in `model_snapshot.workflow_decisions` / `RunContext.workflow_decisions`, defaulting to `off`; historical snapshots missing that field also resume with `off`. `DecisionConfig.stage_modes` saves a dictionary of purpose modes. Its environment setting `JEV_DECISION_STAGE_MODES` defaults to `{}`, and omitted purposes inherit `JEV_DECISION_MODE`. Only `intent_parameters`, `graph_query_template`, `schema_selection`, `composite_review`, and `development_plan_review` are allowed, with values `off`, `shadow`, or `cascade`. Invalid JSON, purposes, or modes reject the snapshot; historical configurations missing the dictionary restore `{}`. Purpose modes do not involve the key or change an existing Run's frozen settings.
+
+Several Noul judgments in synthetic live cases failed their gates, so `cascade` may be enabled only for routing parameter generation while other stages remain in shadow or off. This does not establish improved semantic quality. The following enables parameter generation and retains paid `shadow` evidence for the other purposes:
+
+```dotenv
+JEV_ROUTER_MODE=cascade
+JEV_DECISION_MODE=off
+JEV_DECISION_STAGE_MODES='{"intent_parameters":"cascade","graph_query_template":"shadow","schema_selection":"shadow","composite_review":"shadow","development_plan_review":"shadow"}'
+```
+
+The two-decimal Score compatibility check keeps strict type, range, probability-sum, key, and legend validation, and tests whether the feasible weighted-mean range under `p ± 0.005` and a true sum of 1 intersects `score ± 0.005`. It retains the provider score without changing Choice/Noul thresholds. This rule is inferred from observations; see [Agent Harness](/en/agent/harness.md). Repository file `proposals/decision-generation-harness/DESIGN.md` contains the full interfaces, settings, and failure-trajectory design. These judgments never replace user approval, permissions, or deterministic validation.

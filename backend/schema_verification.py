@@ -9,11 +9,59 @@ from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 from backend.schema_diff import (
     SchemaExtractor,
+    TypeMismatch,
+    UnknownProperty,
+    UnknownType,
     VerificationDiff,
     diff_controller_js,
 )
 
 logger = logging.getLogger("schema_verification")
+
+
+def _model_diff(data: Any) -> VerificationDiff:
+    """Validate the fallback's complete findings before deriving ``is_clean``."""
+    fields = {"unknown_props", "type_mismatches", "unknown_types"}
+    if not isinstance(data, dict) or set(data) != fields:
+        raise ValueError("Schema verification response must contain all three finding lists")
+
+    def findings(name: str, text_fields: set[str], *, occurrences: bool = False) -> list[dict[str, Any]]:
+        items = data[name]
+        if not isinstance(items, list):
+            raise ValueError(f"Schema verification {name} must be a list")
+        expected_fields = text_fields | ({"occurrences"} if occurrences else set())
+        for item in items:
+            if not isinstance(item, dict) or set(item) != expected_fields:
+                raise ValueError(f"Schema verification {name} has a malformed finding")
+            if any(not isinstance(item[field], str) for field in text_fields):
+                raise ValueError(f"Schema verification {name} has a non-text field")
+            identity_fields = text_fields & {"node_type", "property_name", "type_name", "schema_type"}
+            if any(not item[field].strip() for field in identity_fields):
+                raise ValueError(f"Schema verification {name} has an empty identity")
+            if occurrences and (
+                not isinstance(item["occurrences"], int)
+                or isinstance(item["occurrences"], bool)
+                or item["occurrences"] < 0
+            ):
+                raise ValueError(f"Schema verification {name} has an invalid occurrence count")
+        return items
+
+    unknown_props = [
+        UnknownProperty(**item)
+        for item in findings("unknown_props", {"node_type", "property_name", "sample_value_repr"}, occurrences=True)
+    ]
+    type_mismatches = [
+        TypeMismatch(**item)
+        for item in findings("type_mismatches", {"node_type", "property_name", "schema_type", "observed_value_repr"})
+    ]
+    unknown_types = [UnknownType(**item) for item in findings("unknown_types", {"type_name"}, occurrences=True)]
+    # VerificationDiff keeps is_clean as a dataclass field for the UML contract.
+    # Its __post_init__ must see the populated lists rather than an empty diff.
+    return VerificationDiff(
+        unknown_props=unknown_props,
+        type_mismatches=type_mismatches,
+        unknown_types=unknown_types,
+    )
 
 
 class SchemaVerificationService:
@@ -82,39 +130,7 @@ class SchemaVerificationService:
             if start != -1 and end != -1:
                 cleaned = cleaned[start : end + 1]
             data = json.loads(cleaned)
-            diff = VerificationDiff()
-            for u in data.get("unknown_props", []) or []:
-                from backend.schema_diff import UnknownProperty
-
-                diff.unknown_props.append(
-                    UnknownProperty(
-                        node_type=u.get("node_type", ""),
-                        property_name=u.get("property_name", ""),
-                        sample_value_repr=u.get("sample_value_repr", ""),
-                        occurrences=int(u.get("occurrences", 0) or 0),
-                    )
-                )
-            for tm in data.get("type_mismatches", []) or []:
-                from backend.schema_diff import TypeMismatch
-
-                diff.type_mismatches.append(
-                    TypeMismatch(
-                        node_type=tm.get("node_type", ""),
-                        property_name=tm.get("property_name", ""),
-                        schema_type=tm.get("schema_type", ""),
-                        observed_value_repr=tm.get("observed_value_repr", ""),
-                    )
-                )
-            for ut in data.get("unknown_types", []) or []:
-                from backend.schema_diff import UnknownType
-
-                diff.unknown_types.append(
-                    UnknownType(
-                        type_name=ut.get("type_name", ""),
-                        occurrences=int(ut.get("occurrences", 0) or 0),
-                    )
-                )
-            return diff
+            return _model_diff(data)
         except (LLMConfigError, BudgetExhaustedError):
             raise
         except Exception as e:

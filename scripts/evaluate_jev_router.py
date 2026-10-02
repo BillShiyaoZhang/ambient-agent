@@ -15,6 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from backend.agent.decision_context import project_routing_context
 from backend.agent.jev_router import JevDecisionClient, JevRouterConfig, JevRouterError, build_request
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.router_context import GraphSnapshot, RouterContext
@@ -25,6 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 async def evaluate(args: argparse.Namespace) -> None:
     load_dotenv(REPO_ROOT / ".env", override=False)
     config = JevRouterConfig.from_env()
+    if args.context_version is not None:
+        config = JevRouterConfig.model_validate({**config.snapshot(), "context_version": args.context_version})
     if args.timeout_seconds is not None:
         config = JevRouterConfig.model_validate({**config.snapshot(), "timeout_s": args.timeout_seconds})
     payload = json.loads(args.cases.read_text(encoding="utf-8"))
@@ -49,11 +52,18 @@ async def evaluate(args: argparse.Namespace) -> None:
                     session_recent=raw_context.get("session_recent", []),
                     session_summary=raw_context.get("session_summary"),
                 )
-                context_text = context.render_for_prompt(sections=["widgets", "graph_counts", "history"])
+                sections = ["widgets", "graph_counts", "history"]
+                if config.context_version == "routing-context-v2":
+                    projection = project_routing_context(case["message"], context, sections)
+                    context_text, candidates = projection.context_text, projection.app_candidates
+                    row["projection"] = projection.metadata
+                else:
+                    context_text = context.render_for_prompt(sections=sections) + "\n\n" + catalog
+                    candidates = context.app_manifests
                 request = build_request(
                     case["message"],
-                    context_text + "\n\n" + catalog,
-                    context.app_manifests,
+                    context_text,
+                    candidates,
                     case["language"],
                     config,
                 )
@@ -88,6 +98,7 @@ def main() -> None:
     parser.add_argument("--cases", type=Path, default=REPO_ROOT / "proposals/jev-intent-router/cases.json")
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--timeout-seconds", type=float)
+    parser.add_argument("--context-version", choices=["routing-context-v1", "routing-context-v2"])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.limit < 1:
