@@ -43,6 +43,8 @@ Manifest 的 `types` 每项必须是字符串，例如 `["custom:weather"]`；�
 
 Coding Agent 的 Manifest 模板、生成提示提供当前类型标准。新建或修改 App 应依实际交付选类型和功能，不得仅因取得 grant 就声称实现功能；编辑现有 App 时保留并调整声明。Manifest 校验在既有 staging / verification / promotion 流程中执行。Agent 可通过只读类型目录和应用列表理解声明。
 
+模型提示使用由同一目录派生的 ID 引用与按 ID 索引的语义说明，不传入与 `app_spec.types` 同名的目录对象数组。生成和修复共享此投影，修复仍兼容历史 session 的完整目录；公共目录 API 的格式不变。声明规则与示例由同一函数渲染，并以规范校验器验证示例，避免提示和验证规则漂移。
+
 只读 `list_app_specs(app_id?)` tool 返回 App 的身份、说明、版本和完整声明。小型目录可省略参数；大型目录先用 `list_available_apps` 获取 ID，再按 `app_id` 逐个读取，避免多个合法声明合计超过工具输出上限。找不到指定 App 时返回空列表。
 
 `app_spec` 随 Manifest 文件携带，因而可作为未来商店包的分类与功能比较元数据。本次增加标准、验证、生成与应用中心展示；现有 App Center 仍是 workspace 的已安装目录，Skill Market 仍独立。不声称已经实现在线 App 发布、跨用户安装或运行正确性认证。

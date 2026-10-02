@@ -1,4 +1,12 @@
+import json
+import re
+from copy import deepcopy
+
+import pytest
+
 from backend.agent.prompts.manager import PromptManager
+from backend.app_types import AppSpecificationError, validate_app_spec
+from backend.coding_agent_repair import app_spec_declaration_rules
 
 
 def test_prompt_manager_initialization():
@@ -32,7 +40,11 @@ def test_agent_system_prompt_inclusion():
 def test_opencode_system_prompt_inclusion():
     pm = PromptManager()
     prompt = pm.get_prompt(
-        "coding_agent_system.md", app_id="weather-app", target_dir="/some/path", instruction="make weather blue"
+        "coding_agent_system.md",
+        app_id="weather-app",
+        target_dir="/some/path",
+        instruction="make weather blue",
+        app_spec_rules=app_spec_declaration_rules(),
     )
 
     assert "weather-app" in prompt
@@ -42,3 +54,47 @@ def test_opencode_system_prompt_inclusion():
     assert "Never keep user-authored drafts only in React hook state" in prompt
     assert "ambient.lifecycle.onBeforeSuspend(handler)" in prompt
     assert "awaits its `ambient.storage.set(...)`" in prompt
+    assert app_spec_declaration_rules() in prompt
+
+
+def _rendered_app_spec_example():
+    prompt = PromptManager().get_prompt(
+        "coding_agent_system.md",
+        app_id="weather-app",
+        target_dir="staging",
+        instruction="Create an approved draft",
+        app_spec_rules=app_spec_declaration_rules(),
+    )
+    examples = [json.loads(text) for text in re.findall(r"```json\n(.*?)\n```", prompt, re.S)]
+    assert len(examples) == 1
+    example = examples[0]
+    assert validate_app_spec(example).to_dict() == example
+    return example
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"spec_version": True},
+        {"spec_version": 1.0},
+        {"types": [{"id": "custom:weather"}]},
+        {"types": []},
+        {"types": ["custom:weather", "custom:weather"]},
+        {"types": ["custom:Weather"]},
+        {"types": ["custom:other"]},
+        {"types": ["calendar.unknown"]},
+        {"features": ["custom:weather.forecast"]},
+        {"features": [{"id": "custom:weather.forecast", "status": "partial", "surfaces": []}]},
+        {"features": [{"id": "custom:weather.forecast", "status": "planned", "surfaces": ["ui"]}]},
+        {"features": [{"id": "custom:weather.forecast", "status": "partial", "surfaces": ["network"]}]},
+        {"features": [{"id": "custom:weather.forecast", "status": "partial", "surfaces": ["ui", "ui"]}]},
+        {"features": [{"id": "custom:weather.forecast", "status": "partial", "surfaces": ["ui"], "notes": {}}]},
+        {"features": [{"id": "custom:weather.forecast", "status": "partial", "surfaces": ["ui"], "title": "Weather"}]},
+        {"title": "Weather catalog metadata"},
+    ],
+)
+def test_rendered_manifest_example_remains_strict_against_shape_and_semantic_mutations(change):
+    example = deepcopy(_rendered_app_spec_example())
+    example.update(change)
+    with pytest.raises(AppSpecificationError):
+        validate_app_spec(example)

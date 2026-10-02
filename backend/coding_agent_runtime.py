@@ -352,6 +352,15 @@ class CodingAgentRuntime:
             and Path(command[0]) == self._managed_coding_command()
         )
 
+    async def ensure_coding_ready(self, agent_id: str) -> None:
+        """Reject an unusable managed helper before a coding model session."""
+        command = self.coding_command(agent_id)
+        if command and self._uses_managed_coding_cli(agent_id, command) and not await self._code_mode_host_ready():
+            raise CodingAgentRuntimeError(
+                "Codex code mode is unavailable; repair the managed Codex installation before running coding tasks",
+                code="coding_agent_code_mode_unavailable",
+            )
+
     def coding_command(self, agent_id: str) -> list[str] | None:
         """Select coding execution without changing the pinned primary command."""
         if agent_id == "codex" and not os.getenv("CODEX_COMMAND", "").strip():

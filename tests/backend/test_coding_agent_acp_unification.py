@@ -135,6 +135,16 @@ async def test_direct_opencode_runner_rejects_native_model_before_acp_launch(tmp
 @pytest.mark.asyncio
 async def test_main_composition_root_has_no_opencode_execution_bypass(monkeypatch):
     calls = []
+    approved_template = {
+        "manifest_version": 2,
+        "id": "weather-app",
+        "title": "Weather",
+        "description": "",
+        "app_version": "0.1.0",
+        "intents": [],
+        "schema_refs": [],
+        "capabilities": [],
+    }
 
     async def fake_runner(app_id, instruction, **kwargs):
         calls.append((app_id, instruction, kwargs))
@@ -147,11 +157,13 @@ async def test_main_composition_root_has_no_opencode_execution_bypass(monkeypatc
         "build",
         coding_agent="opencode",
         coding_agent_model={"mode": "shared_binding", "inherit": "ambient.primary"},
+        manifest_template=approved_template,
     )
 
     assert result == "staged"
     assert len(calls) == 1
     assert calls[0][2]["coding_agent"] == "opencode"
+    assert calls[0][2]["manifest_template"] is approved_template
 
 
 @pytest.mark.asyncio

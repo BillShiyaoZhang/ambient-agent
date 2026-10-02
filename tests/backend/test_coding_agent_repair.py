@@ -1,12 +1,12 @@
 import json
 import re
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
 
+from backend.agent.prompts.manager import PromptManager
 from backend.app_manifest import AppManifest, ManifestValidationError
-from backend.app_types import get_app_type_catalog, validate_app_spec
+from backend.app_types import get_app_type_catalog, get_app_type_prompt_reference, validate_app_spec
 from backend.capabilities.models import RuntimeContract
 from backend.coding_agent_repair import (
     RepairFinding,
@@ -174,8 +174,8 @@ def test_structured_location_count_is_bounded_and_legacy_findings_stay_empty() -
 @pytest.mark.parametrize("namespace", ["custom:weather", "custom:weather-app"])
 def test_generation_and_repair_shape_examples_are_valid_and_custom_names_need_no_hyphen(namespace: str) -> None:
     rules = app_spec_declaration_rules()
-    system_prompt = (Path(__file__).parents[2] / "backend" / "agent" / "prompts" / "coding_agent_system.md").read_text(
-        encoding="utf-8"
+    system_prompt = PromptManager().get_prompt(
+        "coding_agent_system.md", app_id="weather-app", target_dir="staging", instruction="Draft", app_spec_rules=rules
     )
     rule_example = json.loads(re.search(r"```json\n(.*?)\n```", rules, re.S)[1])
     system_example = json.loads(re.search(r"```json\n(.*?)\n```", system_prompt, re.S)[1])
@@ -193,13 +193,21 @@ def test_generation_and_repair_shape_examples_are_valid_and_custom_names_need_no
         assert "deleting it to evade validation" in prompt
 
 
-def test_repair_context_keeps_request_template_and_complete_ids_without_catalog_metadata() -> None:
+@pytest.mark.parametrize("reference_shape", ["legacy_catalog", "id_reference"])
+def test_repair_context_keeps_request_template_and_complete_ids_without_catalog_metadata(reference_shape) -> None:
     catalog = get_app_type_catalog()
-    for entry in catalog["types"]:
-        entry["description"] = {"en": "expensive-catalog-description-marker" * 500}
+    if reference_shape == "legacy_catalog":
+        context = deepcopy(catalog)
+        for entry in context["types"]:
+            entry["description"] = {"en": "expensive-catalog-description-marker" * 500}
+    else:
+        context = get_app_type_prompt_reference("zh")
+        context["type_descriptions_by_id"] = dict.fromkeys(
+            context["type_ids"], "expensive-catalog-description-marker" * 500
+        )
     template = {**_manifest(), "contract_version": 1, "catalog_version": 12, "unapproved_metadata": "do-not-copy"}
     prompt = build_repair_prompt(
-        finding("Bad type ID", attempt=1, artifact="one"), instruction=_instruction(template=template, catalog=catalog)
+        finding("Bad type ID", attempt=1, artifact="one"), instruction=_instruction(template=template, catalog=context)
     )
 
     assert "显示杭州天气；使用中文界面并保留城市选择。" in prompt
@@ -216,6 +224,16 @@ def test_repair_context_keeps_request_template_and_complete_ids_without_catalog_
     assert app_spec_declaration_rules() in prompt
     assert "never add or broaden capabilities" in prompt
     assert len(prompt) < 8_000
+
+
+@pytest.mark.parametrize("context", ["malformed-json", {"type_ids": ["calendar"], "feature_ids_by_type": {}}])
+def test_malformed_retained_reference_uses_original_session_without_partial_mapping(context) -> None:
+    instruction = _instruction(catalog=context) if isinstance(context, dict) else "[APP TYPE STANDARD]\n" + context
+    prompt = build_repair_prompt(finding("Bad type ID", attempt=1, artifact="one"), instruction=instruction)
+    reference = prompt.split("[APP TYPE STANDARD — ID REFERENCE]\n", 1)[1].split("\n\n[", 1)[0]
+    assert "Consult the complete App Type Standard in the original ACP instruction" in reference
+    assert '"type_ids"' not in reference
+    assert app_spec_declaration_rules() in prompt
 
 
 def test_contract_excerpt_does_not_accidentally_duplicate_template_or_catalog() -> None:

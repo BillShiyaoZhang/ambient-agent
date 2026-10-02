@@ -277,6 +277,7 @@ async def _run_coding_agent_staged(
     coding_agent: str | None = None,
     coding_agent_model: dict[str, Any] | None = None,
     staged_result: CodingAgentStagedResult | None = None,
+    manifest_template: dict[str, Any] | None = None,
     artifact_validator: Any = None,
     repair_decider: Any = None,
 ):
@@ -302,6 +303,7 @@ async def _run_coding_agent_staged(
         runtime=coding_agent_config_store.runtime,
         model_config=coding_agent_model or coding_agent_config_store.model_config(selected),
         staged_result=staged_result,
+        manifest_template=manifest_template,
         artifact_validator=effective_artifact_validator,
         repair_decider=repair_decider,
     )

@@ -103,8 +103,11 @@ class PromptCaptured(Exception):
 async def _capture_coding_instruction(monkeypatch, *, existing: dict | None = None) -> tuple[str, dict]:
     captured: list[str] = []
 
-    async def runner(_app_id: str, instruction: str, **_kwargs) -> None:
+    captured_templates: list[dict | None] = []
+
+    async def runner(_app_id: str, instruction: str, *, manifest_template: dict | None = None, **_kwargs) -> None:
         captured.append(instruction)
+        captured_templates.append(copy.deepcopy(manifest_template))
         raise PromptCaptured
 
     manifest = SimpleNamespace(to_dict=lambda: copy.deepcopy(existing)) if existing else None
@@ -134,21 +137,25 @@ async def _capture_coding_instruction(monkeypatch, *, existing: dict | None = No
 
     instruction = captured[0]
     template_text = instruction.split("[REQUIRED MANIFEST V2 TEMPLATE]\n", 1)[1].split("\n\n[", 1)[0]
+    assert captured_templates == [json.loads(template_text)]
     return instruction, json.loads(template_text)
 
 
 @pytest.mark.asyncio
 async def test_coding_prompt_uses_shared_catalogue_and_actual_implementation_rules(monkeypatch) -> None:
-    catalogue = {
-        "spec_version": 1,
-        "types": [{"id": "custom:review", "title": {"en": "Review", "zh": "评审"}, "features": []}],
+    reference = {
+        "type_ids": ["custom:review"],
+        "feature_ids_by_type": {"custom:review": []},
+        "type_descriptions_by_id": {"custom:review": "评审实际交付的功能。"},
+        "feature_descriptions_by_id": {},
     }
-    monkeypatch.setattr(workflow_module, "get_app_type_catalog", lambda: catalogue, raising=False)
+    monkeypatch.setattr(workflow_module, "get_app_type_prompt_reference", lambda _language: reference, raising=False)
 
     instruction, template = await _capture_coding_instruction(monkeypatch)
 
     catalogue_text = instruction.split("[APP TYPE STANDARD]\n", 1)[1].split("\n\n[", 1)[0]
-    assert json.loads(catalogue_text) == catalogue
+    assert json.loads(catalogue_text) == reference
+    assert "types" not in json.loads(catalogue_text)
     assert "actually delivered" in instruction
     assert "grant alone" in instruction
     assert "implemented" in instruction and "partial" in instruction and "planned" in instruction

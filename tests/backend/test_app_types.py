@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 
 import pytest
@@ -5,7 +6,13 @@ import pytest
 from backend.app_manifest import AppManifest, ManifestValidationError
 from backend.app_manager import AppManager
 from backend.app_store import AppStoreService, CapabilityManifest
-from backend.app_types import AppSpecificationError, validate_app_spec
+from backend.app_types import (
+    AppSpecificationError,
+    get_app_type_catalog,
+    get_app_type_prompt_reference,
+    project_app_type_prompt_reference,
+    validate_app_spec,
+)
 
 
 def app_spec(**overrides):
@@ -69,6 +76,7 @@ def test_legacy_manifest_and_explicit_null_remain_unclassified():
         [],
         {},
         app_spec(spec_version=True),
+        app_spec(spec_version=1.0),
         app_spec(spec_version=2),
         app_spec(extra=True),
         app_spec(types=[]),
@@ -259,6 +267,86 @@ def test_type_catalog_is_bilingual_complete_and_returns_independent_copies():
     expected = deepcopy(catalog)
     catalog["types"][0]["title"]["zh"] = "changed"
     assert get_app_type_catalog() == expected
+
+
+@pytest.mark.parametrize("language", ["en", "zh", "zh-CN", "fr"])
+def test_model_type_reference_has_complete_ids_and_localized_semantics_without_instance_keys(language):
+    catalog = get_app_type_catalog()
+    original = deepcopy(catalog)
+    reference = get_app_type_prompt_reference(language)
+    locale = "zh" if language.startswith("zh") else "en"
+
+    assert set(reference) == {
+        "type_ids",
+        "feature_ids_by_type",
+        "type_descriptions_by_id",
+        "feature_descriptions_by_id",
+    }
+    assert reference["type_ids"] == [item["id"] for item in catalog["types"]]
+    assert reference["feature_ids_by_type"] == {
+        item["id"]: [feature["id"] for feature in item["features"]] for item in catalog["types"]
+    }
+    assert reference["type_descriptions_by_id"] == {
+        item["id"]: item["description"][locale] for item in catalog["types"]
+    }
+    assert reference["feature_descriptions_by_id"] == {
+        feature["id"]: feature["description"][locale] for item in catalog["types"] for feature in item["features"]
+    }
+    assert len(json.dumps(reference, ensure_ascii=False, separators=(",", ":"))) < 4_000
+    assert len(json.dumps(reference, ensure_ascii=False)) < len(json.dumps(catalog, ensure_ascii=False))
+    with pytest.raises(AppSpecificationError):
+        validate_app_spec(reference)
+    reference["type_ids"].clear()
+    reference["feature_ids_by_type"]["calendar"].clear()
+    reference["type_descriptions_by_id"]["calendar"] = "changed"
+    assert get_app_type_catalog() == original
+    assert get_app_type_prompt_reference(language)["type_ids"][0] == "calendar"
+
+
+def test_reference_projection_supports_retained_catalogs_and_new_context_without_losing_ids():
+    catalog = get_app_type_catalog()
+    reference = project_app_type_prompt_reference(catalog, language="zh")
+    expected_ids = {key: reference[key] for key in ("type_ids", "feature_ids_by_type")}
+    assert project_app_type_prompt_reference(catalog, include_descriptions=False) == expected_ids
+    assert project_app_type_prompt_reference(reference, include_descriptions=False) == expected_ids
+    assert project_app_type_prompt_reference(reference) == reference
+
+
+def test_reference_descriptions_fall_back_without_omitting_types_or_features():
+    catalog = {
+        "types": [
+            {
+                "id": "custom:lab",
+                "description": {"zh": "实验室"},
+                "features": [{"id": "custom:lab.samples", "description": {"en": "Samples"}}],
+            },
+            {"id": "custom:other", "description": {"es": "Otro"}, "features": []},
+        ]
+    }
+    reference = project_app_type_prompt_reference(catalog, language="fr")
+    assert reference["type_ids"] == ["custom:lab", "custom:other"]
+    assert reference["type_descriptions_by_id"] == {"custom:lab": "实验室", "custom:other": "Otro"}
+    assert reference["feature_ids_by_type"] == {"custom:lab": ["custom:lab.samples"], "custom:other": []}
+    assert reference["feature_descriptions_by_id"] == {"custom:lab.samples": "Samples"}
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        None,
+        {"types": [{"id": "calendar", "features": ["calendar.events"]}]},
+        {"type_ids": [{"id": "calendar"}], "feature_ids_by_type": {"calendar": []}},
+        {"type_ids": ["calendar", "calendar"], "feature_ids_by_type": {"calendar": []}},
+        {"type_ids": ["calendar"], "feature_ids_by_type": {}},
+        {"type_ids": ["calendar"], "feature_ids_by_type": {"calendar": ["tasks.items"]}},
+        {"type_ids": ["calendar"], "feature_ids_by_type": {"calendar": ["calendar.events", "calendar.events"]}},
+    ],
+)
+def test_malformed_reference_is_rejected_instead_of_dropping_or_coercing_ids(reference):
+    original = deepcopy(reference)
+    with pytest.raises(ValueError):
+        project_app_type_prompt_reference(reference)
+    assert reference == original
 
 
 def test_app_spec_at_declared_limits_preserves_order_and_owns_its_values():

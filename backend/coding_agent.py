@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -190,6 +191,7 @@ async def run_coding_agent(
     runtime: CodingAgentRuntime | None = None,
     model_config: dict[str, Any] | None = None,
     staged_result: CodingAgentStagedResult | None = None,
+    manifest_template: Mapping[str, Any] | None = None,
     artifact_validator: Any = None,
     repair_decider: Any = None,
 ):
@@ -205,6 +207,7 @@ async def run_coding_agent(
         native_model=str((model_config or {}).get("native_model") or "") or None,
         extra_environment=extra_environment,
     )
+    await resolved_runtime.ensure_coding_ready(coding_agent)
     return await run_coding_agent_acp(
         app_id,
         instruction,
@@ -213,6 +216,7 @@ async def run_coding_agent(
         launch=launch,
         promote=promote,
         staged_result=staged_result,
+        manifest_template=manifest_template,
         artifact_validator=artifact_validator,
         repair_decider=repair_decider,
     )

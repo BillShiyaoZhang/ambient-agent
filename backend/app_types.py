@@ -306,6 +306,106 @@ def get_app_type_catalog() -> dict[str, Any]:
     return deepcopy(_CATALOG)
 
 
+def _prompt_description(value: object, language: str) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    locale = language.lower().replace("_", "-")
+    preferred = (locale, locale.split("-", 1)[0], "en", "zh")
+    for key in (*dict.fromkeys(preferred), *sorted(key for key in value if isinstance(key, str))):
+        text = value.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return ""
+
+
+def project_app_type_prompt_reference(
+    value: object, *, language: str = "en", include_descriptions: bool = True
+) -> dict[str, Any]:
+    """Project either a catalog or a retained prompt reference into distinct ID keys.
+
+    This is reference-context formatting, never coercion of an App declaration.
+    Invalid references are rejected rather than silently losing vocabulary IDs.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("App Type reference must be an object")
+    type_descriptions: dict[str, str] = {}
+    feature_descriptions: dict[str, str] = {}
+    if "type_ids" in value:
+        types = value.get("type_ids")
+        features = value.get("feature_ids_by_type")
+        raw_type_descriptions = value.get("type_descriptions_by_id", {})
+        raw_feature_descriptions = value.get("feature_descriptions_by_id", {})
+        if not isinstance(raw_type_descriptions, dict) or not isinstance(raw_feature_descriptions, dict):
+            raise ValueError("App Type descriptions must be ID-keyed objects")
+    else:
+        entries = value.get("types")
+        if not isinstance(entries, list):
+            raise ValueError("App Type catalog must contain type metadata")
+        types = []
+        features = {}
+        raw_type_descriptions = {}
+        raw_feature_descriptions = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                raise ValueError("App Type catalog contains invalid type metadata")
+            type_id = entry["id"]
+            if type_id in features:
+                raise ValueError("App Type catalog contains duplicate type IDs")
+            declared_features = entry.get("features", [])
+            if not isinstance(declared_features, list) or any(
+                not isinstance(feature, dict) or not isinstance(feature.get("id"), str) for feature in declared_features
+            ):
+                raise ValueError("App Type catalog contains invalid feature metadata")
+            types.append(type_id)
+            features[type_id] = [feature["id"] for feature in declared_features]
+            raw_type_descriptions[type_id] = entry.get("description", {})
+            for feature in declared_features:
+                raw_feature_descriptions[feature["id"]] = feature.get("description", {})
+    if (
+        not isinstance(types, list)
+        or any(not isinstance(type_id, str) or not type_id or len(type_id) > MAX_SPEC_ID_LENGTH for type_id in types)
+        or len(types) != len(set(types))
+        or not isinstance(features, dict)
+        or set(features) != set(types)
+    ):
+        raise ValueError("App Type reference must contain unique IDs and their complete feature mapping")
+    feature_ids_by_type: dict[str, list[str]] = {}
+    for type_id in types:
+        feature_ids = features[type_id]
+        if (
+            not isinstance(feature_ids, list)
+            or any(
+                not isinstance(feature_id, str)
+                or not feature_id.startswith(f"{type_id}.")
+                or len(feature_id) > MAX_SPEC_ID_LENGTH
+                for feature_id in feature_ids
+            )
+            or len(feature_ids) != len(set(feature_ids))
+        ):
+            raise ValueError("App Type reference must contain unique feature IDs belonging to each type")
+        feature_ids_by_type[type_id] = list(feature_ids)
+        if include_descriptions:
+            description = _prompt_description(raw_type_descriptions.get(type_id), language)
+            if description:
+                type_descriptions[type_id] = description
+            for feature_id in feature_ids:
+                description = _prompt_description(raw_feature_descriptions.get(feature_id), language)
+                if description:
+                    feature_descriptions[feature_id] = description
+    result = {"type_ids": list(types), "feature_ids_by_type": feature_ids_by_type}
+    if include_descriptions:
+        result["type_descriptions_by_id"] = type_descriptions
+        result["feature_descriptions_by_id"] = feature_descriptions
+    return result
+
+
+def get_app_type_prompt_reference(language: str = "en") -> dict[str, Any]:
+    """Return concise, localized model context distinct from Manifest field names."""
+    return project_app_type_prompt_reference(get_app_type_catalog(), language=language)
+
+
 class AppSpecificationError(ValueError):
     """An App implementation declaration does not match the standard."""
 

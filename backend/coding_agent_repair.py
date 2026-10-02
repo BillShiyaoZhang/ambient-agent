@@ -10,6 +10,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+from backend.app_types import (
+    APP_SPEC_VERSION,
+    MAX_APP_FEATURES,
+    MAX_APP_TYPES,
+    MAX_FEATURE_NOTES_LENGTH,
+    MAX_SPEC_ID_LENGTH,
+    project_app_type_prompt_reference,
+)
+
 Repairability = Literal["deterministic", "code_only", "design_change", "operator"]
 ContractImpact = Literal["none", "subset_only", "expansion", "unknown"]
 RepairAction = Literal["repair", "design", "operator", "human"]
@@ -34,15 +43,28 @@ _MAX_REPAIR_LOCATIONS = 16
 def app_spec_declaration_rules() -> str:
     """One manifest-instance shape contract for generation and repair prompts."""
 
+    example = json.dumps(
+        {
+            "spec_version": APP_SPEC_VERSION,
+            "types": ["custom:weather"],
+            "features": [{"id": "custom:weather.forecast", "status": "partial", "surfaces": ["ui"]}],
+        },
+        separators=(",", ":"),
+    )
     return (
         "Optional `app_spec` is an implementation declaration with exactly `spec_version`, `types`, and `features`. "
-        "`spec_version` is the integer 1. `types` is an ordered, non-empty array of unique type ID strings "
+        f"`spec_version` is the integer {APP_SPEC_VERSION}. `types` is an ordered, non-empty array of unique type ID strings "
         "(primary type first), never objects. The App Type Standard catalog's `types` entries are metadata objects: "
         "copy only each selected `id` string, never its `title`, `description`, or `features` object into `types`. "
+        "The model-facing reference uses `type_ids`, `feature_ids_by_type`, and ID-keyed descriptions; "
+        "these lookup keys are not Manifest fields. "
         "`features` is an array of declaration objects with `id`, `status`, `surfaces`, and optional string `notes`; "
         "never an array of ID strings or catalog feature metadata. Status is `implemented`, `partial`, or `planned`. "
         "Implemented and partial features require at least one actual surface (`data`, `tools`, or `ui`); "
-        "planned features use an empty surfaces array. IDs and surfaces must be unique. Standard feature IDs "
+        "planned features use an empty surfaces array. IDs and surfaces must be unique. "
+        f"Declare at most {MAX_APP_TYPES} types and {MAX_APP_FEATURES} features; each ID is a non-empty string "
+        f"of at most {MAX_SPEC_ID_LENGTH} characters and notes are at most {MAX_FEATURE_NOTES_LENGTH} characters. "
+        "Standard feature IDs "
         "must belong to a declared type. Custom types use `custom:<namespace>` and their feature IDs use "
         "`custom:<namespace>.<feature>`, with lowercase alphanumeric or kebab-case names; a single word such as "
         "`custom:weather` is valid and does not require a hyphen. Choose declarations from actually delivered "
@@ -52,8 +74,7 @@ def app_spec_declaration_rules() -> str:
         "the approved Runtime Contract. This complete valid custom example illustrates shape only; select the "
         "appropriate IDs and truthful statuses for the actual App:\n\n"
         "```json\n"
-        '{"spec_version":1,"types":["custom:weather"],"features":[{"id":"custom:weather.forecast",'
-        '"status":"partial","surfaces":["ui"]}]}\n'
+        f"{example}\n"
         "```"
     )
 
@@ -290,23 +311,10 @@ def _app_type_catalog_context(instruction: str) -> str:
         return ""
     try:
         catalog = json.loads(raw)
-        entries = catalog["types"]
-        if not isinstance(entries, list):
-            raise ValueError("Invalid catalog")
-        types: list[str] = []
-        features: dict[str, list[str]] = {}
-        for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-                raise ValueError("Invalid catalog type")
-            declared_features = entry.get("features", [])
-            if not isinstance(declared_features, list) or any(
-                not isinstance(feature, dict) or not isinstance(feature.get("id"), str) for feature in declared_features
-            ):
-                raise ValueError("Invalid catalog features")
-            types.append(entry["id"])
-            features[entry["id"]] = [feature["id"] for feature in declared_features]
         raw = json.dumps(
-            {"type_ids": types, "feature_ids_by_type": features}, ensure_ascii=False, separators=(",", ":")
+            project_app_type_prompt_reference(catalog, include_descriptions=False),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
     except (ValueError, TypeError, KeyError):
         raw = "Consult the complete App Type Standard in the original ACP instruction; do not invent standard IDs."

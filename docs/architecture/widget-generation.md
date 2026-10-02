@@ -114,6 +114,10 @@ Runtime Contract 是 approved design 编译出的不可变执行信封，至少�
 
 Grant operation 与 SDK action 必须分别表达。例如 `graph.mutate.operations=["create"]` 授权 `{action:"create_node"}`，不得让模型从单词相似性推断 payload。
 
+获批 Manifest 模板通过结构化参数交给 Coding Agent runner。宿主在创建 staging 或启动模型前校验模板；只有新生成且缺少 Manifest 时才原子初始化该文件。已有 Manifest、保留的失败草稿及私有数据不被初始化覆盖。Controller 仍由 Coding Agent 实际生成，不能用宿主占位组件冒充完成；初始化后的产物仍须通过完整独立验证与合同比对。
+
+生成与修复使用同一类型引用投影：`type_ids`、`feature_ids_by_type` 以及按 ID 索引的简短语义说明，避免把目录对象误当成 Manifest 实例。系统提示和修复提示从同一函数渲染声明规则与合法示例，示例由规范校验器执行验证。公共类型目录仍保留完整元数据。
+
 ## 7. 验证与修复闭环
 
 验证顺序固定为：
@@ -153,6 +157,7 @@ Verifier/adapter 统一输出 `RepairFinding`：
 - 不原生兼容的 Agent 只能通过固定版本、可审计的 bridge 接入。Codex 使用 `@agentclientprotocol/codex-acp`，bridge 通过 `CODEX_PATH` 复用受管理的 Codex CLI 和原生登录，并将官方 app-server 映射为 ACP。
 - 生产镜像预装并固定 bridge 版本，不在每次生成时从网络下载；本地开发可以通过显式命令覆盖。
 - bridge 不拥有授权决策、staging、自动修复预算或发布权。它只翻译协议；Ambient 的 ACP client 与 durable workflow 始终是控制平面。
+- 受管理的 Codex 在每次启动编码 session 前执行有界 code-mode helper 可运行性探测。缺失、损坏或不兼容的 helper 直接报运行环境错误，不调用生成模型，也不进入产物自动修复。
 - `acpx` 一类外部 ACP runtime 可作为 Agent 命令目录、恢复和互操作参考，但当前不嵌入执行路径，避免出现第二套 session store、queue、权限和取消语义。
 
 Codex bridge 选择 [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp)：它由 ACP 组织维护并进入官方 Registry，直接把 Codex app-server 映射为 stdio ACP，还支持用 `CODEX_PATH` 复用 Ambient 管理的 CLI。调研过的 [openclaw/acpx](https://github.com/openclaw/acpx) 更适合作为通用 headless ACP client/runtime，但嵌入它会重复 Ambient 已有的 session、queue、取消和权限控制；[cola-io/codex-acp](https://github.com/cola-io/codex-acp) 与 [beyond5959/acp-adapter](https://github.com/beyond5959/acp-adapter) 可作为互操作参考，但不作为当前生产依赖。

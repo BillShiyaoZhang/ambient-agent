@@ -38,10 +38,11 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
-from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
+from backend.app_manifest import MAX_MANIFEST_BYTES, AppManifest, ManifestValidationError, validate_app_id
 from backend.coding_agent_repair import (
     RepairDirective,
     RepairFinding,
+    app_spec_declaration_rules,
     artifact_hash,
     build_repair_prompt,
     decide_widget_repair,
@@ -770,6 +771,23 @@ async def spawn_agent_process(
             stderr_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await stderr_task
+
+
+def _validated_manifest_template(template: Mapping[str, Any] | None, app_id: str) -> AppManifest | None:
+    """Validate host-supplied metadata before allocating a draft or starting an Agent."""
+
+    if template is None:
+        return None
+    if not isinstance(template, Mapping):
+        raise CodingAgentACPInputError("Approved Manifest template must be a mapping")
+    try:
+        manifest = AppManifest.from_dict(dict(template), expected_app_id=app_id)
+        canonical = json.dumps(manifest.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n"
+        if len(canonical.encode("utf-8")) > MAX_MANIFEST_BYTES:
+            raise ManifestValidationError("manifest exceeds its maximum size")
+        return manifest
+    except (ManifestValidationError, TypeError, ValueError) as exc:
+        raise CodingAgentACPInputError(f"Invalid approved Manifest template: {exc!s}") from exc
 
 
 def _prepare_staging_app(apps_dir: str | Path, app_id: str) -> tuple[Path, Path]:
@@ -1862,6 +1880,7 @@ async def run_coding_agent_acp(
     launch: Any,
     promote: bool = True,
     staged_result: CodingAgentStagedResult | None = None,
+    manifest_template: Mapping[str, Any] | None = None,
     artifact_validator: Callable[[CodingAgentStagedResult], Any] | None = None,
     repair_decider: Callable[[RepairFinding, tuple[RepairFinding, ...]], RepairDirective] | None = None,
 ) -> str | CodingAgentStagedResult:
@@ -1878,6 +1897,7 @@ async def run_coding_agent_acp(
     if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
         raise CodingAgentACPInputError("Coding Agent ACP timeout must be positive")
 
+    seed_manifest = _validated_manifest_template(manifest_template, app_id)
     workspace_dir = os.getenv("WORKSPACE_DIR", "workspace")
     apps_dir = os.getenv("APPS_DIR", os.path.join(workspace_dir, "apps"))
     owns_staging = staged_result is None
@@ -1904,6 +1924,11 @@ async def run_coding_agent_acp(
     last_finding: RepairFinding | None = None
 
     try:
+        if owns_staging and seed_manifest is not None and not (staging_dir / "manifest.json").exists():
+            try:
+                seed_manifest.write_atomic(staging_dir / "manifest.json", compact=True)
+            except OSError as exc:
+                raise CodingAgentACPStartupError(f"Unable to initialize approved Manifest in staging: {exc!s}") from exc
         logger.info("Spawning %s ACP agent for App %s inside staging directory", agent_name, app_id)
         try:
             async with spawn_agent_process(
@@ -1939,6 +1964,7 @@ async def run_coding_agent_acp(
                     target_dir=str(staging_dir),
                     instruction=instruction,
                     language=language,
+                    app_spec_rules=app_spec_declaration_rules(),
                 )
 
                 decide_repair = repair_decider or decide_widget_repair
@@ -2093,6 +2119,7 @@ async def run_opencode_agent_acp(
     *,
     promote: bool = True,
     staged_result: CodingAgentStagedResult | None = None,
+    manifest_template: Mapping[str, Any] | None = None,
     artifact_validator: Callable[[CodingAgentStagedResult], Any] | None = None,
     repair_decider: Callable[[RepairFinding, tuple[RepairFinding, ...]], RepairDirective] | None = None,
 ) -> str | CodingAgentStagedResult:
@@ -2127,6 +2154,7 @@ async def run_opencode_agent_acp(
         ),
         promote=promote,
         staged_result=staged_result,
+        manifest_template=manifest_template,
         artifact_validator=artifact_validator,
         repair_decider=repair_decider,
     )

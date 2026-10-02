@@ -114,6 +114,10 @@ The Runtime Contract is the immutable execution envelope compiled from the appro
 
 Grant operations and SDK actions are represented separately. For example, `graph.mutate.operations=["create"]` authorizes `{action:"create_node"}`; the model must not infer payload values from word similarity.
 
+The approved Manifest template reaches the Coding Agent runner as a structured parameter. The host validates it before creating staging or starting the model, then atomically initializes a missing Manifest only for fresh generation. Initialization never overwrites an existing Manifest, a retained failed draft, or private data. The Coding Agent must still create the actual Controller; a host placeholder cannot count as completion. Seeded artifacts still require full independent verification and comparison with the approved contract.
+
+Generation and repair share a type-reference projection: `type_ids`, `feature_ids_by_type`, and brief semantic descriptions indexed by ID. This avoids treating catalogue objects as Manifest instances. System and repair prompts render declaration rules and valid examples from the same function, with examples executed against the canonical validator. The public type catalogue retains its full metadata.
+
 ## 7. Verification and repair loop
 
 Verification order is fixed:
@@ -153,6 +157,7 @@ The policy is deterministic:
 - A non-native Agent may only enter through a pinned, auditable bridge. Codex uses `@agentclientprotocol/codex-acp`; the bridge reuses the managed Codex CLI and native login through `CODEX_PATH` and maps the official app-server to ACP.
 - Production images preinstall and pin bridge versions instead of downloading them for each generation. Local development may use an explicit command override.
 - A bridge never owns authorization decisions, staging, the automatic-repair budget, or publication. It only translates protocols; Ambient's ACP client and durable workflow remain the control plane.
+- Before each coding session, managed Codex runs a bounded executable-health probe for its code-mode helper. A missing, damaged, or incompatible helper raises an environment error before any generation-model call or artifact repair.
 - External ACP runtimes such as `acpx` are useful references for Agent command catalogs, recovery, and interoperability, but are not embedded in the current execution path because doing so would add a second session store, queue, permission model, and cancellation contract.
 
 The selected Codex bridge is [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp): it is maintained under the ACP organization, published through the official Registry, maps Codex app-server directly to stdio ACP, and can reuse Ambient's managed CLI through `CODEX_PATH`. [openclaw/acpx](https://github.com/openclaw/acpx) is a useful general headless ACP client/runtime, but embedding it would duplicate Ambient's existing session, queue, cancellation, and permission controls. [cola-io/codex-acp](https://github.com/cola-io/codex-acp) and [beyond5959/acp-adapter](https://github.com/beyond5959/acp-adapter) remain interoperability references rather than current production dependencies.

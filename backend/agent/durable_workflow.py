@@ -25,7 +25,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.slash_commands import SlashCommandParseError, explicit_skill_ids
 from backend.app_manager import AppManager
 from backend.app_manifest import AppManifest, ManifestValidationError, validate_app_id
-from backend.app_types import get_app_type_catalog
+from backend.app_types import get_app_type_prompt_reference
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.capabilities.models import RuntimeContract, normalize_grants
 from backend.coding_agent_repair import app_spec_declaration_rules, decide_widget_repair
@@ -1891,6 +1891,7 @@ class DurableAgentWorkflow:
         schemas = list(contract.get("schemas") or [])
         schema_text = "\n".join(f"- Type '{item['id']}': {json.dumps(item.get('properties', {}))}" for item in schemas)
         manifest_template = self._manifest_v2_template(contract)
+        language = str(state.data.get("language") or "zh")
         instruction = (
             f"{intent.instruction or ''}\n\n[APPROVED DEVELOPMENT PLAN]\n"
             f"{state.data.get('approved_plan', '')}\n\n[GRAPH DATABASE SCHEMAS]\n{schema_text}"
@@ -1903,7 +1904,7 @@ class DurableAgentWorkflow:
             "`schema_refs` must also be an array of unique, non-empty strings. "
             "Keep every capability entry in the exact approved object shape."
             "\n\n[APP TYPE STANDARD]\n"
-            f"{json.dumps(get_app_type_catalog(), ensure_ascii=False, sort_keys=True, indent=2)}"
+            f"{json.dumps(get_app_type_prompt_reference(language), ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
             "\n\n[APP TYPE DECLARATION RULES]\n"
             f"{app_spec_declaration_rules()}\n"
             "The initial template may be unclassified; do not infer classification from its title, schemas, "
@@ -1923,7 +1924,6 @@ class DurableAgentWorkflow:
                     "requested live behavior.\n"
                     f"{json.dumps(diagnostics, ensure_ascii=False, indent=2)[:16_000]}"
                 )
-        language = str(state.data.get("language") or "zh")
         coding_agent = str(state.model_snapshot.get("coding_agent") or "opencode")
         coding_agent_name = spec_for(coding_agent).name
         await self._emit_activity(
@@ -1951,6 +1951,7 @@ class DurableAgentWorkflow:
             supports_coding_agent = "coding_agent" in runner_parameters
             supports_coding_agent_model = "coding_agent_model" in runner_parameters
             supports_staged_result = "staged_result" in runner_parameters
+            supports_manifest_template = "manifest_template" in runner_parameters
             supports_artifact_validator = "artifact_validator" in runner_parameters
             supports_repair_decider = "repair_decider" in runner_parameters
         except (TypeError, ValueError):
@@ -1958,6 +1959,7 @@ class DurableAgentWorkflow:
             supports_coding_agent = True
             supports_coding_agent_model = True
             supports_staged_result = True
+            supports_manifest_template = True
             supports_artifact_validator = True
             supports_repair_decider = True
         if supports_promote:
@@ -1966,6 +1968,8 @@ class DurableAgentWorkflow:
             kwargs["coding_agent"] = coding_agent
         if supports_coding_agent_model:
             kwargs["coding_agent_model"] = dict(state.model_snapshot.get("coding_agent_config") or {})
+        if supports_manifest_template:
+            kwargs["manifest_template"] = manifest_template
         if supports_artifact_validator:
             kwargs["artifact_validator"] = lambda result: self._assert_staged_runtime_contract(
                 result.staging_dir,

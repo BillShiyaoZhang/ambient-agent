@@ -260,7 +260,7 @@ class AppManifest:
     def grants_digest(self) -> str:
         return grants_digest(self.capabilities)
 
-    def write_atomic(self, path: Path) -> None:
+    def write_atomic(self, path: Path, *, compact: bool = False) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
@@ -273,7 +273,13 @@ class AppManifest:
                 delete=False,
             ) as temporary_file:
                 temporary_path = Path(temporary_file.name)
-                json.dump(self.to_dict(), temporary_file, indent=2, ensure_ascii=False)
+                json.dump(
+                    self.to_dict(),
+                    temporary_file,
+                    indent=None if compact else 2,
+                    separators=(",", ":") if compact else None,
+                    ensure_ascii=False,
+                )
                 temporary_file.write("\n")
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())

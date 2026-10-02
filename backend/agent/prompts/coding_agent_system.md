@@ -19,13 +19,7 @@ Use the complete object under `[REQUIRED MANIFEST V2 TEMPLATE]` as the file shap
 
 Use `[APP TYPE STANDARD]` and `[APP TYPE DECLARATION RULES]` to classify the actual resulting implementation with `app_spec`. A new template may omit it until implementation is known. Preserve and adjust an existing declaration when modifying an App. Distinguish implemented, partial, and planned features, and list only surfaces actually provided. A grant alone proves no implemented feature. Type and feature coverage are author declarations, not verified behavior; they do not grant permissions, create callable tools, or change the approved schema. Do not claim certification or invent standard IDs.
 
-`app_spec` has exactly `spec_version`, `types`, and `features`. `spec_version` is the integer 1. `types` is an ordered, non-empty array of unique type ID strings (primary type first), never objects. Catalog `types` entries are metadata objects: copy only the selected `id` string, never its `title`, `description`, or `features` into `app_spec.types`. `features` is an array of declaration objects with `id`, `status`, `surfaces`, and optional string `notes`, not ID strings or catalog metadata. Status is `implemented`, `partial`, or `planned`; implemented/partial features list actual `data`, `tools`, or `ui` surfaces, while planned features use `[]`. Use unique IDs and surfaces, and declare each feature's corresponding type. Correct a repairable declaration rather than deleting it to evade validation.
-
-Custom type IDs use `custom:<namespace>`; their feature IDs use `custom:<namespace>.<feature>`, with lowercase alphanumeric or kebab-case names. A single word such as `custom:weather` is valid and does not require a hyphen. This complete valid example illustrates shape only; choose IDs and truthful statuses for the actual App:
-
-```json
-{"spec_version":1,"types":["custom:weather"],"features":[{"id":"custom:weather.forecast","status":"partial","surfaces":["ui"]}]}
-```
+{{ app_spec_rules }}
 
 # Widget runtime
 
