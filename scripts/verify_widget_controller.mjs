@@ -337,7 +337,9 @@ try {
   const transformed = Babel.transform(source, {
     filename: "controller.js",
     sourceType: "module",
-    presets: ["react"],
+    // Match the production transformer: Widget JSX becomes injected React.createElement calls.
+    // The automatic runtime would synthesize a static import and reject otherwise-safe intrinsic markup.
+    presets: [["react", { runtime: "classic" }]],
     plugins: [securityPlugin, "transform-modules-commonjs"],
     babelrc: false,
     configFile: false,

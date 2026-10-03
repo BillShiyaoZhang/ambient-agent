@@ -1,0 +1,212 @@
+{
+  "case_id": "compact-follow-up-dashboard",
+  "model": "gpt-6-luna",
+  "artifact_dir": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/app",
+  "artifact_hash": "55feccde75e607c23e54d51270f8c6d3ecdf68554dd523c5f147492af4f716bb",
+  "case_set_sha256": "43be50c3dbebafc5779a1aa1e3cd875755203f8be90ad082cceff25f116b7068",
+  "frame": "production widget-runtime/frame_server.mjs",
+  "checks": [
+    {
+      "id": "no-overflow-320-light",
+      "passed": true,
+      "detail": "document scrollWidth 320, clientWidth 320"
+    },
+    {
+      "id": "accessible-controls-320-light",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-320-light",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "no-overflow-640-light",
+      "passed": true,
+      "detail": "document scrollWidth 640, clientWidth 640"
+    },
+    {
+      "id": "accessible-controls-640-light",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-640-light",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "no-overflow-320-dark",
+      "passed": true,
+      "detail": "document scrollWidth 320, clientWidth 320"
+    },
+    {
+      "id": "accessible-controls-320-dark",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-320-dark",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "no-overflow-640-dark",
+      "passed": true,
+      "detail": "document scrollWidth 640, clientWidth 640"
+    },
+    {
+      "id": "accessible-controls-640-dark",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-640-dark",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "compact-empty-state",
+      "passed": true,
+      "detail": "first frame communicates that the private follow-up list is empty"
+    },
+    {
+      "id": "create-follow-up",
+      "passed": true,
+      "detail": "successful private write appears in the rendered list"
+    },
+    {
+      "id": "keyboard-primary-action",
+      "passed": true,
+      "detail": "follow-up creation works by pressing Enter on the focused action"
+    },
+    {
+      "id": "rename-follow-up",
+      "passed": true,
+      "detail": "updated private record appears in the rendered list"
+    },
+    {
+      "id": "toggle-done",
+      "passed": true,
+      "detail": "done state persisted privately"
+    },
+    {
+      "id": "delete-follow-up",
+      "passed": true,
+      "detail": "deletion persisted and removed the rendered row"
+    },
+    {
+      "id": "read-follow-up",
+      "passed": true,
+      "detail": "private file read and write observed"
+    },
+    {
+      "id": "storage-error",
+      "passed": true,
+      "detail": "file read failure is concise and retry recovers"
+    },
+    {
+      "id": "file-write-error",
+      "passed": true,
+      "detail": "failed private write leaves the file unchanged and shows an actionable error"
+    }
+  ],
+  "screenshots": [
+    {
+      "viewport_css_px": {
+        "width": 320,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-320-light.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-640-light.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 320,
+        "height": 680
+      },
+      "theme": "dark",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-320-dark.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "dark",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-640-dark.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "populated",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-640-light-populated.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "write-error",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-640-light-write-error.png"
+    }
+  ],
+  "rpc": [
+    {
+      "method": "files.read",
+      "params": {
+        "path": "follow-ups.json"
+      }
+    },
+    {
+      "method": "files.write",
+      "params": {
+        "path": "follow-ups.json",
+        "text": "[{\"title\":\"Calibrate backup beacon\",\"done\":false}]"
+      }
+    },
+    {
+      "method": "files.read",
+      "params": {
+        "path": "follow-ups.json"
+      }
+    }
+  ],
+  "page_errors": [],
+  "blocked_network_attempts": [],
+  "browser": {
+    "name": "Chromium",
+    "version": "154.0.8037.97",
+    "executable_path": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "playwright_core_version": "1.62.0"
+  },
+  "renderer_source_sha256": {
+    "widget-runtime/controller_facade.mjs": "1a377a56e3beb6e9dd38f83281ef00212a1139995bf3f3c3d9513947fc074969",
+    "widget-runtime/frame_server.mjs": "e83cc24df28fe2a0f2be068753619935c0fd8a9f60e3dd48eaa9f8bb60ad517c",
+    "widget-runtime/frame_shell.mjs": "cb9de1ff19782b5985aa59aa5e86c78a6a44c2250eb804fa78701676c7786a37",
+    "widget-runtime/frame_shell.css": "0e6afc241fa6318bbdef2546dfd31aaacab4f9b8f902b95c96f1555231032c65",
+    "widget-runtime/presentation_context.mjs": "792ef9f206fa8776f7400063356d3905e6385106200a91568b82e1aea4c5f7e4",
+    "widget-runtime/runtime.mjs": "56127ffdc3e4960b8736087d9fd306602c2bc5c29f2f8d5ea540229741070f4c"
+  },
+  "error": "Error: Timed out waiting for retried failed write\n    at waitForSaved (file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_ui_quality.mjs:335:9)\n    at async verifyCrud (file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_ui_quality.mjs:404:19)\n    at async file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_ui_quality.mjs:430:59",
+  "failure_text": "Follow-ups\n0 open · 0 total\nAdd\nNo follow-ups yet. Add one above to get started.",
+  "failure_screenshot": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/screenshots/compact-follow-up-dashboard-failed.png",
+  "passed": false
+}

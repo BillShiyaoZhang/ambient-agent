@@ -82,6 +82,7 @@ from backend.skill_store import (
 from backend.workspace_storage import WorkspaceStorage
 
 logger = logging.getLogger("agent.durable_workflow")
+_SCHEMA_REFINE_RECOVERY_KEY = "schema_refine_recovery"
 
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 LiveEventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
@@ -863,6 +864,88 @@ class DurableAgentWorkflow:
         response = interaction.get("response")
         state.pending_interaction_id = None
         return response if isinstance(response, dict) else {"approved": response is True}
+
+    def _validated_schema_refine_recovery(
+        self,
+        recovery: Any,
+        run: dict[str, Any],
+        state: AgentRunState,
+    ) -> dict[str, Any]:
+        if not isinstance(recovery, dict):
+            raise WorkflowError("Schema refinement recovery data is invalid", code="schema_refine_recovery_invalid")
+        source_run_id = recovery.get("source_run_id")
+        interaction_id = recovery.get("interaction_id")
+        if (
+            not isinstance(source_run_id, str)
+            or not source_run_id
+            or not isinstance(interaction_id, str)
+            or not interaction_id
+        ):
+            raise WorkflowError(
+                "Schema refinement recovery provenance is missing", code="schema_refine_recovery_invalid"
+            )
+        source_run = self.run_store.get_run(source_run_id)
+        interaction = self.run_store.get_interaction(interaction_id)
+        ancestors: set[str] = set()
+        current_id: str | None = str(run.get("id") or "")
+        for _ in range(32):
+            if not current_id or current_id in ancestors:
+                break
+            ancestors.add(current_id)
+            ancestor = self.run_store.get_run(current_id)
+            if ancestor is None:
+                break
+            parent_id = ancestor.get("retry_of")
+            current_id = str(parent_id) if parent_id else None
+        source_state = source_run.get("state") if source_run is not None else None
+        current_intent = state.intent if isinstance(state.intent, dict) else {}
+        source_intent = source_state.get("intent") if isinstance(source_state, dict) else None
+        source_intent = source_intent if isinstance(source_intent, dict) else {}
+        if (
+            source_run is None
+            or source_run.get("id") != source_run_id
+            or source_run_id not in ancestors
+            or source_run.get("owner_id") != run.get("owner_id")
+            or source_run.get("source_id") != run.get("source_id")
+            or not isinstance(source_state, dict)
+            or source_state.get("phase") != "wait_schema"
+            or source_state.get("session_id") != state.session_id
+            or source_state.get("workflow_type") != state.workflow_type
+            or source_intent.get("app_id") != current_intent.get("app_id")
+            or interaction is None
+            or interaction.get("id") != interaction_id
+            or interaction.get("run_id") != source_run_id
+            or interaction.get("type") != "schema_approval"
+            or interaction.get("status") != "resolved"
+            or not isinstance(interaction.get("payload"), dict)
+            or interaction["payload"].get("type") != "schema_approval_request"
+        ):
+            raise WorkflowError(
+                "Schema refinement recovery source is no longer valid", code="schema_refine_recovery_invalid"
+            )
+        resolved_response = interaction.get("response")
+        if not isinstance(resolved_response, dict) or resolved_response.get("approved") != "refine":
+            raise WorkflowError(
+                "Only a resolved Schema refine response can be recovered", code="schema_refine_recovery_invalid"
+            )
+        source_data = source_state.get("data") if isinstance(source_state, dict) else None
+        candidate = source_data.get("schema_candidate") if isinstance(source_data, dict) else None
+        expected_proposal = resolved_response.get("proposal")
+        if not isinstance(expected_proposal, dict):
+            expected_proposal = interaction["payload"].get("proposal")
+        if not isinstance(expected_proposal, dict):
+            expected_proposal = candidate
+        expected_feedback = str(resolved_response.get("feedback") or "")[:12_000]
+        if (
+            not isinstance(expected_proposal, dict)
+            or recovery.get("proposal") != expected_proposal
+            or recovery.get("feedback") != expected_feedback
+            or recovery.get("action") != "refine"
+        ):
+            raise WorkflowError(
+                "Schema refinement recovery does not match its resolved response", code="schema_refine_recovery_invalid"
+            )
+        return {"proposal": expected_proposal, "feedback": expected_feedback}
 
     @staticmethod
     def _approval(response: dict[str, Any]) -> str:
@@ -1789,11 +1872,22 @@ class DurableAgentWorkflow:
 
     async def _phase_wait_schema(self, run: dict[str, Any], state: AgentRunState) -> StepOutcomeValue:
         intent = self._current_intent(state)
-        response = self._response(state)
-        if response is None:
-            raise WorkflowError("Schema approval response is missing", code="interaction_unresolved")
-        action = self._approval(response)
         proposal = state.data.get("schema_candidate") or {}
+        recovery = state.data.get(_SCHEMA_REFINE_RECOVERY_KEY)
+        if recovery is not None:
+            recovered_inputs = self._validated_schema_refine_recovery(recovery, run, state)
+            response: dict[str, Any] = {
+                "proposal": recovered_inputs["proposal"],
+                "feedback": recovered_inputs["feedback"],
+            }
+            action = "refine"
+            consumed_interaction_id = None
+        else:
+            consumed_interaction_id = state.pending_interaction_id
+            response = self._response(state)
+            if response is None:
+                raise WorkflowError("Schema approval response is missing", code="interaction_unresolved")
+            action = self._approval(response)
         if action == "approve":
             edited_proposal = json.loads(json.dumps(response.get("proposal") or proposal))
             try:
@@ -1877,6 +1971,31 @@ class DurableAgentWorkflow:
             )[:16_000]
             return Continue(next_phase="plan", summary="Returning to development plan")
         if action == "refine":
+            if recovery is None:
+                response_proposal = response.get("proposal")
+                if not isinstance(response_proposal, dict):
+                    source_interaction = (
+                        self.run_store.get_interaction(consumed_interaction_id)
+                        if isinstance(consumed_interaction_id, str)
+                        else None
+                    )
+                    source_payload = source_interaction.get("payload") if isinstance(source_interaction, dict) else None
+                    response_proposal = source_payload.get("proposal") if isinstance(source_payload, dict) else proposal
+                if not isinstance(response_proposal, dict):
+                    response_proposal = proposal
+                recovery = {
+                    "source_run_id": str(run.get("id") or ""),
+                    "interaction_id": consumed_interaction_id,
+                    "action": "refine",
+                    "proposal": json.loads(json.dumps(response_proposal, ensure_ascii=False)),
+                    "feedback": str(response.get("feedback") or "")[:12_000],
+                }
+                recovered_inputs = self._validated_schema_refine_recovery(recovery, run, state)
+                state.data[_SCHEMA_REFINE_RECOVERY_KEY] = recovery
+                response = {
+                    "proposal": recovered_inputs["proposal"],
+                    "feedback": recovered_inputs["feedback"],
+                }
             refined = await SchemaAlignmentService.refine_proposal(
                 instruction=self._widget_instruction(run, state, intent),
                 app_id=intent.app_id or "",
@@ -1902,7 +2021,7 @@ class DurableAgentWorkflow:
             )
             state.data["schema_candidate"] = refined
             state.phase = "wait_schema"
-            return await self._wait(
+            fresh_wait = await self._wait(
                 run,
                 state,
                 kind="schema_approval",
@@ -1914,6 +2033,8 @@ class DurableAgentWorkflow:
                     "proposal": refined,
                 },
             )
+            state.data.pop(_SCHEMA_REFINE_RECOVERY_KEY, None)
+            return fresh_wait
         return Failed(
             summary="Schema proposal denied",
             error_code="approval_denied",

@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "repair_run": false,
+  "case_set_sha256": "43be50c3dbebafc5779a1aa1e3cd875755203f8be90ad082cceff25f116b7068",
+  "repair_feedback_sha256": null,
+  "cases": [
+    {
+      "id": "forecast-operations-dashboard",
+      "status": "passed",
+      "production_staging_validated": true,
+      "model": "gpt-6-luna",
+      "artifact_hash": "7fdaacb6b37176041ab8386939895bb00ac66d665021e8f530e940791ccef874",
+      "artifact_dir": "docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/app",
+      "repair_attempts": 0,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed"
+      },
+      "elapsed_ms": 102114
+    },
+    {
+      "id": "compact-follow-up-dashboard",
+      "status": "passed",
+      "production_staging_validated": true,
+      "model": "gpt-6-luna",
+      "artifact_hash": "55feccde75e607c23e54d51270f8c6d3ecdf68554dd523c5f147492af4f716bb",
+      "artifact_dir": "docs/verification/coding-agent-ui-quality-artifacts/compact-follow-up-dashboard/app",
+      "repair_attempts": 0,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed"
+      },
+      "elapsed_ms": 56600
+    }
+  ],
+  "complete_passes": 2,
+  "elapsed_ms": 158736
+}

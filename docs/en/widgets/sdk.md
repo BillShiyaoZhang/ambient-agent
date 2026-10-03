@@ -19,6 +19,15 @@
 
 `TextField` delivers the current string value to `onChange(value)` and `onEnter(value)`; `Checkbox` delivers a boolean to `onChange(checked)`. Component callbacks do not expose DOM event objects.
 
+`Button` uses its `label` prop or its children for visible content. Children render when `label` is absent; an explicitly supplied `label` takes precedence, including an empty string. Children may contain text and elements such as icons. Other props, including `onClick`, `aria-*`, and `disabled`, are forwarded to the native button:
+
+```javascript
+const { Button } = ambient.components;
+return <Button onClick={openForecast} aria-label="View forecast" disabled={loading}>
+  <span aria-hidden="true">☀</span> View all seven days
+</Button>;
+```
+
 `List` renders text rows from its `items` prop. Each item can be a string or an object with `label` or `name`; it also accepts `onItemClick` and `itemStyle`. It does not render child elements. `Table` renders text cells from `columns` and `rows` and supports row clicks only. For editable records or rows with buttons, checkboxes, or fields, map records to `<${Row}>` children inside `<${Column}>`.
 
 These interfaces grant no external-data access. Controllers do not use `window`, DOM queries, Cookies, browser storage globals, imports, `fetch`, raw WebSockets, `eval`, or `Function`.
@@ -37,6 +46,33 @@ useEffect(
 ```
 
 The Runtime automatically synchronizes the `--widget-*` CSS variables used by built-in components, page `color-scheme`, and prefers-reduced-motion media emulation. Use `presentation.locale` for dynamic language changes.
+
+### Native HTML, SVG, and styles
+
+`ambient.html` can also create native HTML and SVG elements. Controller JSX is compiled in classic mode to the injected React renderer. Use object-form `style` for CSS, including CSS Grid, and map supplied data into SVG marks. Give graphics an accessible name with semantic elements and `aria-label` or `title`. Markup still goes through HTM/React creation; it needs no DOM APIs, imports, external chart components, or HTML-string parsing.
+
+```javascript
+const points = [{ day: "Mon", value: 3 }, { day: "Tue", value: 5 }, { day: "Wed", value: 4 }];
+const pointList = points.map((point, index) => `${index * 50},${60 - point.value * 10}`).join(" ");
+
+return (
+  <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16 }}>
+    <div>
+      <h2>Weekly activity</h2>
+      <svg viewBox="0 0 100 70" role="img" aria-label="Activity trend, Monday to Wednesday">
+        <title>Activity trend</title>
+        <rect x="0" y="0" width="100" height="70" fill="var(--widget-surface-soft)" />
+        <polyline points={pointList} fill="none" stroke="var(--accent)" strokeWidth="3" />
+      </svg>
+    </div>
+    <ul aria-label="Daily activity details">
+      {points.map((point) => <li key={point.day}>{point.day}: {point.value}</li>)}
+    </ul>
+  </section>
+);
+```
+
+SVG and responsive layout are ordinary intrinsic elements and styles inside the existing HTM renderer. Keep a textual summary or detail list beside a chart when readers need exact values.
 
 ## 2. Local Widget Storage
 

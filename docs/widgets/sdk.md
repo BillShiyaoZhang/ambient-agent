@@ -19,6 +19,15 @@
 
 `TextField` 的 `onChange(value)` 与 `onEnter(value)` 接收当前字符串值；`Checkbox` 的 `onChange(checked)` 接收布尔值。组件回调不会暴露 DOM 事件对象。
 
+`Button` 可使用 `label` prop 或 children 作为可见内容；未提供 `label` 时渲染 children，明确提供的 `label` 优先（包括空字符串）。Children 可包含文本和图标等元素。`onClick`、`aria-*`、`disabled` 等其余属性会传给原生 button：
+
+```javascript
+const { Button } = ambient.components;
+return <Button onClick={openForecast} aria-label="View forecast" disabled={loading}>
+  <span aria-hidden="true">☀</span> View all seven days
+</Button>;
+```
+
 `List` 通过 `items` 属性渲染文本行；每项可以是字符串或包含 `label`/`name` 的对象，并支持 `onItemClick` 和 `itemStyle`。它不会渲染子元素。`Table` 用 `columns` 与 `rows` 渲染文本单元格，只支持行点击。需要在记录行中放置按钮、复选框或输入框时，应将记录映射为 `<${Row}>`，并放在 `<${Column}>` 中。
 
 这些接口不授予外部数据访问。Controller 不使用 `window`、DOM 查询、Cookie、浏览器 storage globals、import、`fetch`、原始 WebSocket、`eval` 或 `Function`。
@@ -37,6 +46,33 @@ useEffect(
 ```
 
 内置组件使用的 `--widget-*` CSS variables、页面 `color-scheme` 和 prefers-reduced-motion media emulation 由 Runtime 自动同步。动态语言以 `presentation.locale` 为准。
+
+### 原生 HTML、SVG 与样式
+
+`ambient.html` 也可创建原生 HTML 和 SVG 元素。Controller 中的 JSX 会以 classic 模式编译到已注入的 React renderer。用对象形式的 `style` 设置 CSS（包括 CSS Grid），并把 SVG 图形从已提供的数据映射出来；用语义元素和 `aria-label`/`title` 给图形提供可访问名称。所有标记仍通过 HTM/React 创建，不需要 DOM API、导入、外部图表组件或 HTML 字符串解析。
+
+```javascript
+const points = [{ day: "Mon", value: 3 }, { day: "Tue", value: 5 }, { day: "Wed", value: 4 }];
+const pointList = points.map((point, index) => `${index * 50},${60 - point.value * 10}`).join(" ");
+
+return (
+  <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16 }}>
+    <div>
+      <h2>Weekly activity</h2>
+      <svg viewBox="0 0 100 70" role="img" aria-label="Activity trend, Monday to Wednesday">
+        <title>Activity trend</title>
+        <rect x="0" y="0" width="100" height="70" fill="var(--widget-surface-soft)" />
+        <polyline points={pointList} fill="none" stroke="var(--accent)" strokeWidth="3" />
+      </svg>
+    </div>
+    <ul aria-label="Daily activity details">
+      {points.map((point) => <li key={point.day}>{point.day}: {point.value}</li>)}
+    </ul>
+  </section>
+);
+```
+
+SVG 与响应式布局是现有 HTM 渲染器支持的原生元素和样式。读者需要精确数值时，应在图表旁提供文字摘要或明细列表。
 
 ## 2. 本地 Widget Storage
 

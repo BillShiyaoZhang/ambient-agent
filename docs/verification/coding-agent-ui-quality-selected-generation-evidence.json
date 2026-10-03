@@ -1,0 +1,82 @@
+{
+  "format": 1,
+  "evidence_type": "selected-case-generation-evidence",
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "case_set_sha256": "43be50c3dbebafc5779a1aa1e3cd875755203f8be90ad082cceff25f116b7068",
+  "cases": [
+    {
+      "id": "forecast-operations-dashboard",
+      "status": "passed",
+      "production_staging_validated": true,
+      "model": "gpt-6-luna",
+      "artifact_hash": "7fdaacb6b37176041ab8386939895bb00ac66d665021e8f530e940791ccef874",
+      "artifact_dir": "docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/app",
+      "repair_attempts": 0,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed"
+      },
+      "elapsed_ms": 102114
+    },
+    {
+      "id": "compact-follow-up-dashboard",
+      "status": "generation_ready",
+      "generation_ready": true,
+      "production_staging_validated": true,
+      "model": "gpt-6-luna",
+      "artifact_hash": "89853b23dc9445699700511b64e57a43fb85b18d932706504c0f957d20a6f1ff",
+      "artifact_dir": "/tmp/ui-quality-crud-repair-artifacts/compact-follow-up-dashboard/app",
+      "repair_attempts": 0,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed"
+      },
+      "elapsed_ms": 28311
+    }
+  ],
+  "selection_provenance": {
+    "description": "Per-case selection from immutable production generation reports; original forecast retained, observed CRUD retry failure repaired after interaction testing.",
+    "source_reports": [
+      {
+        "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-generation.json",
+        "sha256": "6833e62bb63e1b0cb11af3a22e573e2469002f5ac76d9b02eb0f414740cfaa07",
+        "repair_run": false,
+        "dispatches_in_source": 3
+      },
+      {
+        "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-repair/repair-generation.json",
+        "sha256": "1117b236612ee3da4897269e567a8d966f5f59f25cd9224dde54f250a29a2496",
+        "repair_run": true,
+        "dispatches_in_source": 1,
+        "repair_feedback_sha256": "d3d3ca803112942ea6545b67b26d04ec59c60a3cb93440d68d0544fc9a897082"
+      }
+    ],
+    "case_sources": {
+      "forecast-operations-dashboard": {
+        "report": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-generation.json",
+        "selected_case_id": "forecast-operations-dashboard"
+      },
+      "compact-follow-up-dashboard": {
+        "report": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-repair/repair-generation.json",
+        "selected_case_id": "compact-follow-up-dashboard",
+        "supersedes_initial_case": true
+      }
+    },
+    "model_dispatch_accounting": {
+      "initial_dispatches": 3,
+      "initial_retained_artifacts": 2,
+      "initial_duplicate_dispatched_then_discarded_after_retention_collision": 1,
+      "focused_repair_dispatches": 1,
+      "total_dispatches": 4
+    },
+    "shared_guide_hash_used_for_generation_and_repair": "2002d5ee19cfb9710ed599207d8139312e6e38247f52cc1ddda77ca483a1f99d",
+    "later_shared_guide_hash_with_persist-pending-write-rule": "f1a9d811e4c1a3eb3724da2d0e68f75bf1def1039b2bd5f817a3f482ca98f2cc",
+    "repair_feedback": "The original browser test observed that files.write failed for a new follow-up and Retry re-read the file, discarding the unsaved draft. The repair was explicitly asked to retain the draft and retry the pending write. The shared-guide paragraph expressing this rule was added after the repair call; the focused feedback already required the same behavior."
+  }
+}

@@ -335,7 +335,7 @@ async def test_capability_dependencies_are_validated_and_selection_changes_canno
     result = await align(inventory)
 
     assert len(provider.calls) == 3
-    assert "Validation error:" in provider.calls[1]["messages"][-1]["content"]
+    assert "Validation diagnostic:" in provider.calls[1]["messages"][-1]["content"]
     assert "COMPILED SCHEMA" not in provider.calls[2]["messages"][1]["content"]
     assert result["capabilities"][0]["scope"]["entities"] == ["Event"]
 

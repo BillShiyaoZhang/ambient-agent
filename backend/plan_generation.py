@@ -7,6 +7,7 @@ from backend.llm_config import LLMConfigError
 from backend.llm_runtime import primary_selection, selection_ids
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.schema_alignment import existing_app_context
+from backend.ui_quality import ui_quality_guide
 
 logger = logging.getLogger("plan_generation")
 
@@ -38,6 +39,7 @@ Keep the plan concise, clear, and direct without compressing away requirements. 
 file listings, or technical configuration steps.
 Preserve the existing App's working features and approved capability baseline unless the user asks to remove them.
 Use the supplied actual runtime catalog to assess feasibility. Catalog support is not approval; available capabilities can be proposed for approval. Missing installed providers must not hide available public HTTPS networking or device SDK capabilities. If a mandatory behavior cannot be supported, explain the specific blocker and a meaningful alternative for the user to review; do not call an unavailable/error label an implementation of the requested feature.
+{ui_quality_guide()}
 IMPORTANT: You MUST write the plan in {"Chinese (中文)" if is_zh else "English"}."""
 
         user_prompt = f"""We are designing/modifying a widget app:
@@ -100,6 +102,7 @@ Keep it a concise, high-level plan covering every requested behavior, interactio
 and relevant loading, empty, validation and failure/retry states, with observable acceptance criteria.
 Carry forward unchanged requirements and apply the user's feedback explicitly. Do NOT write source code.
 Preserve existing working behavior and approved capabilities unless feedback explicitly removes them. Assess mandatory requested behavior against the actual runtime catalog: available capabilities can be proposed for approval, while a genuinely missing capability requires a specific blocker and meaningful alternative for review. Do not silently substitute unavailable/error labels for mandatory live features.
+{ui_quality_guide()}
 IMPORTANT: You MUST write the refined plan in {"Chinese (中文)" if is_zh else "English"}."""
 
         user_prompt = f"""We are building/modifying a widget app:

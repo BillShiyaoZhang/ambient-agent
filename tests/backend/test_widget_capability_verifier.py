@@ -340,3 +340,37 @@ def test_verifier_rejects_navigation_and_peer_network_globals(tmp_path):
         completed = verify(case_path, source, [])
         assert completed.returncode != 0
         assert "Forbidden" in verifier_error_report(completed)["message"]
+
+
+def test_verifier_accepts_data_driven_intrinsic_svg_and_styled_html(tmp_path):
+    source = """
+      export default function App() {
+        const points = [{ day: 'Mon', value: 3 }, { day: 'Tue', value: 5 }];
+        const polyline = points.map((point, index) => `${index * 50},${60 - point.value * 10}`).join(' ');
+        return <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
+          <svg viewBox="0 0 100 70" role="img" aria-label="Activity trend">
+            <title>Activity trend</title>
+            <path d="M0 60 L50 10" />
+            <polyline points={polyline} fill="none" />
+            <rect x="0" y="0" width="100" height="70" />
+          </svg>
+          <ul aria-label="Daily activity details">{points.map((point) => <li key={point.day}>{point.day}: {point.value}</li>)}</ul>
+        </section>;
+      }
+    """
+    completed = verify(tmp_path, source, [])
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_verifier_keeps_chart_imports_and_dom_access_forbidden(tmp_path):
+    cases = [
+        "import { Chart } from 'chart-library'; export default function App() { return <Chart />; }",
+        "export default function App() { return <div>{document.querySelector('svg')}</div>; }",
+    ]
+    for index, source in enumerate(cases):
+        case_path = tmp_path / f"graphics-denied-{index}"
+        case_path.mkdir()
+        completed = verify(case_path, source, [])
+        assert completed.returncode != 0
+        report = verifier_error_report(completed)
+        assert report["code"] in {"unsupported_import", "forbidden_runtime_api"}

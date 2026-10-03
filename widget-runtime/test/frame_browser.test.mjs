@@ -63,6 +63,8 @@ test(
     try {
       result = await page.evaluate(async (url) => {
         const iframe = document.createElement("iframe");
+        iframe.style.width = "600px";
+        iframe.style.height = "480px";
         iframe.src = url;
         document.body.append(iframe);
         window.__widgetFocused = false;
@@ -74,6 +76,7 @@ test(
         return new Promise((resolve, reject) => {
           const channel = new MessageChannel();
           const hostEvents = [];
+          window.__widgetHostEvents = hostEvents;
           let runtimeReady = false;
           const timer = setTimeout(
             () => reject(
@@ -96,14 +99,12 @@ test(
                 nonce: "browser-test-nonce",
                 controller_source: `
                   export default function Controller({ ambient }) {
-                    const cardRef = ambient.react.useRef(null);
+                    const { Button } = ambient.components;
                     ambient.react.useEffect(() => {
                       try {
-                        ambient.sendMessage(
-                          "style:" + getComputedStyle(cardRef.current).borderRadius
-                        );
+                        ambient.sendMessage("graphics-mounted");
                       } catch (error) {
-                        ambient.sendMessage("style-error:" + error.message);
+                        ambient.sendMessage("graphics-error:" + error.message);
                       }
                       fetch("https://example.invalid/controller-egress")
                         .then(() => ambient.sendMessage("external-network-allowed"))
@@ -113,11 +114,25 @@ test(
                           "storage:" + JSON.stringify(value)
                         ));
                     }, []);
-                    return (
-                      <div ref={cardRef} style={{ borderRadius: "13px" }}>
-                        Native controller
+                    const points = [{ day: "Mon", value: 3 }, { day: "Tue", value: 5 }];
+                    const polyline = points.map((point, index) => index * 50 + "," + (60 - point.value * 10)).join(" ");
+                    return <section aria-label="Activity dashboard" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                      <div style={{ borderRadius: "13px", backgroundColor: "#d03030", minHeight: 100 }}>
+                        <h2>Native controller</h2>
+                        <svg viewBox="0 0 100 70" role="img" aria-label="Activity trend">
+                          <title>Activity trend</title>
+                          <rect x="0" y="0" width="100" height="70" fill="#23b35a" />
+                          <path d="M0 60 L50 10" stroke="#111111" />
+                          <polyline points={polyline} fill="none" stroke="#111111" strokeWidth="3" />
+                        </svg>
+                        <Button onClick={() => ambient.sendMessage("button-click")}>
+                          <span aria-hidden="true">☀</span> View all seven days
+                        </Button>
                       </div>
-                    );
+                      <div style={{ backgroundColor: "#245bd0", minHeight: 100 }} aria-label="Daily activity details">
+                        {points.map((point) => <p key={point.day}>{point.day}: {point.value}</p>)}
+                      </div>
+                    </section>;
                   }
                 `,
                 capability_ids: [],
@@ -154,7 +169,7 @@ test(
               runtimeReady
               && hostEvents.includes("network-blocked")
               && hostEvents.includes("storage:null")
-              && hostEvents.includes("style:13px")
+              && hostEvents.includes("graphics-mounted")
             ) {
               clearTimeout(timer);
               resolve({ hostEvents, runtimeReady });
@@ -179,10 +194,38 @@ test(
     assert.equal(result.runtimeReady, true);
     assert.ok(result.hostEvents.includes("network-blocked"));
     assert.ok(result.hostEvents.includes("storage:null"));
-    assert.ok(result.hostEvents.includes("style:13px"));
+    assert.ok(result.hostEvents.includes("graphics-mounted"));
     assert.equal(result.hostEvents.includes("external-network-allowed"), false);
     const widgetFrame = page.frames().find((frame) => frame.url() === frameUrl);
     assert.ok(widgetFrame, "expected the isolated Widget frame");
+    const chart = widgetFrame.getByRole("img", { name: "Activity trend" });
+    assert.equal(await chart.getAttribute("viewBox"), "0 0 100 70");
+    assert.equal(await chart.locator("rect").count(), 1);
+    assert.equal(await chart.locator("path").count(), 1);
+    assert.equal(await chart.locator("polyline").count(), 1);
+    const button = widgetFrame.getByRole("button", { name: "View all seven days" });
+    await button.waitFor({ timeout: 3_000 });
+    await button.focus();
+    await button.press("Enter");
+    await page.waitForFunction(() => window.__widgetHostEvents.includes("button-click"));
+    const styledCard = widgetFrame.getByText("Native controller").locator("..");
+    assert.equal(await styledCard.evaluate((element) => getComputedStyle(element).borderRadius), "13px");
+    const iframe = page.locator("iframe");
+    await iframe.evaluate((element) => {
+      element.style.width = "600px";
+      element.style.height = "480px";
+    });
+    const section = widgetFrame.getByRole("region", { name: "Activity dashboard" });
+    const wideColumns = await section.evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.equal(wideColumns.trim().split(/\s+/).filter((track) => parseFloat(track) > 100).length, 2);
+    await iframe.evaluate((element) => { element.style.width = "320px"; });
+    await widgetFrame.waitForFunction(() =>
+      getComputedStyle(document.querySelector("section")).gridTemplateColumns.trim().split(/\s+/).filter((track) => parseFloat(track) > 100).length === 1,
+      undefined,
+      { timeout: 3_000 },
+    );
+    const narrowColumns = await section.evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    assert.equal(narrowColumns.trim().split(/\s+/).filter((track) => parseFloat(track) > 100).length, 1);
     await widgetFrame.getByText("Native controller").click();
     await page.waitForFunction(() => window.__widgetFocused === true);
     await page.evaluate(() => {

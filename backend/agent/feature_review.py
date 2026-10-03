@@ -33,7 +33,16 @@ _DESIGN_REVIEW_SCOPE = (
     "criteria to review; do not ask for a separate acceptance-criteria document or heading. Each row has four fields: "
     "id is its stable feature identifier; description specifies the observable behavior required of the future "
     "implementation; capability_ids names its dependencies from state.capabilities; network_sources lists exact "
-    "{source_id,path} dependencies within those declared network scopes. Assess whether these criteria cover the "
+    "{source_id,path} dependencies within those declared network scopes. Assess the criteria collectively: one row "
+    "may cover more than one objective, so do not demand duplicate rows for behavior that is already clearly covered. "
+    "Judge only observable future behavior, user-visible results and requested state transitions against the complete "
+    "instruction, approved plan and direct feedback; do not invent an additional objective or implementation recipe. "
+    "For a live service, judge whether the declared capability and source/path support the behavior. Do not demand "
+    "query parameters, provider variable lists, response-field mappings, serialization details or code/file structure "
+    "unless the user or approved plan explicitly requires those exact details. When the provider or its response fields "
+    "are not selected yet, a criterion requiring the implementation to verify the chosen provider's documentation and "
+    "actual response before displaying the requested supported data is a sufficient design commitment. Exact values or "
+    "fields that the user or approved plan did specify must still be covered. Assess whether these criteria cover the "
     "request and provide supported dependencies for that future behavior. Controller code, runtime traces, test "
     "results and already-obtained device permissions are not expected or required at this stage; later staging gates "
     "verify implementation. A complete design may describe behavior that has not been implemented or run yet. "
@@ -47,7 +56,8 @@ _QUESTIONS = {
         + "Do the proposed criteria in state.required_features cover every distinct user-visible objective and target "
         "in the complete original instruction, approved_plan and direct feedback? Missing feature commitments, "
         "generic summaries or an unavailable/error notice replacing a requested action must answer no. Do not "
-        "silently drop an objective because capabilities are absent. Judge design coverage, not present execution.",
+        "silently drop an objective because capabilities are absent. Do not require a separate criterion when an existing "
+        "criterion already covers that objective. Judge design coverage, not present execution.",
     },
     "enforceable_dependencies": {
         "type": "noul",
@@ -58,6 +68,8 @@ _QUESTIONS = {
         "device SDK dependency. A feature described as real live behavior but with empty/irrelevant dependencies "
         "must answer no. UI-only features may legitimately have no capability dependencies. Declared supported "
         "dependencies are design evidence; do not demand a completed network call or a granted browser permission. "
+        "Check the exact source IDs and paths against declared scopes; do not demand query parameters, response-field "
+        "mappings or other implementation details unless explicitly required by the user or approved plan. "
         "This checks design completeness, never authorizes a grant.",
     },
     "no_silent_downgrade": {
@@ -191,7 +203,8 @@ async def review_feature_coverage(
         _DESIGN_REVIEW_SCOPE
         + "Independently review the proposed App acceptance criteria in state.required_features against the complete "
         "original request and approved plan, including direct feedback. "
-        "Check every objective/target, enforceable exact capability/source dependencies, and useful real behavior. "
+        "Check all distinct user-visible objectives and targets, enforceable exact capability dependencies, and useful "
+        "real behavior. Verify each approved network source and path by its declared ID against the matching grant. "
         "UI-only goals need no grant, but external live data, device actions or services need actual supported dependencies. "
         "Unavailable/loading/error labels, fake results or a TODO as final behavior cannot replace a requested live action. "
         "Permission-denied/error handling is valid alongside criteria requiring the actual requested action and "
@@ -199,6 +212,15 @@ async def review_feature_coverage(
         "Complete means this proposed design covers the requested objectives with enforceable dependencies; it does "
         "not mean the app already runs, passes tests or has device permission. "
         "This judgment grants no authority; output no capabilities, permissions or approvals. "
+        "Review criteria collectively and report only a concrete omitted objective, unsupported declared dependency, "
+        "or unjustified downgrade; do not demand duplicate criteria or query parameters, provider variable lists, "
+        "response-field mappings, serialization details or code structure unless the user or approved plan explicitly "
+        "requires them. When the provider or its exact supported response fields have not been fixed, requiring "
+        "implementation-time verification of provider docs and actual response fields before displaying requested "
+        "supported data is sufficient. If a criterion clearly covers "
+        "an objective, do not reject it because another row does not restate that objective. Preserve prior data or "
+        "unsaved user edits on failure only when the instruction, plan or feedback requires that behavior; when it does, "
+        "review that requested state transition explicitly. "
         "Return only strict JSON with exactly action and missing: "
         '{"action":"complete","missing":[]} or {"action":"revise","missing":["specific omitted objective or dependency"]}. '
         "Use revise whenever coverage/dependencies are uncertain; list 1..8 concrete corrections, each at most 320 characters."

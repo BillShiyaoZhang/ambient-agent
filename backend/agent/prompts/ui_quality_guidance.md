@@ -1,0 +1,7 @@
+## UI quality guidance
+
+Put the app's main purpose, useful summary and primary action first, with meaningful visual hierarchy. Keep every requested datum accessible; dense information can live in compact cards or lists, tabs, pagination or expandable details. Use real data-driven graphics when they help explain requested or naturally visual data. Do not represent a chart with Unicode glyphs. Preserve necessary reading content in document, note and other reading-oriented apps. Apply these choices to the task; there is no universal text-count limit, and charts belong where they help.
+
+The `ambient.components` namespace is limited to its documented primitives; `ambient.html` also supports intrinsic HTML/SVG tags and inline styles. Use them when they help the interface; they require no added library, DOM global or capability. Use the approved Ambient components and runtime APIs for app behavior. Make layouts work at 320px and 640px widths, maintain readable contrast in light and dark themes, support keyboard use, and give interactive controls accessible names. Show concise, actionable loading, empty and error states when relevant; never expose raw provider exceptions, internal plans, permission contracts or implementation notes as normal UI copy.
+
+Preserve unsaved user edits after a failed request; retry the failed operation instead of reloading over pending edits. Never present a failed write as saved.

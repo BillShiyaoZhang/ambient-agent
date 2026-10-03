@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 import sys
@@ -10,7 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from backend.codex_llm import NativeCodexTransport, _SAFE_CONFIG, _closed_schema, _error, _stop_process
+from backend.codex_llm import (
+    NativeCodexTransport,
+    _BYTE_LIMIT,
+    _ITEM_LIMIT,
+    _MESSAGE_LIMIT,
+    _SAFE_CONFIG,
+    _STREAM_MESSAGE_LIMIT,
+    _Connection,
+    _closed_schema,
+    _error,
+    _stop_process,
+)
 from backend.llm_config import ResolvedModel
 from backend.llm_service import LLMTransportError
 
@@ -246,6 +258,31 @@ class NativeProcess:
             return
         if self.scenario == "hang":
             return
+        if self.scenario in {"stream_deltas", "stream_overflow"}:
+            self.emit(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {"id": "final", "type": "agentMessage", "text": ""},
+                    },
+                }
+            )
+            delta_count = 1100 if self.scenario == "stream_deltas" else _STREAM_MESSAGE_LIMIT + 1
+            for _ in range(delta_count):
+                self.emit(
+                    {
+                        "method": "item/agentMessage/delta",
+                        "emittedAtMs": 1_797_000_000_000,
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "itemId": "final",
+                            "delta": "x",
+                        },
+                    }
+                )
         if self.scenario == "approval":
             self.emit(
                 {
@@ -848,6 +885,130 @@ async def test_absent_and_explicit_null_endpoints_preserve_native_defaults(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_many_bound_agent_message_deltas_use_separate_bounded_stream_budget(tmp_path):
+    transport, _, processes, _ = adapter(tmp_path, "stream_deltas")
+    result = await transport.generate(selection(), HISTORY, TOOLS)
+    assert result.text == "done"
+    assert processes[-1].stopped
+
+
+@pytest.mark.asyncio
+async def test_agent_message_delta_stream_budget_remains_bounded(caplog, tmp_path):
+    transport, _, processes, _ = adapter(tmp_path, "stream_overflow")
+    with caplog.at_level(logging.WARNING, logger="backend.codex_llm"), pytest.raises(LLMTransportError) as caught:
+        await transport.generate(selection(), HISTORY, TOOLS)
+    assert caught.value.details == {"native_reason": "output_limit"}
+    record = next(record for record in caplog.records if record.limit_kind == "stream_messages")
+    assert (record.observed, record.hard_limit) == (_STREAM_MESSAGE_LIMIT + 1, _STREAM_MESSAGE_LIMIT)
+    assert "private-secret" not in caplog.text
+    assert processes[-1].stopped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params,expected_reason",
+    [
+        ({"threadId": "foreign", "turnId": "turn-1", "itemId": "item-1", "delta": "x"}, "identity"),
+        (
+            {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "x", "extra": 1},
+            "native_notification",
+        ),
+        ({"threadId": "thread-1", "turnId": "turn-1", "itemId": "unknown", "delta": "x"}, "native_notification"),
+    ],
+)
+async def test_unbound_malformed_or_foreign_delta_never_uses_stream_credit(params, expected_reason):
+    class Process:
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+
+    process = Process()
+    message = {"method": "item/agentMessage/delta", "params": params}
+    process.stdout.feed_data(json.dumps(message).encode() + b"\n")
+    process.stdout.feed_eof()
+    connection = _Connection(process)
+    connection.thread_id = "thread-1"
+    connection.turn_id = "turn-1"
+    connection.pending_turn = True
+    connection.items["item-1"] = {"id": "item-1", "type": "agentMessage"}
+
+    received = await connection.receive()
+    assert connection.control_messages == 1
+    assert connection.stream_messages == 0
+    with pytest.raises(LLMTransportError) as caught:
+        connection.notification(received)
+    assert caught.value.details["native_reason"] == expected_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("emitted_at_ms", ["missing", -(2**63), -1, 0, 2**63 - 1])
+async def test_valid_optional_delta_timestamp_uses_stream_credit(emitted_at_ms):
+    class Process:
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+
+    process = Process()
+    message = {
+        "method": "item/agentMessage/delta",
+        "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "x"},
+    }
+    if emitted_at_ms != "missing":
+        message["emittedAtMs"] = emitted_at_ms
+    process.stdout.feed_data(json.dumps(message).encode() + b"\n")
+    process.stdout.feed_eof()
+    connection = _Connection(process)
+    connection.thread_id = "thread-1"
+    connection.turn_id = "turn-1"
+    connection.pending_turn = True
+    connection.items["item-1"] = {"id": "item-1", "type": "agentMessage"}
+
+    received = await connection.receive()
+    assert connection.control_messages == 0
+    assert connection.stream_messages == 1
+    connection.notification(received)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("emittedAtMs", True),
+        ("emittedAtMs", False),
+        ("emittedAtMs", None),
+        ("emittedAtMs", "1797000000000"),
+        ("emittedAtMs", 1.5),
+        ("emittedAtMs", 2**63),
+        ("emittedAtMs", -(2**63) - 1),
+        ("unexpected", 1),
+    ],
+)
+async def test_malformed_delta_envelope_is_rejected_without_stream_credit(field, value):
+    class Process:
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+
+    process = Process()
+    message = {
+        "method": "item/agentMessage/delta",
+        "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "x"},
+        field: value,
+    }
+    process.stdout.feed_data(json.dumps(message).encode() + b"\n")
+    process.stdout.feed_eof()
+    connection = _Connection(process)
+    connection.thread_id = "thread-1"
+    connection.turn_id = "turn-1"
+    connection.pending_turn = True
+    connection.items["item-1"] = {"id": "item-1", "type": "agentMessage"}
+
+    received = await connection.receive()
+    assert connection.control_messages == 1
+    assert connection.stream_messages == 0
+    with pytest.raises(LLMTransportError) as caught:
+        connection.notification(received)
+    assert caught.value.details["native_reason"] == "native_notification"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scenario,reason",
     [
@@ -894,6 +1055,56 @@ async def test_metadata_and_input_limits_have_fixed_reasons_before_any_turn(tmp_
         await transport.generate(selection(), [{"role": "user", "content": "x" * (512 * 1024)}])
     assert caught.value.details == {"native_reason": "input_limit"}
     assert processes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "limit_kind,observed,hard_limit",
+    [
+        ("line_bytes", _BYTE_LIMIT + 1, _BYTE_LIMIT),
+        ("total_bytes", _BYTE_LIMIT + 1, _BYTE_LIMIT),
+        ("control_messages", _MESSAGE_LIMIT + 1, _MESSAGE_LIMIT),
+        ("items", _ITEM_LIMIT + 1, _ITEM_LIMIT),
+    ],
+)
+async def test_native_output_limits_log_only_fixed_scalar_diagnostics(caplog, limit_kind, observed, hard_limit):
+    class Process:
+        def __init__(self, line_limit=_BYTE_LIMIT):
+            self.stdout = asyncio.StreamReader(limit=line_limit)
+
+    process = Process()
+    connection = _Connection(process)
+    small_line = json.dumps({"id": 1, "result": {}}).encode() + b"\n"
+    if limit_kind == "line_bytes":
+        process.stdout.feed_data(b"x" * (_BYTE_LIMIT + 1) + b"\n")
+        process.stdout.feed_eof()
+    elif limit_kind == "total_bytes":
+        connection.bytes = _BYTE_LIMIT - len(small_line) + 1
+        process.stdout.feed_data(small_line)
+        process.stdout.feed_eof()
+    elif limit_kind == "control_messages":
+        connection.control_messages = _MESSAGE_LIMIT
+        process.stdout.feed_data(small_line)
+        process.stdout.feed_eof()
+    else:
+        with caplog.at_level(logging.WARNING, logger="backend.codex_llm"), pytest.raises(LLMTransportError) as caught:
+            for index in range(_ITEM_LIMIT + 1):
+                connection._item({"id": f"item-{index}", "type": "reasoning"})
+        assert caught.value.details == {"native_reason": "output_limit"}
+        assert any(record.limit_kind == limit_kind for record in caplog.records)
+        record = next(record for record in caplog.records if record.limit_kind == limit_kind)
+        assert (record.observed, record.hard_limit) == (observed, hard_limit)
+        assert record.getMessage() == "Native Codex output bound reached"
+        assert "item-" not in record.getMessage()
+        return
+
+    with caplog.at_level(logging.WARNING, logger="backend.codex_llm"), pytest.raises(LLMTransportError) as caught:
+        await connection.receive()
+    assert caught.value.details == {"native_reason": "output_limit"}
+    record = next(record for record in caplog.records if record.limit_kind == limit_kind)
+    assert (record.observed, record.hard_limit) == (observed, hard_limit)
+    assert record.getMessage() == "Native Codex output bound reached"
+    assert "private-secret" not in caplog.text
 
 
 def test_unrecognized_diagnostic_reason_cannot_enter_message_or_audit():

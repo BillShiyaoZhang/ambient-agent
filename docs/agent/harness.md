@@ -111,7 +111,13 @@ stateDiagram-v2
 
 Schema interaction 原子批准数据 schema 与 capability grants。Workflow 随后生成带 grants digest 的不可变 Runtime Contract。Coding Agent 使用 `promote=False` 生成 staging；`verify` 要求 Manifest grants 等于 contract、代码使用为其子集，再检查 Graph schema。`promote` 持久化 marker、提交 schema 并原子替换 live App。recovery 不重复发布；失败、返工和取消保留旧 live App。
 
+如果 Schema `refine` 在调用模型或校验结果时失败，durable retry 只能恢复已解析 interaction 中明确的 `refine` 提案与反馈，并重新生成提案；必须创建新的 Schema 审批 interaction。不得把旧 `approve`、`deny` 或 `rework_plan` 当作重试授权，也不得跳过新审批继续编码。恢复输入须校验其来源 run、interaction 类型与已解析状态；不匹配时安全失败。
+
 首帧验收使用隔离 Chromium Runtime，并由宿主显式启用 `ephemeral_storage`，提供原生 Widget SDK 的 `ambient.storage` 与生命周期注册接口。存储仅在本次验收的内存中存在，最多 256 个键、1 MiB JSON 值；能力 RPC 仍经过原有授权器。首帧结果证明代码可以加载和渲染，持久化、暂停前刷盘与实际交互需要分别验证。文件首次读取的 `file_not_found` 在授权后返回；其他读取故障需要保留可见错误状态。
+
+计划生成、计划修改、编码与自动修复共享同一 UI 质量指南。默认视图先呈现摘要、主要操作和有意义的视觉层级；“全量信息”通过紧凑列表、分页或可展开详情保持可访问，不等于把全部字段平铺成文字。文档、笔记等以阅读为目的的 App 仍保留必要正文。需要趋势、分布等可视化时，使用真实数据驱动的图形，不以 Unicode 字符串冒充图表。原生 `ambient.html` 支持内置 HTML/SVG 标签和内联样式，详见 [Widget SDK](../widgets/sdk.md)；此能力不增加外部库、DOM 全局对象或网络权限。
+
+验收关注 320/640 像素宽度、明暗主题、键盘操作、控件名称、可见错误和详情访问。界面文案以任务和状态为中心，不把计划、权限契约、实现说明或原始供应商异常当作常驻正文。请求失败后保留未保存的用户编辑；重试原操作，避免重新读取覆盖待保存内容，不能把写入失败显示为已保存。确定性测试检查共享指南传播、图形渲染与权限边界；独立 GPT-6 luna 案例验证实际生成产物的图形、布局、详情与交互，并保留绑定代码哈希的截图。首帧成功不能证明 UI 质量；也不使用适用于所有 App 的文字数量或强制图表门槛。
 
 Schema verification 的生成 fallback 必须返回完整有效的 `unknown_props`、`type_mismatches`、`unknown_types` 三组列表，并在列表填充完成后构造 `VerificationDiff`。任一 finding 都使 `is_clean=false` 并进入 `wait_override`；缺列表或非法结果是验证失败，不能当作 clean。用户批准不能绕过 mandatory findings，必须返工代码、Schema 或计划后再次验证。
 
@@ -152,6 +158,12 @@ Manifest、权限、功能依赖、AST 与 Schema 的确定性校验不消耗模
 
 单应用的计划、Schema 对齐和编码同时保留原始用户请求与 Router 摘要；复合与 slash 命令步骤使用各自的范围内指令。计划覆盖适用的交互、持久化、数据来源和失败恢复，并给出可观察的验收条件。修复提示保留逐项功能条件；超长段落指向完整的原始 ACP 指令。Schema 模型回退读取完整 Controller，遵守 staging 的 2 MiB 上限；超限则拒绝，不能只验证前缀。
 
+Schema 对齐提示还包含当前版本的 App 类型/功能 ID 目录和自定义功能 ID 格式。初始生成与用户反馈后的 refinement 都必须使用本目录中的标准功能 ID 或合法的 `custom:<namespace>.<feature>` ID；批准的 `required_features` ID 会由后续 App 实现原样声明。功能标准从完整用户请求和获批计划中拆分成多个可独立验收的目标，涵盖适用的核心行为、数据源核实、持久化、定位、交互/失败恢复，以及可访问和主题适配的视觉呈现。若计划要求核实数据源，就应要求确认所选服务支持的字段，准确标注单位并诚实呈现不可用数据；只有请求或计划明确给出参数和映射细节时，才把它们写入标准，不能预先编造 API 配方。需要完整信息的界面也应明确摘要、真实图形或趋势视图和可访问的细节；只声明任务相关的状态，不把无关状态强加给 App。每个标准逐项填写其获批能力和精确来源路径，避免用一个笼统条目代替不同目标。用户提出 refinement 时，定向修复逐条处理每个具体反馈，保留仍然正确的功能标准、ID 与授权依赖，再分别补充缺失目标。提案解析或功能覆盖复核失败时，服务最多发起一次带有界校验诊断的定向修复；修复后的确定性拒绝会作为不可重试的 Schema 错误返回，避免 durable workflow 在新尝试中丢弃诊断并重复生成。模型调用或传输失败保持既有重试分类；配置错误和预算错误继续原样传播。
+
+功能覆盖复核按原始请求、批准方案和直接反馈中的可观察结果及明确状态转换，审查 `required_features` 整体；一条验收条件可以覆盖多个目标，不要求重复声明。依赖检查比对实际声明的 capability、来源 ID 和获批路径。当服务或其精确响应字段尚未确定时，不要求额外编造查询参数、变量清单、响应字段映射、序列化或代码组织；要求实现时核对所选服务文档及真实响应、按实际提供的数据展示用户要求的信息即可。用户或批准方案明确指定的字段与行为仍须覆盖。复核须指出真实遗漏、不受支持的依赖或功能降级；遇到不确定或无法复核时继续失败关闭，不自动改成通过。
+
+网络 capability 审批必须以有依据的具体 origin 和 path 为准。不能从服务名或功能名拼出 URL/path，也不能把同一供应商上不同 API host 的路径合并到一个来源。若 origin 或 path 尚无可靠资料，应明确标注需核实，并先确认实际端点后再请求对应范围的审批；已批准路径是能力边界，不是可以在后续实现中自由替换的占位符。此提示要求模型谨慎，不代表系统自动验证外部端点的真实性。
+
 Jev 可仅用于入口路由；`workflow_decisions=off` 时开发设计复核走 LLM。最终 Runtime Contract 批准后，正常执行路径由 Coding Agent 和确定性验证推进，不再重新路由或用 Jev 决定是否允许发布。最终审批前的目标覆盖复核仍保留，避免将占位提示误报为功能完成。
 
 ## 5. 事件、取消与保留期
@@ -178,6 +190,13 @@ Plan、Schema、verification 和 MCP/Agent permission 都使用 Run interaction�
 解析时拒绝。同步不改变模型绑定、Run 快照、工具权限或恢复语义。新版原生推理复用
 固定 `0.159.3` 二进制和独立推理 home，保留未升级安装的旧 profile；版本与 Linux 限制
 见 [Provider 契约](../integrations/llm-providers.md)。工具执行始终由 Ambient 工具循环所有。
+
+原生推理为每次接收保留 2 MiB 总字节硬上限、单行 StreamReader 界限和最多 64 个已登记 item。普通
+JSON-RPC 控制消息最多 1,024 条；仅精确匹配当前 thread/turn、结构合法且绑定已知 agent-message item
+的 delta 可使用独立的 8,192 条流式预算。每条流式消息的原始字节仍计入总字节上限；未知、格式错误、跨
+thread/turn 的通知以及 callback 仍按控制消息预算并保留原有校验和 fail-closed 行为。达到任一上限时，内部诊断只记录限额
+类型和标量计数，不记录 prompt、payload 或原始协议行；对外固定错误码与 `native_reason` 保持不变。
+delta envelope 可带可选 `emittedAtMs`；存在时必须是有符号 64 位 JSON integer（不接受 boolean 或 null），不额外假定非负。字段缺省兼容未发送时间戳的旧版协议；多余 envelope 字段仍不授予流式预算。
 
 `RemoteWorkspaceConnector` 是本地前台与 API 的受限传输入口，使用 `RemoteWorkspaceNodeStore` 保存并验证本机授权。它不改变 `RunCoordinator`、tool effect、审批或恢复语义。云平台只领取节点、签发一次性入口并中转；远程请求进入原有本地 API 和 Run 路径，仍受相同应用、能力和持久执行边界约束。完整范围和协议见 [远程工作区设计](../architecture/remote-workspace.md)。
 

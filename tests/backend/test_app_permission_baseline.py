@@ -499,9 +499,197 @@ async def test_semantically_incomplete_repair_cannot_return_an_approvable_propos
     with pytest.raises(WorkflowError, match="alignment") as failure:
         await getattr(SchemaAlignmentService, method)(**strict_schema_kwargs(method, initial))
 
-    assert failure.value.code in {"schema_alignment_failed", "schema_alignment_refinement_failed"}
+    assert failure.value.code == (
+        "schema_alignment_refinement_failed" if method == "refine_proposal" else "schema_alignment_failed"
+    )
+    assert failure.value.retryable is False
+    assert "Required live behavior remains absent" in str(failure.value)
     assert len(provider.calls) == 2
     assert reviewer.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["align_schemas", "refine_proposal"])
+async def test_alignment_prompts_include_app_type_ids_and_custom_feature_id_contract(monkeypatch, method):
+    generated = proposal(capabilities=[WEATHER])
+    provider = Provider(generated)
+    install_provider(monkeypatch, alignment_module, provider)
+    kwargs = strict_schema_kwargs(method, generated)
+    kwargs["require_feature_requirements"] = False
+    if method == "refine_proposal":
+        kwargs["feedback"] = "Keep the forecast"
+
+    await getattr(SchemaAlignmentService, method)(**kwargs)
+
+    system_prompt = provider.calls[0][0]["content"]
+    assert '"calendar.events"' in system_prompt
+    assert "custom:<lowercase-kebab-case-namespace>.<lowercase-kebab-case-feature>" in system_prompt
+    assert "later App implementation must declare exactly" in system_prompt
+    assert '"app_spec"' not in system_prompt.split("### Output Format:", 1)[1]
+    assert "multiple independently verifiable rows" in system_prompt
+    assert "no-location" in system_prompt
+    assert "supported fields before presenting live data" in system_prompt
+    assert "only when the user or approved plan gives those details" in system_prompt
+    assert "real graphics or trends" in system_prompt
+    assert '"custom:task-app.accessible-view"' in system_prompt
+    assert '"custom:task-app.recovery"' in system_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["align_schemas", "refine_proposal"])
+async def test_network_grant_prompts_require_evidence_backed_origins_and_paths(monkeypatch, method):
+    generated = proposal(capabilities=[WEATHER])
+    provider = Provider(generated)
+    install_provider(monkeypatch, alignment_module, provider)
+    kwargs = strict_schema_kwargs(method, generated)
+    kwargs["require_feature_requirements"] = False
+    if method == "refine_proposal":
+        kwargs["feedback"] = "Keep current weather access"
+
+    await getattr(SchemaAlignmentService, method)(**kwargs)
+
+    system_prompt = provider.calls[0][0]["content"]
+    assert "authoritative provider documentation or user-supplied evidence" in system_prompt
+    assert "Do not infer an endpoint from the service or feature name" in system_prompt
+    assert "different API hosts" in system_prompt
+    assert "exact capability boundaries" in system_prompt
+    assert "explicitly mark it for endpoint verification" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_semantic_repair_applies_each_feedback_item_and_preserves_existing_criteria(monkeypatch):
+    initial_criteria = [
+        {
+            "id": "custom:weather.forecast",
+            "description": "Fetch a real location-based forecast and show provider-confirmed fields with units.",
+            "capability_ids": ["network.request"],
+            "network_sources": [{"source_id": "open-meteo", "path": "/v1/forecast"}],
+        }
+    ]
+    corrected_criteria = [
+        *initial_criteria,
+        {
+            "id": "custom:weather.recovery",
+            "description": "Show loading, no-location, empty, invalid-location, and request-error states; preserve input and unsaved edits and retry only the failed request.",
+            "capability_ids": [],
+            "network_sources": [],
+        },
+        {
+            "id": "custom:weather.visualization",
+            "description": "Show readable live trends and forecast details with keyboard-accessible named controls at 320px and 640px in light and dark themes.",
+            "capability_ids": [],
+            "network_sources": [],
+        },
+    ]
+    initial = proposal(capabilities=[WEATHER], required_features=initial_criteria)
+    corrected = proposal(capabilities=[WEATHER], required_features=corrected_criteria)
+    provider = Provider(initial, corrected)
+    install_provider(monkeypatch, alignment_module, provider)
+    feedback = (
+        "Confirm requested variables, units and response mapping against provider docs before presenting weather as live.",
+        "Preserve location input and unsaved edits during failures; retry only the failed request.",
+        "Add real trends, keyboard support and light/dark responsive behavior.",
+    )
+    reviewer = AsyncMock(
+        side_effect=[
+            FeatureCoverageReview("revise", feedback, "llm"),
+            FeatureCoverageReview("complete", source="llm"),
+        ]
+    )
+    monkeypatch.setattr(alignment_module, "review_feature_coverage", reviewer)
+
+    result = await SchemaAlignmentService.align_schemas(
+        "Build a full weather app",
+        "weather-app",
+        SimpleNamespace(list_schemas=lambda: []),
+        approved_plan="Show real weather, preserve failed edits, and use clear trend graphics in accessible themes.",
+        existing_app_manifest=baseline(WEATHER),
+        decision_config={"mode": "off"},
+        require_feature_requirements=True,
+    )
+
+    assert [row["id"] for row in result["required_features"]] == [
+        "custom:weather.forecast",
+        "custom:weather.recovery",
+        "custom:weather.visualization",
+    ]
+    assert result["required_features"][0] == initial_criteria[0]
+    assert result["capabilities"] == [WEATHER]
+    repair_prompt = provider.calls[1][-1]["content"]
+    for item in feedback:
+        assert item in repair_prompt
+    assert "address each actionable feedback item separately" in repair_prompt
+    assert "Preserve every still-correct required feature" in repair_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["align_schemas", "refine_proposal"])
+async def test_invalid_feature_ids_get_one_targeted_repair_then_actionable_nonretryable_failure(monkeypatch, method):
+    invalid = proposal(
+        capabilities=[WEATHER],
+        required_features=[
+            {
+                "id": "weather.current-and-forecast",
+                "description": "Display live weather",
+                "capability_ids": ["network.request"],
+                "network_sources": [{"source_id": "open-meteo", "path": "/v1/forecast"}],
+            }
+        ],
+    )
+    provider = Provider(invalid, invalid)
+    install_provider(monkeypatch, alignment_module, provider)
+    kwargs = strict_schema_kwargs(method, invalid)
+    if method == "refine_proposal":
+        kwargs["feedback"] = "Keep the forecast"
+
+    with pytest.raises(WorkflowError) as failure:
+        await getattr(SchemaAlignmentService, method)(**kwargs)
+
+    assert failure.value.code == (
+        "schema_alignment_refinement_failed" if method == "refine_proposal" else "schema_alignment_failed"
+    )
+    assert failure.value.retryable is False
+    assert "unknown type ID" in str(failure.value)
+    assert len(provider.calls) == 2
+    repair_prompt = provider.calls[1][-1]["content"]
+    assert "failed Schema, capability, or required-feature validation" in repair_prompt
+    assert "Capability Ontology scope contract" not in repair_prompt
+    assert "Do not infer an endpoint from the service or feature name" in repair_prompt
+    assert "different API hosts" in repair_prompt
+    assert "exact capability boundaries" in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_targeted_repair_transport_failure_remains_retryable(monkeypatch):
+    invalid = proposal(capabilities=[WEATHER], required_features=placeholder_criteria())
+    provider = Provider(invalid, RuntimeError("provider unavailable"))
+    install_provider(monkeypatch, alignment_module, provider)
+    reviewer = AsyncMock(return_value=FeatureCoverageReview("revise", ("Add the real forecast dependency",), "jev"))
+    monkeypatch.setattr(alignment_module, "review_feature_coverage", reviewer)
+
+    with pytest.raises(WorkflowError) as failure:
+        await SchemaAlignmentService.align_schemas(**strict_schema_kwargs("align_schemas", invalid))
+
+    assert failure.value.code == "schema_alignment_failed"
+    assert failure.value.retryable is True
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_unexpected_feature_reviewer_failure_is_not_misclassified_as_invalid_proposal(monkeypatch):
+    generated = proposal(capabilities=[WEATHER], required_features=placeholder_criteria())
+    provider = Provider(generated)
+    install_provider(monkeypatch, alignment_module, provider)
+    reviewer = AsyncMock(side_effect=RuntimeError("reviewer process failed"))
+    monkeypatch.setattr(alignment_module, "review_feature_coverage", reviewer)
+
+    with pytest.raises(WorkflowError) as failure:
+        await SchemaAlignmentService.align_schemas(**strict_schema_kwargs("align_schemas", generated))
+
+    assert failure.value.code == "schema_alignment_failed"
+    assert failure.value.retryable is True
+    assert len(provider.calls) == 1
+    assert reviewer.await_count == 1
 
 
 @pytest.mark.asyncio

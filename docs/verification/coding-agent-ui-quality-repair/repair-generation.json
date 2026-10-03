@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "model": "gpt-6-luna",
+  "executor": "production backend.coding_agent.run_coding_agent",
+  "promote": false,
+  "repair_run": true,
+  "case_set_sha256": "43be50c3dbebafc5779a1aa1e3cd875755203f8be90ad082cceff25f116b7068",
+  "repair_feedback_sha256": "d3d3ca803112942ea6545b67b26d04ec59c60a3cb93440d68d0544fc9a897082",
+  "cases": [
+    {
+      "id": "compact-follow-up-dashboard",
+      "status": "generation_ready",
+      "generation_ready": true,
+      "production_staging_validated": true,
+      "model": "gpt-6-luna",
+      "artifact_hash": "89853b23dc9445699700511b64e57a43fb85b18d932706504c0f957d20a6f1ff",
+      "artifact_dir": "/tmp/ui-quality-crud-repair-artifacts/compact-follow-up-dashboard/app",
+      "repair_attempts": 0,
+      "runtime_smoke": "passed",
+      "assertions": {
+        "manifest-controller-contract": "passed",
+        "feature-coverage": "passed",
+        "runtime-first-frame": "passed"
+      },
+      "elapsed_ms": 28311
+    }
+  ],
+  "complete_passes": 1,
+  "elapsed_ms": 28332
+}

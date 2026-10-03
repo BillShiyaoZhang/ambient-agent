@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { chromium } from "playwright-core";
 
 import {
   BrowserLifecycle,
@@ -712,6 +713,92 @@ test("listens on the socket without launching Chromium", async (context) => {
   assert.match(output, /Widget Runtime listening/);
   assert.equal(child.exitCode, null);
 });
+
+
+test(
+  "native runtime frames include Button child content",
+  {
+    skip: CHROMIUM_PATH ? false : "Chromium is not installed",
+    timeout: 90_000,
+  },
+  async (context) => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "ambient-widget-runtime-button-"),
+    );
+    const socketPath = path.join(directory, "runtime.sock");
+    const child = spawn(process.execPath, [RUNTIME_PATH], {
+      env: {
+        ...process.env,
+        CHROMIUM_EXECUTABLE_PATH: CHROMIUM_PATH,
+        WIDGET_RUNTIME_SOCKET_PATH: socketPath,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let inspectBrowser;
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    context.after(async () => {
+      await inspectBrowser?.close();
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        await waitForChildExit(child);
+      }
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+    await waitForSocket(socketPath, child);
+    const capture = async (sessionId, buttonChild) => {
+      const socket = await connectUnix(socketPath);
+      const framePromise = waitForFirstFrame(socket, sessionId);
+      const controllerSource = `
+        export default function Controller({ ambient }) {
+          const { Button } = ambient.components;
+          return <Button onClick={() => ambient.sendMessage("clicked")}>${buttonChild}</Button>;
+        }
+      `;
+      socket.write(`${JSON.stringify(runtimeStartMessage(sessionId, { controllerSource }))}\n`);
+      const result = await framePromise;
+      await closeRuntimeSession(socket, sessionId);
+      assert.equal(result.ready, true, output);
+      assert.equal(result.frame.format, "jpeg");
+      return result.frame.data;
+    };
+    const emptyFrame = await capture("button-empty", "");
+    const labeledFrame = await capture("button-labeled", "View all seven days");
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      await waitForChildExit(child);
+    }
+    inspectBrowser = await chromium.launch({
+      executablePath: CHROMIUM_PATH,
+      headless: true,
+    });
+    const page = await inspectBrowser.newPage();
+    await page.setContent("<!doctype html><body></body>");
+    const changedPixels = await page.evaluate(async ([first, second]) => {
+      const decode = async (data) => {
+        const image = new Image();
+        image.src = `data:image/jpeg;base64,${data}`;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        return context.getImageData(0, 0, canvas.width, canvas.height).data;
+      };
+      const [before, after] = await Promise.all([decode(first), decode(second)]);
+      let changed = 0;
+      for (let index = 0; index < before.length; index += 4) {
+        if (Math.abs(before[index] - after[index])
+          + Math.abs(before[index + 1] - after[index + 1])
+          + Math.abs(before[index + 2] - after[index + 2]) > 80) changed += 1;
+      }
+      return changed;
+    }, [emptyFrame, labeledFrame]);
+    assert.ok(changedPixels > 20, `expected visible child text to change native frame pixels; got ${changedPixels}`);
+  },
+);
 
 
 test(

@@ -21,9 +21,11 @@ Use `[APP TYPE STANDARD]` and `[APP TYPE DECLARATION RULES]` to classify the act
 
 {{ app_spec_rules }}
 
+{% include 'ui_quality_guidance.md' %}
+
 # Widget runtime
 
-- Obtain hooks from `ambient.react` and UI primitives from `ambient.components`. The only available components are `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`. The only available hooks are `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`. Never invent or assume another primitive or hook.
+- Obtain hooks from `ambient.react` and injected UI primitives from `ambient.components`. Its only primitives are `Column`, `Row`, `Card`, `Text`, `Button`, `TextField`, `Checkbox`, `List`, and `Table`; intrinsic HTML and SVG tags are also supported through `ambient.html`. The only available hooks are `useState`, `useEffect`, `useMemo`, `useRef`, `useCallback`, `useContext`, and `useReducer`. Never invent or assume another injected primitive or hook.
 - `List` renders its `items` prop as text rows; each item may be a string or an object with `label` or `name`. It accepts `onItemClick` and `itemStyle`, and ignores child elements. `Table` renders text cells from `columns` and `rows` and supports row clicks only. For editable records or rows with buttons, checkboxes, or fields, map the records to `<${Row}>` children inside `<${Column}>` instead of nesting controls inside `List` or `Table`.
 - `TextField` calls `onChange(value)` and `onEnter(value)` with the current string value; `Checkbox` calls `onChange(checked)` with a boolean. Treat these callback arguments as normalized values, not DOM events.
 - The host provides live presentation state without a capability grant. Read `{ theme, locale, reducedMotion }` with `ambient.presentation.getSnapshot()` and subscribe to changes with `ambient.presentation.subscribe(listener)`. `ambient.theme.preference`, `ambient.theme.effective`, `ambient.theme.getSnapshot()`, and `ambient.theme.subscribe(listener)` are available when only theme is needed. Do not use `window`, `document`, or `navigator` to infer these values.

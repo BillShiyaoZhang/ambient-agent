@@ -118,6 +118,31 @@ test("TextField callbacks receive the current string value", () => {
 });
 
 
+test("Button renders children and forwards native props while label takes precedence", () => {
+  const { ambient, controller } = mountTestController();
+  const onClick = () => "clicked";
+  const children = "View all seven days";
+  const childButton = ambient.components.Button({
+    children,
+    onClick,
+    "aria-label": "View forecast",
+    disabled: true,
+  });
+
+  assert.equal(childButton.type, "button");
+  assert.deepEqual(childButton.props.children, [children]);
+  assert.equal(childButton.props.onClick, onClick);
+  assert.equal(childButton.props["aria-label"], "View forecast");
+  assert.equal(childButton.props.disabled, true);
+
+  const explicitLabel = ambient.components.Button({ label: "Explicit", children: "Child" });
+  assert.deepEqual(explicitLabel.props.children, ["Explicit"]);
+  const explicitEmptyLabel = ambient.components.Button({ label: "", children: "Child" });
+  assert.deepEqual(explicitEmptyLabel.props.children, [""]);
+  controller.dispose();
+});
+
+
 test("ambient.lifecycle keeps one replaceable pre-suspend handler", async () => {
   const { ambient, controller } = mountTestController();
   const calls = [];

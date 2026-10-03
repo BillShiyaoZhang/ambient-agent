@@ -1,0 +1,55 @@
+{
+  "format": 1,
+  "cases": [
+    {
+      "id": "forecast-operations-dashboard",
+      "title": "Dense forecast dashboard with progressive detail",
+      "instruction": "Create a graphical forecast and service-status dashboard for Harbor Station. Make it easy to see current conditions and understand the temperature trend, with access to the complete seven-day forecast and service status. Load the approved fixture JSON source harbor-weather at GET /v1/forecast with ambient.net.request. Its response shape is {location:string, current:{temperature:number,condition:string}, days:[{date:string,high:number,low:number,precipitation:number}], services:[{name:string,status:string}]}; it contains exactly seven days and two services. Include loading, request-failure recovery with retry, and malformed-data handling. Do not fabricate data, use direct fetch, or request another source. Declare and implement custom:forecast-dashboard.progressive-details.",
+      "manifest": {
+        "manifest_version": 2,
+        "id": "forecast-operations-dashboard",
+        "title": "Harbor Forecast",
+        "description": "A compact forecast and service-status dashboard",
+        "app_version": "1.0.0",
+        "intents": ["check the harbor forecast and service status"],
+        "schema_refs": [],
+        "capabilities": [
+          {"id": "network.request", "scope": {"sources": {"harbor-weather": {"base_url": "https://weather.example.invalid", "paths": ["/v1/forecast"], "methods": ["GET"], "response_limit": 65536}}}}
+        ]
+      },
+      "requirements": [
+        {"id": "custom:forecast-dashboard.progressive-details", "description": "Load approved forecast and service data, display a data-backed SVG temperature chart, progressively disclose seven-day details, and expose retry and malformed-data errors.", "capability_ids": ["network.request"], "network_sources": [{"source_id": "harbor-weather", "path": "/v1/forecast"}]}
+      ],
+      "acceptance": ["manifest-controller-contract", "feature-coverage", "runtime-first-frame", "fixture-request", "current-conditions", "svg-data-chart", "compact-initial-summary", "expand-seven-day-details", "retry-error", "malformed-data-error", "accessible-controls", "responsive-no-overflow"],
+      "fixture": {
+        "kind": "http",
+        "source_id": "harbor-weather",
+        "path": "/v1/forecast",
+        "responses": [{"status": 200, "body": {"location": "Harbor Station", "current": {"temperature": 18, "condition": "Cloudy"}, "days": [{"date": "Mon", "high": 20, "low": 13, "precipitation": 10}, {"date": "Tue", "high": 22, "low": 14, "precipitation": 0}, {"date": "Wed", "high": 19, "low": 12, "precipitation": 35}, {"date": "Thu", "high": 17, "low": 11, "precipitation": 60}, {"date": "Fri", "high": 21, "low": 12, "precipitation": 5}, {"date": "Sat", "high": 23, "low": 15, "precipitation": 0}, {"date": "Sun", "high": 20, "low": 14, "precipitation": 15}], "services": [{"name": "Ferry", "status": "Operational"}, {"name": "Tide sensor", "status": "Delayed"}]}}]
+      }
+    },
+    {
+      "id": "compact-follow-up-dashboard",
+      "title": "Compact private CRUD dashboard",
+      "instruction": "Make a compact dashboard for private operational follow-ups, stored in follow-ups.json with ambient.files. Each entry has a title and done boolean. Let me add, view, rename, complete or reopen, and remove follow-ups. Keep the focus on the records; a chart or explanatory prose is unnecessary. Declare and implement custom:follow-up-dashboard.private-crud.",
+      "manifest": {
+        "manifest_version": 2,
+        "id": "compact-follow-up-dashboard",
+        "title": "Follow-ups",
+        "description": "A compact private operational follow-up list",
+        "app_version": "1.0.0",
+        "intents": ["manage private operational follow-ups"],
+        "schema_refs": [],
+        "capabilities": [
+          {"id": "file.read", "scope": {"paths": ["follow-ups.json"]}},
+          {"id": "file.write", "scope": {"paths": ["follow-ups.json"], "max_bytes": 65536}}
+        ]
+      },
+      "requirements": [
+        {"id": "custom:follow-up-dashboard.private-crud", "description": "Create, read, update, toggle, and delete private follow-up items in follow-ups.json and surface file errors.", "capability_ids": ["file.read", "file.write"], "network_sources": []}
+      ],
+      "acceptance": ["manifest-controller-contract", "feature-coverage", "runtime-first-frame", "compact-empty-state", "create-follow-up", "read-follow-up", "rename-follow-up", "toggle-done", "delete-follow-up", "storage-error", "accessible-controls", "responsive-no-overflow"],
+      "fixture": {"kind": "private-files", "initial": {"follow-ups.json": "[]"}, "reload_between": []}
+    }
+  ]
+}

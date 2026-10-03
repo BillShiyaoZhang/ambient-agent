@@ -675,7 +675,7 @@ async function installPageRuntime(page, session, transformedController) {
         );
       const Text = ({ text, style, ...rest }) =>
         h("span", { ...rest, style }, text);
-      const Button = ({ label, variant, style, ...rest }) =>
+      const Button = ({ label, children, variant, style, ...rest }) =>
         h(
           "button",
           {
@@ -699,7 +699,7 @@ async function installPageRuntime(page, session, transformedController) {
               style,
             ),
           },
-          label,
+          label ?? children,
         );
       const TextField = ({
         label,

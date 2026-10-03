@@ -1,0 +1,740 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-03T02:42:44.370729+00:00",
+  "session_id": "841qjgu7tel",
+  "original_request": "给我一个能显示全量天气信息的 app",
+  "model": "gpt-6-luna",
+  "original_failures": [
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "phase": "align_schema",
+      "status": "failed",
+      "error_code": "budget_exhausted",
+      "tokens_used": 64351
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "phase": "align_schema",
+      "status": "failed",
+      "error_code": "budget_exhausted",
+      "tokens_used": 68831
+    }
+  ],
+  "first_recovery": {
+    "run_id": "886e870c-e87b-4249-8e34-20635ef79f2f",
+    "status": "failed",
+    "error_code": "schema_alignment_failed",
+    "retryable": false,
+    "calls": 4,
+    "additional_tokens": 26433
+  },
+  "initial_second_recovery": {
+    "run_id": "9dfb1d9d-0f48-4f5b-80bc-795f235f5108",
+    "status_before_refinement": "waiting_user",
+    "phase": "wait_schema",
+    "calls": 2,
+    "additional_tokens": 14436,
+    "external_source_issue_found_by_manual_documentation_check": {
+      "origin": "https://api.open-meteo.com",
+      "path": "/v1/geocoding/search"
+    },
+    "later_refinement_failure": {
+      "code": "llm_provider_error",
+      "native_reason": "output_limit",
+      "model_calls": 1,
+      "usage": null
+    }
+  },
+  "native_output_diagnostic": {
+    "dispatches": 1,
+    "model": "gpt-6-luna",
+    "native_version": "0.159.3",
+    "task": "Complete preserved system prompt with reconstructed task from approved plan, original proposal and verified feedback; audit user prompt was truncated.",
+    "bytes_at_rejection": 357036,
+    "messages_at_rejection": 1025,
+    "items_at_rejection": 3,
+    "accepted_agent_message_deltas": 1004,
+    "configured_byte_limit": 2097152,
+    "configured_message_limit": 1024,
+    "usage": null,
+    "safety_profile_or_bounds_changed_for_diagnostic": false
+  },
+  "stream_compatibility_recovery": {
+    "run_id": "d0aa37cd-8943-4133-95cc-fd040d18b2df",
+    "status": "failed",
+    "phase": "wait_schema",
+    "error_code": "llm_capability_unsupported",
+    "native_reason": "native_notification",
+    "cause": "Valid modern notification included the emittedAtMs envelope timestamp; exact-key stream classification rejected it.",
+    "model_calls": 1,
+    "usage": null,
+    "original_refine_input_retained": true
+  },
+  "native_shape_diagnostic": {
+    "dispatches": 1,
+    "model": "gpt-6-luna",
+    "usage": null,
+    "rejected_shape": {
+      "bytes": 100374,
+      "completed": false,
+      "control_messages": 21,
+      "item_known": true,
+      "item_type": "agentMessage",
+      "message_keys": [
+        "emittedAtMs",
+        "method",
+        "params"
+      ],
+      "messages": 21,
+      "method": "item/agentMessage/delta",
+      "parameter_types": {
+        "delta": "str",
+        "itemId": "str",
+        "threadId": "str",
+        "turnId": "str"
+      },
+      "pending_turn": true,
+      "stream_messages": 0,
+      "thread_matches": true,
+      "turn_matches": true
+    },
+    "safety_profile_or_bounds_changed_for_diagnostic": false
+  },
+  "native_timestamp_protocol": {
+    "native_version": "0.159.3",
+    "generated_file": "ServerNotification.json",
+    "sha256": "d3479ecf59ca421a8b052d3d15e8196d23d297a0bd85ae5a270a34ddd9c865c9",
+    "timestamp_property": {
+      "description": "Unix timestamp (in milliseconds) when app-server emitted this notification.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "required": []
+  },
+  "final_recovery": {
+    "run_id": "f329cbb4-0676-401c-91f1-4572cc73b2d5",
+    "status": "waiting_user",
+    "phase": "wait_schema",
+    "error": null,
+    "budget": {
+      "max_model_turns": null,
+      "model_turn_limit_explicit": false,
+      "max_wall_seconds": 600.0,
+      "max_tokens": 173700,
+      "max_cost_usd": 5.00003675,
+      "model_turns": 22,
+      "tokens_used": 144627,
+      "cost_usd": 3.675e-05
+    },
+    "reported_additional_tokens_since_retry": 34927,
+    "pending_interaction_id": "schema_approval-f329cbb4-a1-f5b6332109377f52",
+    "required_feature_count": 8,
+    "proposal_sha256": "f604c7b29910c52462e198771e0b345e609032cbee96f5b843f5c9b12ed6997e",
+    "network_sources": {
+      "weather-forecast": {
+        "base_url": "https://api.open-meteo.com",
+        "methods": [
+          "GET"
+        ],
+        "paths": [
+          "/v1/forecast"
+        ],
+        "response_limit": 1048576
+      },
+      "weather-geocoding": {
+        "base_url": "https://geocoding-api.open-meteo.com",
+        "methods": [
+          "GET"
+        ],
+        "paths": [
+          "/v1/search"
+        ],
+        "response_limit": 1048576
+      }
+    },
+    "required_features": [
+      {
+        "id": "custom:weather-app.location-search",
+        "description": "允许用户输入或搜索地点，并以所选地点触发天气查询；无效地点时给出可操作提示并保留输入。查询参数及响应字段须在实现时依据官方文档和实际响应核实。",
+        "capability_ids": [
+          "network.request"
+        ],
+        "network_sources": [
+          {
+            "source_id": "weather-geocoding",
+            "path": "/v1/search"
+          }
+        ]
+      },
+      {
+        "id": "custom:weather-app.current-weather",
+        "description": "展示所选地点当前天气、温度、体感温度及更新时间；实现前依据官方文档和实际响应核实字段及单位，仅呈现已确认数据。",
+        "capability_ids": [
+          "network.request"
+        ],
+        "network_sources": [
+          {
+            "source_id": "weather-forecast",
+            "path": "/v1/forecast"
+          }
+        ]
+      },
+      {
+        "id": "custom:weather-app.forecasts",
+        "description": "以真实图表展示逐小时及未来数日预报并标明时间和单位；依据官方文档和实际响应核实字段，缺失数据明确标为不可用，不得猜测或伪造。",
+        "capability_ids": [
+          "network.request"
+        ],
+        "network_sources": [
+          {
+            "source_id": "weather-forecast",
+            "path": "/v1/forecast"
+          }
+        ]
+      },
+      {
+        "id": "custom:weather-app.weather-details",
+        "description": "以分区或可展开详情展示经官方文档和实际响应确认的扩展指标，包括服务实际提供的最高/最低温、降水、湿度、风、气压、能见度、云量、紫外线及日出日落等；使用正确单位，缺失字段明确标为不可用。",
+        "capability_ids": [
+          "network.request"
+        ],
+        "network_sources": [
+          {
+            "source_id": "weather-forecast",
+            "path": "/v1/forecast"
+          }
+        ]
+      },
+      {
+        "id": "custom:weather-app.device-location",
+        "description": "仅在用户主动触发并授权后尝试一次性设备定位，并允许使用手动地点输入作为替代。",
+        "capability_ids": [
+          "device.location"
+        ],
+        "network_sources": []
+      },
+      {
+        "id": "custom:weather-app.save-preferences",
+        "description": "获批后读取并保存用户选择的地点及偏好到应用数据文件，不保存天气缓存或原始服务载荷。",
+        "capability_ids": [
+          "file.read",
+          "file.write"
+        ],
+        "network_sources": []
+      },
+      {
+        "id": "custom:weather-app.refresh-recovery",
+        "description": "首次加载显示进度；无地点时引导搜索或定位；无预报数据时说明并提供重试；无效地点时保留输入并提供可操作提示。请求失败时显示不含内部错误细节的说明和重试，保留地点及未提交编辑，重试仅重新执行失败请求；涉及搜索或天气请求时分别只使用其对应的真实来源，不将旧数据误标为实时。",
+        "capability_ids": [
+          "network.request"
+        ],
+        "network_sources": [
+          {
+            "source_id": "weather-geocoding",
+            "path": "/v1/search"
+          },
+          {
+            "source_id": "weather-forecast",
+            "path": "/v1/forecast"
+          }
+        ]
+      },
+      {
+        "id": "custom:weather-app.responsive-accessible-view",
+        "description": "提供预报详情切换与刷新操作，使用真实图表呈现逐小时及未来数日预报，并标注时间和单位；支持键盘操作和清晰控件名称，在320px及640px宽度、明暗主题下保持易读。",
+        "capability_ids": [],
+        "network_sources": []
+      }
+    ],
+    "approved_plan_preserved": true,
+    "recovered_feedback_sha256": "52d7d92bba5bd921e657f264be653285b97f126b673f7d2dddf20bb8a52d6c00",
+    "refine_recovery_cache_cleared_after_fresh_approval": true,
+    "permission_grants_approved": false,
+    "app_generation_started": false
+  },
+  "official_sources_checked": [
+    "https://open-meteo.com/en/docs/geocoding-api",
+    "https://open-meteo.com/en/docs"
+  ],
+  "validation": {
+    "backend_passed": 2072,
+    "backend_existing_skips": 16,
+    "frontend_passed_earlier_same_turn": 370,
+    "frontend_build_and_oxlint": "passed; frontend source unchanged afterward",
+    "ruff": "passed",
+    "uml": "passed",
+    "git_diff_check": "passed"
+  },
+  "source_sha256": {
+    "backend/schema_alignment.py": "15ef312f29c35e92206cad4c1a0d5d0428b423037a9a76ef2170a906d0696c09",
+    "backend/agent/feature_review.py": "b5075afda2dc47663be60445c1f5f2f5f56f08e259fdf580a6b036fbf10e22a6",
+    "backend/codex_llm.py": "dbe8b13c1659f69d04920714514291fda62bba16125e58769c894a24aa51b8cb",
+    "backend/agent/durable_workflow.py": "c28656eb9bdd30f9bfac1cc5136c06280a8fb5a7cc9b3b4777d54984fa48a7f2",
+    "backend/run_service.py": "7095ca7557ddf2d37c53c1b7064be7f796b2996ad1e72d57c65079bdef660d7c"
+  },
+  "native_model_audit_entries": [
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "route",
+      "timestamp": "2026-10-03T01:18:39.542610+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 12761,
+        "output_tokens": 198,
+        "total_tokens": 12959
+      },
+      "error": null,
+      "prompt_hash": "fb90ac7ced6bf557fb0c8f0028081e31060facab9f8a1cc64b84be99ef83af37",
+      "response_sha256": "be401bab38dd8506bc22d36843728aa8d627e15f3f83cc0a0e5c0d718b549764"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "plan",
+      "timestamp": "2026-10-03T01:19:05.887629+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 5377,
+        "output_tokens": 692,
+        "total_tokens": 6069
+      },
+      "error": null,
+      "prompt_hash": "7557913e270b9b192363159b7505ce78ba5887b121a0c85b5b0cd24da96ce83a",
+      "response_sha256": "fd62283e41b5b2bed8e3769aece2b07fb464311a73f4f1ff066313c3462784f5"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:19:38.042249+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7184,
+        "output_tokens": 328,
+        "total_tokens": 7512
+      },
+      "error": null,
+      "prompt_hash": "a93fe81199303a285444ae5bea65feb4eaf3a514a5cb9911584087632cf788fe",
+      "response_sha256": "117e5bc85d17f8a93ff4317d78dae306b79bdc1360c9116c932e50a096a2dac5"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:19:45.181493+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4181,
+        "output_tokens": 130,
+        "total_tokens": 4311
+      },
+      "error": null,
+      "prompt_hash": "0428a8b573b323bd90377f499835fc26b67fe38360781088ad309127b6b63bbe",
+      "response_sha256": "00e3da6e0fad982b644150acad61f1a2ff653589918571d85627289eec45e808",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "schema_alignment_repair",
+      "timestamp": "2026-10-03T01:20:05.652068+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7619,
+        "output_tokens": 689,
+        "total_tokens": 8308
+      },
+      "error": null,
+      "prompt_hash": "24f8a8969d642ec1656977cca9150e24e79cc90c6d61e7116a26ebe17b184b24",
+      "response_sha256": "d3503e756252039c8af4427ae6bc4c77682c795c5bc9e0f6364349c30e1adf95"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:20:11.734704+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4350,
+        "output_tokens": 82,
+        "total_tokens": 4432
+      },
+      "error": null,
+      "prompt_hash": "419f5e30320b37ff6b750479de51c9ef56a1f3b97d922e2a8503deffb31eb261",
+      "response_sha256": "1c8ab4c16244809a70583129475530102d06a9f86d5f3dcad1d5a43357c850d7",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:20:21.720864+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7184,
+        "output_tokens": 311,
+        "total_tokens": 7495
+      },
+      "error": null,
+      "prompt_hash": "a93fe81199303a285444ae5bea65feb4eaf3a514a5cb9911584087632cf788fe",
+      "response_sha256": "fa865afa552f9e87a49695faf9506f280b004c826d7cec615bcf77c4136c6c8d"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:20:32.932232+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4124,
+        "output_tokens": 227,
+        "total_tokens": 4351
+      },
+      "error": null,
+      "prompt_hash": "cef899ccb1ed7cd4c1e9211ed1988ebce72e282fd41639795cd43f44232c6fd6",
+      "response_sha256": "eabdfd6594b1ddccfcf158f77b217dd820ea366e5e393d8d264d7fd7d039cafb",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "schema_alignment_repair",
+      "timestamp": "2026-10-03T01:20:44.346721+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7602,
+        "output_tokens": 364,
+        "total_tokens": 7966
+      },
+      "error": null,
+      "prompt_hash": "66d3d3ce30d3ca6556f975e049f47dc09d1adf7242cf5218f703c288ead8826d",
+      "response_sha256": "837d7fd15d560584b42438a6915de5acda7d9a359b1d47671ce2010fa9b97be1"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "route",
+      "timestamp": "2026-10-03T01:22:08.120340+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 12762,
+        "output_tokens": 213,
+        "total_tokens": 12975
+      },
+      "error": null,
+      "prompt_hash": "2d991c55d41f4b438a76c24bd8ecf59412f70c29a19a6fd35db1782ba37c074e",
+      "response_sha256": "bde04fa93e37d1a68884903743e90f345b4685daed774905f58f1cc7a7e16f4e"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "plan",
+      "timestamp": "2026-10-03T01:22:28.096747+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 5368,
+        "output_tokens": 589,
+        "total_tokens": 5957
+      },
+      "error": null,
+      "prompt_hash": "6281fdd3ee69391107fae60cfc23eaf52b1e38ff91fef03099f025e45375736e",
+      "response_sha256": "c582bbfbc6ac02bbdaba27ae5e657c08eee240e810be05141fbdcfe1285665b6"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:23:05.933855+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7072,
+        "output_tokens": 557,
+        "total_tokens": 7629
+      },
+      "error": null,
+      "prompt_hash": "7417278758b79b0ccf1e70998358985a55bf5406f9309e4f45523016ad692da2",
+      "response_sha256": "dcb10d668d237f6fcc18fd2ef92d3c21a730743cd777039aec268c3399a8deee"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:23:15.461402+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4498,
+        "output_tokens": 242,
+        "total_tokens": 4740
+      },
+      "error": null,
+      "prompt_hash": "4f5b1cb50fcbc7883507a674cc966de2b66644e2e0452e796aa76d8fedb86359",
+      "response_sha256": "d6ec393878b04ccf085c85763e9540c59a9a09d4c8ae9dc0f78e3a1bc707d3cc",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "schema_alignment_repair",
+      "timestamp": "2026-10-03T01:23:37.313562+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7873,
+        "output_tokens": 965,
+        "total_tokens": 8838
+      },
+      "error": null,
+      "prompt_hash": "92e65dedcbaa8a96ee3a50f375f6b35deda830c15523c895ba3033a9e8f63624",
+      "response_sha256": "6a84f6b19e63ecbbc487dcd05152169f05a46952f654f6969fcb1199e79cad19"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:23:45.731980+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4743,
+        "output_tokens": 190,
+        "total_tokens": 4933
+      },
+      "error": null,
+      "prompt_hash": "d238e490d2fcbaea130fbcd4941955e369517c913caf36bd00d979806742d512",
+      "response_sha256": "0bd82facab974a29973c5bd9efb4701cf3ba650fbcf81774e12f0cd152df3794",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:23:57.142908+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7072,
+        "output_tokens": 362,
+        "total_tokens": 7434
+      },
+      "error": null,
+      "prompt_hash": "7417278758b79b0ccf1e70998358985a55bf5406f9309e4f45523016ad692da2",
+      "response_sha256": "0d33fcbdbf9378b327eaef9543d91c6fa0607b65405d831c299a33f5e75bc564"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "schema_alignment_repair",
+      "timestamp": "2026-10-03T01:24:08.339890+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7528,
+        "output_tokens": 363,
+        "total_tokens": 7891
+      },
+      "error": null,
+      "prompt_hash": "9e6cad56b1c551e49fd3c3ae780fb930594357621d2cc71edfae4b6084a588e7",
+      "response_sha256": "0ca0455fa9791ee157c2725d1de23edd3b6b83dfcf6219563808f79b98f7823b"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:24:23.050111+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7072,
+        "output_tokens": 402,
+        "total_tokens": 7474
+      },
+      "error": null,
+      "prompt_hash": "7417278758b79b0ccf1e70998358985a55bf5406f9309e4f45523016ad692da2",
+      "response_sha256": "3a9c2014a1badf4d607681843e66c2c75a089b3e2bebf4f891534c5d52a26c39"
+    },
+    {
+      "run_id": "886e870c-e87b-4249-8e34-20635ef79f2f",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:40:35.717465+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 7865,
+        "output_tokens": 593,
+        "total_tokens": 8458
+      },
+      "error": null,
+      "prompt_hash": "84db8c54c0bf4ff8b5e87d24c903248e6846a6eb7e4ea45e33312a930691f132",
+      "response_sha256": "06fa2baf825e1be53299427389390c775a0b8dffd6236cf46c53d71197745ce3"
+    },
+    {
+      "run_id": "886e870c-e87b-4249-8e34-20635ef79f2f",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:40:43.692747+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4042,
+        "output_tokens": 169,
+        "total_tokens": 4211
+      },
+      "error": null,
+      "prompt_hash": "28531dae52ca2f57c4cbac21a7c64e90ebbea62e23c5093332d6ec4b5812908e",
+      "response_sha256": "ad93545a5d629099e7e0ce2c54a80a87d5912c09413e39abaff15dc10dcd1f8b",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "886e870c-e87b-4249-8e34-20635ef79f2f",
+      "stage": "schema_alignment_repair",
+      "timestamp": "2026-10-03T01:41:02.741619+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 8432,
+        "output_tokens": 556,
+        "total_tokens": 8988
+      },
+      "error": null,
+      "prompt_hash": "b2f1f3a81e489bdfdcccf54bf4dce7c57e3d5d8db56ef1a4a6cf8eddd84ab005",
+      "response_sha256": "dd43302e1881de2fc7b53733297659af5b1b3bcd2b7c88e43c344b0c02536995"
+    },
+    {
+      "run_id": "886e870c-e87b-4249-8e34-20635ef79f2f",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:41:15.252966+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 4578,
+        "output_tokens": 198,
+        "total_tokens": 4776
+      },
+      "error": null,
+      "prompt_hash": "15ae7f296c4637e29a01c7b3064c50ea6ba9eab36e20bd63d220f223435b8c35",
+      "response_sha256": "cf0700fdfbfef38182546f5d20a5fdd70489793560021db101d15a72e5e29935",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "9dfb1d9d-0f48-4f5b-80bc-795f235f5108",
+      "stage": "schema_alignment",
+      "timestamp": "2026-10-03T01:51:25.749001+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 8216,
+        "output_tokens": 940,
+        "total_tokens": 9156
+      },
+      "error": null,
+      "prompt_hash": "5add4c64f05915ea1ea215ee7e525aac645eb6d3badaa800f61501b23de7e489",
+      "response_sha256": "b11db9d3bee5b27091fc119b6c2f9605190fa0487c543742e6995079c9e674fc"
+    },
+    {
+      "run_id": "9dfb1d9d-0f48-4f5b-80bc-795f235f5108",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T01:51:31.209319+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 5254,
+        "output_tokens": 26,
+        "total_tokens": 5280
+      },
+      "error": null,
+      "prompt_hash": "ae6ca0549ed38a1731f227464e193890731cf8770fbd81d0ebd6ef8a8fdc19ea",
+      "response_sha256": "b4500be868d7d02bfff9c8d477e6090b4e56a4bfe1a1bea941d2f97ec23697f9",
+      "review_action": "complete"
+    },
+    {
+      "run_id": "9dfb1d9d-0f48-4f5b-80bc-795f235f5108",
+      "stage": "schema_alignment_refine",
+      "timestamp": "2026-10-03T02:00:09.413447+00:00",
+      "model": "gpt-6-luna",
+      "usage": null,
+      "error": "LLMTransportError: Native Codex inference failed [native:output_limit]",
+      "prompt_hash": "6e7c1b16ed964354ec057ec78d43935195d73abf66874db783c018d36350e5dd",
+      "response_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "run_id": "d0aa37cd-8943-4133-95cc-fd040d18b2df",
+      "stage": "schema_alignment_refine",
+      "timestamp": "2026-10-03T02:31:20.538965+00:00",
+      "model": "gpt-6-luna",
+      "usage": null,
+      "error": "LLMTransportError: Native Codex does not satisfy the isolated inference profile [native:native_notification]",
+      "prompt_hash": "6e7c1b16ed964354ec057ec78d43935195d73abf66874db783c018d36350e5dd",
+      "response_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "run_id": "f329cbb4-0676-401c-91f1-4572cc73b2d5",
+      "stage": "schema_alignment_refine",
+      "timestamp": "2026-10-03T02:40:55.978789+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 9980,
+        "output_tokens": 1027,
+        "total_tokens": 11007
+      },
+      "error": null,
+      "prompt_hash": "6e7c1b16ed964354ec057ec78d43935195d73abf66874db783c018d36350e5dd",
+      "response_sha256": "4b961c31d855d69e2b5941d825c14ae388dfdb0943541e59ec7f7362d4bc24ea"
+    },
+    {
+      "run_id": "f329cbb4-0676-401c-91f1-4572cc73b2d5",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T02:41:01.718906+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 5724,
+        "output_tokens": 63,
+        "total_tokens": 5787
+      },
+      "error": null,
+      "prompt_hash": "6dc2e789fff3b7cfc3aa7988a4bb54a2889afd1bc4c63a133d2e9c8a7e7d7d71",
+      "response_sha256": "26b00b5406ac04ccdd52dbaea0c7e2652f57cfc636ca0bd95aec4aff9530c1bc",
+      "review_action": "revise"
+    },
+    {
+      "run_id": "f329cbb4-0676-401c-91f1-4572cc73b2d5",
+      "stage": "schema_alignment_refine_repair",
+      "timestamp": "2026-10-03T02:41:30.045586+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 11316,
+        "output_tokens": 1047,
+        "total_tokens": 12363
+      },
+      "error": null,
+      "prompt_hash": "d2ceb2aaf6b8b81137f627e06a7366c3f6e06b16edfd9a253418901a4c38c04b",
+      "response_sha256": "f02d1ecd35c5aef9ee1182f29445e84a7c20236a8aec2e717578a085b7aa173e"
+    },
+    {
+      "run_id": "f329cbb4-0676-401c-91f1-4572cc73b2d5",
+      "stage": "feature_coverage_review_fallback",
+      "timestamp": "2026-10-03T02:41:36.463221+00:00",
+      "model": "gpt-6-luna",
+      "usage": {
+        "input_tokens": 5744,
+        "output_tokens": 26,
+        "total_tokens": 5770
+      },
+      "error": null,
+      "prompt_hash": "ca6453a2b1be5caa2096fc8acf71482a584926703e345f756bfc6670bf62d0b1",
+      "response_sha256": "b4500be868d7d02bfff9c8d477e6090b4e56a4bfe1a1bea941d2f97ec23697f9",
+      "review_action": "complete"
+    }
+  ],
+  "original_shadow_router_audit_entries": [
+    {
+      "run_id": "8f2eb35b-e430-467a-a2cc-ba2057fdaaa1",
+      "stage": "route_decision",
+      "timestamp": "2026-10-03T01:18:39.543963+00:00",
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 863,
+        "output_tokens": 85,
+        "total_tokens": 948,
+        "cost_usd": 3.6246000000000005e-05
+      },
+      "error": null,
+      "prompt_hash": "8495526165829db3ef128dad64635a71f9bad8dfb61d1f478dd57254132b907d",
+      "response_sha256": "f0a46f0e42d93d6b891759d4b67bacdffd4efea38feed01fcc9ee1589bd339bb"
+    },
+    {
+      "run_id": "beb81004-e03f-40cd-a321-422e7b97e3be",
+      "stage": "route_decision",
+      "timestamp": "2026-10-03T01:22:08.121587+00:00",
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 875,
+        "output_tokens": 85,
+        "total_tokens": 960,
+        "cost_usd": 3.675e-05
+      },
+      "error": null,
+      "prompt_hash": "7314fd9320f338e297d1187be995b2af855e06304bb02c4e2614e2d6d4352d84",
+      "response_sha256": "7287baaf9fc0dec8d6225cab9194703e5a0545be40b9d78cc4851d86d063ff6d"
+    }
+  ],
+  "evidence_limits": [
+    "Structural validation and semantic feature review do not verify external endpoint documentation or uptime.",
+    "The incorrect geocoding origin/path was corrected by model refinement with manually verified official documentation feedback.",
+    "The normal 64000-token retry window and cumulative token accounting were retained; no global budget increase.",
+    "Two failed native refinements and two independent bounded diagnostic dispatches did not return token usage; reported totals exclude that unknown usage.",
+    "The two original runs also recorded pre-existing Jev shadow-router calls; they are listed separately from GPT-6 luna inference. The final refinement retry made no routing call.",
+    "Network, location and private-file grants remain pending human approval; no generated App or live data behavior is claimed for this conversation.",
+    "Endpoint guidance reduces speculative authoring but is not an automated external endpoint verifier."
+  ]
+}

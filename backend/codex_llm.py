@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import signal
@@ -60,7 +61,11 @@ _HOST_DISABLED_WARNING = (
 _BYTE_LIMIT = 2 * 1024 * 1024
 _INPUT_LIMIT = 512 * 1024
 _MESSAGE_LIMIT = 1024
+_STREAM_MESSAGE_LIMIT = 8192
 _ITEM_LIMIT = 64
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
+_logger = logging.getLogger(__name__)
 _REJECTION_REASONS = frozenset(
     {
         "configuration",
@@ -190,6 +195,14 @@ def _error(code: str = "llm_provider_error", *, reason: str | None = None) -> LL
     error = LLMTransportError(messages[code] + f" [native:{safe_reason}]", code=code)
     error.details = {"native_reason": safe_reason}
     return error
+
+
+def _log_output_bound(limit_kind: str, observed: int, hard_limit: int) -> None:
+    """Emit bounded diagnostics without including provider-controlled content."""
+    _logger.warning(
+        "Native Codex output bound reached",
+        extra={"limit_kind": limit_kind, "observed": observed, "hard_limit": hard_limit},
+    )
 
 
 def _config_matches(actual: Any, expected: Any) -> bool:
@@ -434,6 +447,8 @@ class _Connection:
         self.sequence = 0
         self.bytes = 0
         self.messages = 0
+        self.control_messages = 0
+        self.stream_messages = 0
         self.thread_id: str | None = None
         self.turn_id: str | None = None
         self.items: dict[str, dict[str, Any]] = {}
@@ -459,18 +474,70 @@ class _Connection:
         try:
             raw = await self.process.stdout.readline()
         except (ValueError, asyncio.LimitOverrunError):
+            _log_output_bound("line_bytes", _BYTE_LIMIT + 1, _BYTE_LIMIT)
             raise _error(reason="output_limit") from None
         self.bytes += len(raw)
         self.messages += 1
-        if self.bytes > _BYTE_LIMIT or self.messages > _MESSAGE_LIMIT:
+        if self.bytes > _BYTE_LIMIT:
+            _log_output_bound("total_bytes", self.bytes, _BYTE_LIMIT)
             raise _error(reason="output_limit")
         if not raw:
             raise _error()
-        message = json.loads(raw)
+        self.control_messages += 1
+        try:
+            message = json.loads(raw)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            if self.control_messages > _MESSAGE_LIMIT:
+                _log_output_bound("control_messages", self.control_messages, _MESSAGE_LIMIT)
+                raise _error(reason="output_limit") from None
+            raise
+        if self._is_stream_delta(message):
+            self.control_messages -= 1
+            self.stream_messages += 1
+            if self.stream_messages > _STREAM_MESSAGE_LIMIT:
+                _log_output_bound("stream_messages", self.stream_messages, _STREAM_MESSAGE_LIMIT)
+                raise _error(reason="output_limit")
+        elif self.control_messages > _MESSAGE_LIMIT:
+            _log_output_bound("control_messages", self.control_messages, _MESSAGE_LIMIT)
+            raise _error(reason="output_limit")
         if not isinstance(message, dict) or ("method" in message and "id" in message):
             # Approval, dynamic tool and auth refresh callbacks are never answered.
             raise _error("llm_capability_unsupported", reason="callback")
         return message
+
+    def _is_stream_delta(self, message: Any) -> bool:
+        emitted_at_ms = message.get("emittedAtMs") if isinstance(message, dict) else None
+        valid_envelope = (
+            isinstance(message, dict)
+            and set(message) in ({"method", "params"}, {"method", "params", "emittedAtMs"})
+            and (
+                "emittedAtMs" not in message
+                or (type(emitted_at_ms) is int and _INT64_MIN <= emitted_at_ms <= _INT64_MAX)
+            )
+        )
+        if (
+            not valid_envelope
+            or message.get("method") != "item/agentMessage/delta"
+            or not self.pending_turn
+            or self.completed is not None
+            or not isinstance(self.thread_id, str)
+            or not self.thread_id
+            or not isinstance(self.turn_id, str)
+            or not self.turn_id
+        ):
+            return False
+        params = message.get("params")
+        if (
+            not isinstance(params, dict)
+            or set(params) != {"threadId", "turnId", "itemId", "delta"}
+            or params.get("threadId") != self.thread_id
+            or params.get("turnId") != self.turn_id
+            or not isinstance(params.get("itemId"), str)
+            or not isinstance(params.get("delta"), str)
+        ):
+            return False
+        item = self.items.get(params["itemId"])
+        return isinstance(item, dict) and item.get("type") == "agentMessage"
 
     def _item(self, item: Any) -> None:
         if not isinstance(item, dict) or item.get("type") not in {"userMessage", "agentMessage", "reasoning", "plan"}:
@@ -522,6 +589,7 @@ class _Connection:
                     raise _error("llm_capability_unsupported", reason="native_item")
         self.items[identifier] = item
         if len(self.items) > _ITEM_LIMIT:
+            _log_output_bound("items", len(self.items), _ITEM_LIMIT)
             raise _error(reason="output_limit")
 
     def notification(self, message: dict[str, Any]) -> None:
@@ -628,8 +696,10 @@ class _Connection:
                 or params["message"] not in (startup_warning, _HOST_DISABLED_WARNING)
             ):
                 raise _error("llm_capability_unsupported", reason="native_notification")
+        elif method == "item/agentMessage/delta":
+            if not self._is_stream_delta(message):
+                raise _error("llm_capability_unsupported", reason="native_notification")
         elif method in {
-            "item/agentMessage/delta",
             "item/reasoning/summaryTextDelta",
             "item/reasoning/textDelta",
             "item/reasoning/summaryPartAdded",

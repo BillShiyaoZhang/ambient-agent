@@ -18,6 +18,7 @@ from backend.app_types import (
     MAX_SPEC_ID_LENGTH,
     project_app_type_prompt_reference,
 )
+from backend.ui_quality import ui_quality_guide
 
 Repairability = Literal["deterministic", "code_only", "design_change", "operator"]
 ContractImpact = Literal["none", "subset_only", "expansion", "unknown"]
@@ -363,5 +364,5 @@ def build_repair_prompt(finding: RepairFinding, *, instruction: str) -> str:
         "within the approved contract, leave the contract unchanged and explain the blocker. Do not claim success "
         "until the files themselves are repaired.\n\n"
         f"[STRUCTURED REPAIR FINDING]\n{finding_payload}\n\n"
-        f"[APP TYPE DECLARATION RULES]\n{app_spec_declaration_rules()}{contract_context}"
+        f"[APP TYPE DECLARATION RULES]\n{app_spec_declaration_rules()}\n\n{ui_quality_guide()}{contract_context}"
     )

@@ -18,13 +18,16 @@ from acp import text_block
 from acp.schema import AgentMessageChunk, InitializeResponse, NewSessionResponse, PromptResponse
 
 import backend.agent.durable_workflow as durable_workflow_module
+import backend.schema_alignment as schema_alignment_module
 from backend.agent.durable_workflow import DurableAgentWorkflow
 from backend.agent.errors import WorkflowError
+from backend.agent.feature_review import FeatureCoverageReview
 from backend.agent.harness import AgentOrchestrator
 from backend.agent.intent_plan import IntentKind, IntentPlan, SubIntent, SubIntentKind
 from backend.app_manifest import AppManifest
 from backend.capabilities.models import RuntimeContract
 from backend.graph_db import GraphDatabase
+from backend.llm_service import LLMTransportError
 from backend.models import ChatMessage, ChatSession
 from backend.coding_agent_acp import (
     CodingAgentArtifactError,
@@ -37,6 +40,7 @@ from backend.coding_agent_runtime import CodingAgentRuntime
 from backend.coding_agent_repair import finding_from_exception
 from backend.run_service import AgentRunState, Continue, Failed, RunCoordinator, RunStore, Succeeded, Wait
 from backend.schema_diff import UnknownProperty, VerificationDiff
+from backend.agent.schema_decisions import SchemaSelection
 from backend.skill_authorization import compute_skill_grant_digest, skill_principal_id
 from backend.skill_sandbox import build_skill_prompt_channels
 from backend.skill_store import (
@@ -2251,6 +2255,328 @@ async def test_widget_v2_coordinator_e2e_resolves_durable_approvals_before_verif
     assert [(message.role, message.run_id) for message in persisted_messages] == [
         ("agent", submitted["id"]),
     ]
+
+
+class _DurableSchemaProvider:
+    def __init__(self, responses: list[Any]):
+        self.responses = list(responses)
+        self.calls: list[list[dict[str, Any]]] = []
+
+    async def generate(self, messages: list[dict[str, Any]], *, budget: Any = None, **_kwargs: Any) -> str:
+        self.calls.append(messages)
+        if budget is not None and budget.on_model_call is not None:
+            budget.on_model_call()
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        if budget is not None and budget.on_usage is not None:
+            budget.on_usage({"input_tokens": 700, "output_tokens": 300, "total_tokens": 1_000})
+        return json.dumps(response, ensure_ascii=False)
+
+
+def _durable_schema_proposal() -> dict[str, Any]:
+    return {
+        "reused_schemas": [],
+        "new_schemas": [],
+        "capabilities": [],
+        "required_features": [
+            {
+                "id": "custom:weather.forecast",
+                "description": "Display the requested forecast",
+                "capability_ids": [],
+                "network_sources": [],
+            }
+        ],
+    }
+
+
+def _invalid_durable_schema_proposal() -> dict[str, Any]:
+    proposal = _durable_schema_proposal()
+    proposal["capabilities"] = [{"id": "shell.exec", "scope": {}}]
+    return proposal
+
+
+def _install_durable_schema_provider(monkeypatch: pytest.MonkeyPatch, provider: _DurableSchemaProvider) -> None:
+    monkeypatch.setattr(schema_alignment_module, "get_llm_provider", lambda *_args: provider)
+    monkeypatch.setattr(
+        schema_alignment_module,
+        "select_schema_candidates",
+        AsyncMock(return_value=SchemaSelection(mode="off", disposition="NO_GRAPH_DATA")),
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_alignment_stops_after_targeted_semantic_repair_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    rejected = _durable_schema_proposal()
+    provider = _DurableSchemaProvider([rejected, rejected])
+    _install_durable_schema_provider(monkeypatch, provider)
+    reviewer = AsyncMock(
+        return_value=FeatureCoverageReview(
+            action="revise",
+            missing=("The live forecast criterion must name its approved weather source and endpoint.",),
+            source="llm",
+        )
+    )
+    monkeypatch.setattr(schema_alignment_module, "review_feature_coverage", reviewer)
+    state = _state(
+        session_id="schema-semantic-repair",
+        phase="align_schema",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="Build weather"),
+        data={"language": "en", "approved_plan": "Build a live weather forecast"},
+    )
+    state.budget.max_tokens = 10_000
+    run = _create_run(store, state, content="Build weather")
+
+    outcome, committed, executed_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-semantic-repair",
+    )
+
+    assert isinstance(outcome, Failed)
+    assert outcome.error_code == "schema_alignment_failed"
+    assert outcome.retryable is False
+    assert "one targeted repair" in outcome.message
+    assert committed["status"] == "failed"
+    assert committed["error"]["retryable"] is False
+    assert executed_state.data.get("phase_retries", {}).get("align_schema", 0) == 0
+    assert len(provider.calls) == reviewer.await_count == 2
+    assert (
+        "The live forecast criterion must name its approved weather source and endpoint."
+        in provider.calls[1][-1]["content"]
+    )
+    assert executed_state.budget.model_turns == 2
+    assert executed_state.budget.tokens_used == 2_000
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_alignment_retries_transient_generation_failure_then_requests_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    provider = _DurableSchemaProvider([RuntimeError("temporary provider transport fault"), _durable_schema_proposal()])
+    _install_durable_schema_provider(monkeypatch, provider)
+    monkeypatch.setattr(
+        schema_alignment_module,
+        "review_feature_coverage",
+        AsyncMock(return_value=FeatureCoverageReview(action="complete", source="llm")),
+    )
+    state = _state(
+        session_id="schema-transport-retry",
+        phase="align_schema",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="Build weather"),
+        data={"language": "en", "approved_plan": "Build a live weather forecast"},
+    )
+    run = _create_run(store, state, content="Build weather")
+
+    failed_attempt, queued, failed_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-transport-first",
+    )
+
+    assert isinstance(failed_attempt, Failed)
+    assert failed_attempt.error_code == "schema_alignment_failed"
+    assert failed_attempt.retryable is True
+    assert queued["status"] == "queued"
+    assert failed_state.data["phase_retries"]["align_schema"] == 1
+
+    retried, waiting, retried_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-transport-second",
+    )
+
+    assert isinstance(retried, Wait)
+    assert retried.interaction_type == "schema_approval"
+    assert waiting["status"] == "waiting_user"
+    assert retried_state.phase == "wait_schema"
+    assert retried_state.data["approved_plan"] == "Build a live weather forecast"
+    assert len(provider.calls) == 2
+    assert retried_state.budget.model_turns == 2
+    assert retried_state.budget.tokens_used == 1_000
+
+
+@pytest.mark.asyncio
+async def test_failed_schema_refine_retry_uses_only_refine_input_and_requests_fresh_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    proposal = _durable_schema_proposal()
+    provider = _DurableSchemaProvider(
+        [proposal, LLMTransportError("The LLM provider request failed", code="llm_provider_error"), proposal]
+    )
+    _install_durable_schema_provider(monkeypatch, provider)
+    monkeypatch.setattr(
+        schema_alignment_module,
+        "review_feature_coverage",
+        AsyncMock(return_value=FeatureCoverageReview(action="complete", source="llm")),
+    )
+    state = _state(
+        session_id="schema-refine-recovery",
+        phase="align_schema",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="Build weather"),
+        data={"language": "en", "approved_plan": "Build a live weather forecast"},
+    )
+    run = _create_run(store, state, content="Build weather")
+
+    initial, waiting, _ = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-refine-initial",
+    )
+    assert isinstance(initial, Wait)
+    resolved = store.resolve_interaction(
+        initial.interaction_id,
+        {"approved": "refine", "feedback": "Use the verified source path."},
+        expected_run_version=waiting["version"],
+    )
+    assert resolved["status"] == "resolved"
+    assert store.get_run(run["id"])["status"] == "queued"
+
+    failed, failed_run, failed_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-refine-failure",
+    )
+    assert isinstance(failed, Failed)
+    assert failed_run["status"] == "failed"
+    assert failed_state.phase == "wait_schema"
+    assert failed_state.pending_interaction_id is None
+
+    coordinator = RunCoordinator(store, SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    retried_run = coordinator.retry(run["id"])
+    retried, fresh_wait, retried_state = await _execute_fenced_step(
+        store,
+        workflow,
+        retried_run["id"],
+        worker_id="worker-schema-refine-retry",
+    )
+
+    assert isinstance(retried, Wait)
+    assert retried.interaction_type == "schema_approval"
+    assert retried.interaction_id != initial.interaction_id
+    assert fresh_wait["status"] == "waiting_user"
+    assert retried_state.phase == "wait_schema"
+    assert "runtime_contract" not in retried_state.data
+    assert "staged_app" not in retried_state.data
+    interactions = store.get_run(retried_run["id"])["interactions"]
+    assert len(interactions) == 1
+    assert interactions[0]["status"] == "pending"
+    assert interactions[0]["response"] is None
+    assert len(provider.calls) == 3
+    assert "Use the verified source path." in provider.calls[-1][-1]["content"]
+
+
+def test_schema_refine_retry_rejects_recovery_from_another_app(tmp_path: Path) -> None:
+    store = RunStore(str(tmp_path))
+    proposal = _durable_schema_proposal()
+    source_state = _state(
+        session_id="schema-refine-foreign-source",
+        phase="wait_schema",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="foreign-weather-app", instruction="Build weather"),
+        data={"schema_candidate": proposal},
+    )
+    source = _create_run(store, source_state, content="Build weather")
+    retry_state = _state(
+        session_id="schema-refine-foreign-source",
+        phase="wait_schema",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="Build weather"),
+        data={
+            "schema_candidate": proposal,
+            "schema_refine_recovery": {
+                "source_run_id": source["id"],
+                "interaction_id": "foreign-schema-interaction",
+                "action": "refine",
+                "proposal": proposal,
+                "feedback": "Use the verified source path.",
+            },
+        },
+    )
+    failed = store.create_run(
+        owner_id=f"session:{retry_state.session_id}",
+        action_id="chat",
+        action_title="Chat",
+        source_type="chat",
+        source_id=retry_state.session_id,
+        adapter_type="internal_agent",
+        runtime_id="internal:agent",
+        input_data={"content": "Build weather"},
+        recovery="restart_safe",
+        retry_of=source["id"],
+        attempt=2,
+        status="failed",
+        state=retry_state,
+        workflow_type=retry_state.workflow_type,
+        workflow_version=retry_state.workflow_version,
+    )
+
+    coordinator = RunCoordinator(store, SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    with pytest.raises(ValueError, match="source checkpoint is invalid"):
+        coordinator.retry(failed["id"])
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_alignment_enforces_cumulative_tokens_across_provider_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(str(tmp_path))
+    graph_db = GraphDatabase(str(tmp_path))
+    workflow = _workflow(tmp_path, store, graph_db)
+    provider = _DurableSchemaProvider([_invalid_durable_schema_proposal(), _durable_schema_proposal()])
+    _install_durable_schema_provider(monkeypatch, provider)
+    monkeypatch.setattr(
+        schema_alignment_module,
+        "review_feature_coverage",
+        AsyncMock(return_value=FeatureCoverageReview(action="complete", source="llm")),
+    )
+    state = _state(
+        session_id="schema-cumulative-budget",
+        phase="align_schema",
+        workflow_type="widget_create",
+        intent=IntentPlan(kind=IntentKind.WIDGET_CREATE, app_id="weather-app", instruction="Build weather"),
+        data={"language": "en", "approved_plan": "Build a live weather forecast"},
+    )
+    state.budget.max_tokens = 1_500
+    run = _create_run(store, state, content="Build weather")
+
+    outcome, committed, executed_state = await _execute_fenced_step(
+        store,
+        workflow,
+        run["id"],
+        worker_id="worker-schema-cumulative-budget",
+    )
+
+    assert isinstance(outcome, Failed)
+    assert outcome.error_code == "budget_exhausted"
+    assert outcome.retryable is False
+    assert committed["status"] == "failed"
+    assert executed_state.budget.model_turns == 2
+    assert executed_state.budget.tokens_used == 2_000
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,169 @@
+{
+  "case_id": "forecast-operations-dashboard",
+  "model": "gpt-6-luna",
+  "artifact_dir": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/app",
+  "artifact_hash": "7fdaacb6b37176041ab8386939895bb00ac66d665021e8f530e940791ccef874",
+  "case_set_sha256": "43be50c3dbebafc5779a1aa1e3cd875755203f8be90ad082cceff25f116b7068",
+  "frame": "production widget-runtime/frame_server.mjs",
+  "checks": [
+    {
+      "id": "no-overflow-320-light",
+      "passed": true,
+      "detail": "document scrollWidth 320, clientWidth 320"
+    },
+    {
+      "id": "accessible-controls-320-light",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-320-light",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "no-overflow-640-light",
+      "passed": true,
+      "detail": "document scrollWidth 640, clientWidth 640"
+    },
+    {
+      "id": "accessible-controls-640-light",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-640-light",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "no-overflow-320-dark",
+      "passed": true,
+      "detail": "document scrollWidth 320, clientWidth 320"
+    },
+    {
+      "id": "accessible-controls-320-dark",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-320-dark",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "no-overflow-640-dark",
+      "passed": true,
+      "detail": "document scrollWidth 640, clientWidth 640"
+    },
+    {
+      "id": "accessible-controls-640-dark",
+      "passed": true,
+      "detail": "visible buttons and fields have accessible names"
+    },
+    {
+      "id": "runtime-clean-640-dark",
+      "passed": true,
+      "detail": "production frame reported no runtime errors"
+    },
+    {
+      "id": "current-conditions",
+      "passed": true,
+      "detail": "fixture location, temperature, and condition rendered"
+    },
+    {
+      "id": "fixture-request",
+      "passed": true,
+      "detail": "approved source, path, and GET observed"
+    },
+    {
+      "id": "svg-data-chart",
+      "passed": true,
+      "detail": "visible CSS plot with 7 geometric marks and fixture temperature labels"
+    },
+    {
+      "id": "svg-chart-uses-data",
+      "passed": true,
+      "detail": "a fixture temperature change changes plotted geometry and its visible value"
+    },
+    {
+      "id": "compact-initial-summary",
+      "passed": true,
+      "detail": "only 3 daily detail rows are initially visible; remaining days are collapsed"
+    },
+    {
+      "id": "keyboard-primary-action",
+      "passed": true,
+      "detail": "forecast disclosure opens with Enter from keyboard focus"
+    },
+    {
+      "id": "expand-seven-day-details",
+      "passed": true,
+      "detail": "all seven dates, highs, lows, precipitation values and service details revealed"
+    }
+  ],
+  "screenshots": [
+    {
+      "viewport_css_px": {
+        "width": 320,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/pre-sdk-button-fix/screenshots/forecast-operations-dashboard-320-light.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/pre-sdk-button-fix/screenshots/forecast-operations-dashboard-640-light.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 320,
+        "height": 680
+      },
+      "theme": "dark",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/pre-sdk-button-fix/screenshots/forecast-operations-dashboard-320-dark.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "dark",
+      "phase": "initial",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/pre-sdk-button-fix/screenshots/forecast-operations-dashboard-640-dark.png"
+    },
+    {
+      "viewport_css_px": {
+        "width": 640,
+        "height": 680
+      },
+      "theme": "light",
+      "phase": "expanded",
+      "path": "/Users/shiyaozhang/Developer/ambient-agent/docs/verification/coding-agent-ui-quality-artifacts/forecast-operations-dashboard/pre-sdk-button-fix/screenshots/forecast-operations-dashboard-640-light-expanded.png"
+    }
+  ],
+  "rpc": [
+    {
+      "method": "net.request",
+      "params": {
+        "source_id": "harbor-weather",
+        "request": {
+          "path": "/v1/forecast",
+          "method": "GET"
+        }
+      }
+    }
+  ],
+  "page_errors": [],
+  "blocked_network_attempts": [],
+  "error": "locator.waitFor: Timeout 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('iframe[title=\"Generated Ambient Widget\"]').contentFrame().getByRole('button', { name: /retry|try again|refresh/i }).first() to be visible\u001b[22m\n\n    at namedButton (/Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_ui_quality.mjs:111:16)\n    at verifyForecast (/Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_ui_quality.mjs:304:16)\n    at async file:///Users/shiyaozhang/Developer/ambient-agent/scripts/verify_coding_agent_ui_quality.mjs:396:56",
+  "failure_text": "Harbor Station\nForecast unavailable. Check your connection and try again.",
+  "passed": false
+}

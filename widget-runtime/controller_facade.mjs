@@ -163,7 +163,7 @@ function createComponents(h) {
   const Text = ({ text, style, ...rest }) =>
     h("span", { ...rest, style }, text);
 
-  const Button = ({ label, variant, style, ...rest }) =>
+  const Button = ({ label, children, variant, style, ...rest }) =>
     h(
       "button",
       {
@@ -187,7 +187,7 @@ function createComponents(h) {
           style,
         ),
       },
-      label,
+      label ?? children,
     );
 
   const TextField = ({

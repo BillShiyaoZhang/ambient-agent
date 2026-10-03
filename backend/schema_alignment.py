@@ -17,6 +17,7 @@ from backend.agent.schema_decisions import (
 from backend.agent.providers import ToolLoopBudget, get_llm_provider
 from backend.agent.errors import BudgetExhaustedError, WorkflowError
 from backend.agent.feature_review import review_feature_coverage
+from backend.app_types import get_app_type_prompt_reference
 from backend.capabilities.catalog import AgentRole, SystemCapabilityCatalog
 from backend.capabilities.models import normalize_grants
 from backend.graph_db import GraphDatabase
@@ -25,9 +26,39 @@ from backend.llm_runtime import primary_selection, selection_ids
 
 logger = logging.getLogger("schema_alignment")
 
+_NETWORK_SOURCE_GROUNDING_GUIDANCE = (
+    "**Grounded Network Scope**: Each `network.request` source must use a concrete public HTTPS origin and exact "
+    "paths supported by authoritative provider documentation or user-supplied evidence. Do not infer an endpoint "
+    "from the service or feature name. Keep different API hosts as separate sources even when they belong to the "
+    "same provider; do not move paths between hosts or combine them under one base URL. The approved origin and "
+    "paths are exact capability boundaries, not placeholders for later implementation. If reliable evidence is "
+    "missing, explicitly mark it for endpoint verification and confirm the actual origin/path before requesting "
+    "approval; do not describe an endpoint as verified without evidence. This guidance does not automatically verify "
+    "external endpoints."
+)
+
 
 class RequiredFeatureReviewError(ValueError):
     """A semantic rejection cannot be retried as a Schema-selection conflict."""
+
+
+class SchemaProposalValidationError(ValueError):
+    """The generated proposal and its single targeted repair both failed validation."""
+
+
+def _app_spec_prompt_context(language: str) -> str:
+    """Render the exact App type vocabulary and authoring contract for schema generation."""
+    reference = get_app_type_prompt_reference(language)
+    return json.dumps(reference, ensure_ascii=False, separators=(",", ":"))
+
+
+def _schema_repair_diagnostic(initial_error: Exception, repair_error: Exception) -> str:
+    return (
+        "Initial proposal validation failed: "
+        f"{str(initial_error)[:2_000]}\n"
+        "Targeted repair validation failed: "
+        f"{str(repair_error)[:2_000]}"
+    )
 
 
 def capability_change_summary(previous: Any, proposed: Any) -> dict[str, list[dict[str, Any]]]:
@@ -294,10 +325,15 @@ async def _generate_validated_proposal(
         return await validate(raw_response), raw_response
     except (LLMConfigError, BudgetExhaustedError):
         raise
-    except Exception as validation_error:
+    except (ValueError, TypeError) as validation_error:
         repair_prompt = (
-            "Your previous JSON violated the supplied Capability Ontology scope contract.\n"
-            f"Validation error: {str(validation_error)[:1_000]}\n"
+            "Your previous JSON failed Schema, capability, or required-feature validation.\n"
+            f"Validation diagnostic: {str(validation_error)[:2_000]}\n"
+            f"{_NETWORK_SOURCE_GROUNDING_GUIDANCE}\n"
+            "For semantic coverage feedback, address each actionable feedback item separately. Preserve every still-correct "
+            "required feature ID, behavior and approved dependency; add or revise separate feature rows to cover each "
+            "uncovered goal instead of replacing the list with one broad summary or merging unrelated feedback. "
+            "Keep every network source ID and path exactly within the declared capability grants.\n"
             "Return the complete corrected JSON object only. Preserve the requested schemas and least-privilege intent. "
             "Declare the precise capabilities needed for the requested behavior before approval; do not add unrelated "
             "permissions, invent placeholders, silently downgrade required functionality, or omit required nested fields."
@@ -311,7 +347,14 @@ async def _generate_validated_proposal(
             repair_messages,
             {**audit_context, "stage": f"{audit_context.get('stage', 'schema_alignment')}_repair"},
         )
-        return await validate(repaired_response), repaired_response
+        try:
+            return await validate(repaired_response), repaired_response
+        except (LLMConfigError, BudgetExhaustedError):
+            raise
+        except (ValueError, TypeError) as repair_error:
+            raise SchemaProposalValidationError(
+                _schema_repair_diagnostic(validation_error, repair_error)
+            ) from repair_error
 
 
 def _schema_inventory(schemas: list[dict[str, Any]], *, include_description: bool) -> str:
@@ -377,7 +420,7 @@ async def _generate_schema_task(
                 if grant["id"] not in proposal.get("preserved_capability_ids", [])
             ]
         task.validate(envelope_proposal)
-    except (LLMConfigError, BudgetExhaustedError, RequiredFeatureReviewError):
+    except (LLMConfigError, BudgetExhaustedError, RequiredFeatureReviewError, SchemaProposalValidationError):
         raise
     except Exception:
         if not constrained:
@@ -463,6 +506,7 @@ class SchemaAlignmentService:
         is_zh = language == "zh"
         catalog = capability_catalog or SystemCapabilityCatalog.build()
         rendered_capability_catalog = catalog.render(AgentRole.SCHEMA_ALIGNMENT)
+        app_type_reference = _app_spec_prompt_context(language)
         system_prompt = f"""You are a Canonical Ontology Alignment Architect.
 Your task is to analyze a widget request and match only its user-context facts against the single `ambient-context` ontology.
 
@@ -474,8 +518,14 @@ Your task is to analyze a widget request and match only its user-context facts a
 5. **New Entities**: Propose a new entity only if the concept is genuinely new. Attach it to an existing `subclass_of` parent (normally `Thing`) and provide established external `equivalent_to` IRIs when available.
 6. **Supported Data Types**: Property fields must use one of: "string", "integer", "number", "boolean".
 7. **Capability Ontology**: Propose the smallest required Widget grants from the supplied Capability Ontology and follow each category's complete `scope_contract`. Do not invent category ids, scope fields, entity types, installed catalog ids, or installed actions. For `network.request`, propose full public HTTPS source definitions rather than placeholder names. An empty capabilities array is valid.
+{_NETWORK_SOURCE_GROUNDING_GUIDANCE}
 8. **Existing App Baseline**: A modification preserves currently approved grants and their required Graph schemas by default. List exact existing capability category IDs in `capability_removals` only when the user requests revocation, or in `capability_replacements` to deliberately replace the complete scope (including removing a network source). Omitting grants, sources, paths, or methods does not revoke them. Every change will be displayed for approval; never treat catalog availability as approval.
 9. **Required Features**: Declare every mandatory requested behavior in `required_features`, linked to its exact App `app_spec.features[].id`. Each row contains `id`, `description`, `capability_ids`, and `network_sources` (objects containing `source_id` and `path`). Include the real grants and exact approved network sources/paths needed for those behaviors. A required live feature cannot be replaced by unavailable/error labels. Explain infeasibility through validation/refinement when the runtime lacks the SDK capability, rather than silently removing the requested behavior. Static features can use empty capability/source arrays; an empty required_features array is appropriate only when no functional behavior was requested.
+10. **Required Feature IDs**: Use standard feature IDs from this catalog or custom IDs matching `custom:<lowercase-kebab-case-namespace>.<lowercase-kebab-case-feature>`. These IDs are the approved behavior criteria that the later App implementation must declare exactly in its `app_spec`; do not emit `app_spec` in this Schema proposal.
+11. **Complete Acceptance Criteria**: Derive criteria from the complete user request, approved plan and direct feedback. Split distinct goals into multiple independently verifiable rows; do not compress the request into one vague summary or copy only the sample row. Include each relevant primary behavior, provider-confirmation requirement, persistence requirement, location behavior, interactive state/recovery behavior and visual/accessibility requirement. When the plan requires provider confirmation, require checking the chosen endpoint and the provider's actual supported fields before presenting live data; use only confirmed metrics, correct units and truthful unavailable-field behavior. Specify concrete query parameters or response-to-UI mappings only when the user or approved plan gives those details; otherwise do not invent an API recipe before confirmation. Cover relevant loading, no-location, empty-result, invalid-input, request-error and retry states, preserving user input/unsaved edits and retrying only the failed request where requested. For information-rich interfaces, include a summary, real graphics or trends where useful, accessible details, responsive widths and light/dark themes where specified. Put each criterion's own approved dependencies in its row; exact network source IDs and paths must match declared grants. Do not add irrelevant goals or permissions.
+
+App Type and feature ID catalog:
+{app_type_reference}
 
 {rendered_capability_catalog}
 
@@ -515,7 +565,9 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
   "capability_removals": [],
   "capability_replacements": [],
   "required_features": [
-    {{"id": "custom:task-app.list", "description": "Display the user's task list", "capability_ids": ["graph.query"], "network_sources": []}}
+    {{"id": "custom:task-app.list", "description": "Display the user's task list from approved Task records", "capability_ids": ["graph.query"], "network_sources": []}},
+    {{"id": "custom:task-app.accessible-view", "description": "Keep the main view readable at the requested widths and themes, with keyboard support and named controls", "capability_ids": [], "network_sources": []}},
+    {{"id": "custom:task-app.recovery", "description": "Show relevant loading, empty, invalid-input, request-error and retry states; preserve input and retry only the failed action", "capability_ids": [], "network_sources": []}}
   ]
 }}
 """
@@ -596,6 +648,13 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
 
         except (LLMConfigError, BudgetExhaustedError):
             raise
+        except SchemaProposalValidationError as e:
+            logger.error(f"Schema proposal remained invalid after targeted repair: {e}. Raw response: {raw_response}")
+            raise WorkflowError(
+                f"Schema capability alignment proposal is invalid after one targeted repair: {e}",
+                code="schema_alignment_failed",
+                retryable=False,
+            ) from e
         except Exception as e:
             logger.error(f"Failed to generate or parse schema alignment: {e}. Raw response: {raw_response}")
             raise WorkflowError(
@@ -644,6 +703,7 @@ Propose the optimal schema alignment plan for this widget as a JSON block.
         is_zh = language == "zh"
         catalog = capability_catalog or SystemCapabilityCatalog.build()
         rendered_capability_catalog = catalog.render(AgentRole.SCHEMA_ALIGNMENT)
+        app_type_reference = _app_spec_prompt_context(language)
         system_prompt = f"""You are a Canonical Ontology Alignment Architect.
 Your task is to refine an `ambient-context` ontology proposal based on direct natural language feedback from the user.
 
@@ -654,8 +714,14 @@ Your task is to refine an `ambient-context` ontology proposal based on direct na
 4. Keep all entities in the single canonical ontology and preserve `subclass_of`/`equivalent_to` alignments.
 5. Never model App-only runtime data; caches, cursors, credentials, UI state, checkpoints, and raw provider payloads stay in the App directory.
 6. Refine capability grants from the supplied Capability Ontology with least privilege and follow every complete `scope_contract`. Do not invent category ids, scope fields, installed catalog ids, or installed actions. Declare full public HTTPS source objects for `network.request`.
+{_NETWORK_SOURCE_GROUNDING_GUIDANCE}
 7. Preserve the existing App's approved grants unless user feedback requests revocation. Use `capability_removals` for exact existing category IDs being revoked, or `capability_replacements` for complete deliberate scope replacement. Omissions are preserved before approval, and the exact resulting change summary is reviewable.
 8. Preserve mandatory requested behaviors in `required_features` rows containing `id`, `description`, `capability_ids`, and `network_sources` with `source_id`/`path`. These feature IDs link to App app_spec feature declarations. Supply their actual required grants and exact sources/paths. A missing SDK or permission must cause correction/refinement rather than substituting unavailable labels for the required behavior. Empty dependency arrays support static features; empty required_features is only appropriate if no behavior was requested.
+9. **Required Feature IDs**: Use standard feature IDs from this catalog or custom IDs matching `custom:<lowercase-kebab-case-namespace>.<lowercase-kebab-case-feature>`. These IDs are the approved behavior criteria that the later App implementation must declare exactly in its `app_spec`; do not emit `app_spec` in this Schema proposal.
+10. **Complete Acceptance Criteria**: Derive criteria from the complete user request, approved plan and direct feedback. Split distinct goals into multiple independently verifiable rows; do not compress the request into one vague summary or copy only the sample row. Include each relevant primary behavior, provider-confirmation requirement, persistence requirement, location behavior, interactive state/recovery behavior and visual/accessibility requirement. When the plan requires provider confirmation, require checking the chosen endpoint and the provider's actual supported fields before presenting live data; use only confirmed metrics, correct units and truthful unavailable-field behavior. Specify concrete query parameters or response-to-UI mappings only when the user or approved plan gives those details; otherwise do not invent an API recipe before confirmation. Cover relevant loading, no-location, empty-result, invalid-input, request-error and retry states, preserving user input/unsaved edits and retrying only the failed request where requested. For information-rich interfaces, include a summary, real graphics or trends where useful, accessible details, responsive widths and light/dark themes where specified. Put each criterion's own approved dependencies in its row; exact network source IDs and paths must match declared grants. Do not add irrelevant goals or permissions.
+
+App Type and feature ID catalog:
+{app_type_reference}
 
 {rendered_capability_catalog}
 
@@ -695,7 +761,9 @@ You MUST output ONLY a valid JSON object matching the following structure, with 
   "capability_removals": [],
   "capability_replacements": [],
   "required_features": [
-    {{"id": "custom:task-app.list", "description": "Display the user's task list", "capability_ids": ["graph.query"], "network_sources": []}}
+    {{"id": "custom:task-app.list", "description": "Display the user's task list from approved Task records", "capability_ids": ["graph.query"], "network_sources": []}},
+    {{"id": "custom:task-app.accessible-view", "description": "Keep the main view readable at the requested widths and themes, with keyboard support and named controls", "capability_ids": [], "network_sources": []}},
+    {{"id": "custom:task-app.recovery", "description": "Show relevant loading, empty, invalid-input, request-error and retry states; preserve input and retry only the failed action", "capability_ids": [], "network_sources": []}}
   ]
 }}
 """
@@ -782,6 +850,13 @@ Apply the adjustments requested in the feedback and output the updated JSON sche
             return proposal
         except (LLMConfigError, BudgetExhaustedError):
             raise
+        except SchemaProposalValidationError as e:
+            logger.error(f"Schema refinement remained invalid after targeted repair: {e}. Raw response: {raw_response}")
+            raise WorkflowError(
+                f"Schema capability alignment refinement is invalid after one targeted repair: {e}",
+                code="schema_alignment_refinement_failed",
+                retryable=False,
+            ) from e
         except Exception as e:
             logger.error(f"Failed to refine schema alignment: {e}. Raw response: {raw_response}")
             raise WorkflowError(

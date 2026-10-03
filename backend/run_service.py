@@ -38,6 +38,7 @@ _JSON_COLUMNS = {
     "output",
     "state",
 }
+_SCHEMA_REFINE_RECOVERY_KEY = "schema_refine_recovery"
 _TRANSITIONS = {
     "queued": {"running", "failed", "cancelled", "needs_attention"},
     "running": {"waiting_user", "cancel_requested", "succeeded", "failed", "cancelled", "needs_attention"},
@@ -3264,6 +3265,117 @@ class RunCoordinator:
         self._wake.set()
         return self.store.get_run(run_id) or run
 
+    def _schema_refine_recovery_for_retry(
+        self,
+        original: dict[str, Any],
+        state: AgentRunState,
+    ) -> dict[str, Any] | None:
+        """Recover only a resolved Schema refine input, never its approval action."""
+        if state.phase != "wait_schema" or state.pending_interaction_id is not None:
+            if _SCHEMA_REFINE_RECOVERY_KEY in state.data:
+                raise ValueError("Schema refinement recovery is only valid while waiting for schema approval")
+            return None
+        if not state.workflow_type.startswith("widget"):
+            return None
+
+        existing = state.data.get(_SCHEMA_REFINE_RECOVERY_KEY)
+        source_run_id = existing.get("source_run_id") if isinstance(existing, dict) else original["id"]
+        source_run = self.store.get_run(source_run_id) if isinstance(source_run_id, str) else None
+        if source_run is None or source_run.get("id") != source_run_id:
+            if existing is not None:
+                raise ValueError("Schema refinement recovery source run is missing")
+            return None
+
+        # Only the current Run or a bounded retry ancestor may own the resolved
+        # interaction. This prevents copying refine input across unrelated apps.
+        ancestors: set[str] = set()
+        current_id: str | None = str(original.get("id") or "")
+        for _ in range(32):
+            if not current_id or current_id in ancestors:
+                break
+            ancestors.add(current_id)
+            ancestor = self.store.get_run(current_id)
+            if ancestor is None:
+                break
+            parent = ancestor.get("retry_of")
+            current_id = str(parent) if parent else None
+        if source_run_id not in ancestors:
+            if existing is not None:
+                raise ValueError("Schema refinement recovery is outside this Run's retry lineage")
+            return None
+
+        source_state = source_run.get("state")
+        source_data = source_state.get("data") if isinstance(source_state, dict) else None
+        current_intent = state.intent if isinstance(state.intent, dict) else {}
+        source_intent = source_state.get("intent") if isinstance(source_state, dict) else {}
+        source_intent = source_intent if isinstance(source_intent, dict) else {}
+        if (
+            not isinstance(source_state, dict)
+            or source_state.get("phase") != "wait_schema"
+            or source_state.get("session_id") != state.session_id
+            or not str(source_state.get("workflow_type") or "").startswith("widget")
+            or source_state.get("workflow_type") != state.workflow_type
+            or source_run.get("owner_id") != original.get("owner_id")
+            or source_run.get("source_id") != original.get("source_id")
+            or source_intent.get("app_id") != current_intent.get("app_id")
+            or not isinstance(source_data, dict)
+        ):
+            if existing is not None:
+                raise ValueError("Schema refinement recovery source checkpoint is invalid")
+            return None
+
+        interactions = [
+            item
+            for item in source_run.get("interactions", [])
+            if isinstance(item, dict) and item.get("type") == "schema_approval"
+        ]
+        if isinstance(existing, dict):
+            interaction_id = existing.get("interaction_id")
+            interaction = next((item for item in interactions if item.get("id") == interaction_id), None)
+        else:
+            interaction = interactions[-1] if interactions else None
+            interaction_id = interaction.get("id") if isinstance(interaction, dict) else None
+        if not isinstance(interaction, dict):
+            if existing is not None:
+                raise ValueError("Schema refinement recovery interaction is missing")
+            return None
+
+        payload = interaction.get("payload")
+        response = interaction.get("response")
+        if (
+            interaction.get("id") != interaction_id
+            or interaction.get("run_id") != source_run_id
+            or interaction.get("status") != "resolved"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "schema_approval_request"
+            or not isinstance(response, dict)
+            or response.get("approved") != "refine"
+        ):
+            if existing is not None:
+                raise ValueError("Only a resolved Schema refine response can be recovered")
+            return None
+
+        proposal = response.get("proposal")
+        if not isinstance(proposal, dict):
+            proposal = payload.get("proposal")
+        if not isinstance(proposal, dict):
+            proposal = source_data.get("schema_candidate")
+        feedback = str(response.get("feedback") or "")[:12_000]
+        if not isinstance(proposal, dict):
+            if existing is not None:
+                raise ValueError("Schema refinement recovery proposal is invalid")
+            return None
+        recovery = {
+            "source_run_id": source_run_id,
+            "interaction_id": interaction_id,
+            "action": "refine",
+            "proposal": proposal,
+            "feedback": feedback,
+        }
+        if existing is not None and existing != recovery:
+            raise ValueError("Schema refinement recovery does not match its resolved interaction")
+        return recovery
+
     @staticmethod
     def _renew_agent_retry_budget(state: AgentRunState) -> None:
         """Give a new Run attempt a fresh allowance while retaining cumulative usage."""
@@ -3326,6 +3438,10 @@ class RunCoordinator:
             if (normalized_retry_state.last_error or {}).get("effect_state") == "unknown":
                 raise ValueError("run has an unknown external effect and cannot be retried automatically")
             normalized_retry_state.attempt = int(original["attempt"]) + 1
+            if original["status"] == "failed" and normalized_retry_state.phase == "wait_schema":
+                recovery = self._schema_refine_recovery_for_retry(original, normalized_retry_state)
+                if recovery is not None:
+                    normalized_retry_state.data[_SCHEMA_REFINE_RECOVERY_KEY] = recovery
             normalized_retry_state.pending_interaction_id = None
             normalized_retry_state.last_error = None
             normalized_retry_state.data.pop("phase_retries", None)

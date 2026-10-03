@@ -187,6 +187,62 @@ async def test_valid_closed_shape_complete_is_only_a_review(provider):
 
 
 @pytest.mark.asyncio
+async def test_review_rubric_accepts_future_behavior_without_inventing_wire_level_requirements(provider):
+    provider.generate.return_value = '{"action":"complete","missing":[]}'
+    result = await feature_review.review_feature_coverage(
+        REQUEST,
+        PLAN,
+        FULL_DESIGN,
+        capabilities=FULL_CAPABILITIES,
+        decision_config={"mode": "off"},
+    )
+
+    assert result.action == "complete"
+    system = provider.generate.call_args.args[0][0]["content"]
+    state = json.loads(provider.generate.call_args.args[0][1]["content"])
+    assert "criteria collectively" in system
+    assert "Do not demand" in system
+    assert "query parameters" in system
+    assert "response-field mappings" in system
+    assert "approved network source and path" in system
+    assert "provider or its exact supported response fields have not been fixed" in system
+    assert state["required_features"] == FULL_DESIGN
+    assert state["capabilities"] == FULL_CAPABILITIES
+
+
+@pytest.mark.asyncio
+async def test_review_rubric_keeps_specific_user_objectives_and_failed_state_gaps_reviewable(provider):
+    provider.generate.return_value = json.dumps(
+        {
+            "action": "revise",
+            "missing": ["定位拒绝时仍需手动选择地点；请求失败时保留最后成功数据和未提交输入。"],
+        }
+    )
+    incomplete_design = FULL_DESIGN[:-1]
+    stateful_request = REQUEST + " 定位被拒绝后仍须允许手动选择地点；天气请求失败时保留最后成功数据和未提交的地点输入。"
+    stateful_plan = PLAN + " 用户拒绝定位时继续支持手动搜索；刷新失败时保留当前显示数据和输入。"
+    result = await feature_review.review_feature_coverage(
+        stateful_request,
+        stateful_plan,
+        incomplete_design,
+        capabilities=FULL_CAPABILITIES,
+        decision_config={"mode": "off"},
+    )
+
+    assert result.action == "revise"
+    assert "定位拒绝" in result.feedback
+    system = provider.generate.call_args.args[0][0]["content"]
+    state = json.loads(provider.generate.call_args.args[0][1]["content"])
+    assert "all distinct user-visible objectives" in system
+    assert "meaningful fallback" in system
+    assert "preserve" in system.lower()
+    assert "only when the instruction, plan or feedback requires" in system
+    assert state["instruction"] == stateful_request
+    assert state["approved_plan"] == stateful_plan
+    assert state["required_features"] == incomplete_design
+
+
+@pytest.mark.asyncio
 async def test_fallback_failure_cannot_silently_pass(provider):
     provider.generate.side_effect = TimeoutError
     result = await feature_review.review_feature_coverage(REQUEST, PLAN, FEATURES, decision_config={"mode": "off"})
