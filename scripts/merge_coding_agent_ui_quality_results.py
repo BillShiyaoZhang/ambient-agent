@@ -25,16 +25,34 @@ RENDERER_SOURCES = (
 COMMON_CHECKS = {
     "network-isolated",
     "keyboard-primary-action",
-    *(f"{kind}-{width}-{theme}" for width in VIEWPORTS for theme in THEMES for kind in ("no-overflow", "accessible-controls", "runtime-clean")),
+    *(
+        f"{kind}-{width}-{theme}"
+        for width in VIEWPORTS
+        for theme in THEMES
+        for kind in ("no-overflow", "accessible-controls", "runtime-clean")
+    ),
 }
 CASE_CHECKS = {
     "forecast-operations-dashboard": {
-        "fixture-request", "current-conditions", "svg-data-chart", "svg-chart-uses-data",
-        "compact-initial-summary", "expand-seven-day-details", "retry-error", "malformed-data-error",
+        "fixture-request",
+        "current-conditions",
+        "svg-data-chart",
+        "svg-chart-uses-data",
+        "compact-initial-summary",
+        "expand-seven-day-details",
+        "retry-error",
+        "malformed-data-error",
     },
-        "compact-follow-up-dashboard": {
-        "compact-empty-state", "create-follow-up", "read-follow-up", "rename-follow-up",
-        "toggle-done", "delete-follow-up", "storage-error", "file-write-error", "retry-file-write",
+    "compact-follow-up-dashboard": {
+        "compact-empty-state",
+        "create-follow-up",
+        "read-follow-up",
+        "rename-follow-up",
+        "toggle-done",
+        "delete-follow-up",
+        "storage-error",
+        "file-write-error",
+        "retry-file-write",
     },
 }
 
@@ -57,10 +75,7 @@ def artifact_digest(directory: Path) -> str:
 
 def renderer_source_digests() -> dict[str, str]:
     """Hash the production renderer inputs whose versions are recorded by the browser runner."""
-    return {
-        source: hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
-        for source in RENDERER_SOURCES
-    }
+    return {source: hashlib.sha256((ROOT / source).read_bytes()).hexdigest() for source in RENDERER_SOURCES}
 
 
 def _check_screenshots(case_root: Path, screenshots: Any) -> list[str]:
@@ -101,7 +116,9 @@ def _check_screenshots(case_root: Path, screenshots: Any) -> list[str]:
             expected_width = width
             expected_height = viewport.get("height")
             if image_width != expected_width or image_height != expected_height:
-                errors.append(f"screenshot dimensions {image_width}x{image_height} do not match viewport {expected_width}x{expected_height}: {path_value}")
+                errors.append(
+                    f"screenshot dimensions {image_width}x{image_height} do not match viewport {expected_width}x{expected_height}: {path_value}"
+                )
         except OSError:
             errors.append(f"missing screenshot: {path_value}")
     expected_pairs = {(width, theme) for width in VIEWPORTS for theme in THEMES}
@@ -131,7 +148,11 @@ def pair(generation_path: Path, browser_root: Path, cases_path: Path = DEFAULT_C
     case_set_hash_matches = generation.get("case_set_sha256") == actual_case_hash
     if not case_set_hash_matches:
         global_errors.append("generation case-set hash does not match the canonical JSON")
-    for key, expected in (("model", "gpt-6-luna"), ("executor", "production backend.coding_agent.run_coding_agent"), ("promote", False)):
+    for key, expected in (
+        ("model", "gpt-6-luna"),
+        ("executor", "production backend.coding_agent.run_coding_agent"),
+        ("promote", False),
+    ):
         if generation.get(key) != expected:
             global_errors.append(f"generation metadata {key!r} must be {expected!r}")
 
@@ -161,7 +182,11 @@ def pair(generation_path: Path, browser_root: Path, cases_path: Path = DEFAULT_C
                 case_errors.append(f"browser report cannot be read: {exc}")
         if browser.get("case_id") != case_id:
             case_errors.append("browser report case_id does not match its directory")
-        if not isinstance(browser.get("browser"), dict) or not browser["browser"].get("version") or not browser["browser"].get("playwright_core_version"):
+        if (
+            not isinstance(browser.get("browser"), dict)
+            or not browser["browser"].get("version")
+            or not browser["browser"].get("playwright_core_version")
+        ):
             case_errors.append("browser report is missing Chromium/Playwright version provenance")
         reported_renderer_hashes = browser.get("renderer_source_sha256")
         if not isinstance(reported_renderer_hashes, dict):
@@ -181,16 +206,19 @@ def pair(generation_path: Path, browser_root: Path, cases_path: Path = DEFAULT_C
         )
         status = generated.get("status")
         generation_ready_field = generated.get("generation_ready")
-        status_ready = (
-            (generation_ready_field is True and status in {"generation_ready", "passed", "incomplete"})
-            or (generation_ready_field is None and status == "passed")
+        status_ready = (generation_ready_field is True and status in {"generation_ready", "passed", "incomplete"}) or (
+            generation_ready_field is None and status == "passed"
         )
         generation_ok = stage_checks_passed and status_ready and generation_ready_field is not False
         if not generation_ok:
             case_errors.append("production staging, feature coverage, or first-frame validation failed")
         if browser.get("passed") is not True or browser.get("page_errors") or browser.get("blocked_network_attempts"):
             case_errors.append("browser verification failed or reported page/network errors")
-        check_ids = {item.get("id") for item in browser.get("checks", []) if isinstance(item, dict) and item.get("passed") is True}
+        check_ids = {
+            item.get("id")
+            for item in browser.get("checks", [])
+            if isinstance(item, dict) and item.get("passed") is True
+        }
         required_checks = COMMON_CHECKS | CASE_CHECKS.get(case_id, set())
         missing_checks = sorted(required_checks - check_ids)
         if missing_checks:
@@ -212,24 +240,26 @@ def pair(generation_path: Path, browser_root: Path, cases_path: Path = DEFAULT_C
             actual_hash = None
             case_errors.append(f"retained artifact tree is unavailable: {exc}")
 
-        results.append({
-            "id": case_id,
-            "passed": not case_errors and case_set_hash_matches and not global_errors,
-            "production_staging_validated": generated.get("production_staging_validated") is True,
-            "production_first_frame": assertions.get("runtime-first-frame") == "passed",
-            "feature_coverage": assertions.get("feature-coverage") == "passed",
-            "artifact_hash": generation_hash,
-            "browser_artifact_hash": browser_hash,
-            "retained_artifact_hash": actual_hash,
-            "case_set_hash_matches": case_set_hash_matches,
-            "browser_checks": browser.get("checks", []),
-            "screenshots": browser.get("screenshots", []),
-            "browser": browser.get("browser"),
-            "renderer_source_sha256": browser.get("renderer_source_sha256"),
-            "errors": case_errors,
-            "generation_report": str(generation_path.resolve()),
-            "browser_report": str((browser_path or case_root / "browser-report.json").resolve()),
-        })
+        results.append(
+            {
+                "id": case_id,
+                "passed": not case_errors and case_set_hash_matches and not global_errors,
+                "production_staging_validated": generated.get("production_staging_validated") is True,
+                "production_first_frame": assertions.get("runtime-first-frame") == "passed",
+                "feature_coverage": assertions.get("feature-coverage") == "passed",
+                "artifact_hash": generation_hash,
+                "browser_artifact_hash": browser_hash,
+                "retained_artifact_hash": actual_hash,
+                "case_set_hash_matches": case_set_hash_matches,
+                "browser_checks": browser.get("checks", []),
+                "screenshots": browser.get("screenshots", []),
+                "browser": browser.get("browser"),
+                "renderer_source_sha256": browser.get("renderer_source_sha256"),
+                "errors": case_errors,
+                "generation_report": str(generation_path.resolve()),
+                "browser_report": str((browser_path or case_root / "browser-report.json").resolve()),
+            }
+        )
     return {
         "format": 1,
         "model": generation.get("model"),
@@ -255,7 +285,16 @@ def main() -> int:
     result = pair(args.generation, args.browser_root, args.cases)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"passed": result["passed"], "complete_passes": result["complete_passes"], "cases": len(result["cases"]), "errors": result["errors"]}))
+    print(
+        json.dumps(
+            {
+                "passed": result["passed"],
+                "complete_passes": result["complete_passes"],
+                "cases": len(result["cases"]),
+                "errors": result["errors"],
+            }
+        )
+    )
     return 0 if result["passed"] else 2
 
 
